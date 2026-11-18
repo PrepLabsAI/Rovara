@@ -125,6 +125,20 @@ describe("approving a project's test environment on AWS", () => {
     expect(issued).toEqual([]);
   });
 
+  it("a project name that is not a plain name is not found before anything is read: no membership or grant read, no proof, no gate", async () => {
+    const who = people({ role: "owner" });
+    const s = await setup(sandbox(), who);
+    for (const project of ["", "a/b", "../x", "x".repeat(101), 7 as unknown as string]) {
+      expect(await s.decider.approve({ personId: "p1", stepUp: STEP_UP, project, approval: s.approval }), String(project)).toMatchObject({ ok: false, reason: "not_found" });
+    }
+    expect(who.calls).toEqual([]);
+    expect(s.issued).toEqual([]);
+    expect(s.gate).not.toHaveBeenCalled();
+    // Positive control: the real project name reads the person.
+    expect(await s.decider.approve({ personId: "p1", stepUp: STEP_UP, project: s.b.project, approval: s.approval })).toMatchObject({ ok: true });
+    expect(who.calls.length).toBeGreaterThan(0);
+  });
+
   it("not wired (no proof issuer: the hosted approvers point cannot prove this act yet) answers not_wired and reads nothing", async () => {
     const who = people({ role: "admin" });
     const s = await setup(sandbox(), who, { proofs: null });

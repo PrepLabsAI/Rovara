@@ -45,11 +45,13 @@ import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordInta
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
+import { createAnswerChoices, createAnswerDoor } from "../../packages/slack-service/src/slack-answer-door.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { handleTaskQuestion, runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
+import { withSlackThreadRoutes } from "../../packages/slack-service/src/slack-thread-api.js";
 import { createContinuationRecorder } from "../../packages/slack-service/src/thread-continuation.js";
-import { threadContinuationOf } from "../../packages/contracts/src/index.js";
+import { threadContinuationOf, type SlackAnswerResult } from "../../packages/contracts/src/index.js";
 import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
@@ -307,6 +309,11 @@ export async function createWorkflowE2E(options: {
   route?: (text: string) => RequestRoute | Promise<RequestRoute>;
   /** Decision 134: the Slack service asks the broker to start a clear small change on Quick (through the `/v1/service` route). */
   autoStartQuick?: true;
+  /**
+   * Lead 4 J2: the smart Just answer door on the Slack service's routing, with the production choice store and the strict Slack double. `ask` is the control plane's answer (`"route"`: the broker's own
+   * `/v1/service/answers` route over the signed fetch, which in this single-company harness serves no answers and so declines); the door's other seams are the production ones.
+   */
+  answers?: { ask: "route" | ((input: { requestId: string; question: string }) => Promise<SlackAnswerResult>) };
   /** Messages posted by apps are read too (the ingress's appPosted switch), with this member check. */
   appPosted?: { accept: boolean; checkMember: (userId: string) => Promise<{ outcome: "person" } | { outcome: "not_person" } | { outcome: "failed"; error: string }> };
   /**
@@ -1038,6 +1045,21 @@ export async function createWorkflowE2E(options: {
     post: async (thread, text, blocks) => slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts,
     log: (event, fields) => { routeLogs.push({ event, fields }); } });
   const rememberAnswered = createContinuationRecorder({ documentClient: db, tableName: "slack-threads", log: (event, fields) => { routeLogs.push({ event, fields }); } });
+  const answerRemovals: string[] = [];
+  const answerDoor = createAnswerDoor({
+    api: (message) => {
+      const ask = options.answers?.ask;
+      if (typeof ask === "function") return { askAnswer: async (input) => ask(input) };
+      const signedFetch = serviceFetch(message.thread, message.userId);
+      return withSlackThreadRoutes(createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch }), { controlPlaneUrl: CONTROL_PLANE_URL, signedFetch });
+    },
+    post: async (thread, text, blocks) => slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts,
+    update: async (thread, ts, text, blocks) => { slack.update({ channel: thread.channelId, ts, text, blocks: blocks ?? [] }); },
+    remove: async (_thread, ts) => { answerRemovals.push(ts); },
+    choices: createAnswerChoices({ documentClient: db, tableName: "slack-threads", log: (event, fields) => { routeLogs.push({ event, fields }); } }),
+    lookingDelayMs: 600_000,
+    log: (event, fields) => { routeLogs.push({ event, fields }); },
+  });
   const runRoutedRequests = async () => {
     for (const message of routedQueue.splice(0, routedQueue.length)) {
       const route = options.route;
@@ -1048,6 +1070,7 @@ export async function createWorkflowE2E(options: {
         notify: async (thread, text, blocks) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }); },
         // Decision 147: the production recorder of whom AgentX answered, on the fake Slack threads table.
         answered: (request: SlackRequestMessage) => rememberAnswered(request.thread, request.userId),
+        ...(options.answers === undefined ? {} : { justAnswer: answerDoor }),
         ...(options.autoStartQuick === true ? { autoStart: async ({ message: request, requestId }: { message: SlackRequestMessage; requestId: string }) =>
           createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(request.thread, request.userId) }).startQuickFromIntake!({ requestId }) } : {}),
         log: (event, fields) => { routeLogs.push({ event, fields }); },
@@ -1273,7 +1296,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, serviceFetch, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, brokerEvents, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
+    db, s3, handler, serviceFetch, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, brokerEvents, credentialAttempts, routeCalls, routeLogs, answerRemovals, dispatchReceipts, slackActionTimestamps,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,

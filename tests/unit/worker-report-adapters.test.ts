@@ -21,6 +21,63 @@ describe("TE-IF4 adapter fixtures", () => {
   it("keeps a JSON string containing XML out of the XML parser", () => {
     expect(parseTestReport(JSON.stringify({ results: { tests: [] }, message: '<testsuite><testcase name="fake"/></testsuite>' }))).toBeUndefined();
   });
+
+  it.each([
+    ["go.failure.jsonl", "gotest", "src/cart.go:8"],
+    ["trx.failure.xml", "trx", "src/cart.cs:8"],
+    ["ctrf.failure.json", "ctrf", "src/cart.ts:8"],
+    ["junit.failure.xml", "junit", "src/cart.py:8"],
+  ])("reads failure details from %s including CDATA", (file, format, signal) => {
+    const report = parseTestReport(fixture(file));
+    expect(report?.format).toBe(format);
+    expect(report?.tests.find((test) => test.status === "failed")?.failureText).toContain(signal);
+  });
+
+  it("refuses malformed and over-cap failure reports as a whole", () => {
+    expect(parseTestReport('{"reportFormat":"CTRF","results":{"tests":[')).toBeUndefined();
+    const overCap = JSON.stringify({ reportFormat: "CTRF", results: { tests: Array.from({ length: 50_001 }, (_, i) => ({ name: `t${i}`, status: "passed" })) } });
+    expect(parseTestReport(overCap)).toBeUndefined();
+  });
+
+  it("refuses malformed and over-cap go, TRX, and JUnit reports as a whole", () => {
+    expect(parseTestReport('{"Action":"pass","Package":"p","Test":"x"}\n{broken')).toMatchObject({ format: "gotest", passed: 1 });
+    expect(parseTestReport('<TestRun><Results><UnitTestResult outcome="Failed"><Output><ErrorInfo><Message><![CDATA[unclosed</Message></ErrorInfo></Output></UnitTestResult></Results></TestRun>')).toBeUndefined();
+    expect(parseTestReport('<testsuite><testcase name="x"><failure><![CDATA[unclosed</failure></testcase></testsuite>')).toBeUndefined();
+    expect(parseTestReport('<!DOCTYPE testsuite [<!ENTITY x "src/x.ts">]><testsuite><testcase name="x"><failure>&x;</failure></testcase></testsuite>')).toMatchObject({ format: "junit", failed: 1 });
+    expect(parseTestReport('<!DOCTYPE TestRun [<!ENTITY x "src/x.cs">]><TestRun><Results><UnitTestResult outcome="Failed"/></Results></TestRun>')).toBeUndefined();
+
+    const many = 50_001;
+    const go = Array.from({ length: many }, (_, i) => JSON.stringify({ Action: "pass", Package: "p", Test: `t${i}` })).join("\n");
+    const trx = `<TestRun><Results>${'<UnitTestResult outcome="Passed" testName="x"/>'.repeat(many)}</Results></TestRun>`;
+    const junit = `<testsuite>${'<testcase name="x"/>'.repeat(many)}</testsuite>`;
+    expect(parseTestReport(go, "gotest")).toBeUndefined();
+    expect(parseTestReport(trx, "trx")).toBeUndefined();
+    expect(parseTestReport(junit, "junit")).toBeUndefined();
+  });
+
+  it("does not turn markup inside JUnit CDATA into extra cases or accept passing-test failure text", () => {
+    const junit = parseTestReport('<testsuite><system-out><![CDATA[<testcase name="forged"/>]]></system-out><testcase name="real"><failure>src/real.ts:1</failure></testcase></testsuite>')!;
+    expect(junit.tests.map((test) => test.name)).toEqual(["real"]);
+    const ctrf = parseTestReport(JSON.stringify({ reportFormat: "CTRF", results: { tests: [{ name: "ok", status: "passed", failureMessage: "src/should-not-be-read.ts:1" }] } }))!;
+    expect(ctrf.tests[0]).not.toHaveProperty("failureText");
+  });
+
+  it("keeps a later failing Go test's output after discarding chatty passing output", () => {
+    const events = [
+      { Action: "run", Package: "p", Test: "Pass" },
+      { Action: "output", Package: "p", Test: "Pass", Output: "noise".repeat(5_000) },
+      { Action: "pass", Package: "p", Test: "Pass" },
+      { Action: "run", Package: "p", Test: "Fail" },
+      { Action: "output", Package: "p", Test: "Fail", Output: "src/failure.go:8" },
+      { Action: "fail", Package: "p", Test: "Fail" },
+    ];
+    expect(parseTestReport(events.map((event) => JSON.stringify(event)).join("\n"), "gotest")?.tests[1]?.failureText).toContain("src/failure.go:8");
+  });
+
+  it("preserves a TRX stack path when the message is long", () => {
+    const trx = `<TestRun><Results><UnitTestResult outcome="Failed" testName="fail"><Output><ErrorInfo><Message>${"m".repeat(5_000)}</Message><StackTrace><![CDATA[at f (src/failure.cs:9)]]></StackTrace></ErrorInfo></Output></UnitTestResult></Results></TestRun>`;
+    expect(parseTestReport(trx, "trx")?.tests[0]?.failureText).toContain("src/failure.cs:9");
+  });
 });
 
 // Golden output captured from the pinned TE-B3 writer before refactoring.

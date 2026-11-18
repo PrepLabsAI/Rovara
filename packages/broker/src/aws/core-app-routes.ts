@@ -8,7 +8,7 @@
 //     the person's level, grant or role, and the fresh step-up on every act.
 //   - answers anything the core's handlers throw (a runtime or registry that cannot be built) with fixed words and a log line naming only the error's kind.
 // While the core switch is off the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
-import type { DeployedCaller } from "../core-host/dev-routes.js";
+import type { DeployedCaller, SlackThreadAnswer, SlackThreadAnswerInput } from "../core-host/dev-routes.js";
 import type { PersonEraseCaller } from "../core-host/person-erase-route.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { CoreEntryCaller } from "./engine-boundary.js";
@@ -23,11 +23,16 @@ export const CORE_APP_UNAVAILABLE = "The core engine is not available on this in
 /** The core's /v1/app/* handlers for a signed-in developer, as the deployment composes them. `undefined`: the core does not serve this path. */
 export interface CoreAppEntry {
   route(request: BrokerRequest, caller: CoreEntryCaller): Promise<BrokerResponse | undefined>;
+  /**
+   * Lead 4 J2: the smart Just answer for a verified Slack thread, in process (the Slack service route `POST /v1/service/answers`, aws/slack-answers.ts). Not an HTTP route: nothing a caller sends can reach it.
+   * `undefined`: the core does not serve answers for this company.
+   */
+  answerForSlackThread?(input: SlackThreadAnswerInput): Promise<SlackThreadAnswer | undefined>;
 }
 
 export interface CoreAppEntryOptions {
   /** The core host's dev routes (`createCoreDevRoutes`). */
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> };
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; answerForSlackThread?: CoreAppEntry["answerForSlackThread"] };
   /** The person-erase route (`createPersonEraseRoute`, through the root's `personErase`). */
   personErase: { route(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> };
   /** The deployment's identity mapping: the company and role from membership. Undefined: not a member of any company (the sign-in refusal). */
@@ -38,7 +43,9 @@ export interface CoreAppEntryOptions {
 const answer = (statusCode: number, code: string, message: string): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ error: { code, message } }) });
 
 export function coreAppEntryFrom(options: CoreAppEntryOptions): CoreAppEntry {
+  const answerForSlackThread = options.routes.answerForSlackThread;
   return {
+    ...(answerForSlackThread === undefined ? {} : { answerForSlackThread: (input: SlackThreadAnswerInput) => answerForSlackThread.call(options.routes, input) }),
     async route(request, caller) {
       const path = request.path.split("?")[0] ?? "";
       if (!path.startsWith(CORE_APP_PREFIX)) return undefined;

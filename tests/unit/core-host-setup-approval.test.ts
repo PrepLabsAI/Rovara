@@ -4,11 +4,13 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type ApprovalProof, type ApprovalRequest, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
+  change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type ApprovalProof, type ApprovalRequest, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { setupApplyDigest, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { recheckRowKey, repairNoticeKey } from "../../packages/broker/src/core/setup-agent/recheck-rows.js";
+import { repairCurrentKey, repairRowKey } from "../../packages/broker/src/core/setup-agent/repair-rows.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
@@ -427,5 +429,54 @@ describe("hosted approvers: a setup candidate's proof", () => {
 
   it("issues no setup proof for a malformed project name", () => {
     for (const project of ["", "-bad", "a/b", "x".repeat(101)]) expect(() => token({ project }), project).toThrow("a step-up approval cannot be issued for this input");
+  });
+});
+
+describe("hosted setup run: the broken-setup card and a candidate Rovara drafted (L4-RD)", () => {
+  const STEP = "setup: npm ci - setup step 0 (npm ci) failed: exit 1";
+  /** The rows a broken setup leaves (the re-check, its one admin notice) and, when `repair` is given, the draft. */
+  async function seedBroken(world: FakeWorld, companyId: string, name: string, repair?: Record<string, unknown>): Promise<void> {
+    const at = new Date(world.clock.now).toISOString();
+    const base = { orgId: companyId, project: name };
+    const check = { workspaceId: randomUUID(), revision: 1, startedAt: at, startedBy: "x" };
+    // The project's own setup state is the failed re-check's check (the break holds only while that mark stands).
+    await world.store.update({ key: projectMetaKey(companyId, name), ops: [change.set("setupCheck", check)] });
+    await world.store.put({ item: { ...recheckRowKey(companyId, name, "k1"), entityType: "SETUP_RECHECK", ...base, key: "k1", setupRevision: 1, commits: {}, classes: ["lockfile"], state: "broken", attempt: 2, check, startedAt: at, failedStep: STEP } });
+    await world.store.put({ item: { ...repairNoticeKey(companyId, name), entityType: "SETUP_REPAIR_NOTICE", ...base, key: "k1", failedStep: STEP, classes: ["lockfile"], at } });
+    if (repair === undefined) return;
+    await world.store.put({ item: { ...repairRowKey(companyId, name, "k1"), entityType: "SETUP_REPAIR", ...base, key: "k1", setupRevision: 1, runRequestId: randomUUID(), confirmRequestId: randomUUID(), budgetCents: 400, claimedAt: at, ...repair } });
+    await world.store.put({ item: { ...repairCurrentKey(companyId, name), entityType: "SETUP_REPAIR_CURRENT", ...base, key: "k1", startedAt: at } });
+  }
+
+  it("shows managers the card with the manual way out, and shows readers and other projects nothing", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedBroken(world, FAKE_COMPANY, "payments");
+    const admin = person("p-admin", FAKE_COMPANY, "member", { payments: "administrator" });
+    const reader = person("p-reader", FAKE_COMPANY, "member", { payments: "developer" });
+    const view = await call(get(RUN), admin);
+    expect(view.body["repair"]).toMatchObject({ title: "Setup needs repair", state: "no_fix", actions: [{ id: "fix_setup", label: "Fix setup (uses your AI, up to $4)" }, { id: "edit_commands" }] });
+    expect((await call(get(RUN), reader)).body["repair"]).toBeUndefined();
+    expect((await call(get(LEDGER), person("p-ledger", FAKE_COMPANY, "member", { ledger: "administrator" }))).body["repair"]).toBeUndefined();
+    // Another company's project of the same name has its own (here: no) card.
+    expect((await call(get(RUN), person("p-other", OTHER, "owner"))).body["repair"]).toBeUndefined();
+  });
+
+  it("a candidate whose check ran as the system owner is marked drafted by Rovara, shown with the fix-ready card, and a maintainer still approves it by the risk rule", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--prefer-offline"])] });
+    const requestId = randomUUID();
+    await world.store.update({ key: setupApplyKey(FAKE_COMPANY, "payments"), ops: [change.set("by", systemOwnerIdOf(FAKE_COMPANY, "payments")), change.set("requestId", requestId)] });
+    await seedBroken(world, FAKE_COMPANY, "payments", { state: "ready", confirmRequestId: requestId, taskId: "t1" });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const view = await call(get(RUN), maintainer);
+    expect(view.body["apply"]).toMatchObject({ candidateRevision: 2, draftedByRovara: true, risk: "low", canApprove: true });
+    expect(view.body["repair"]).toMatchObject({ state: "fix_ready", candidateRevision: 2, actions: [{ id: "approve_setup", label: "Approve new setup" }, { id: "see_changes" }] });
+    // A person's own candidate is not marked.
+    const { world: w2, person: p2, call: c2 } = await setupWorld();
+    await seedCandidate(w2, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--prefer-offline"])] });
+    expect((await c2(get(RUN), p2("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }))).body["apply"]).not.toHaveProperty("draftedByRovara");
+    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+    expect(decided.status, decided.raw).toBe(200);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
   });
 });

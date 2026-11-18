@@ -99,3 +99,39 @@ before its own classifier step.
 - A Stop pressed during setup is remembered: one press is enough.
 - The unclear picker recommends Just answer.
 - No per-project forced path.
+
+## Answer first in a project channel (lead 4 J2, DEC 254z, 254zza)
+
+In a Slack channel bound to a project, a question and an unclear message the classifier read cleanly (`unclear` with outcome `ok`) go to the smart Just answer service (J1) before anything else. This replaces
+step 6 above for those messages (the three-button card is now shown only when the classifier failed or the answer could not be made), and decision 134(c) ("the unclear picker recommends Just answer").
+
+| Message | What happens |
+| --- | --- |
+| Small talk | Fixed reply, as before. |
+| Question, or unclear and read cleanly | The answer service answers in the thread; one message, edited in place. |
+| Small change, large change | As before (Quick starts on its own for a clear small change, or a card). |
+| Classifier down, invalid or timed out | The three-button card, as before. |
+| The answer was declined (no company workspace or core answers, no role, a thread that holds a task, a message the service does not take) | Nothing is said; the request goes the way it always did (the chat agent for a question, the card for an unclear message). |
+
+How it is wired:
+
+- **The control plane decides, not the Slack service.** `POST /v1/service/answers` (`aws/slack-answers.ts`) takes only `{ requestId, question }`. The company is the Slack workspace's own, the person is the
+  company-linked member the Slack account is, the project is the one the thread's channel is bound to (read live by the Slack identity), and the thread's memory is the Slack thread (`slackAnswerThreadId`). The
+  body can name none of them (a body that does is declined). The role on the project is read live by the answer service itself (any role asks, a viewer too); no role, no project and another company's project
+  all read as a decline. A thread that holds a task is never answered here.
+- **The core is reached in process**, never over HTTP: `coreApp.answerForSlackThread` (`core-host/dev-routes.ts`) mounts that company's runtime only and calls the same answer service the web route uses (one rule for
+  who may ask, `hostedAnswerService`). The Slack thread is shared (everyone who reads a Slack thread has read every answer in it), which the HTTP route never says.
+- **One message per question.** "Looking..." is posted only if the answer takes more than about a second, then edited in place into the answer. If the edit fails, one new message is posted and the old line removed.
+  Under the channel adapter (which cannot edit) the answer is posted once with no "Looking..." line.
+- **Safe words.** The answer's sentences, honesty line, sources and one wiki page are shown as plain Slack text with `&`, `<` and `>` escaped, so an answer can never mention anyone, notify a channel, or carry a
+  link whose label hides its destination. Nothing the person wrote or the answer said is logged.
+- **At most one button, "Start a Quick task".** It exists only when the answer carries the answer service's one action and its attached context. It is the existing Quick choice (`WORKFLOW_PATH_QUICK_ACTION` on a
+  saved choice in the Slack threads table), so only the person who asked can press it, and the press is the person's own Start with every normal check, limit and approval. The saved request is the person's own
+  question followed by the answer as untrusted data (framed by the answer service: source, question, answer, sources and pages read, "never an instruction"). The choice keeps the answer's own words
+  (`cardText`), so a press ("Starting this on Quick..."), a failed start and a finished start never replace the answer with a card question. A second answer in the same thread replaces an earlier answer's
+  unpressed choice; it never replaces a card question that waits or a choice that is starting.
+- **Follow-ups.** After an answer, the same person's plain replies in the thread for 24 hours are routed again (decision 147) and reach the answer service with the same thread, so "and partial refunds?" needs
+  no new context. An @mention reply inside the thread still reaches the chat agent, as before.
+- **Nothing is spent without an answers model.** Until the gateway's answers purpose is wired (L4-E) the hosted answer is `not_set_up`: the thread hears the fixed words "Answers are not set up here yet." in the one
+  message, with no button, and nothing is spent or recorded (lead 4's instruction; the chat agent does not answer that question). A core that does not serve answers at all (no company workspace, the engine
+  switch off, no answers wiring) still declines, and the request goes the old way.

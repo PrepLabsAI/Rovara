@@ -5,7 +5,7 @@
 // A bare git repository on disk is not modelled here: the worker-side fake git server belongs to P10 (the end-to-end task), which needs a real clone.
 import { createHash } from "node:crypto";
 import {
-  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, type FileEntryType, type ChangeRequestFile, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
+  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
 } from "@agentx/contracts";
 
 export interface FakeAccount { login: string; permission: HostPermission; accountType: HostAccountKind; hostUserId: string }
@@ -530,6 +530,9 @@ export class FakeHostModel {
     }
     return out;
   }
+
+  /** Who the host says wrote a commit (L4-LM1c): a test sets it for the revisions it wants a person, a bot or an unlinked identity on. A commit with none is read with no identity. */
+  readonly commitIdentities = new Map<string, CommitIdentity>();
 
   /** One commit's own changes (DEC 213): its files against its FIRST parent (a root commit against nothing), as GitHub's commit read lists them. */
   commitChangedFiles(sha: string): ChangeRequestFile[] {

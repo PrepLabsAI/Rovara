@@ -34,6 +34,16 @@ export interface RovaraPullRequestIndexDependencies {
   companyId: OrgId;
 }
 
+/**
+ * Whether a task record is this company's. The core's task record names its company `companyId` (and has no `orgId`); the older record names it `orgId`. A record is the company's only when it names one and every name it carries is
+ * this company (a record that carries two names that disagree, or none, is nobody's). Reading only `orgId` made every core task a miss, so no revert of a core task could ever be recorded (found by lane L4-LM1b).
+ */
+function belongsTo(task: unknown, companyId: OrgId): boolean {
+  const record = task as { companyId?: unknown; orgId?: unknown };
+  const names = [record.companyId, record.orgId].filter((name) => name !== undefined);
+  return names.length > 0 && names.every((name) => name === companyId);
+}
+
 export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDependencies): RovaraPullRequestIndex {
   async function byNumber({ host, connection, repo, number }: { host: string; connection?: string | undefined; repo: string; number: number }): Promise<RovaraPullRequest | undefined> {
     if (host !== "github") return undefined;
@@ -41,7 +51,7 @@ export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDepende
     // The link must belong to THIS company: a pull request number is only unique inside a repository, and a repository belongs to one company's installation.
     if (linked === undefined || linked.workspaceId === undefined) return undefined;
     const task = (await deps.store.get(taskKey(linked.taskId))) as unknown as DeveloperTaskRecord | undefined;
-    if (task === undefined || (task as { orgId?: string }).orgId !== deps.companyId) return undefined;
+    if (task === undefined || task.taskId !== linked.taskId || !belongsTo(task, deps.companyId)) return undefined;
     const entry = task.workflow?.pullRequests?.find((pullRequest) => pullRequest.number === number && pullRequest.url === linked.url);
     if (entry?.headSha === undefined) return undefined;
     return { taskId: task.taskId, project: task.project, number, url: linked.url, candidateHeadSha: entry.headSha };

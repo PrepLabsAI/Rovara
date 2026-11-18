@@ -96,3 +96,11 @@ export function setupApproverAllows(standing: SetupApproverStanding | undefined,
   if (outcome !== "approve") return false;
   return SETUP_RISK_APPROVER[risk] === "admin" ? admin : maintainer;
 }
+
+/**
+ * Whether this person may allow or refuse a WEBSITE for a project's setup run (L4-SF d). A website changes what a repository's code can reach, so it is the high-risk rule for both answers: only a company
+ * owner or admin. A project maintainer who is not one may not decide it (a refusal keeps the website out for a week, for everyone). Anything it does not know is a no.
+ */
+export function setupHostApproverAllows(standing: SetupApproverStanding | undefined): boolean {
+  return isRecord(standing) && (standing.companyRole === "owner" || standing.companyRole === "admin");
+}

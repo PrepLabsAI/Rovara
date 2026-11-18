@@ -90,6 +90,15 @@ describe("a member's act starts the work", () => {
     expect(stored?.body).toBeUndefined();
   });
 
+  it("keeps a tracker-read parent on the intake row and passes it only through the server start port", async () => {
+    const w = world();
+    const parent = { kind: "project" as const, id: "proj-1", title: "Payments refresh" };
+    await ingestIntake(w.ports, candidate({ parent }));
+    expect(w.started[0]!.request).not.toHaveProperty("parent");
+    const stored = await readIntakeItem(w.ports.table, ORG, PROJECT, intakeItemIdOf("jira", "PAY-12"));
+    expect(stored?.parent).toEqual(parent);
+  });
+
   it("is a request the schema accepts", async () => {
     const { CodeIntentRequestSchema } = await import("@agentx/contracts");
     const w = world();

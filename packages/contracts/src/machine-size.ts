@@ -11,21 +11,35 @@ export const MACHINE_SIZE_ROWS: readonly MachineSizeRow[] = [
   { id: "arm64-2-8", chip: "arm64", vcpu: 2, memoryGiB: 8 },
   { id: "arm64-4-16", chip: "arm64", vcpu: 4, memoryGiB: 16 },
   { id: "arm64-8-32", chip: "arm64", vcpu: 8, memoryGiB: 32 },
+  { id: "arm64-16-64", chip: "arm64", vcpu: 16, memoryGiB: 64 },
+  { id: "arm64-32-128", chip: "arm64", vcpu: 32, memoryGiB: 128 },
   { id: "x86_64-2-8", chip: "x86_64", vcpu: 2, memoryGiB: 8 },
   { id: "x86_64-4-16", chip: "x86_64", vcpu: 4, memoryGiB: 16 },
   { id: "x86_64-8-32", chip: "x86_64", vcpu: 8, memoryGiB: 32 },
+  { id: "x86_64-16-64", chip: "x86_64", vcpu: 16, memoryGiB: 64 },
+  { id: "x86_64-32-128", chip: "x86_64", vcpu: 32, memoryGiB: 128 },
 ];
+/** DEC 254zr: a suite that ran this long on the measured machine is suggested one size larger than its memory needs (more vCPUs, same chip), when the install offers it. */
+export const LONG_SUITE_MS = 60 * 60 * 1000;
 export type ArmVerdict = "arm_ok" | "arm_incompatible" | "unknown";
 export function validPeakMemory(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= MAX_PEAK_MEMORY_MIB;
 }
-/** Available ids are install policy, never arbitrary row shapes. An absent row means no suggested change. Time is display only. */
+/**
+ * Available ids are install policy, never arbitrary row shapes. An absent row means no suggested change. Memory picks the smallest listed size of the chip that fits with headroom (so a big
+ * suite reaches 16 vCPU / 64 GB or 32 vCPU / 128 GB). Time only moves the pick up ONE size, and only for a suite of LONG_SUITE_MS or more; it never picks a size when no size fits the memory, and steps up only to a listed size of the same chip.
+ */
 export function suggestMachine(input: { peakMemoryMiB?: number | undefined; suiteMs?: number; armVerdict: ArmVerdict; available: readonly string[]; currentRowId?: string }): { row?: MachineSizeRow; reasons: string[] } {
   if (!validPeakMemory(input.peakMemoryMiB)) return { reasons: ["peak memory not measured"] };
   const chip = input.armVerdict === "arm_incompatible" ? "x86_64" : (MACHINE_SIZE_ROWS.find(row => row.id === input.currentRowId)?.chip ?? "arm64");
-  const row = MACHINE_SIZE_ROWS.find(row => row.chip === chip && input.available.includes(row.id) && row.memoryGiB * 1024 >= input.peakMemoryMiB! * MACHINE_MEMORY_HEADROOM);
+  const candidates = MACHINE_SIZE_ROWS.filter(row => row.chip === chip && input.available.includes(row.id));
+  const fit = candidates.findIndex(row => row.memoryGiB * 1024 >= input.peakMemoryMiB! * MACHINE_MEMORY_HEADROOM);
+  const longSuite = typeof input.suiteMs === "number" && Number.isFinite(input.suiteMs) && input.suiteMs >= LONG_SUITE_MS && input.suiteMs <= MAX_SUITE_MS;
+  const steppedUp = fit >= 0 && longSuite && fit + 1 < candidates.length;
+  const row = fit < 0 ? undefined : candidates[steppedUp ? fit + 1 : fit];
   const reasons = [`peak memory ${String(Math.ceil(input.peakMemoryMiB))} MiB`, "memory headroom 1.5x", "peak memory includes file cache"];
   if (typeof input.suiteMs === "number" && Number.isFinite(input.suiteMs) && input.suiteMs >= 0 && input.suiteMs <= MAX_SUITE_MS) reasons.push(`suite ${String(Math.ceil(input.suiteMs / 60000))} min`);
+  if (steppedUp) reasons.push("long suite; one size larger to shorten it");
   reasons.push(input.armVerdict === "arm_incompatible" ? "ARM incompatible; x86 required" : "current chip retained");
   if (input.armVerdict !== "arm_incompatible") reasons.push("an ARM run does not prove x86 compatibility");
   if (row === undefined) reasons.push("no available size meets the measured memory requirement");

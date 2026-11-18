@@ -513,6 +513,36 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     expect((await h.api("/v1/app/sessions/ses_00000000000000000000")).status).toBe(404);
   });
 
+  it("puts Understand's questions, and the owner's answers with who and where, in the task log, in the same commits that asked and answered", async () => {
+    const h = await launch();
+    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
+    const started = await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: "66666666-6666-4666-8666-666666666667", project: "payments", instructions: "Add a /health endpoint", workflow: true } });
+    const taskId = started.body.task.taskId;
+    const store = h.runtime.registry.require("storage");
+    const workspaceId = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["workspaceId"] as string;
+    const seen = new Set<string>();
+    await h.callback(await h.nextJob(workspaceId, seen), "result", { status: "SUCCEEDED", result: {} });
+    const understand = await h.nextJob(workspaceId, seen);
+    const questions = { kind: "questions", restatement: "Add a health endpoint.", questions: [{ id: "q1", text: "Which path? Use sk-live token please", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], recommended: "a" }] };
+    await h.callback(understand, "artifacts", { name: UNDERSTAND_ARTIFACT_NAME, mediaType: "application/json", content: JSON.stringify(questions) });
+    await h.callback(understand, "result", { status: "SUCCEEDED" });
+    const logOf = async () => (await store.query({ pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: "TASKLOG#" } })).items.map((item) => item["entry"] as Record<string, unknown>);
+    // The question is in the log from the commit that asked it (the log says nothing of an answer yet).
+    expect(await logOf()).toMatchObject([{ kind: "question", key: "question:r1:q1", questionId: "q1", round: 1, text: "Which path? Use sk-live token please", choices: ["/health", "/healthz"] }]);
+    const sessionId = (await h.api(`/v1/dev/tasks/${taskId}`)).body.task.sessionId!;
+    const answered = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777778", round: 1, answers: [{ questionId: "q1", optionId: "a", text: "and keep it simple" }] } });
+    expect(answered.status, JSON.stringify(answered.body)).toBe(200);
+    const entries = await logOf();
+    expect(entries).toHaveLength(2);
+    // Who and where come from the person the broker signed in and the surface that took the answer, never from the body.
+    expect(entries.find((entry) => entry["kind"] === "answer")).toMatchObject({ key: "answer:r1:q1", questionId: "q1", text: "/health: and keep it simple", surface: "web" });
+    expect(typeof entries.find((entry) => entry["kind"] === "answer")!["by"]).toBe("string");
+    // An answer sent again after the round moved on is refused and writes nothing more.
+    const again = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777779", round: 1, answers: [{ questionId: "q1", optionId: "b" }] } });
+    expect(again.status).toBeGreaterThanOrEqual(400);
+    expect(await logOf()).toHaveLength(2);
+  });
+
   it("`rovara open` has the running process open the browser and prints no address, and says so when nothing is running", async () => {
     const h = await launch();
     const { taskId } = await toPlanReview(h);
@@ -2787,7 +2817,8 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.draft).toBe(false);
     expect(cr.state).toBe("open");
     expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ci: "passing", draft: false, readyAt: expect.stringMatching(/^2/) as unknown });
-    expect(await sessionLines(h, waiting.taskId)).toContain("Rovara marked demo pull request 1 ready for review.");
+    // L4-PRP: the line ends with the pull request's verdict heading (the description's words).
+    expect((await sessionLines(h, waiting.taskId)).filter((line) => line.startsWith("Rovara marked demo pull request 1 ready for review. "))).toHaveLength(1);
     // Nothing changes: each quiet pass waits longer (60 s, then 2 minutes, then 4, up to 5), so the host is asked less and less.
     const waits: number[] = [];
     for (let pass = 0; pass < 4; pass += 1) {
@@ -3397,7 +3428,7 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.runtime.tick();
     await h.runtime.tick();
     const events = (await readSessionEvents(store, IMPLICIT_COMPANY_ID, (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["sessionId"] as never)).events.map((event) => event.text ?? "");
-    expect(events).toContain("Rovara marked demo pull request " + cr.id + " ready for review.");
+    expect(events.filter((line) => line.startsWith("Rovara marked demo pull request " + cr.id + " ready for review. "))).toHaveLength(1);
     expect(events.some((line) => line.startsWith("CI is failing on unit-tests, so Rovara is fixing it"))).toBe(true);
     expect(events.some((line) => line.startsWith("Approved by dana. Ready to merge"))).toBe(true);
     // L4-C B5: the pull request was out of draft when CI went red, so the fix round is told on it once (a reviewer's earlier read may be stale); nothing else is: the passing checks and the approval are silent.

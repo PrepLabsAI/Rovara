@@ -3,6 +3,7 @@
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
+//   - a task's proof index (`GET /v1/dev/tasks/<id>/evidence`, Cloud's Proof tab): the task read's own rule, then the items the proof page shows for the current code and its failing tests (at most ten);
 //   - a task's START (`POST /v1/dev/tasks`), only for a member whose company the switch sends NEW tasks to the core (`engineForNewTask`). Anyone else, and a person with no member company,
 //     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
@@ -12,13 +13,19 @@
 //     old workflow routes' request and answer (`{ task }`), so Cloud's Send back and Accept findings work for a task of either engine. Served only when the deployment wires the money
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
 //     (the install's owner role), which a hosted company never uses for who owns a task;
-//   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project;
+//   - the company's agent directory (`GET /v1/app/agents`, lead 4 L4-MF3): read only, for a LIVE company owner or administrator only (agent-directory-routes.ts);
+//   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-PB, DEC 254zzj);
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
-//     only for a person the company lets read that project; proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//     for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-B3c); proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): a fresh step-up, the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
+//     the project's maintainer for low and medium risk; high risk a company owner or admin only), read live again inside the decision, with the approvers point's own proof; served only where the deployment wires it;
+//   - the project's saved environment image (`GET /v1/app/projects/<p>/environment-image`, L4-MF1): read only, the Environment panel's own view (`savedEnvPanel`, fixed words, counts and times) from the company's
+//     saved-environment row for that project, for a person the company lets read that project (any project role; `canReset` is always false here). Saved environments are off on a hosted install until the
+//     install switch is on: then it answers a plain 404 "Saved environments are off for this install", never made-up data. Reset and the setting are not on the core here;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
-//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
+//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
 //     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
 //   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
 //     body. The age is checked HERE, on every such request, against the company's window (`stepUpWindowSeconds`, the policy hook's answer, which may only shorten the default), so a
@@ -32,9 +39,9 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, SavedEnvPanelSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
-import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
+import { loadOwnedTask, loadReadableTask, taskViewOf } from "../core/task-flow/reads.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
 import { createTaskActions, type TaskActions } from "../core/task-flow/task-actions.js";
@@ -44,26 +51,44 @@ import type { SessionMembers } from "../core/sessions/access.js";
 import { answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { createScriptToken, listScriptTokens, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, readScriptToken, scriptTokenStatus, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { SCRIPT_TOKEN_CREATE_ADMIN_ONLY } from "../core/script-tokens/store.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer } from "./inbox-routes.js";
+import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
 import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
+import { proofIndexOf } from "../local/app/proof-index.js";
+import { loadEvidencePack } from "../core/proof/evidence-keep.js";
 import type { CoreHostApp } from "./app.js";
 import type { TestEnvDeps } from "../core/test-env/deps.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
 import { testEnvironmentView } from "../core/test-env/local-view.js";
 import { testServicesSwitchedOn } from "../core/test-env/test-services-switch.js";
+import { savedEnvPanel } from "../core/test-env/saved-env-panel.js";
+import { documentSavedEnvStore } from "../core/test-env/saved-env-store.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
-import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
+import { isSetupCheckPath, isSetupRunPath, routeHostedSetupCheck, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
 import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
+import { scriptTokenRoute } from "../core/script-tokens/authenticate.js";
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
+import { isWikiCorrectionPath, routeHostedWikiCorrections, type HostedWikiCorrectionsWiring } from "./wiki-corrections-routes.js";
+import type { HostedTestEnvironmentDecider } from "./hosted-test-environment-decision.js";
+import { z } from "zod";
+import { isReportPath, routeHostedReport, type HostedReportWiring } from "./report-routes.js";
+import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } from "./wiki-build-routes.js";
+import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
+import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "./start-suggest-routes.js";
+import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
+import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
+import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
 const TASK_READ = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})$/u;
+/** A core task's proof index (Cloud's `tasks.evidence.list`): the task read's own rule, then what the proof page reads (proof-index.ts). */
+const TASK_EVIDENCE = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/evidence$/u;
 /** The owner's moves on a task already running (DECISIONS 198), on the old workflow routes' paths. */
 const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
 /** A person's Stop on a core task, on the old cancel route's path (`{ requestId }` in, `{ task }` out), so Cloud's Stop and the AI tools' cancel stop a task of either engine. */
@@ -74,8 +99,18 @@ const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const TASK_ANSWERS = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
+const SAVED_ENV_IMAGE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/environment-image$/u;
 const TEST_ENVIRONMENT = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment$/u;
+/** L4-B3b: approving the proposal that waits (a POST). */
+const TEST_ENVIRONMENT_APPROVE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment\/approve$/u;
+/** What the person saw, as the approve route's body (strict: nothing else is read from the client). */
+const ApproveTestEnvironmentBodySchema = z.object({
+  requestId: z.string().regex(/^[A-Za-z0-9_-]{8,128}$/u),
+  revision: z.number().int().min(1),
+  artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict();
 
+export const SAVED_ENV_OFF = "Saved environments are off for this install";
 export const NOT_ON_THE_CORE_YET = "That is not on the core engine on this install yet.";
 export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made right after you confirm it's you on the sign-in page: it is a long-lived credential, so a tool that holds an API token cannot make one. Confirm it's you, then try again within a few minutes.";
 export const SIGN_IN_AGAIN = "Sign in again.";
@@ -90,7 +125,7 @@ export const INVOLVED_UNAVAILABLE = "Your involved tasks could not be listed rig
 export interface DeployedCaller {
   principal: Principal;
   client?: string | undefined;
-  /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches only a task's read here. */
+  /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches task reads and explicitly scoped wiki reads here. */
   scriptToken?: { tokenId: string } | undefined;
   /**
    * Lane ID part 2: the person's last step-up as the VERIFIED access token states it (`stepUpOf` over its `step_up_at` and `step_up_amr`), set by the broker's sign-in and never from a
@@ -138,6 +173,16 @@ export interface CoreDevWiring {
    * pin dependencies from (hosted: the owner starter list, `hostedServiceCatalog`), `catalogName` how the answer names it. Served only with `canReadProject`.
    */
   testEnvironment?: { env: NodeJS.ProcessEnv; serviceCatalog?: ServiceCatalogSource | undefined; catalogName: "owner-starter-list" };
+  /**
+   * L4-B3b (DEC 254zm item 4): approving the project's test environment (`POST /v1/app/projects/<p>/test-environment/approve`): a fresh step-up, the risk-based approver rule read live, the approvers
+   * point's own proof, the approval gate (test-environment-approval.ts). Absent: that path says "not on the core yet". Served only with `canReadProject`.
+   */
+  testEnvironmentApproval?: HostedTestEnvironmentDecider;
+  /**
+   * L4-MF1: the project's saved environment image, read only (`GET /v1/app/projects/<p>/environment-image`). `enabled` is the install's saved-environments switch (`savedEnvEnabled(env)`); off, the read answers
+   * `SAVED_ENV_OFF` (404), never invented data. Served only with `canReadProject`. Absent: "not on the core yet".
+   */
+  savedEnv?: { enabled: boolean };
   /** Script tokens' list and revoke (the token store is the core's; the audit sink is the registry's). */
   scriptTokens?: { enabled?: () => boolean };
   /**
@@ -148,7 +193,7 @@ export interface CoreDevWiring {
   /** The company's agent model choice over the gateway's offered models (`createAgentModelChoice`). Absent: `/v1/app/agent-models` says "not on the core yet". */
   modelChoice?: AgentModelChoice;
   /** The URL clients reach the API at (a session's `link`). */
-  origin: () => string;
+  origin: () => string; unsubscribeKey?: Buffer;
   /** Hosted wiring (d): the audit sink for one request, naming the caller it came through (`auditSinkForDeployedCaller`). Absent: the registry's sink as it is. */
   auditFor?: (caller: DeployedCaller, sink: AuditSink) => AuditSink;
   /** Guided onboarding L2-3: the hosted setup run (`/v1/app/projects/<p>/setup-agent...`, setup-run-routes.ts). Absent: those paths say "not on the core yet". */
@@ -157,6 +202,18 @@ export interface CoreDevWiring {
   wikiMap?: HostedWikiMapWiring;
   /** Lead 4 W2: the project wiki's reads (`/v1/app/projects/<p>/wiki...`, wiki-routes.ts). Absent: those paths say "not on the core yet". */
   wiki?: HostedWikiWiring;
+  /** Lead 4 C1: the project wiki's corrections (`.../wiki/pages/<p>/notes|flags|corrections`, `.../wiki/disputed`, wiki-corrections-routes.ts). Absent: those paths say "not on the core yet". */
+  wikiCorrections?: HostedWikiCorrectionsWiring;
+  /** Lead 4 A1/A2: the cost and time report (`/v1/app/org/report/...` and `POST /v1/app/tasks/<id>/feature`, report-routes.ts). Absent: those paths say "not on the core yet". */
+  report?: HostedReportWiring;
+  /** Lead 4 W4: the wiki build controls (`/v1/app/projects/<p>/wiki-build...`, wiki-build-routes.ts). Absent: those paths say "not on the core yet". */
+  wikiBuild?: HostedWikiBuildWiring;
+  /** Lead 4 J3: the web start box's path suggestion (`POST /v1/app/projects/<p>/code/suggest`, start-suggest-routes.ts). Absent: that path says "not on the core yet". */
+  startSuggest?: HostedStartSuggestWiring;
+  /** Lead 4 J1: the smart Just answer route (`POST /v1/app/projects/<p>/answers`, answer-routes.ts). Absent: that path says "not on the core yet". */
+  answers?: HostedAnswersWiring;
+  /** Lead 4 N1: the nightly upkeep switch (`/v1/app/projects/<p>/upkeep`, upkeep-routes.ts). Absent: that path says "not on the core yet". */
+  upkeep?: HostedUpkeepWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -166,6 +223,25 @@ export interface CoreDevRoutesOptions {
   /** The company's wiring, built once per company (a build that fails is tried again on the next request, as the runtime is). */
   wiring(runtime: CoreRuntime): CoreDevWiring | Promise<CoreDevWiring>;
   log?: (entry: Record<string, unknown>) => void;
+}
+
+/**
+ * Lead 4 J2: what the Slack door asks of the core, in process. Everything here was verified by the caller (the Slack workspace's company, the company-linked person, the project the thread's channel is bound to,
+ * the thread's own id): the body of a Slack message names none of them.
+ */
+export interface SlackThreadAnswerInput {
+  companyId: string;
+  personId: string;
+  project: string;
+  /** The verified Slack thread (`slackAnswerThreadId`). */
+  threadId: string;
+  requestId: string;
+  question: string;
+}
+export interface SlackThreadAnswer {
+  answer: AnswerResponse;
+  /** The answer as untrusted data for the task a person starts from it; present only when the answer carries its one button and the asker may still attach it. */
+  attach?: string | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -181,11 +257,12 @@ function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
   if (TASK_ANSWERS.test(path)) return method === "POST";
-  if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path)) return method === "GET";
-  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
+  if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
+  if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
+  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
-  if (isWikiPath(path, method)) return true;
+  if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -237,6 +314,28 @@ async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs:
 
 const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
 
+/** Whether the project has a catalog row in THIS company (the company is the membership's, never the request's). A read that fails is "no". */
+async function projectExistsIn(target: Mounted, companyId: string, project: string): Promise<boolean> {
+  try {
+    return (await target.runtime.flow.deps.store.get(orgProjectCatalogKey(companyId, project)))?.["entityType"] === "PROJECT_CATALOG";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the caller may READ a project's how-we-work or test environment state: a live company owner or admin (the role is the membership's, read for this request) of a project that exists in THEIR company, or
+ * a person the company lets read that project (the grant). A grant read that fails is "no". Reads only: nothing that writes, decides or makes a credential uses this.
+ */
+async function mayReadProject(target: Mounted, caller: DeployedCaller, membership: CompanyMembership, project: string): Promise<boolean> {
+  if ((membership.role === "owner" || membership.role === "admin") && await projectExistsIn(target, membership.companyId, project)) return true;
+  try {
+    return await target.wiring.canReadProject!(caller.principal.personId, project);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The state answer of a project's test environment on the deployed API: the laptop's view (the same core reader, over the company's own records: every row is under the company's project key) plus the catalog
  * the install would pin from, while test services are switched on. The company is the membership's (the runtime's), never the request's.
@@ -261,7 +360,16 @@ interface Mounted {
   actions?: TaskActions;
 }
 
-export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> } {
+export interface CoreDevRoutes {
+  route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>;
+  /**
+   * Lead 4 J2: the smart Just answer for a Slack thread, in process (the thread is one every participant reads, so its memory is shared; the HTTP route never says so). `undefined`: the core does not serve
+   * answers for this company (switch off, or no answers wiring). Throws the answer service's own refusals (`NOT_FOUND` for no role or no project, `TOO_MANY_REQUESTS`, `RUNTIME_UNAVAILABLE`).
+   */
+  answerForSlackThread(input: SlackThreadAnswerInput): Promise<SlackThreadAnswer | undefined>;
+}
+
+export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
   const mounted = new Map<string, Promise<Mounted>>();
   const mount = (companyId: string): Promise<Mounted> => {
     let found = mounted.get(companyId);
@@ -271,7 +379,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const blobs = (await options.app.registry()).require("object-storage");
         return {
           runtime, wiring, blobs,
-          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }) }),
+          ...(wiring.members === undefined ? {} : { sessions: createSessionRoutes({ flow: runtime.flow, blobs, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members }), inbox: createInboxRoutes({ store: runtime.flow.deps.store, companyId: runtime.companyId, origin: wiring.origin, members: wiring.members, ...(wiring.unsubscribeKey === undefined ? {} : { unsubscribeKey: wiring.unsubscribeKey }) }) }),
           ...(wiring.playbook === undefined ? {} : { playbook: createLocalPlaybook({ playbook: wiring.playbook, store: runtime.flow.deps.store, companyId: runtime.companyId }) }),
           // The owner's moves need both the money cap and the company's owner rule; with either missing they are not served (never Code's laptop owner rule on a hosted company).
           ...(wiring.taskActions === undefined || runtime.flow.deps.access.ownerActing === undefined ? {} : { actions: createTaskActions(runtime.flow.deps, { roundCap: wiring.taskActions.roundCap }) }),
@@ -284,6 +392,27 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
   };
 
   return {
+    async answerForSlackThread(input) {
+      if (!options.app.serving || !ORG_ID.test(input.companyId)) return undefined;
+      let target: Mounted;
+      try {
+        target = await mount(input.companyId);
+      } catch (error) {
+        if (error instanceof Error && error.name === "CoreEngineOffError") return undefined;
+        throw error;
+      }
+      // Mounted by the company asked for; a runtime of another company would never be asked.
+      if (target.runtime.companyId !== input.companyId || target.wiring.answers === undefined) return undefined;
+      const service = hostedAnswerService({ companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+      const answer = await service.ask({
+        personId: input.personId, project: input.project, sharedThread: true,
+        body: { requestId: input.requestId, question: input.question, threadId: input.threadId, channel: "slack" },
+      });
+      if (answer.answerId === undefined || answer.action === undefined) return { answer };
+      // Attached only for the person who asked, with a role on the project now (the answer service checks both); anything else leaves the answer without its button.
+      const context = await service.taskContext({ personId: input.personId, project: input.project, answerId: answer.answerId }).catch(() => undefined);
+      return { answer, ...(context === undefined ? {} : { attach: context.text }) };
+    },
     async route(request, caller) {
       // Off: nothing is read and nothing answers here.
       if (!options.app.serving) return undefined;
@@ -311,10 +440,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
       if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // Answering the agent is never a script token's either, and reads like a missing task for the same reason.
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      // A script token reaches only a task's read here (its closed list: its own projects' tasks); never sessions, decisions, playbooks or tokens.
+      // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
       if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path))) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      if (caller.scriptToken !== undefined && !TASK_READ.test(path)) return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
         target = await mount(companyId);
@@ -343,9 +472,20 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         const task = TASK_READ.exec(path);
         if (task !== null) {
           if (request.method !== "GET") return undefined;
-          // Another company's task, or none, answers the same "not found" (the flow's owned read checks the company).
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
+          // Another company's task, or none, answers the same "not found" (the flow's read checks the company). A person's own read also lets the People list's commenters and viewers read it (C6, the same
+          // live rule); a script token reads exactly as before (its own closed list), never through People.
+          const record = caller.scriptToken === undefined
+            ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!)
+            : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+        }
+        const evidence = TASK_EVIDENCE.exec(path);
+        if (evidence !== null) {
+          // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
+          // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
+          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
+          const pack = await loadEvidencePack(target.blobs, { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
+          return json(200, proofIndexOf(record.taskId, record.workflow, pack));
         }
         const cancel = TASK_CANCEL.exec(path);
         if (cancel !== null) {
@@ -407,10 +547,10 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
-        if (isSetupRunPath(path, request.method)) {
+        if (isSetupRunPath(path, request.method) || isSetupCheckPath(path, request.method)) {
           // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.setupRun === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedSetupRun({
+          return await (isSetupCheckPath(path, request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
@@ -425,25 +565,126 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
         }
         if (isWikiPath(path, request.method)) {
           // Lead 4 W2: the member company's own store; the caller's live standing on the project is read inside (any project role reads).
+          if (caller.scriptToken !== undefined) {
+            // Re-read scope in the live member company's store: a verified token id alone grants no wiki access.
+            const route = scriptTokenRoute(request.method, path);
+            const token = await readScriptToken({ store: target.runtime.flow.deps.store }, companyId, caller.scriptToken.tokenId);
+            if (target.wiring.scriptTokens === undefined || !(target.wiring.scriptTokens.enabled ?? scriptTokensEnabled)()
+              || route?.permission !== "wiki" || route.project !== "path"
+              || token === undefined || scriptTokenStatus(token, nowOf(target)) !== "active"
+              || (token.personId !== undefined && token.personId !== caller.principal.personId) || token.developerId !== developerIdOf(caller.principal)
+              || token.createdRole !== membership.role || !token.permissions.includes("wiki") || !token.projects.includes(route.name)) {
+              throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+            }
+          }
           if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target) });
+        }
+        if (isWikiCorrectionPath(path, request.method)) {
+          // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).
+          if (target.wiring.wikiCorrections === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedWikiCorrections({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wikiCorrections, now: () => nowOf(target) });
+        }
+        if (isReportPath(path, request.method)) {
+          // Lead 4 A1/A2: the company's own runtime, the caller's live role from membership, the request's audit sink naming the caller.
+          if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedReport({
+            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+          });
+        }
+        if (isUpkeepPath(path, request.method)) {
+          // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedUpkeep({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            // L4-P3: allowing the company's automatic runs (the setup step) needs a fresh step-up, checked here against the company's window like making a script token.
+            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isSystemRunsPath(path, request.method)) {
+          // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; allowing needs a fresh step-up; the ceiling is the upkeep wiring's.
+          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedSystemRuns({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isWikiBuildPath(path, request.method)) {
+          // Lead 4 W4: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.wikiBuild === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedWikiBuild({
+            request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiBuild,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
+            startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target), log: options.log,
+          });
+        }
+        if (isStartSuggestPath(path, request.method)) {
+          // Lead 4 J3: the member company's own role read live inside; nothing is started; only the hourly counter row (ids and a count) is stored.
+          if (target.wiring.startSuggest === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedStartSuggest({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.startSuggest, now: () => nowOf(target), log: options.log });
+        }
+        if (isAnswersPath(path, request.method)) {
+          // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
+          if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+        }
+        if (isAgentDirectoryPath(path, request.method)) {
+          // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.
+          return await routeHostedAgentDirectory({
+            request, path, companyId: target.runtime.companyId, role: membership.role, developerId: developerIdOf(caller.principal),
+            store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
+          });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
           if (target.playbook === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // A project the person may not read, and one that does not exist, answer the same words.
-          if (!(await target.wiring.canReadProject(caller.principal.personId, playbook[1]!).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          // A project the person may not read, and one that does not exist, answer the same words. A live company owner or admin needs no grant on a project of THEIR company (GET only: a write is the old broker's).
+          if (!(await mayReadProject(target, caller, membership, playbook[1]!))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           const answer = (await target.playbook.routes(request)) ?? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND));
           return answer.statusCode === 404 ? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND)) : answer;
+        }
+        const approveEnvironment = TEST_ENVIRONMENT_APPROVE.exec(path);
+        if (approveEnvironment !== null) {
+          const approval = target.wiring.testEnvironmentApproval;
+          if (approval === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          // A decision needs a fresh step-up, checked before anything else is read (a tool holding an ordinary API token has none).
+          const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), DECIDE_ON_A_PAGE);
+          const project = approveEnvironment[1]!;
+          // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
+          // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
+          if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(request));
+          if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
+          const result = await approval.approve({ personId: caller.principal.personId, stepUp, project, approval: parsedBody.data });
+          if (result.ok) return json(200, { project, message: result.message });
+          // The decision's own words (fixed, never an echo); the status by reason.
+          throw agentXError(result.reason === "off" ? "NOT_AVAILABLE_HERE" : result.reason === "stale" ? "CHANGE_STALE" : result.reason === "not_found" || result.reason === "not_wired" ? "NOT_FOUND" : "FORBIDDEN", result.message);
         }
         const testEnvironment = TEST_ENVIRONMENT.exec(path);
         if (testEnvironment !== null) {
           const wired = target.wiring.testEnvironment;
           if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           const project = testEnvironment[1]!;
+          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it. A live company owner or admin (the role is membership's, read for this request)
+          // needs no grant on a project of THEIR company (the same reach as approving; the project must exist in that company); anyone else needs the grant.
+          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          return json(200, await testEnvironmentAnswer(target, wired, project));
+        }
+        const savedEnvImage = SAVED_ENV_IMAGE.exec(path);
+        if (savedEnvImage !== null) {
+          const wired = target.wiring.savedEnv;
+          if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          const project = savedEnvImage[1]!;
           // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
           if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          return json(200, await testEnvironmentAnswer(target, wired, project));
+          // The company is the membership's (the runtime's), never the request's. Role "viewer": a reader never gets Reset or the setting control, whatever their grant (the writes are not on the core here).
+          const deps = { store: documentSavedEnvStore({ store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit }), session: { config: { enabled: wired.enabled === true } }, now: () => nowOf(target) };
+          const panel = await savedEnvPanel(deps, { orgId: target.runtime.companyId, projectId: project }, { projectRole: "viewer" });
+          if (!panel.ok) throw agentXError("NOT_FOUND", SAVED_ENV_OFF);
+          return json(200, SavedEnvPanelSchema.parse(panel.panel));
         }
         const tokens = SCRIPT_TOKENS.exec(path);
         if (tokens !== null) {
@@ -451,10 +692,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
           const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
           const deps = { store: target.runtime.flow.deps.store, audit, now: () => nowOf(target) };
-          // The live role from membership decides whether the list and revoke reach every token of the company (an administrator) or only the caller's own.
+          // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
           if (tokens[1] === undefined && request.method === "POST") {
-            // Making a token needs a fresh step-up, checked before the body is read.
+            // Refuse the role before checking step-up or reading the body; core creation enforces it too.
+            if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
             const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
             const canRead = target.wiring.canReadProject;
             if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
@@ -467,7 +709,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
             }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method, authTime: stepUp.at } });
             return json(201, made);
           }
-          if (tokens[1] === undefined && request.method === "GET") return json(200, { tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
+          if (tokens[1] === undefined && request.method === "GET") return json(200, { canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin", tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
           if (tokens[1] !== undefined && request.method === "POST") return json(200, { token: await revokeScriptToken(deps, scriptCaller, tokenIdOf(tokens[1])) });
           throw agentXError("NOT_FOUND", "route not found");
         }
