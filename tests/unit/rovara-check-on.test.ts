@@ -25,7 +25,7 @@ const task = (orgId: OrgId) => ({ taskId: TASK_ID, orgId, project: "web", starti
 describe("the source a host passes", () => {
   it("is on for every task of every company, and says nothing about a link unless the host gives one", () => {
     const source = rovaraCheckSource();
-    expect(source.detailsUrl).toBeUndefined();
+    expect("detailsUrl" in source).toBe(false);
     expect(source.verdict).toBeUndefined();
     for (const orgId of [ORG, B]) expect(source.enabled(task(orgId))).toBe(true);
     const linked = rovaraCheckSource({ detailsUrl: (t) => `https://rovara.example.test/tasks/${t.taskId}` });
@@ -111,8 +111,8 @@ describe("the laptop's tracking", () => {
     const fetchSpy = vi.fn<typeof fetch>((input, init) => api.fetch(input, init));
     const secrets = createLocalSecretStore({ environment: {}, keyFile: { get: async () => new SecretValue("fixture-personal-token"), providers: async () => ["github"] } });
     const codeHost = githubTokenCodeHost({ companyId: GITHUB_ORG_SCOPE.orgId, secrets, environment: {}, gh: async () => undefined, fetch: fetchSpy, now: () => NOW, registeredRepositories: () => [GITHUB_REPO_URL] });
-    expect(codeHost.upsertSummaryCheck).toBeUndefined();
-    expect(codeHost.summaryCheckSource).toBeUndefined();
+    expect("upsertSummaryCheck" in codeHost).toBe(false);
+    expect("summaryCheckSource" in codeHost).toBe(false);
     const w = await mergeWorld();
     const pr = w.prs[0]!;
     const pass: SummaryCheckPass = {
@@ -136,7 +136,7 @@ describe("the hosted code host writes the Check through the company's own rules 
         const client = new GitHubAppCredentialProvider({
           credentialRef: "github", appId: "5002502", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
           fetchImplementation: options.refuseWrite !== true ? api.fetch : (async (input, init) => (init?.method === "POST" && String(input instanceof Request ? input.url : input).endsWith("/check-runs")
-            ? new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 }) : api!.fetch(input, init))) as typeof fetch,
+            ? new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403 }) : api!.fetch(input, init))),
           now: () => NOW, requireInstallationBound: async () => undefined,
         });
         const repositories = options.repositories ?? { [ORG]: ["acme/app"], [B]: ["bcorp/own"] };
@@ -202,8 +202,8 @@ describe("the hosted code host writes the Check through the company's own rules 
     expect(typeof provider.upsertRovaraCheck).toBe("function");
     expect(await provider.summaryCheckSource!()).toBe("5002502");
     const half = companyScopedGitHubProvider({ upsertRovaraCheck: async () => ({ runId: "1" }) } as unknown as Parameters<typeof companyScopedGitHubProvider>[0], { repositoriesOf: async () => new Set() });
-    expect(half.upsertRovaraCheck).toBeUndefined();
-    expect(half.summaryCheckSource).toBeUndefined();
+    expect("upsertRovaraCheck" in half).toBe(false);
+    expect("summaryCheckSource" in half).toBe(false);
   });
 
   // Mutant F1: a permission refusal throws (or is retried) instead of being remembered for an hour.
