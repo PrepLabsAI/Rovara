@@ -23,11 +23,16 @@ const factories: Array<[string, () => LessonStore]> = [
   ["document store", () => new DocumentLessonStore(new MemoryDocumentStore())],
 ];
 
-/** A store whose FIRST flags read is followed by `between` (another writer's whole write) before the read returns: the reader's copy is already stale when it writes. */
-function racing(store: LessonStore, between: () => Promise<void>): LessonStore {
+/**
+ * A store whose FIRST flags read is followed by `between` (another writer's whole write) before the read returns: the reader's copy is already stale when it writes. `reads: "rev"` counts only `flagsRev` (the
+ * revision-checked read: for a writer that reads the row first for another reason, such as Pause); `"any"` counts `flags` too (so a writer that skipped the revision check, and read the plain row, is raced as well).
+ */
+function racing(store: LessonStore, between: () => Promise<void>, reads: "rev" | "any" = "rev"): LessonStore {
   let fired = false;
+  const after = async <T>(read: T): Promise<T> => { if (!fired) { fired = true; await between(); } return read; };
   return Object.assign(Object.create(store) as LessonStore, {
-    flagsRev: async (key: ScopeKey) => { const read = await store.flagsRev(key); if (!fired) { fired = true; await between(); } return read; },
+    flagsRev: async (key: ScopeKey) => after(await store.flagsRev(key)),
+    ...(reads === "any" ? { flags: async (key: ScopeKey) => after(await store.flags(key)) } : {}),
   });
 }
 /** A store where every conditional flags write loses its race. */
@@ -59,7 +64,7 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
   it("a flood-guard hold that races a stop: both survive", async () => {
     const store = make();
     const w = world();
-    const racedGuard = racing(store, async () => { await stopSource(store, w); });
+    const racedGuard = racing(store, async () => { await stopSource(store, w); }, "any");
     await flood(racedGuard, w, "slack:ramp");
     expect(Object.keys((await store.flags(KEY)).pausedSources ?? {})).toEqual(["slack:ramp"]);
     expect(stoppedOf(await store.flags(KEY))).toEqual(STOPPED);
@@ -84,7 +89,7 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
       await stopSource(store, w);
       await store.forgetSource(KEY, "member:ann");
     } else {
-      const racedErasure = racing(store, async () => { await stopSource(store, w); });
+      const racedErasure = racing(store, async () => { await stopSource(store, w); }, "any");
       await racedErasure.forgetSource(KEY, "member:ann");
     }
     expect((await store.flags(KEY)).pausedSources).toEqual({});
@@ -95,7 +100,7 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
     const store = make();
     const w = world();
     await store.setFlags(KEY, { pausedSources: { "slack:ramp": { at: 1, reason: "spike" } } });
-    const racedResume = racing(store, async () => { await stopSource(store, w); });
+    const racedResume = racing(store, async () => { await stopSource(store, w); }, "any");
     expect(await clearSourcePause(w.deps, racedResume, KEY, "slack:ramp", "owner")).toBe(true);
     expect((await store.flags(KEY)).pausedSources).toEqual({});
     expect(stoppedOf(await store.flags(KEY))).toEqual(STOPPED);
@@ -110,6 +115,16 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
     expect(flags.volumeAlertedAt).toBeDefined();
     expect(stoppedOf(flags)).toEqual(STOPPED);
     expect(w.alerts.sent.filter((code) => code === "project_volume_spike")).toHaveLength(1);
+  });
+
+  it("a volume alert that races a stop: both survive", async () => {
+    const store = make();
+    const w = world();
+    const racedVolume = racing(store, async () => { await stopSource(store, w); }, "any");
+    for (let i = 0; i < 40; i += 1) await noteCandidateSources(w.deps, racedVolume, KEY, [`slack:c${i}`], w.alerts);
+    const flags = await store.flags(KEY);
+    expect(flags.volumeAlertedAt).toBeDefined();
+    expect(stoppedOf(flags)).toEqual(STOPPED);
   });
 
   it("a resume that races a flood-guard hold: the hold survives and the stop is lifted with its window", async () => {
