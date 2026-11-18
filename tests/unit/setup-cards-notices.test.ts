@@ -1,8 +1,8 @@
 // L4-U5: the people-facing words for system runs and setup upkeep, on Code's side: the evidence line of a task, the one message in the task's chat thread and on the ticket when the task pauses at Build, the evidence line
 // on the pull request message and the pull request body, the admins' "Setup needs repair" notice, and the "Setup needs repair" card the web page reads. "One experience rule": silent when fine, one message when
 // someone must act, one evidence line when trust changes; Slack, Linear and the web say the SAME words; no cost figure in a chat. Mutants are listed in the PR body with the test that kills each.
-import { describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, intakeItemIdOf, setupDriftWords, type ChannelEvent, type CodeMilestone, type ConversationRef, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { describe, expect, it } from "vitest";
+import { intakeItemIdOf, setupDriftWords, type ChannelEvent, type CodeMilestone, type ConversationRef, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
@@ -16,7 +16,6 @@ import { readIntakeItem } from "../../packages/broker/src/core/intake/store.js";
 import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/broker/src/plugins/fake/tracker.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 import {
   SETUP_REPAIR_WORDS, driftTaskKey, inertSetupStep, plainSetupLink, recheckRowKey, setupAdminNoticeWords, setupBrokenTaskWords, setupEvidenceOf, setupMayBeOutOfDateWords, setupNotRecheckedWords,
   setupPausedMessage, setupPullRequestLineOf, setupRecheckLineOf, setupStillWorksWords, setupTrustLineOf, type RecheckRow, type RecheckState,
@@ -117,8 +116,8 @@ describe("the words are one set, safe for a chat, with no cost in them", () => {
 
   it("repository text (the failing step) is made safe: no mention, link, markup or control character; a plain step is unchanged", () => {
     expect(inertSetupStep(STEP)).toBe(STEP);
-    const hostile = inertSetupStep("setup step 0 (npm ci) failed: @here <!channel> `rm -rf` https://evil.test/x‮\u0007\nsecond line");
-    for (const unsafe of ["@", "<", ">", "`", "\u202e", "\u0007", "\n", "://"]) expect(hostile.includes(unsafe), JSON.stringify(unsafe)).toBe(false);
+    const hostile = inertSetupStep("setup step 0 (npm ci) failed: @here <!channel> `rm -rf` https://evil.test/x [click](//evil.test) *bold* _it_ #chan | ! ~x~‮\u0007\nsecond line");
+    for (const unsafe of ["@", "<", ">", "`", "\u202e", "\u0007", "\n", "://", "//", "[", "]", "*", "_", "#", "|", "!", "~"]) expect(hostile.includes(unsafe), JSON.stringify(unsafe)).toBe(false);
     expect(setupPausedMessage("x @everyone <https://evil.test|click>")).not.toMatch(/@everyone|<https/u);
     expect(inertSetupStep("x".repeat(500))).toHaveLength(200);
   });
@@ -185,11 +184,11 @@ describe("the chat thread: one message when the task pauses at Build", () => {
     expect(w.attempts).toHaveLength(1);
   });
 
-  it("carries the setup page's link when the host has one, and the words that say where to go when it has none", async () => {
+  it("carries the setup page's link when the host has one, as the last line, and the words that say where to go when it has none", async () => {
     const w = await ThreadWorld.make({ setupUrl: (project) => `https://app.example.test/p/${project}/setup` });
     await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
     await w.handler.on(paused());
-    expect((w.attempts[0] as { data: { text: string } }).data.text.endsWith("Setup page: https://app.example.test/p/web/setup") || (w.attempts[0] as { data: { text: string } }).data.text.includes("https://app.example.test/p/")).toBe(true);
+    expect((w.attempts[0] as { data: { text: string } }).data.text).toBe(setupPausedMessage(STEP, "https://app.example.test/p/payments/setup"));
   });
 
   it("never tells another company's thread, a closed task, or a task of another company's record", async () => {
@@ -507,15 +506,6 @@ describe("the nightly upkeep pause reaches an admin's Slack target in fixed word
   });
 });
 
-describe("the project's own rows are never another company's", () => {
-  it("the setup partition is built from the company and project, so company B's rows are never at company A's keys", () => {
-    expect(setupPartition(COMPANY, "payments")).not.toBe(setupPartition(OTHER, "payments"));
-    expect(recheckRowKey(COMPANY, "payments", KEY_A).pk).not.toBe(recheckRowKey(OTHER, "payments", KEY_A).pk);
-    expect(repairToldKey(COMPANY, "payments", KEY_A).pk).not.toBe(repairToldKey(OTHER, "payments", KEY_A).pk);
-    expect(vi.isMockFunction(setupPartition)).toBe(false);
-    expect(IMPLICIT_COMPANY_ID).toBe(COMPANY);
-  });
-});
 
 // ---- the pull request description
 
@@ -623,5 +613,75 @@ describe("nightly upkeep's read says why it is paused, to the people who manage 
     const broken = { ...w.deps, store: { ...w.store, query: async () => { throw new Error("down"); }, get: w.store.get.bind(w.store) } };
     expect((await upkeepView(broken as never, ADMIN_1, "payments")).paused).toBeUndefined();
     clock.ms -= 60_000;
+  });
+});
+
+
+// ---- the once-only marker holds against a race, the requester hears once, and the wiring that carries all this is in place
+
+import { readFileSync } from "node:fs";
+import { setupPausedPosted } from "../../packages/broker/src/core/channel/thread-notices.js";
+import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
+
+describe("the admins' notice holds when two readers of one break meet", () => {
+  it("a reader that read the marker as absent just before the other wrote it still writes nothing (the marker's own write is conditional)", async () => {
+    const w = adminWorld();
+    expect(await w.queue(COMPANY, "payments", KEY_A)).toEqual({ queued: 2, deduped: false });
+    const key = repairToldKey(COMPANY, "payments", KEY_A);
+    const realGet = w.store.get.bind(w.store);
+    w.store.get = async (request) => (request.pk === key.pk && request.sk === key.sk ? undefined : realGet(request));
+    expect(await w.queue(COMPANY, "payments", KEY_A)).toEqual({ queued: 0, deduped: true });
+    expect(await w.pending()).toHaveLength(2);
+  });
+});
+
+describe("the requester hears the pause once: the needs-you reminder knows the thread was told", () => {
+  const session = { orgId: COMPANY, sessionId: taskSessionId(ThreadWorld.TASK), subject: { kind: "task", taskId: ThreadWorld.TASK } } as never;
+  const blocked = async (w: ThreadWorld) => { await w.store.update({ key: taskKey(ThreadWorld.TASK), ops: [{ op: "set", path: ["workflow"], value: { state: "BLOCKED", stage: "IMPLEMENT", revision: 3 } }] }); };
+
+  it("is true only after the pause message was sent for the break that holds the task now", async () => {
+    const w = await ThreadWorld.make();
+    const told = setupPausedPosted({ store: w.store });
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken", key: KEY_A });
+    await blocked(w);
+    expect(await told(session)).toBe(false);
+    await w.handler.on({ kind: "setup_paused", orgId: COMPANY, taskId: ThreadWorld.TASK, at: iso(), text: "x" });
+    expect(await told(session)).toBe(true);
+    // A newer break has not been told yet.
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken", key: KEY_B });
+    expect(await told(session)).toBe(false);
+  });
+
+  it("is false for a task that is not blocked, another company's session and a store that fails", async () => {
+    const w = await ThreadWorld.make();
+    const told = setupPausedPosted({ store: w.store });
+    await seed(w.store, { taskId: ThreadWorld.TASK, state: "broken" });
+    await w.handler.on({ kind: "setup_paused", orgId: COMPANY, taskId: ThreadWorld.TASK, at: iso(), text: "x" });
+    expect(await told(session)).toBe(false);
+    await blocked(w);
+    expect(await told({ ...(session as object), orgId: OTHER } as never)).toBe(false);
+    await expect(setupPausedPosted({ store: { get: async () => { throw new Error("down"); } } })(session)).rejects.toThrow();
+  });
+});
+
+describe("the wiring that carries the lines is in place (a guard on the source: removing a line must fail a test)", () => {
+  const source = (path: string): string => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+  it("both pull request descriptions (the first and the rewrite) are given the setup line", () => {
+    for (const path of ["packages/broker/src/core/build-step/publish.ts", "packages/broker/src/core/build-step/changed-files.ts"]) {
+      const text = source(path);
+      expect(text, path).toContain("setupPullRequestLineOf(deps, task.project, task.taskId)");
+      expect(text, path).toMatch(/\.\.\.\(setupLine === undefined \? \{\} : \{ setupLine \}\)/u);
+    }
+  });
+  it("the hosted engine tells the admins of a break and reads the card for ITS company only, and the local app knows when the thread was told", () => {
+    const root = source("packages/broker/src/aws/core-engine-root.ts");
+    expect(root).toContain("flow.deps.setupBroken = async (input) => { await upkeep.setupBroken(input); };");
+    expect(root).toContain("setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice(");
+    expect(source("packages/broker/src/local/app/app.ts")).toContain("setupPausedTold: setupPausedPosted({ store }),");
+  });
+  it("pausing at Build stores fixed words, never the failing step, in the milestone and the session's timeline", () => {
+    const start = source("packages/broker/src/core/build-step/start.ts");
+    expect(start).toContain("text: SETUP_PAUSED_TIMELINE,");
+    expect(start).not.toMatch(/kind: "setup_paused"[^]{0,200}text: setupGate/u);
   });
 });

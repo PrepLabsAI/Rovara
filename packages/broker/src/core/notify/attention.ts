@@ -258,6 +258,11 @@ export interface AttentionDeliveryDependencies {
    * goes to the places the person chose, and every other kind of notice is unchanged. A failure counts as "no card", so the reminder is sent.
    */
   planCarded?: (session: AgentSessionRecord) => Promise<boolean>;
+  /**
+   * L4-U5: whether the task's setup pause ("I can't build this yet ...") was already told in the conversation the task was started from (`core/channel/thread-notices.ts` `setupPausedPosted`). The needs-you reminder is then not sent to THAT
+   * conversation as well (one message for the requester); it still goes to the places the person chose. A failure counts as "not told", so the reminder is sent.
+   */
+  setupPausedTold?: (session: AgentSessionRecord) => Promise<boolean>;
   /** Whether the person may READ the session now. Default: the session's owner. */
   access?: (orgId: OrgId, developerId: string, session: AgentSessionRecord) => Promise<{ owner: boolean } | undefined>;
   /** The person's own email address (from their sign-in record), or undefined. Absent: nobody has one, and email is never used. */
@@ -480,6 +485,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       // Still current (a later change of state supersedes the row), never "needs you" for an ended session, and still theirs to read: anything else is dropped without a word.
       if (session === undefined || access === undefined || kind !== row.kind || (session.endedAt !== undefined && kind !== "done" && kind !== "failed")) { stale.push(row); continue; }
       if (kind === "needs_you" && deps.planCarded !== undefined && await deps.planCarded(session).catch(() => false)) carded.add(row.sessionId);
+      else if (kind === "needs_you" && deps.setupPausedTold !== undefined && await deps.setupPausedTold(session).catch(() => false)) carded.add(row.sessionId);
       const link = deps.link?.(session);
       current.push({ row, line: { title: oneLine(access.owner ? session.title : hideEmailAddresses(session.title), TITLE_MAX) || "A task", status: oneLine(taskStatusText(sessionTaskStatus(session.summary)), 200), link, kind } });
     }

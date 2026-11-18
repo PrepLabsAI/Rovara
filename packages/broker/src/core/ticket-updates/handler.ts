@@ -152,7 +152,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   if (!settings.comments && status === undefined) return "off";
   const tracker = deps.trackerFor(ticket.tracker);
   if (tracker === undefined || (tracker.comment === undefined && tracker.setStatusByName === undefined)) return "not_connected";
-  // The setup pause says its words only while the break still holds for this task, and once per re-check (a task paused twice by the same break is told once).
+  // The setup pause says its words only while the task's re-check says the setup is broken, and once per re-check (a task paused twice by the same break is told once).
   let setupText: string | undefined;
   let setupKey: string | undefined;
   if (setupPaused) {

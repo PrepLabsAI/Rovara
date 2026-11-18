@@ -18,6 +18,8 @@ import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
 import { setupGateBeforeBuild } from "../setup-agent/recheck.js";
+/** The timeline line and milestone text of the pause: fixed words, never the check's failing step (repository text). */
+const SETUP_PAUSED_TIMELINE = "Paused before Build: the project's setup needs repair.";
 import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
@@ -128,7 +130,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
     // L4-U5: the thread and the ticket the task came from are told ONCE that it paused, in the same transaction as the pause (the milestone hook tells them and tries again after a failure). The handlers read the words from the
     // project's own re-check rows; the text here is only the session's timeline line.
     const told = deps.milestones === undefined ? [] : deps.milestones.items({
-      kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: iso(deps), text: setupGate.words.slice(0, 500),
+      kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: iso(deps), text: SETUP_PAUSED_TIMELINE,
     }, blocked.revision);
     const committed = await commitWorkflow(deps, task, blocked, told);
     if (committed && told.length > 0) await deps.milestones?.deliver(task.taskId).catch(() => undefined);

@@ -115,6 +115,24 @@ export function planCardPosted(deps: { store: Pick<DocumentStore, "get">; now: (
 }
 
 /**
+ * L4-U5: whether the task's "I can't build this yet" message (the setup pause) was already told in its thread, for the break that holds the task now: the answer the needs-you reminder asks (`deliverAttention`'s
+ * `setupPausedTold`), so the thread is not told twice for one pause. True only for a task that is blocked on a broken re-check whose message was sent; anything else (or a read that fails) is "not told".
+ */
+export function setupPausedPosted(deps: { store: Pick<DocumentStore, "get"> }): (session: AgentSessionRecord) => Promise<boolean> {
+  return async (session) => {
+    if (session.subject.kind !== "task") return false;
+    const task = await deps.store.get(taskKey(session.subject.taskId));
+    const workflow = task?.["workflow"] as Partial<WorkflowSnapshot> | undefined;
+    const project = task?.["project"];
+    if (task === undefined || (task["orgId"] ?? task["companyId"]) !== session.orgId || task["closedAt"] !== undefined || workflow?.state !== "BLOCKED" || typeof project !== "string") return false;
+    const evidence = await setupEvidenceOf({ store: deps.store, companyId: session.orgId }, project, session.subject.taskId);
+    if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return false;
+    const sessionId = typeof task["sessionId"] === "string" ? task["sessionId"] : session.sessionId;
+    return (await deps.store.get(claimKey(session.orgId, sessionId, `setup_paused#${evidence.recheckKey}`)))?.["state"] === "done";
+  };
+}
+
+/**
  * Whether the session's task was started from a chat thread: the `follows` of the milestone moments (`ticket-updates/moments.ts`), so a `plan_ready` and a `closed` milestone are written for it. A read only; the row is the
  * company's own, so another company's session reads as not followed.
  */
@@ -184,7 +202,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       const where = open(taskId);
 
       if (moment === "setup_paused") {
-        // The words come from the project's own re-check rows (never from the milestone's text), and only while the break still holds for this task.
+        // The words come from the project's own re-check rows (never from the milestone's text), and only while the task's re-check says the setup is broken.
         const project = typeof task["project"] === "string" ? task["project"] : undefined;
         if (project === undefined || task["closedAt"] !== undefined) return;
         const evidence = await setupEvidenceOf({ store: deps.store, companyId: orgId }, project, taskId);

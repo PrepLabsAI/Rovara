@@ -753,7 +753,8 @@ describe("what the re-check says, and what blocks", () => {
     expect(await startImplementation(w.h.deps, { taskId: task.taskId, workflowRevision: ready.revision })).toBe("STALE");
     const paused = (await readTask(w.h.deps, task.taskId))!.workflow!;
     expect(heard.filter((milestone) => milestone.kind === "setup_paused")).toHaveLength(1);
-    expect(heard.find((milestone) => milestone.kind === "setup_paused")).toMatchObject({ orgId: w.h.deps.companyId, taskId: task.taskId, text: paused.blockReason });
+    expect(heard.find((milestone) => milestone.kind === "setup_paused")).toMatchObject({ orgId: w.h.deps.companyId, taskId: task.taskId, text: "Paused before Build: the project's setup needs repair." });
+    expect(JSON.stringify(heard)).not.toContain("npm ci");
     const rows = await queryAll(w.h.store, { pk: `DEVTASK#${task.taskId}`, sk: { op: "beginsWith", prefix: "CODE_MILESTONE#setup_paused#" } });
     expect(rows.map((row) => row.sk)).toEqual([`CODE_MILESTONE#setup_paused#${String(paused.revision).padStart(6, "0")}`]);
   });
