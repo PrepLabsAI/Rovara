@@ -13,7 +13,7 @@
 //
 // Wiring (the deployment, per company, in the runtime's `services`): `const lessons = createCoreLessons({ flow, ... }); lessons?.attach(); return { ..., ...(lessons === undefined ? {} : { lessons: lessons.service }) }`.
 // The worker callbacks then hand a step's events to `lessons.host.onEvents`.
-import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type IdentityProvider, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView } from "@agentx/contracts";
+import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView, type Tracker } from "@agentx/contracts";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
@@ -38,6 +38,7 @@ import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
 import type { RepositoryVisibility } from "../lessons/used-in-pr.js";
 import { createLessonRepositories } from "../local/app/lessons-repos.js";
 import { createLocalLessonSources } from "../local/app/lessons-sources.js";
+import { ticketSourcePaused } from "../lessons/ticket-comments.js";
 import type { CoreService } from "./core-runtime.js";
 import { parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
 
@@ -76,6 +77,11 @@ export interface CoreLessonsOptions {
    * cannot place (or one of another company) is nobody here, and an edit by it is not learned from.
    */
   identity?: Pick<IdentityProvider, "resolveExternalAccount"> | undefined;
+  /**
+   * The ticket source (L4-SRC-TK, weak): the trackers a company's tickets are read through, and who a tracker's own account is (the identity point's `resolveExternalAccount`; Linear's is the company's link rows).
+   * Absent: ticket comments are not read for this company. An account it cannot place (or one of another company) is nobody, and its comment is not learned from.
+   */
+  tickets?: { trackerFor(system: string): Tracker | undefined; resolveAccount(companyId: OrgId, account: ExternalAccountRef): Promise<{ companyId: string; personId: string } | undefined> } | undefined;
   /** The model-access port for learning calls (the gateway on the company's own account, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   learning?: { model: PipelineModel; spend: LearningSpend } | undefined;
   /** How lessons are compared (an embedder and where vectors live). Absent: keywords and cited paths, the vectors beside the lessons. */
@@ -155,6 +161,17 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   const sources = createLocalLessonSources({
     flow: deps, companyId, ownerId: SYSTEM_ACTOR.id, repos: repositories, readObject: readText, now, log: (event, fields) => log(event, fields),
     hosted: { people: options.people, ...(options.personOfAccount === undefined ? {} : { personOfAccount: options.personOfAccount }) },
+    ...(options.tickets === undefined ? {} : {
+      tickets: {
+        trackerFor: (system: string) => options.tickets!.trackerFor(system), scope: { orgId: companyId },
+        async personOfAccount(tracker: string, tenant: string, accountId: string) {
+          const principal = await options.tickets!.resolveAccount(companyId, { provider: tracker, tenant, accountId }).catch(() => undefined);
+          if (principal === undefined || principal.companyId !== companyId) return undefined;
+          return (await options.people.resolveMember?.(companyId, principal.personId)) ?? principal.personId;
+        },
+        paused: (project: string) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
+      },
+    }),
   });
   const host = createLessonsHost({
     flow: deps, runtime, companyId, blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },

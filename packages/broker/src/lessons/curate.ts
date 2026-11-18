@@ -1,6 +1,7 @@
 // The curator, in the ACE pattern. It finds a draft's neighbours (a shortlist fused from code-aware keywords, cited paths and, where the install has one, the small open embedder:
 // lessons/similarity.ts), asks ONE tool-less listwise judge call what the draft is to each of the top few, and applies the result as delta operations (ADD, MERGE, UPDATE, RETIRE) by code in one conditional
 // write. A model never rewrites the lesson set. With no judge (no provider, the month's cap, a refusal, a failed call) only a copy merges (the same words in the same order); everything else stays its own candidate. A judge's "same" merges only a pair that is the same advice by structure; any other "same" is kept as a possible duplicate for a person.
+import { weakSourceWaits } from "./weak-source.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { firstExpiry } from "./expiry.js";
@@ -359,9 +360,11 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
    */
   // A draft the judge called "same" as a rejected lesson (not the same advice by structure) is acted on through a live neighbour below as well: the card still says it resembles rejected advice.
   const rejectedNote: string[] = unconfirmedRejected === undefined ? [] : ["matches_rejected"];
+  // L4-SRC-TK: a draft that rests on a weak source alone and has not been seen twice is kept as a candidate (nobody is alerted, nothing waits for a person) until its second sighting (`weak-source.ts`).
+  const weakWaits = weakSourceWaits(draft.provenance);
   const toPerson = async (other: Lesson, matchesRejectedLesson: boolean): Promise<CurateOutcome> => {
     const named = !matchesRejectedLesson || visible.has(other.id);
-    const created = newLesson(deps, key, draft, "pending", { ...(named ? { contradictsWith: other.id } : {}), tierReasons: matchesRejectedLesson ? ["contradiction", "matches_rejected"] : ["contradiction", ...rejectedNote] });
+    const created = newLesson(deps, key, draft, weakWaits ? "candidate" : "pending", { ...(named ? { contradictsWith: other.id } : {}), tierReasons: matchesRejectedLesson ? ["contradiction", "matches_rejected"] : ["contradiction", ...rejectedNote] });
     const written = await commitWith(deps, key, async () => [created]);
     if (written === undefined) return drop("conflict");
     await keepVector(sim, key, created, queryVector);
@@ -372,7 +375,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     if (!matchesRejectedLesson && isTrialLesson(other) && other.status === "active" && draft.provenance.memberCorrection === true && mergeKeepsRepoOnly(other, draft)) {
       try { await retireLesson(deps, key, other.id, "contradicted", undefined, "lesson.trial_retired"); } catch { deps.log?.("lessons.trial_retire_deferred", { lesson: logRef(key.workspaceId, other.id) }); }
     }
-    try { await deps.alerts?.alert(key.workspaceId, key.project, "lesson_contradiction"); } catch { /* the card is already in the queue */ }
+    if (!weakWaits) try { await deps.alerts?.alert(key.workspaceId, key.project, "lesson_contradiction"); } catch { /* the card is already in the queue */ }
     return { outcome: "contradiction", lesson: created, ...(named ? { other: other.id } : {}), ...(matchesRejectedLesson ? { matchesRejected: true as const } : {}) };
   };
 
@@ -405,7 +408,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     if (chosen.verdict === "duplicate") {
       // When the pair stays apart because merging would cross the repo-only line, the other lesson learns its twin too (linked both ways; its text, mark and trial are untouched), and the loader gives a task only one of the two. The card says it cannot be merged.
       const twinned = !mergeKeepsRepoOnly(other, draft);
-      const created = newLesson(deps, key, draft, "pending", { possibleDuplicateOf: other.id, tierReasons: ["possible_duplicate", ...(twinned ? ["repo_twin"] : []), ...rejectedNote] });
+      const created = newLesson(deps, key, draft, weakWaits ? "candidate" : "pending", { possibleDuplicateOf: other.id, tierReasons: ["possible_duplicate", ...(twinned ? ["repo_twin"] : []), ...rejectedNote] });
       const written = await commitWith(deps, key, async () => {
         if (!twinned) return [created];
         const fresh = await deps.store.get(key, other.id);

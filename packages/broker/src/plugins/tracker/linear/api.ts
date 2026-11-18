@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { TrackerSearchError, TrackerWriteRefusedError, TrackerParentSchema, agentXError, type TrackerAskedItem } from "@agentx/contracts";
 import { normalizeIssueKey } from "./webhook.js";
-import type { LinearIssueRead, LinearReplyPort, LinearStateType, LinearTrackerAccess } from "./index.js";
+import type { LinearCommentRead, LinearIssueRead, LinearReplyPort, LinearStateType, LinearTrackerAccess } from "./index.js";
 
 export const LINEAR_GRAPHQL = "https://api.linear.app/graphql";
 /** The most characters one comment holds. */
@@ -75,6 +75,10 @@ export interface LinearApiOptions {
   sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
+/** Comments fetched per page, and the most pages one call walks to reach a page (a deeper page is not there). */
+export const LINEAR_COMMENTS_PER_PAGE = 100;
+export const LINEAR_COMMENT_PAGES_MAX = 5;
+const COMMENTS_QUERY = `query($id: String!, $first: Int!, $after: String, $filter: CommentFilter) { viewer { id } issue(id: $id) { identifier url comments(first: $first, after: $after, filter: $filter) { pageInfo { hasNextPage endCursor } nodes { id body createdAt updatedAt user { id } botActor { id } } } } }`;
 const STATE_TYPES: readonly string[] = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
 const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url project { id name url } parent { id identifier title url }
 creator { displayName } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
@@ -115,7 +119,7 @@ export function linearActOf(entries: readonly unknown[], hasMore: boolean, act: 
 }
 
 /** What Rovara asks Linear, over the owner's API key: the shape `linearTracker` takes as access. */
-export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<LinearTrackerAccess, "reply" | "readIssue" | "asked" | "moveIssue">> {
+export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<LinearTrackerAccess, "reply" | "readIssue" | "asked" | "moveIssue" | "listComments">> {
   const fetchImpl = options.fetch ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const ownIsRovara = options.ownAccountIsRovara === true;
@@ -250,6 +254,52 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     return read;
   };
 
+  /**
+   * One page of an issue's comments (L4-SRC-TK, fetch only): at most `LINEAR_COMMENTS_PER_PAGE`, those created after `since` when it is given. A page past the first is reached by walking Linear's cursors, so pages are honest
+   * and numbered from 1. An author is `isBot` for an app actor (`botActor`), for a comment with no user, and, when the key is Rovara's own account, for that account (the viewer). An issue that is not found has no comments.
+   */
+  const listComments: NonNullable<LinearTrackerAccess["listComments"]> = async (_orgId, key, query) => {
+    const issueKey = normalizeIssueKey(key);
+    if (issueKey === undefined) return undefined;
+    let after: string | null = null;
+    for (let page = 1; page <= LINEAR_COMMENT_PAGES_MAX; page += 1) {
+      const answer = await call(COMMENTS_QUERY, { id: issueKey, first: LINEAR_COMMENTS_PER_PAGE, after, filter: query.since === undefined ? null : { createdAt: { gt: query.since } } });
+      if ("errors" in answer) {
+        if (isNotFoundAnswer(answer.errors)) return undefined;
+        if (isPermissionAnswer(answer.errors)) throw new TrackerWriteRefusedError("needs_write_access");
+        throw unavailable();
+      }
+      const issue = rec(answer.data["issue"]);
+      // An answer for another issue than the one asked about is no answer.
+      if (normalizeIssueKey(str(issue["identifier"])) !== issueKey) return undefined;
+      // The issue key repeats across workspaces: when the caller names the workspace the ticket is in, an issue of another workspace is no answer.
+      if (query.workspace !== undefined && workspaceOfIssueUrl(str(issue["url"]) ?? "") !== query.workspace) return undefined;
+      const connection = rec(issue["comments"]);
+      const more = rec(connection["pageInfo"])["hasNextPage"] === true;
+      const cursor = str(rec(connection["pageInfo"])["endCursor"]);
+      if (page < (query.page ?? 1)) {
+        // Walking to the page asked for: a connection that says there is more but gives no cursor cannot be walked (the page is not there).
+        if (!more || cursor === undefined) return { comments: [] };
+        after = cursor;
+        continue;
+      }
+      const viewer = ownIsRovara ? str(rec(answer.data["viewer"])["id"]) : undefined;
+      const comments: LinearCommentRead[] = [];
+      for (const raw of arr(connection["nodes"]).slice(0, LINEAR_COMMENTS_PER_PAGE)) {
+        const node = rec(raw);
+        const id = str(node["id"]);
+        const createdAt = str(node["createdAt"]);
+        const updatedAt = str(node["updatedAt"]) ?? createdAt;
+        if (id === undefined || createdAt === undefined || updatedAt === undefined) continue;
+        const accountId = str(rec(node["user"])["id"]);
+        const isBot = str(rec(node["botActor"])["id"]) !== undefined || accountId === undefined || (viewer !== undefined && accountId === viewer);
+        comments.push({ id, ...(accountId === undefined ? {} : { accountId }), isBot, body: cut(str(node["body"]) ?? "", LINEAR_COMMENT_MAX_CHARS), createdAt, updatedAt });
+      }
+      return { comments, ...(more ? { nextPage: page + 1 } : {}) };
+    }
+    return { comments: [] };
+  };
+
   const asked: NonNullable<LinearTrackerAccess["asked"]> = async ({ label, assignedToRovara, limit, signal }) => {
     const wanted: unknown[] = [];
     const open = { state: { type: { nin: ["completed", "canceled"] } } };
@@ -325,5 +375,5 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
     throw unavailable();
   };
 
-  return { reply: { reply, edit }, readIssue, asked, moveIssue };
+  return { reply: { reply, edit }, readIssue, asked, moveIssue, listComments };
 }

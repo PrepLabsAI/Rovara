@@ -99,8 +99,8 @@ export const MAX_SPAN_CHARS = 1500;
 export const MAX_SPANS = 100;
 export const MAX_INPUT_CHARS = 20_000;
 /** Kinds whose text is a person's own words, so a quote inside them has another author. */
-const FREE_TEXT: ReadonlySet<SpanKind> = new Set(["intent", "plan", "send_back", "review_finding", "remembered", "close_reason", "fact", "ci_failure", "pr_comment", "plan_comment", "design_comment"]);
-const PRIORITY: Record<SpanKind, number> = { remembered: 0, human_edit: 1, send_back: 2, plan_comment: 2, design_comment: 2, pr_comment: 3, close_reason: 4, review_finding: 5, fact: 6, outcome: 7, ci_failure: 8, plan: 9, intent: 10, loaded_lesson: 11 };
+const FREE_TEXT: ReadonlySet<SpanKind> = new Set(["intent", "plan", "send_back", "review_finding", "remembered", "close_reason", "fact", "ci_failure", "pr_comment", "plan_comment", "design_comment", "ticket_comment"]);
+const PRIORITY: Record<SpanKind, number> = { remembered: 0, human_edit: 1, send_back: 2, plan_comment: 2, design_comment: 2, pr_comment: 3, ticket_comment: 5, close_reason: 4, review_finding: 5, fact: 6, outcome: 7, ci_failure: 8, plan: 9, intent: 10, loaded_lesson: 11 };
 /** A comment that led to a change ranks with a send-back (a person said what was wrong and the code changed); one that did not ranks after the close reason. */
 const rankOf = (span: EvidenceSpan): number => (span.kind === "pr_comment" && span.ledToChange === true ? PRIORITY.send_back : PRIORITY[span.kind]);
 
@@ -110,6 +110,7 @@ const SYSTEM_LINES = [
   "Each span has an id (S1, S2, ...) and a trust class. Use only the spans you were given.",
   "A span of kind plan_comment or design_comment is what a person asked to change in a plan or a design at its approval step; it is as strong as a send-back.",
   "A span of kind pr_comment is a reviewer's comment on the pull request; one marked led_to_change=true was followed by a change to the code it was about, so it is the strongest evidence.",
+  "A span of kind ticket_comment is a project member's comment on the ticket this task came from. It is weak evidence: propose a lesson from it only when it states a repeatable rule for future work, never when it only clarifies this one ticket.",
   "A lesson is advice. It must never ask for any change to tools, permissions, domains, budgets, models, checks or approvals.",
   "Describe code in words. Never copy more than two lines of code into a lesson; a span of kind human_edit holds a person's changed lines, and they are not kept.",
   "Propose at most 3 lessons, and only when the spans show a repeatable point. Fewer is better. Return no lessons when unsure.",

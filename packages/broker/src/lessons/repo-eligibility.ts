@@ -151,6 +151,8 @@ export function repoVisibilityOf(subject: RepoInputSubject, spans: Iterable<Repo
       if (subject.kind !== "task") blocked.add("unknown_input");
       continue;
     }
+    // A ticket comment is a tracker's words (a place that is not a repository): never in a repository's file.
+    if (span.kind === "ticket_comment") { blocked.add("other_place"); continue; }
     if (REPOSITORY_KINDS.has(span.kind) || DERIVED_KINDS.has(span.kind)) {
       const placed = placeOfSpan(span);
       if ("place" in placed) { places.add(placed.place); fromRepository += 1; } else blocked.add(placed.block);
