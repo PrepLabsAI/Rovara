@@ -1,6 +1,7 @@
 import type { ProjectSetupExecution } from "@agentx/contracts";
 import { projectSetupSessionKey, type ProjectSetupSession } from "@agentx/contracts";
 import { projectSetupRuntimeKey, type ProjectSetupRuntimeRecord } from "./project-setup-runtime-catalog.js";
+import { grantKeyFor } from "./company-layout.js";
 
 type TerminalExecutionAuthority = Pick<ProjectSetupExecution,
   "setupExecutionId" | "ownerKey" | "projectName" | "projectRevision" | "approvalRevision" | "proposalRef" | "proposalSha256" | "candidateDigest" | "policyDigest"
@@ -14,11 +15,13 @@ export function projectSetupTerminalAuthorityChecks(
   execution: TerminalExecutionAuthority,
   runtime: TerminalRuntimeIdentity,
   session: TerminalSessionIdentity,
+  /** DEC 254zzz80: the company the project's stored revision names; a named company's grant is in its own partition (company-layout.ts). */
+  companyId: string | undefined,
 ) {
   return [
     { ConditionCheck: {
       TableName: tableName,
-      Key: { pk: `MEMBER#${execution.ownerKey}`, sk: `PROJECT#${execution.projectName}` },
+      Key: grantKeyFor(companyId, execution.ownerKey, execution.projectName),
       ConditionExpression: "entityType = :membership AND ownerKey = :ownerKey AND projectName = :projectName AND #role = :administrator",
       ExpressionAttributeNames: { "#role": "role" },
       ExpressionAttributeValues: { ":membership": "MEMBERSHIP", ":ownerKey": execution.ownerKey, ":projectName": execution.projectName, ":administrator": "administrator" },

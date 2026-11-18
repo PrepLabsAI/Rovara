@@ -33,7 +33,8 @@ const PROJECT: ProjectDefinition = {
 };
 
 const member = (personId: string, companyId: string) => ({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId, companyId, role: "member", joinedAt: "2026-11-01T00:00:00.000Z" });
-const grant = (personId: string) => ({ pk: `MEMBER#${personId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
+// DEC 254zzz80: a named company's grant sits in its own partition (`ORG#<company>#MEMBER#<person>`).
+const grant = (personId: string, companyId: string) => ({ pk: `ORG#${companyId}#MEMBER#${personId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
 
 async function registerProject(world: FakeWorld, companyId: string): Promise<void> {
   await world.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
@@ -46,7 +47,7 @@ async function world(options: { chatThreads?: boolean } = {}) {
   await registerProject(fake, A);
   await registerProject(fake, B);
   const rows = new Map<string, Record<string, unknown>>();
-  for (const [table, item] of [[SIGN_IN, member(OWNER, A)], [SIGN_IN, member(TEAMMATE, A)], [SIGN_IN, member(OUTSIDER, B)], [STATE, grant(OWNER)], [STATE, grant(TEAMMATE)], [STATE, grant(OUTSIDER)]] as const) rows.set(`${table}|${item.pk}|${item.sk}`, item);
+  for (const [table, item] of [[SIGN_IN, member(OWNER, A)], [SIGN_IN, member(TEAMMATE, A)], [SIGN_IN, member(OUTSIDER, B)], [STATE, grant(OWNER, A)], [STATE, grant(TEAMMATE, A)], [STATE, grant(OUTSIDER, B)]] as const) rows.set(`${table}|${item.pk}|${item.sk}`, item);
   const client = { async send(command: unknown) {
     if (!(command instanceof GetCommand)) throw new Error("unexpected write");
     const input = command.input as { TableName: string; Key: { pk: string; sk: string } };
@@ -129,7 +130,7 @@ describe("the hosted core root takes a Slack thread's later message as the task'
   it("the task's owner, once the project grant is gone (a role on the project is part of the rule), is refused", async () => {
     const w = await world();
     const taskId = await w.start();
-    w.rows.delete(`${STATE}|MEMBER#${OWNER}|PROJECT#payments`);
+    w.rows.delete(`${STATE}|ORG#${A}#MEMBER#${OWNER}|PROJECT#payments`);
     expect(await w.root.coreTasks!.threadInput!(w.caller(OWNER), w.input(taskId))).toEqual({ outcome: "refused", notice: "not_allowed" });
     expect(await readTaskNotes(w.fake.store, taskId)).toEqual([]);
   });

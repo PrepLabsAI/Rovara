@@ -56,7 +56,8 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     h.db.set({ pk: `SESSION#${sid}`, sk: "META", developerId: personId, amr: "slack", startedAt: TIME, endsAt: now / 1000 + 86_400 });
     h.claims.sub = personId; h.claims.sid = sid;
   };
-  const grant = (personId: string, project: string, companyId: string, role: "developer" | "administrator") => h.db.set({ pk: `MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role, companyId });
+  // DEC 254zzz80: a named company's grants live in its own partition.
+  const grant = (personId: string, project: string, companyId: string, role: "developer" | "administrator") => h.db.set({ pk: `ORG#${companyId}#MEMBER#${personId}`, sk: `PROJECT#${project}`, projectName: project, role, companyId });
   const call = async (method: string, path: string, body?: unknown) => {
     const answer = await h.read(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, unknown> };
@@ -92,7 +93,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
     } },
     access: { checkStart: async (principal, name) => {
       const m = await membershipOf(principal.personId);
-      const row = h.db.get(`MEMBER#${principal.personId}`, `PROJECT#${name}`) as Record<string, unknown> | undefined;
+      const row = h.db.get(`ORG#${companyId}#MEMBER#${principal.personId}`, `PROJECT#${name}`) as Record<string, unknown> | undefined;
       return m?.companyId === companyId && principal.companyId === companyId && row?.["companyId"] === companyId ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: "no" };
     } },
     // The flow's start as the hosted runtime runs it for a ticket: its session and ticket binding in the start's own transaction (`ticketSessionStartExtras`), once per request id.

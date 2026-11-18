@@ -255,9 +255,9 @@ export function bindSlackChannelInCompany(db: FakeDynamoDb, company: string, tea
   } });
 }
 
-/** An admin grant (FR-013), so access does not depend on a bound channel. */
-export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments"): void {
-  db.set({ pk: `MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });
+/** An admin grant (FR-013), so access does not depend on a bound channel. DEC 254zzz80: a named company's grant lives in its own partition (`namedCompanyId`). */
+export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments", namedCompanyId?: string): void {
+  db.set({ pk: namedCompanyId === undefined ? `MEMBER#${who.developerId}` : `ORG#${namedCompanyId}#MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });
 }
 
 /** What the notifier's start message leaves behind (Task 7): the thread on the task, and its record. */

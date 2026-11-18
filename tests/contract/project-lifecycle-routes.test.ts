@@ -33,9 +33,12 @@ function harness(options: { companies?: boolean; fullAccess?: boolean; engine?: 
     db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "slack", displayName: name, revoked: false });
     db.set({ pk: `SESSION#${sid}`, sk: "META", sessionId: sid, developerId: id, amr: "slack", clientId: "web-app", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
   }
-  const join = (id: string, companyId: string, role: "owner" | "admin" | "member", revoked = false) => db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME, ...(revoked ? { revokedAt: TIME } : {}) });
+  // DEC 254zzz80: each person's live company decides where their grants live (a named company's own partition; the implicit company or none: the legacy row).
+  const companyOfPerson = new Map<string, string>();
+  const join = (id: string, companyId: string, role: "owner" | "admin" | "member", revoked = false) => (companyOfPerson.set(id, companyId), db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME, ...(revoked ? { revokedAt: TIME } : {}) }));
   const project = (name: string, companyId: string | undefined, revision = 1) => db.set({ pk: `PROJECT#${name}`, sk: `REV#${String(revision).padStart(12, "0")}`, entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision } });
-  const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
+  const grantPk = (id: string) => { const companyId = companyOfPerson.get(id); return companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? `MEMBER#${id}` : `ORG#${companyId}#MEMBER#${id}`; };
+  const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: grantPk(id), sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   const deps: DeveloperRouteDependencies = {
     documentClient: db, tableName: "State", now: () => NOW,

@@ -69,10 +69,13 @@ function harness(options: HarnessOptions = {}) {
     }
   };
   const as = (id: string, sid: string) => { claims.sub = id; claims.sid = sid; };
-  const join = (id: string, companyId: string, role: Role) => db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME });
+  // DEC 254zzz80: each person's live company decides where their grants live (a named company's own partition; the implicit company or none: the legacy row).
+  const companyOfPerson = new Map<string, string>();
+  const join = (id: string, companyId: string, role: Role) => (companyOfPerson.set(id, companyId), db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME }));
   const project = (name: string, companyId?: string, repositories: unknown[] = [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }]) =>
     db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 1, repositories } });
-  const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
+  const grantPk = (id: string) => { const companyId = companyOfPerson.get(id); return companyId === undefined || companyId === IMPLICIT_COMPANY_ID ? `MEMBER#${id}` : `ORG#${companyId}#MEMBER#${id}`; };
+  const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: grantPk(id), sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
   const ok = async (path = PATH()) => { const answer = await call("GET", path); expect(answer.status).toBe(200); return ProjectSetupChecklistSchema.parse(answer.body); };
   return { db, claims, deps, call, as, join, project, grant, ok };
 }

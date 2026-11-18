@@ -36,8 +36,9 @@ function world() {
   } };
   h.deps.companies = companyMembershipFromDynamo(h.db, "SignIn");
   const membership = (companyId = A, role = "admin", revoked = false) => h.db.set({ pk: `COMPANY_MEMBER#${PERSON}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId, role, joinedAt: TIME, ...(revoked ? { revokedAt: TIME } : {}) });
-  const grant = (role = "developer", companyId: string | undefined = A, project = "pa") => h.db.set({ pk: `MEMBER#${PERSON}`, sk: `PROJECT#${project}`, projectName: project, role, ...(companyId === undefined ? {} : { companyId }) });
-  h.project(A, "none", "pa"); h.project(B, "none", "pb"); grant(); grant("developer", B, "pb"); membership();
+  // DEC 254zzz80: a named company's grant lives in its own partition (`partition`); `companyId` is the company the row itself names (drift when it differs).
+  const grant = (role = "developer", companyId: string | undefined = A, project = "pa", partition = A) => h.db.set({ pk: `ORG#${partition}#MEMBER#${PERSON}`, sk: `PROJECT#${project}`, projectName: project, role, ...(companyId === undefined ? {} : { companyId }) });
+  h.project(A, "none", "pa"); h.project(B, "none", "pb"); grant(); grant("developer", B, "pb", B); membership();
   const client = (kind: "page" | "tool" | "cli" | "scoped" = "page", scopes: ClientScope[] = ["tasks:read"]) => {
     const id = kind === "cli" ? "agentx-cli" : "cloud-page";
     h.claims["azp"] = id; h.claims["scope"] = scopes.join(" ");
@@ -74,8 +75,10 @@ describe("hosted machine-size dispatcher", () => {
   });
   it.each(["pb", "missing"])("refuses a foreign or unknown project %s", async (project) => { const w = world(); await w.refused("NOT_FOUND", "project not found", "arm64-4-16", project, 404); });
   it.each([B, "legacy"])("refuses a foreign or legacy administrator grant %s", async (company) => {
-    const w = world(); w.membership(A, "member"); w.grant("administrator", company);
-    if (company === "legacy") w.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#pa", projectName: "pa", role: "administrator" });
+    // B: an administrator grant in company B's own partition; the person's own (company A) grant stays a developer one.
+    const w = world(); w.membership(A, "member"); if (company === B) w.grant("administrator", B, "pa", B);
+    // A legacy grant row is never a named company's grant (DEC 254zzz80: no dual read): the own-partition row stays a developer one.
+    if (company === "legacy") { w.grant("developer"); w.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#pa", projectName: "pa", role: "administrator", companyId: A }); }
     await w.refused("FORBIDDEN", ROLE);
   });
   it("refuses a revoked membership", async () => { const w = world(); w.membership(A, "owner", true); const before = w.stored(); expect(await w.call()).toMatchObject({ statusCode: 401 }); expect(w.stored()).toBe(before); });

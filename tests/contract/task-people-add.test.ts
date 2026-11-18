@@ -112,7 +112,7 @@ describe("candidates (GET people/candidates)", () => {
   it("lists only live members of the task's company with a grant and a current web sign-in, never the caller, another company, a revoked or a Slack sign-in", async () => {
     const h = harness();
     await expect(getTaskPeopleCandidates(h.deps, GALE_CALLER, TASK_A)).resolves.toStrictEqual({ candidates: [{ developerId: WREN_ID, name: "Wren Cloud" }], complete: true });
-    expect(h.projectMemberIds).toHaveBeenCalledWith("payments", 200);
+    expect(h.projectMemberIds).toHaveBeenCalledWith("payments", 200, COMPANY_A);
     expect(h.proof).not.toHaveBeenCalled();
   });
 
@@ -179,10 +179,11 @@ describe("candidates: the read budget on the route wiring", () => {
       const developerId = person.developerId;
       db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", ...person });
       db.set({ pk: `COMPANY_MEMBER#${developerId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: developerId, companyId: COMPANY_A, role: "member", joinedAt: CREATED });
-      db.set({ pk: `MEMBER#${developerId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
-      db.set({ pk: "PROJECT_MEMBERS#payments", sk: `DEVELOPER#${developerId}`, projectName: "payments", developerId });
+      // DEC 254zzz80: company A is a named company, so its grants (and their reverse rows) live in its own partition.
+      db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${developerId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
+      db.set({ pk: `ORG#${COMPANY_A}#PROJECT_MEMBERS#payments`, sk: `DEVELOPER#${developerId}`, projectName: "payments", developerId });
     }
-    for (let index = 0; index < extraGrantRows; index += 1) db.set({ pk: `MEMBER#${WREN_ID}`, sk: `PROJECT#extra-${String(index).padStart(4, "0")}`, projectName: `extra-${index}`, role: "viewer" });
+    for (let index = 0; index < extraGrantRows; index += 1) db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${WREN_ID}`, sk: `PROJECT#extra-${String(index).padStart(4, "0")}`, projectName: `extra-${index}`, role: "viewer" });
     const queries: Array<{ pk: unknown; prefix: unknown }> = [];
     const counting = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       if (command.constructor.name === "QueryCommand") queries.push({ pk: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"], prefix: (command.input.ExpressionAttributeValues as Record<string, unknown>)[":prefix"] });

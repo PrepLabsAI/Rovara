@@ -54,7 +54,7 @@ async function world(options: { bindings?: false } = {}) {
   const send = h.db.send.bind(h.db);
   h.db.send = vi.fn(async (command: unknown) => { sent.push(command); return send(command as never); });
   const revision = (id: string) => h.db.get(`PROJECT#${id}`, "REV#000000000001");
-  const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk.includes("#PROJECT_CATALOG") || item.pk.includes("#PROJECT_NAME") || item.pk.startsWith("MEMBER#") || item.pk.includes("#PROJECT#")));
+  const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk.includes("#PROJECT_CATALOG") || item.pk.includes("#PROJECT_NAME") || item.pk.startsWith("MEMBER#") || item.pk.includes("#MEMBER#") || item.pk.includes("#PROJECT#")));
   return { ...h, deps, clientProjects, companyOf, sent, revision, projectRows, as: (next: string) => { company = next; } };
 }
 const reason = async (work: Promise<unknown>) => { try { await work; return "created"; } catch (error) { return error instanceof ClientProjectRefused ? error.reason : (error as { code?: string }).code; } };
@@ -72,7 +72,10 @@ describe("same name in two companies", () => {
       expect(h.revision(created.name)?.companyId).toBe(company);
       expect((h.revision(created.name)?.definition as { name?: string } | undefined)?.name).toBe(created.name);
       expect(h.db.get(orgProjectNameClaimKey(company, "web").pk, orgProjectNameClaimKey(company, "web").sk)).toMatchObject({ entityType: "PROJECT_NAME_CLAIM", companyId: company, name: "web", projectId: created.name, claimedBy: PERSON });
+      // DEC 254zzz80: this broker has no Code company layer for its developer routes (no developer sign-in membership reader, no Slack company mode), so the
+      // creator's administrator grant keeps the legacy row, which is where those routes read it; nothing is written in the company's own partition.
       expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toMatchObject({ role: "administrator" });
+      expect(h.db.get(`ORG#${company}#MEMBER#${PERSON}`, `PROJECT#${created.name}`)).toBeUndefined();
     }
     expect(a.name).not.toBe(b.name);
     expect(h.revision("web")).toBeUndefined();

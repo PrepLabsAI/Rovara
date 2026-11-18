@@ -325,7 +325,7 @@ describe("company broker secondary workspace", () => {
 });
 
 it("secondary workspace starts for a linked person with an explicit project grant", async () => {
-  const h = await brokerWorld(); grantProject(h.db, { developerId: person, name: "Member", provider: "oidc", sessionId: "fixture" });
+  const h = await brokerWorld(); grantProject(h.db, { developerId: person, name: "Member", provider: "oidc", sessionId: "fixture" }, "payments", A);
   const response = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { ...h.currentThread, threadTs: "1700000000.000006" },
     userId: USER, instructions: "explicit grant", workflowPath: "QUICK", requestId: randomUUID() });
   expect(response.statusCode, response.body).toBe(200);

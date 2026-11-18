@@ -1,4 +1,5 @@
 import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { grantKeyFor } from "./company-layout.js";
 import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
@@ -518,8 +519,9 @@ export function createProjectSetupDispatchGuard(input: { documentClient: DynamoD
   if (!project || project.registeredBy !== row.ownerKey || project.definition?.revision !== row.projectRevision
     || project.setupApproval?.decision !== "approve" || project.setupApproval.proposalSha256 !== row.proposalSha256
     || project.setupApproval.proposalRef !== row.proposalRef) return "PARKED";
+  // DEC 254zzz80: the owner's grant in the company the project's stored revision names (a named company's own partition, company-layout.ts).
   const membership = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
-    Key: { pk: `MEMBER#${row.ownerKey}`, sk: `PROJECT#${row.projectName}` }, ConsistentRead: true }))).Item as { role?: unknown } | undefined;
+    Key: grantKeyFor(typeof projectItem?.["companyId"] === "string" ? projectItem["companyId"] : undefined, row.ownerKey, row.projectName), ConsistentRead: true }))).Item as { role?: unknown } | undefined;
   if (membership?.role !== "administrator") return "PARKED";
   const approved = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
     Key: { pk: `PROJECT_SETUP#${row.projectName}`, sk: `PROPOSAL#${row.proposalSha256}` }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;

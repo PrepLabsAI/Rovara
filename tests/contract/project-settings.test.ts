@@ -11,6 +11,8 @@ const now = 1_800_000_000_000;
 const person = "d".repeat(64);
 const path = "/v1/dev/projects/web/settings";
 const install = makeKey("install"); const hookKey = makeKey("hook");
+/** DEC 254zzz80: where a person's grants live for this company. */
+const grantPk = (companyId: string) => companyId === IMPLICIT_COMPANY_ID ? `MEMBER#${person}` : `ORG#${companyId}#MEMBER#${person}`;
 /** The switch-over layout (staging 2026-11-17): the company's own catalog pointer and selected revision, with NO companyId (the partition key names the company). */
 function partitionProject(db: FakeDynamoDb, companyId: string, name = "web", revision = 1, extra: Record<string, unknown> = {}) {
   db.set({ ...projectRevisionKey(companyId, name, revision), entityType: "PROJECT", definition: { name, revision } });
@@ -32,7 +34,8 @@ function world() {
     db.set({ pk: "PROJECT#web", sk: "REV#000000000001", companyId: cid, entityType: "PROJECT", definition: { name: "web", revision: 1 } });
     partitionProject(db, cid);
   };
-  const role = (value = "administrator", cid = COMPANY) => db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: cid, projectName: "web", role: value });
+  // DEC 254zzz80: a named company's grant lives in its own partition (the implicit company's in the legacy row); `stamp` names a company on the row itself (drift when it differs).
+  const role = (value = "administrator", cid = COMPANY, stamp = cid) => db.set({ pk: grantPk(cid), sk: "PROJECT#web", companyId: stamp, projectName: "web", role: value });
   project(COMPANY); role();
   const send = vi.spyOn(db, "send");
   const call = (method = "GET", body?: unknown, query = "", headers: Record<string, string> = {}) => routeDeveloperRequest(deps, { method, path, headers: { authorization: "Bearer fixture", "x-company-id": COMPANY, ...headers }, requestId: "test", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path + query, ISSUER)).catch((error: unknown) => {
@@ -87,7 +90,8 @@ it("missing or unreadable live membership fails closed without settings access",
 it.each(["developer", "unknown"])("PUT requires this company's project administrator (%s)", async (role) => {
   const w = world(); w.role(role);
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
-  w.role("administrator", B);
+  // A row in the company's own partition that names another company is not its grant.
+  w.role("administrator", COMPANY, B);
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
 });
 it("concurrent writes with the same revision have one winner and one audit", async () => {
@@ -157,13 +161,13 @@ it("failed project and administrator reads never echo their cause", async () => 
 
 // ---- L2-5 (a): the page reads the company's own partition, like the S3 compliance list (#843). ----
 const STAGING = "/v1/dev/projects/web/settings";
-/** Only the switch-over layout: no shared rows at all, no companyId on any project row, and the broker's grant row without a company (as registration writes it). */
+/** Only the switch-over layout: no shared rows at all, no companyId on any project row, and the grant row in the company's own partition without a company field (DEC 254zzz80). */
 function stagingWorld(company = COMPANY) {
   const w = world();
-  for (const row of w.db.find((r) => r.pk === "PROJECT#web" || r.pk === `MEMBER#${person}` || String(r.pk).includes("PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#"))) w.db.delete(String(row.pk), String(row.sk));
+  for (const row of w.db.find((r) => r.pk === "PROJECT#web" || String(r.pk).endsWith(`MEMBER#${person}`) || String(r.pk).includes("PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#"))) w.db.delete(String(row.pk), String(row.sk));
   w.setCompany(company);
   partitionProject(w.db, company);
-  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator" });
+  w.db.set({ pk: grantPk(company), sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator" });
   return w;
 }
 const drop = (db: FakeDynamoDb, key: { pk: string; sk: string }) => db.delete(key.pk, key.sk);
@@ -233,12 +237,14 @@ it("an approved setup's selected revision (it keeps candidate: true) is the proj
 
 it("PUT on a partition project: the grant row may leave the company out, but one naming another company, another project or a lesser role is refused", async () => {
   const w = stagingWorld();
-  const grant = (fields: Record<string, unknown>) => w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", ...fields });
+  const grant = (fields: Record<string, unknown>) => w.db.set({ pk: grantPk(COMPANY), sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", ...fields });
   for (const fields of [{ companyId: B }, { orgId: B }, { companyId: "not-an-org" }, { projectName: "api" }, { role: "developer" }, { role: "owner" }]) {
     grant(fields);
     await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
   }
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
+  // A legacy grant row is never a named company's grant (DEC 254zzz80: no dual read).
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", companyId: COMPANY });
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
   expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS")).toEqual([]);
   grant({ companyId: COMPANY });
@@ -259,7 +265,7 @@ it("the implicit company keeps today's shared path until it is marked, then read
   w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", projectName: "other", orgId: B, role: "administrator" });
   expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2 });
   // A grant naming a named company is refused on the legacy path (projectGrant's stored-company rule).
-  w.role("administrator", COMPANY);
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: COMPANY, projectName: "web", role: "administrator" });
   await expect(w.call("PUT", { expectedRevision: 2, preset: "lightweight" })).rejects.toMatchObject({ code: "FORBIDDEN" });
   // Marked: only the partition counts, so a shared-only project is not found.
   w.db.set({ ...orgSettingsKey(I, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date(now).toISOString(), count: 1, runId: "run-1" });
@@ -576,7 +582,7 @@ it("a change of preset that a company preset_level minimum fully hides still lea
 const BUDGET_ONLY = "Company owners and admins can change only this project's per-task spending limit here. Other project settings need one of the project's admins.";
 function companyAdminWorld(role: string, extra: Record<string, unknown> = {}) {
   const w = stagingWorld();
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
   w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role, joinedAt: new Date(now).toISOString(), ...extra });
   return w;
 }
@@ -594,7 +600,7 @@ it.each(["owner", "admin"])("a company %s who is not a project admin changes the
 it("a company admin may not change any other setting, not even beside the limit; the stored others may be sent back unchanged", async () => {
   const w = stagingWorld();
   await w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { extra_review: true } });
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
   w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role: "admin", joinedAt: new Date(now).toISOString() });
   for (const body of [{ expectedRevision: 1, preset: "careful" }, { expectedRevision: 1, overrides: { extra_review: false, model_budget_usd: 2 } }, { expectedRevision: 1, overrides: { model_budget_usd: 2 } },
     { expectedRevision: 1, overrides: { extra_review: true, ci_fix_rounds: 1, model_budget_usd: 2 } }]) {
