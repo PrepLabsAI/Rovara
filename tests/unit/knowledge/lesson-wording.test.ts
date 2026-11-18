@@ -45,16 +45,15 @@ describe("the soft check", () => {
 });
 
 describe("the drafting prompt (golden)", () => {
-  it("carries the wording lines in both prompt styles, right before the JSON shape", () => {
-    for (const promptStyle of [undefined, "repo_only" as const]) {
-      const input = buildReflectorInput(subject([memberSpan("Use withRetry for retries.")], promptStyle === undefined ? {} : { promptStyle }));
-      if (!input.eligible) throw new Error("expected eligible");
-      const lines = input.system.split("\n");
-      const first = lines.findIndex((line) => line === LESSON_WORDING_PROMPT_LINES[0]);
-      expect(first).toBeGreaterThan(0);
-      expect(lines.slice(first, first + 3)).toEqual([...LESSON_WORDING_PROMPT_LINES]);
-      expect(lines[first + 3]).toMatch(/^Reply with one JSON object and nothing else:/u);
-    }
+  // Batch 16: #979 removed the repo-only prompt style (owner DEC 254zzz14), so the one remaining style is checked.
+  it("carries the wording lines in the drafting prompt, right before the JSON shape", () => {
+    const input = buildReflectorInput(subject([memberSpan("Use withRetry for retries.")]));
+    if (!input.eligible) throw new Error("expected eligible");
+    const lines = input.system.split("\n");
+    const first = lines.findIndex((line) => line === LESSON_WORDING_PROMPT_LINES[0]);
+    expect(first).toBeGreaterThan(0);
+    expect(lines.slice(first, first + 3)).toEqual([...LESSON_WORDING_PROMPT_LINES]);
+    expect(lines[first + 3]).toMatch(/^Reply with one JSON object and nothing else:/u);
   });
 });
 

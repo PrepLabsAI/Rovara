@@ -7,7 +7,7 @@
 //   - The schedule follows the switch: ON puts the project's upkeep night on the scheduler, OFF removes it. A schedule that could not be changed is thrown AFTER the row is written (the switch is what is true; a retry of
 //     the same request puts it right).
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
-import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepSpend, type UpkeepView } from "@agentx/contracts";
+import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, type DocumentStore, type OrgId, type UpkeepSpend, type UpkeepView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "../system-runs/consent.js";
 import { requireFreshStepUp } from "../system-runs/consent-control.js";
 import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
