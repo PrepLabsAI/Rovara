@@ -24,6 +24,9 @@ export const DISPATCHER_LESSONS_UNAVAILABLE = "the dispatcher cannot read lesson
 export const DISPATCHER_LESSONS_LIMITS = { reads: 128, items: 512, bytes: 1_048_576, lessons: 100 } as const;
 /** The look-up's own share of the reads: it runs after the lessons, and a look-up that would pass this share is left out; it can never fail the lessons. */
 export const DISPATCHER_PULL_READS = 40;
+/** The look-up's own clock, and the time it always leaves of the dispatch deadline for the answer itself. */
+export const DISPATCHER_PULL_MS = 900;
+export const DISPATCHER_PULL_MARGIN_MS = 300;
 class PullBudgetSpent extends Error {}
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
 function refuse(): never { throw agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE); }
@@ -55,21 +58,23 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = Date.now() + LESSON_LOAD_DEADLINE_MS;
     const check = (): void => { if (stopped || failed || Date.now() >= deadline) refuse(); };
-    // The look-up (lead 4 L4-AK2) runs on a share of its own: past it a read throws HERE, before it is counted, so the look-up ends without failing the lessons' budget.
+    // The look-up (lead 4 L4-AK2) runs on a share of its own, and it can never fail the lessons: while it runs, a read past its share of reads, past its own short clock, past what is left of the shared caps, or a read that
+    // fails, throws HERE (`PullBudgetSpent`) before anything is counted or `failed` is set, so the look-up ends and the lessons stand.
     let pulling = false;
     let pullReads = 0;
+    let pullDeadline = 0;
     const read = async <T>(work: () => Promise<T>, count = 1): Promise<T> => {
       check();
-      if (pulling && ++pullReads > DISPATCHER_PULL_READS) throw new PullBudgetSpent();
+      if (pulling && (Date.now() >= pullDeadline || ++pullReads > DISPATCHER_PULL_READS || reads + 1 > DISPATCHER_LESSONS_LIMITS.reads || items + count > DISPATCHER_LESSONS_LIMITS.items || bytes >= DISPATCHER_LESSONS_LIMITS.bytes / 2)) throw new PullBudgetSpent();
       reads++; items += count;
       if (reads > DISPATCHER_LESSONS_LIMITS.reads || items > DISPATCHER_LESSONS_LIMITS.items) { failed = true; refuse(); }
       try {
         const answer = await work();
         check();
         bytes += Buffer.byteLength(JSON.stringify(answer) ?? "", "utf8");
-        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { failed = true; refuse(); }
+        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { if (pulling) throw new PullBudgetSpent(); failed = true; refuse(); }
         return answer;
-      } catch { failed = true; return refuse(); }
+      } catch { if (pulling) throw new PullBudgetSpent(); failed = true; return refuse(); }
     };
     // The shared lesson selector can catch dependency failures. A sticky failed budget ensures
     // those catches never turn a cap or failed read into a partial successful answer.
@@ -78,6 +83,8 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
       if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
+      // The plan check's lessons are part of the knowledge briefing: an older worker is sent exactly what it always was.
+      if (request.data.workflowMode === "PLAN_CRITIQUE" && !request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE)) return {};
       const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const client = { send: async (command: GetCommand) => {
         const answer = await read(() => options.documentClient.send(command));
@@ -159,19 +166,22 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       // The knowledge briefing (lead 4 L4-AK2) for a worker that lists it: the look-up's lessons on their own read share, and no facts or skill names (this reader has no source for them). Anything that goes wrong here is no
       // briefing, never a refused load. This reader writes nothing, so it leaves no delivery record: a use report for such a step cannot be checked and is not kept.
       let knowledgeContext: ReturnType<typeof buildKnowledgeContext>;
-      if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && KNOWLEDGE_STAGE_PARTS[stage].pull) {
+      pullDeadline = Math.min(deadline - DISPATCHER_PULL_MARGIN_MS, Date.now() + DISPATCHER_PULL_MS);
+      if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && KNOWLEDGE_STAGE_PARTS[stage].pull && Date.now() < pullDeadline) {
         pulling = true;
         try {
-          const wider = await selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
+          const widerRun = selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
             key: { workspaceId: company, project: task.project }, stage, resolved,
             active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
             intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
             repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
             reader: { running: { taskId: task.taskId } }, where: "load", budget: { lessons: Math.min(KNOWLEDGE_PULL_MAX_UNITS, DISPATCHER_LESSONS_LIMITS.lessons), bytes: 256 * 1024 }, prefilter: async (eligible) => eligible.filter(pullable),
           });
-          if (wider.ok && !failed) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
+          // A read already in flight is raced against the look-up's own clock too: the look-up ends at its limit whatever a slow read is doing, and the lessons are never waiting on it.
+          let pullTimer: ReturnType<typeof setTimeout> | undefined;
+          const wider = await Promise.race([widerRun, new Promise<undefined>((resolve) => { pullTimer = setTimeout(() => { resolve(undefined); }, Math.max(1, pullDeadline - Date.now())); pullTimer.unref?.(); })]).finally(() => { if (pullTimer !== undefined) clearTimeout(pullTimer); });
+          if (wider !== undefined && wider.ok && wider.complete) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
         } catch { knowledgeContext = undefined; } finally { pulling = false; }
-        if (failed) refuse();
       }
       return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
         ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),

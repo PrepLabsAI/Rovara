@@ -135,6 +135,8 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     if (stage === undefined || !enabled() || !request.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
     // The knowledge briefing rides only to a worker that lists its feature; an older worker is sent the lessons alone.
     const briefing = request.features.includes(KNOWLEDGE_CONTEXT_FEATURE);
+    // The plan check's lessons and the fix round's picking by the correction are part of the briefing: an older worker is sent exactly what it always was.
+    if (stage === "PLAN_CRITIQUE" && !briefing) return {};
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, request.workspaceId)).taskPointerKey()));
@@ -149,7 +151,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         const repos = project === undefined ? [] : codeRepositoriesOf(project.definition).map((repository) => repository.name);
         const requestText = (task as { requestText?: string }).requestText ?? "";
         // A fix round picks again by the correction: its words and the files it names come first, then the task's own (ranking only; none of it is stored or shown).
-        const fixText = request.fix === undefined ? "" : request.fix.text.slice(0, FIX_TEXT_CHARS);
+        const fixText = request.fix === undefined || !briefing ? "" : request.fix.text.slice(0, FIX_TEXT_CHARS);
         const intent = [...(fixText.trim() === "" ? [] : [fixText]), task.title, requestText.slice(0, INTENT_REQUEST_CHARS)].filter((part) => part.trim() !== "").join("\n");
         const files = [...new Set([...pathsNamedIn(fixText), ...(plan?.files ?? [])])].slice(0, 50);
         const loadRequest = {
@@ -158,18 +160,19 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
           // The fit floor goes with the briefing: a worker that takes it gets the sharper push; an older one is sent exactly what it always was.
           ...(briefing ? { fitFloor: PUSH_FIT_FLOOR } : {}),
         };
+        // The look-up's lessons, the measured facts and the skill names are asked AT THE SAME TIME as the lessons, each on a short clock of its own, so they never add to the lessons' wait: a slow one is left out and the lessons still go.
+        const parts = KNOWLEDGE_STAGE_PARTS[stage];
+        const extra = { companyId, project: task.project, stage, files, repos };
+        const extras = briefing ? Promise.all([
+          parts.pull ? within(loadPullForStage(runtime.load, { workspaceId: companyId, project: task.project, taskId: task.taskId, stage, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }), repos, files, languages: [] }), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+          parts.facts && input.knowledge?.facts !== undefined ? within(input.knowledge.facts(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+          parts.skills && input.knowledge?.skills !== undefined ? within(input.knowledge.skills(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
+        ]) : undefined;
         const loaded = briefing ? await lessonsAndPickedForDispatch(runtime.load, loadRequest, [LEARNED_CONTEXT_FEATURE]) : await learnedContextForDispatch(runtime.load, loadRequest, [LEARNED_CONTEXT_FEATURE]);
         if (abandoned) return {};
-        // The look-up's lessons and the measured facts, each on a short clock of its own: a slow one is left out and the lessons still go.
         let knowledgeContext: KnowledgeContext | undefined;
-        if (briefing) {
-          const parts = KNOWLEDGE_STAGE_PARTS[stage];
-          const extra = { companyId, project: task.project, stage, files, repos };
-          const [pull, facts, skills] = await Promise.all([
-            parts.pull ? within(loadPullForStage(runtime.load, { workspaceId: companyId, project: task.project, taskId: task.taskId, stage, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }), repos, files, languages: [] }), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
-            parts.facts && input.knowledge?.facts !== undefined ? within(input.knowledge.facts(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
-            parts.skills && input.knowledge?.skills !== undefined ? within(input.knowledge.skills(extra), KNOWLEDGE_EXTRAS_MS) : Promise.resolve(undefined),
-          ]);
+        if (extras !== undefined) {
+          const [pull, facts, skills] = await extras;
           if (abandoned) return {};
           knowledgeContext = buildKnowledgeContext({ stage, pushed: (loaded as { picked?: Lesson[] }).picked ?? [], pull: pull?.picked, pullLeftOut: pull?.leftOut, facts, skills });
         }
@@ -183,7 +186,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
           }
         }
         // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.
-        if (knowledgeContext !== undefined) {
+        if (knowledgeContext !== undefined && !abandoned) {
           const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: (loaded.learnedContext?.lessons ?? []).map((lesson) => lesson.id), knowledge: knowledgeContext });
           await flow.store.put({ item: { pk: companyScoped(companyId, "KNOWLEDGE_GIVEN"), sk: request.operationId, entityType: "KNOWLEDGE_GIVEN", ...record, ...ttl(LOAD_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
         }

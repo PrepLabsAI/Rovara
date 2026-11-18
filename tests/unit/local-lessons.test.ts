@@ -764,6 +764,12 @@ describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
     expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-none", workflowMode: "PLAN", features: [KNOWLEDGE_CONTEXT_FEATURE] })).toEqual({});
   });
 
+  it("the plan check's lessons are part of the briefing: an older worker is sent exactly what it always was", async () => {
+    const w = await world();
+    await put(w, scoped("les_health001", { type: "review_check", tier: 2, stages: ["PLAN_CRITIQUE", "REVIEW"], approvals: [{ approvalId: "a1", by: "local-owner", at: 1, mode: "one" }, { approvalId: "a2", by: "ann", at: 1, mode: "second_person" }] }));
+    expect(await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-pc-old", workflowMode: "PLAN_CRITIQUE", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
+  });
+
   it("measured facts come from the facts port, in Build only (not in Plan)", async () => {
     const w = await world({ knowledge: flaky });
     await put(w, scoped("les_health001"));

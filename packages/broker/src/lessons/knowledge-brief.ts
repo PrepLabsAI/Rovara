@@ -10,7 +10,7 @@ import {
   type KnowledgeContext, type KnowledgeDeliveryRecord, type KnowledgeFact, type KnowledgeSkillName, type KnowledgeUnit, type LessonStage,
 } from "@agentx/contracts";
 import { needsALook } from "./area-index.js";
-import { safeScopeLabel } from "./render.js";
+import { STRICT_TOKEN, safeScopeLabel } from "./render.js";
 import { hasPersonApproval } from "./repo-eligibility.js";
 import type { Lesson } from "./types.js";
 
@@ -46,16 +46,18 @@ export function areaLabelOf(unit: Pick<KnowledgeUnit, "repos" | "paths">): strin
     const literal = (cut < 0 ? first : first.slice(0, cut)).replace(/^\.?\//u, "");
     // With a wildcard the literal part is a folder when it ends in a slash (else its last segment is a half-written name); without one the last segment is the file.
     const folder = cut >= 0 && literal.endsWith("/") ? literal.replace(/\/+$/u, "") : literal.split("/").slice(0, -1).join("/");
-    if (folder !== "") return `${oneLine(folder, 100)}/`;
+    // Only a plain path token is shown (the stored scope is free text): anything else falls back to the repository.
+    if (folder !== "" && STRICT_TOKEN.test(folder)) return `${folder}/`;
   }
-  return unit.repos[0] === undefined ? "whole project" : oneLine(unit.repos[0], 100);
+  return unit.repos[0] !== undefined && STRICT_TOKEN.test(unit.repos[0]) ? unit.repos[0] : "whole project";
 }
 
 export interface PullPick { units: KnowledgeUnit[]; leftOut: number }
 /** The ranked, visible, pullable lessons as units, within the unit and byte limits; what does not fit is counted, never cut mid-unit. `extraLeftOut` is what the selection itself left out. */
 export function pullUnitsOf(ranked: readonly Lesson[], extraLeftOut = 0): PullPick {
   const units: KnowledgeUnit[] = [];
-  let bytes = 0;
+  // The worker measures the whole `{"units":[...],"leftOut":N}` object, so the wrapper is counted here too.
+  let bytes = 40;
   let leftOut = extraLeftOut;
   for (const lesson of ranked) {
     if (!pullable(lesson)) continue;

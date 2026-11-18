@@ -246,6 +246,15 @@ describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)",
     }
   });
 
+  it("a lesson with no scope is pushed when it fits but is not in the look-up", async () => {
+    const w = await scopedWorld();
+    const key = lessonKey(A, "payments", "les_aaaa1111");
+    await w.store.put({ item: { ...(await w.store.get(key))!, scope: {} } });
+    const answer = await w.learned(BOTH);
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+    expect(answer.knowledgeContext?.pull).toBeUndefined();
+  });
+
   it("a worker without the feature is sent exactly the lessons it always was", async () => {
     const w = await scopedWorld();
     const answer = await w.learned(request);
@@ -253,9 +262,22 @@ describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)",
     expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
   });
 
+  it("a look-up that has no time left is left out and the lessons still go (it has a clock of its own and leaves the dispatch deadline its margin)", async () => {
+    const w = await scopedWorld();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The lessons' own reads take 2.3 s of the 2.5 s: past the look-up's start limit (the deadline less its margin).
+    const send = w.send.getMockImplementation()!;
+    w.send.mockImplementationOnce(async (command) => { vi.setSystemTime(Date.now() + 2_300); return send(command); });
+    const answer = await w.learned(BOTH);
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+    expect(answer.knowledgeContext).toBeUndefined();
+  });
+
   it("the plan check mode is a lesson mode (a fixed set, no look-up)", async () => {
     const w = await scopedWorld();
     const answer = await w.learned({ ...BOTH, workflowMode: "PLAN_CRITIQUE" });
     expect(answer.knowledgeContext).toBeUndefined();
+    // An older worker (no knowledge feature) is not sent the plan check's lessons: it gets exactly what it always did.
+    expect(await w.learned({ ...request, workflowMode: "PLAN_CRITIQUE" })).toEqual({});
   });
 });

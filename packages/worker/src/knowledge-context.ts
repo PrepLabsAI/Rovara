@@ -185,8 +185,13 @@ export function answerKnowledgeFor(pull: NonNullable<KnowledgeContext["pull"]>, 
     lines.push(line);
     shown.push(unit);
   }
-  if (already.length > 0) lines.push(`Already given: ${already.slice(0, 12).join(", ")}`);
-  if (notShown > 0) lines.push(`${notShown} more not shown. Ask with a narrower path.`);
+  const tail = (): string[] => [
+    ...(already.length > 0 ? [`Already given: ${already.slice(0, 12).join(", ")}`] : []),
+    ...(notShown > 0 ? [`${notShown} more not shown. Ask with a narrower path.`] : []),
+  ];
+  // The whole answer, closing lines included, stays within the cap: a unit is dropped (and counted) until it does.
+  while (shown.length > 0 && bytes([...lines, ...tail()].join("\n")) > KNOWLEDGE_FOR_MAX_BYTES) { lines.splice(lines.length - 1, 1); shown.pop(); notShown += 1; }
+  lines.push(...tail());
   if (shown.length === 0 && already.length === 0 && rules.length === 0) return { text: "No team notes for this path.", shown: [], empty: true };
   return { text: lines.join("\n"), shown, empty: false };
 }

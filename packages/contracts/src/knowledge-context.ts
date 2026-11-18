@@ -135,6 +135,8 @@ export function validateKnowledgeUseReport(report: KnowledgeUseReport, delivered
   const seen = new Set<string>();
   const units = report.units.filter((unit) => {
     if (!allowed.has(unit.id) || seen.has(unit.id)) return false;
+    // The kind must be the one the id's letter says (a fact cannot be reported as a lesson to dilute the lessons' shares).
+    if (unit.id[0] !== KIND_LETTER[unit.kind]) return false;
     seen.add(unit.id);
     // `given: push` must be a pushed id and `given: pull` a pulled one: a unit cannot claim to have been pushed when it was only in the pull set.
     if (unit.given === "push" && !delivered.pushed.includes(unit.id)) return false;
