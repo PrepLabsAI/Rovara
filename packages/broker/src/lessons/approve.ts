@@ -43,7 +43,7 @@ const MAX_TRIES = 3;
 export class AuditUnavailable extends Error { constructor() { super("audit unavailable"); } }
 
 /** A restricted lesson may be shown to, and decided by, only a person who could see its source. Unrestricted lessons are open to every eligible person. */
-async function mayHandle(deps: { directory: ApproverDirectory; access: AccessCheckPort; log?: LessonLog }, key: ScopeKey, lesson: Lesson, personId: string): Promise<boolean> {
+export async function mayHandle(deps: { directory: ApproverDirectory; access: AccessCheckPort; log?: LessonLog }, key: ScopeKey, lesson: Lesson, personId: string): Promise<boolean> {
   // The person's frozen-snapshot standing AND the access records now (a person removed from the channel can neither see nor decide its lessons); no port, or no answer, is a no.
   try {
     const identity = await deps.directory.identity(key.workspaceId, personId);

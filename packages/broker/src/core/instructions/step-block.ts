@@ -9,7 +9,7 @@ import { stepForMode, type PlaybookMode, type PlaybookService } from "../playboo
 import { runningProcessOf } from "../playbook/process.js";
 import { isReviewingStage } from "../playbook/process-reviewers.js";
 import { readCompanyInstructions } from "./company-source.js";
-import { buildStandingInstructions } from "./standing-block.js";
+import { buildStandingInstructions, type StandingLayer } from "./standing-block.js";
 
 /**
  * The modes whose operations do not carry the block: verification (`CHECKS` runs the project's checks in the harness; a check step takes no instructions), the setup run that runs commands, and the
@@ -25,7 +25,15 @@ export interface StandingOperation {
   purpose?: string | undefined;
   /** The commit of the project's playbook the task pinned when it started: the file is read at it, so one task runs under one playbook. Absent: the head of the default branch. */
   playbookCommit?: string | undefined;
+  /** The files the step works on, when it knows them: a team rule scoped to other paths is then left out. Absent: every rule of the step's stage goes, each saying where it applies. */
+  files?: readonly string[] | undefined;
 }
+
+/**
+ * The project's team rules (lessons phase 4): rules a person made permanent from proven lessons, kept in Rovara's own store and scoped to a code area. Read at every step, like the company's rules, from THIS
+ * company's rows only. A read that fails refuses the step with `RUNTIME_UNAVAILABLE` (fail closed: running without the project's rules would be a silent switch).
+ */
+export interface TeamRulesSource { layersFor(input: { project: string; mode: PlaybookMode | undefined; files?: readonly string[] | undefined }): Promise<StandingLayer[]> }
 
 export interface StandingInstructions {
   /** The block of one operation, or `undefined` when it carries none (its mode takes none, or there is nothing to say). */
@@ -40,16 +48,26 @@ export interface StandingInstructionsOptions {
   company?: CompanyInstructionsSource | undefined;
   /** The project's How we work. Absent: no project rules. */
   playbook?: Pick<PlaybookService, "layersFor" | "pin"> | undefined;
+  /** The project's team rules, read after the playbook's layers. Absent: none. */
+  teamRules?: TeamRulesSource | undefined;
 }
 
-export const STANDING_BLOCK_TOO_LONG = "The standing instructions for this step are too long to send to the worker. Shorten the company rules or the project's How we work file.";
+export const TEAM_RULES_UNREADABLE = "The project's team rules can't be read right now";
+
+export const STANDING_BLOCK_TOO_LONG = "The standing instructions for this step are too long to send to the worker. Shorten the company rules, the project's How we work file or the project's team rules.";
 
 export function createStandingInstructions(options: StandingInstructionsOptions): StandingInstructions {
   return {
     async forOperation(input) {
       if ((input.mode !== undefined && WITHOUT_BLOCK.has(input.mode)) || input.purpose === "diagnosis") return undefined;
       const company = await readCompanyInstructions(options.company, options.companyId);
-      const howWeWork = options.playbook === undefined ? [] : await options.playbook.layersFor(input.project, input.mode, input.playbookCommit);
+      const playbookLayers = options.playbook === undefined ? [] : await options.playbook.layersFor(input.project, input.mode, input.playbookCommit);
+      let teamLayers: StandingLayer[] = [];
+      if (options.teamRules !== undefined) {
+        try { teamLayers = await options.teamRules.layersFor({ project: input.project, mode: input.mode, ...(input.files === undefined ? {} : { files: input.files }) }); }
+        catch { throw agentXError("RUNTIME_UNAVAILABLE", `${TEAM_RULES_UNREADABLE}. Try again in a moment.`); }
+      }
+      const howWeWork = [...playbookLayers, ...teamLayers];
       // Whether the stage checks work (plan check, review, feedback review): its company section also tells it to judge the change against the rules.
       const checking = isReviewingStage(stepForMode(runningProcessOf(undefined).recipe, input.mode));
       const block = buildStandingInstructions({ company, howWeWork, checking });

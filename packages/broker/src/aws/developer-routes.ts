@@ -2113,6 +2113,9 @@ export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\
 /** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
 export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
 
+/** Lessons phase 4: the weekly cards and what a person does with them (`core-host/lessons-graduation.ts` parses the same paths, with strict ids; a test holds the two equal where they are valid). Answered by the same lessons API. */
+export const LESSONS_GRADUATION_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/(?:(graduation)|tidy\/(retire-chosen|later)|check-drafts\/([^/]+)\/(started|dismiss)|rules\/([^/]+)\/(retire)|([^/]+)\/(graduate|graduate-later|both-places))$/u;
+
 /** The Home number's paths (`core-host/lessons-repeats-api.ts` parses the same paths; a test holds the two equal). */
 export const LESSONS_REPEATS_ROUTES = /^\/v1\/dev\/(?:projects\/([^/]+)\/)?lessons\/repeats$/u;
 
@@ -2424,7 +2427,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (url.pathname === "/v1/dev/me/sign-in-factors") return routeSignInFactors(deps.developer.signInLinks, caller, request, url); // L4-MF4: the caller's own confirmation email (masked) and passkeys (sign-in-link-routes.ts).
   if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
-  if (LESSONS_API_ROUTES.test(url.pathname)) {
+  if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
   }

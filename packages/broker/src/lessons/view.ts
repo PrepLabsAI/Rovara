@@ -136,6 +136,8 @@ function toView(lesson: Lesson, ctx: Context): LessonView {
     ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }),
     ...(lesson.retireProposedAt === undefined ? {} : { retireProposed: true as const }), ...(lesson.supersedes === undefined ? {} : { supersedes: lesson.supersedes }),
     ...(lesson.status === "rejected" && lesson.rejectedReason !== undefined ? { rejectedReason: lesson.rejectedReason } : {}),
+    // What a graduated lesson became (phase 4): it is retired, and keeps this link and its history.
+    ...(lesson.became === undefined ? {} : { became: { kind: lesson.became.kind, ref: lesson.became.ref, at: lesson.became.at } }),
     canApprove, canReject: ctx.canDecide && pending, canRetire: ctx.canDecide && (lesson.status === "active" || lesson.status === "stale" || pending),
   };
 }

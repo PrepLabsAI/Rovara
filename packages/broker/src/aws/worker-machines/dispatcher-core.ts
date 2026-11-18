@@ -46,6 +46,8 @@ import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createWikiForStep } from "../../core/wiki/agent-context.js";
 import { wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
 import { createDispatcherLearned, type DispatcherLessonsOptions } from "./dispatcher-lessons.js";
+import { createStandingInstructions } from "../../core/instructions/step-block.js";
+import { createTeamRulesSource } from "../../lessons/team-rules.js";
 
 /** A record of the dispatcher's SQS batch, as far as the router reads it. */
 export interface DispatcherRecord extends CoreDispatchRecord {
@@ -143,7 +145,10 @@ export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryT
     // A narrowed lessons switch must not attach a reader to another company's runtime.
     if (options !== undefined && !switchCovers(lessonsSwitch, options.companyId)) return { standingInstructions: null, modelAccess, learned: null };
     const reader = options === undefined ? learned : createDispatcherLearned({ ...options, lessonsSwitch });
-    return typeof reader !== "function" ? undefined : { standingInstructions: null, modelAccess, learned: reader };
+    // Lessons phase 4: a rule a person made permanent from a proven lesson is read from THIS company's own team-rule row (one `get`, never another company's) and put in front of the steps it applies to as standing
+    // instructions; with no rules the step is byte for byte what it was. Only where lessons are on for the company and the deployment gave its store.
+    const standing = options === undefined ? null : createStandingInstructions({ companyId: options.companyId, teamRules: createTeamRulesSource({ store: options.store, companyId: options.companyId }) });
+    return typeof reader !== "function" ? undefined : { standingInstructions: standing, modelAccess, learned: reader };
   }
   return { standingInstructions: null, modelAccess, learned: null };
 }

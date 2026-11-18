@@ -144,6 +144,17 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
+  // Lessons phase 4 (core-host/lessons-graduation.ts): this week's cards, making a proven lesson permanent, "Not now", the third conflict answer, the Tidy card, and the draft check tasks. Full access only; live membership,
+  // the project's roster and the approver directory still decide, and a script token is refused.
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/graduation", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/graduate", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/graduate-later", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/both-places", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/tidy/retire-chosen", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/tidy/later", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/started", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/dismiss", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/rules/{ruleId}/retire", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
   // L4-AK1H: team knowledge for a tool outside Rovara (core-host/knowledge-api.ts): a signed-in person's own token (full access, like the rows above) or a script token with the Team knowledge permission naming the project

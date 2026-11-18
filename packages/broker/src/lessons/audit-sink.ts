@@ -56,6 +56,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.withdrawn": { action: "lesson.withdrawn", facts: (e) => ({ cause: word(e.facts["cause"], "source_deleted") }) },
   "lesson.refused": { action: "lesson.refused", facts: (e) => ({ refusal: word(e.facts["reason"], "refused") }) },
   "lesson.promoted": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
+  // Phase 4: a lesson made permanent as a rule, a draft check task or a skill. The ledger line is the promotion (its target is in the lesson's `became` link, not in the chain).
+  "lesson.graduated": { action: "lesson.promoted", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
   "lesson.rolled_back": { action: "lesson.rolled_back", facts: (e) => ({ fromSetVersion: num(e.facts["from"]), toSetVersion: num(e.facts["to"]) }) },
   // A citation that moved, and a duplicate that was merged in, each commit a new version of the lesson's text or lines: recorded as an edit by the system.
   "lesson.citation_moved": { action: "lesson.edited", facts: (e) => ({ tier: num(e.facts["tier"]), fromTier: num(e.facts["tier"]) }) },
