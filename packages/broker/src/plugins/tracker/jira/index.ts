@@ -11,8 +11,8 @@
 // no such issue) is a `TrackerWriteRefusedError`, so a ticket that cannot be written never fails the task. Jira sends no webhook here: the adapter has no `events`.
 import { createHash } from "node:crypto";
 import {
-  TrackerItemSchema, TrackerParentSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
-  type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerItem, type TrackerItemRef, type UntrustedText,
+  SubjectCommentSchema, TrackerItemSchema, TrackerParentSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
+  type HostScope, type NeutralStatus, type SubjectCommentsPage, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerItem, type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
 export const JIRA_TRACKER_KIND = "jira";
@@ -22,6 +22,8 @@ export const JIRA_MARKER_PROPERTY = "rovara.ticket-update";
 const JIRA_COMMENT_ID = /^[0-9]{1,18}$/u;
 export const JIRA_KEY = /^[A-Z][A-Z0-9_]{0,30}-[1-9][0-9]{0,9}$/u;
 const ATLASSIAN_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/u;
+/** Comments read per page. A page past the last the caller will take is still offered (`nextPage`), so the caller says the read is not whole instead of taking the oldest part of it. */
+export const JIRA_COMMENTS_PER_PAGE = 100;
 const JIRA_LABEL = /^[^"\\\p{Cc}]{1,100}$/u;
 const TIMEOUT_MS = 10_000;
 const RESPONSE_MAX_BYTES = 2_000_000;
@@ -298,6 +300,46 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       if (moved.status === 404) throw new TrackerWriteRefusedError("not_found");
       if (moved.status !== 204 && moved.status !== 200) throw unavailable();
       return "moved";
+    },
+
+    /**
+     * L4-SRC-TK, fetch only: one page (numbered from 1, 100 a page, oldest first) of an issue's comments, those created after `since` when given. The author's account is `isBot` unless Jira says it is a person's
+     * (`accountType` "atlassian": an app or a service-desk customer is not), and a comment that carries Rovara's own marker property is `isBot` too (it is Rovara's, written with the key's account). A comment
+     * whose times cannot be read is left out. No such issue: no comments.
+     */
+    async comments(ref: TrackerItemRef, options: { since?: string; page?: number }, scope: HostScope): Promise<SubjectCommentsPage> {
+      checkedScope(scope);
+      const key = keyOf(ref);
+      const page = Math.max(1, Math.min(options.page ?? 1, 1_000));
+      const answer = await call(`/rest/api/3/issue/${encodeURIComponent(key)}/comment?orderBy=created&startAt=${String((page - 1) * JIRA_COMMENTS_PER_PAGE)}&maxResults=${String(JIRA_COMMENTS_PER_PAGE)}&expand=properties`);
+      if (refused(answer.status)) throw new TrackerWriteRefusedError("needs_write_access");
+      if (answer.status === 404) return { comments: [] };
+      if (answer.status !== 200) throw unavailable();
+      const body = rec(answer.body);
+      const since = options.since === undefined ? undefined : Date.parse(options.since);
+      const item = { tracker: JIRA_TRACKER_KIND, id: key, url: `${site}/browse/${key}` };
+      const comments = arr(body["comments"]).slice(0, JIRA_COMMENTS_PER_PAGE).flatMap((raw) => {
+        const comment = rec(raw);
+        const id = str(comment["id"]);
+        const created = Date.parse(str(comment["created"]) ?? "");
+        const updated = Date.parse(str(comment["updated"]) ?? str(comment["created"]) ?? "");
+        if (id === undefined || !JIRA_COMMENT_ID.test(id) || !Number.isFinite(created) || !Number.isFinite(updated)) return [];
+        if (since !== undefined && Number.isFinite(since) && created <= since) return [];
+        // A comment only some can read (a role or group restriction, or a service desk's internal note) is not for a lesson every project member and agent sees: left out.
+        if (comment["visibility"] !== undefined && comment["visibility"] !== null) return [];
+        if (comment["jsdPublic"] === false) return [];
+        const author = rec(comment["author"]);
+        const accountId = str(author["accountId"]);
+        const own = arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY);
+        const parsed = SubjectCommentSchema.safeParse({
+          id, subject: { kind: "item", ref: item },
+          author: { login: cut(str(author["displayName"]) ?? accountId ?? "unknown", 200), ...(accountId === undefined ? {} : { hostUserId: accountId }), isBot: own || str(author["accountType"]) !== "atlassian" || accountId === undefined },
+          body: cut(adfText(comment["body"]), 65_536), createdAt: new Date(created).toISOString(), updatedAt: new Date(updated).toISOString(),
+        });
+        return parsed.success ? [parsed.data] : [];
+      });
+      const total = typeof body["total"] === "number" ? body["total"] : 0;
+      return { comments, ...(page * JIRA_COMMENTS_PER_PAGE < total ? { nextPage: page + 1 } : {}) };
     },
 
     async askedFor(query: TrackerAskedQuery, scope: HostScope): Promise<readonly TrackerAskedItem[]> {

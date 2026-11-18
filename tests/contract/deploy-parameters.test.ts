@@ -275,9 +275,32 @@ describe("deploy parameters", () => {
   });
 
   it("uses image overrides as-is, and only by digest", () => {
-    const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx-worker-production@sha256:${d("e")}` } };
     expect(stackParameters("runtime", withOverrides, outputs, { packages: true }).WorkerImageUri).toBe(withOverrides.images.worker);
     expect(() => stackParameters("runtime", { ...answers(), images: { worker: "x/y:latest" } }, outputs, { packages: true })).toThrow("image override for worker must be referenced by digest");
+  });
+
+  // L4-IAM: the worker role reads only agentx-<env>/ (and the test-service copies), so an override anywhere else would deploy and then fail every instance boot.
+  it("refuses a worker image override outside this account's ECR, this region, or the environment's image prefix, with fixed words", () => {
+    const refused = "the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+    const host = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+    for (const uri of [
+      `${host}/agentx-worker-production@sha256:${d("e")}`, // no prefix
+      `${host}/agentx-staging-2/worker@sha256:${d("e")}`, // another environment's lookalike
+      `${host}/agentx-staging@sha256:${d("e")}`, // the prefix itself is not a repository under it
+      `${host}/agentx-other/worker@sha256:${d("e")}`,
+      `${"9".repeat(12)}.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker@sha256:${d("e")}`, // another account
+      `123456789012.dkr.ecr.eu-west-1.amazonaws.com/agentx-staging/worker@sha256:${d("e")}`, // another region
+      `registry.example.test/agentx-staging/worker@sha256:${d("e")}`,
+    ]) {
+      expect(() => stackParameters("runtime", { ...answers(), images: { worker: uri } }, outputs, { packages: true }), uri).toThrow(refused);
+    }
+    try { stackParameters("runtime", { ...answers(), images: { worker: `${host}/agentx-worker-production@sha256:${d("e")}` } }, outputs, { packages: true }); } catch (error) { expect(String(error)).not.toContain("agentx-worker-production"); }
+    // the check follows the answers' own account and region, not a fixed one
+    const other = { ...answers(), account: "7".repeat(12), region: "eu-west-1" };
+    expect(() => stackParameters("runtime", { ...other, images: { worker: `${host}/agentx-staging/worker@sha256:${d("e")}` } }, outputs, { packages: true })).toThrow(refused);
+    const inside = `${host}/agentx-staging/worker@sha256:${d("e")}`;
+    expect(stackParameters("runtime", { ...answers(), images: { worker: inside } }, outputs, { packages: true }).WorkerImageUri).toBe(inside);
   });
 
   it("uses a slack image override as-is, and only by digest", () => {
@@ -299,7 +322,7 @@ describe("deploy parameters", () => {
   it("a worker image override does not require the access stack's PullThroughPrefix output", () => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
     const { PullThroughPrefix: _prefixGone, ...accessNoPrefix } = outputs.access;
-    const withOverride = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
+    const withOverride = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx-worker-production@sha256:${d("e")}` } };
     expect(() => stackParameters("runtime", withOverride, { ...outputs, access: accessNoPrefix }, { packages: true })).not.toThrow();
   });
 
@@ -359,10 +382,10 @@ describe("L4-EGR: Rovara's outbound addresses reach the control plane's NatEgres
   const withAddresses = (value: string | undefined) => ({ ...outputs, foundation: { ...outputs.foundation, ...(value === undefined ? {} : { NatEgressAddresses: value }) } });
 
   it("passes the foundation's output as is, to a parameter the control plane template declares, and nowhere else", () => {
-    const given = stackParameters("control-plane", answers(), withAddresses("44.235.136.195,44.226.134.187"), { packages: true });
-    expect(given.NatEgressAddresses).toBe("44.235.136.195,44.226.134.187");
+    const given = stackParameters("control-plane", answers(), withAddresses("203.0.113.195,198.51.100.187"), { packages: true });
+    expect(given.NatEgressAddresses).toBe("203.0.113.195,198.51.100.187");
     expect(Object.keys(given).filter((name) => !(name in templates.get("control-plane")!.Parameters!))).toEqual([]);
-    for (const part of ["access", "foundation", "identity", "runtime", "slack"] as DeployPart[]) expect(stackParameters(part, answers(), withAddresses("44.235.136.195,44.226.134.187"), { packages: true })).not.toHaveProperty("NatEgressAddresses");
+    for (const part of ["access", "foundation", "identity", "runtime", "slack"] as DeployPart[]) expect(stackParameters(part, answers(), withAddresses("203.0.113.195,198.51.100.187"), { packages: true })).not.toHaveProperty("NatEgressAddresses");
   });
 
   it("passes nothing when the foundation does not output it yet (the parameter keeps its empty default), and an operator parameter is not involved", () => {
@@ -373,7 +396,7 @@ describe("L4-EGR: Rovara's outbound addresses reach the control plane's NatEgres
   });
 
   it("passes nothing for a value the template's pattern would refuse (the deploy never stops on it)", () => {
-    for (const bad of ["not-an-address", "44.235.136.195, 44.226.134.187", "44.235.136.195,", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "2001:db8::1"]) {
+    for (const bad of ["not-an-address", "203.0.113.195, 198.51.100.187", "203.0.113.195,", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "2001:db8::1"]) {
       expect(stackParameters("control-plane", answers(), withAddresses(bad), { packages: true }), bad).not.toHaveProperty("NatEgressAddresses");
     }
   });

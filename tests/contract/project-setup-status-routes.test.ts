@@ -20,6 +20,9 @@ import { journalKey, setupAgentKey } from "../../packages/broker/src/core/setup-
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { CLIENT_MEMBERS_NOT_ALLOWED } from "../../packages/broker/src/aws/developer-routes.js";
+import { LinearConnections, linearConnectionKey, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
+import type { LinearConnectWiring } from "../../packages/broker/src/aws/linear-connect-routes.js";
 
 const NOW = Date.parse("2026-11-17T12:00:00.000Z");
 const TIME = "2026-11-01T09:00:00.000Z";
@@ -36,7 +39,7 @@ const TEAM = "T0123ABCD";
 const CHANNEL = "C0123ABCD";
 
 type Role = "owner" | "admin" | "member";
-interface HarnessOptions { companies?: boolean; fullAccess?: boolean }
+interface HarnessOptions { companies?: boolean; fullAccess?: boolean; linear?: boolean }
 
 function harness(options: HarnessOptions = {}) {
   const db = new FakeDynamoDb({ seed: 5 });
@@ -53,6 +56,7 @@ function harness(options: HarnessOptions = {}) {
     developer: {
       issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true, slackTeamId: TEAM,
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
+      ...(options.linear === true ? { linearConnect: linearWiring(db) } : {}),
     },
   };
   const jwt = () => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
@@ -71,6 +75,19 @@ function harness(options: HarnessOptions = {}) {
   const ok = async (path = PATH()) => { const answer = await call("GET", path); expect(answer.status).toBe(200); return ProjectSetupChecklistSchema.parse(answer.body); };
   return { db, claims, deps, call, as, join, project, grant, ok };
 }
+/** The deployed Linear wiring's connections (linear-wiring.ts builds the same class) over the same table; nothing here talks to Linear. */
+function linearWiring(db: FakeDynamoDb): LinearConnectWiring {
+  const never = async () => { throw new Error("no Linear call in these tests"); };
+  const connections = new LinearConnections({ documentClient: db, tableName: "State", sealer: { seal: never, open: never }, fetch: never, now: () => NOW, app: async () => undefined, log: () => undefined });
+  return { connections, app: async () => undefined, fetch: never, log: () => undefined };
+}
+const pickTeam = (h: { db: FakeDynamoDb }, company: string, project: string, over: Record<string, unknown> = {}) => h.db.set({
+  ...linearTeamKey(company, project), entityType: "LINEAR_PROJECT_TEAM", companyId: company, project, teamId: "team-1234", teamKey: "ENG", teamName: "Engineering", setBy: "a".repeat(64), setAt: TIME, ...over,
+});
+const linearConnected = (h: { db: FakeDynamoDb }, company: string, status: "connected" | "needs_reconnect" | "disconnected" = "connected") => h.db.set({
+  ...linearConnectionKey(company), entityType: "LINEAR_CONNECTION", companyId: company, organizationId: "ws-1", workspaceName: "Acme", urlKey: "acme", status, statusAt: TIME,
+  connectedBy: "a".repeat(64), connectedAt: TIME, version: 1,
+});
 type Harness = ReturnType<typeof harness>;
 const error = (code: string, message: string) => ({ error: { code, message } });
 const NOT_FOUND = { status: 404, body: error("NOT_FOUND", "project not found") };
@@ -781,11 +798,11 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
 
 describe("what did not change", () => {
   it("the route table keeps every existing row exactly; the three new rows are full-access only", () => {
-    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none"];
+    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep"];
     const rows = DEV_ROUTES.map((route) => `${route.method} ${route.path} ${route.requires}`);
     for (const row of added) expect(rows).toContain(`${row} full`);
     const existing = rows.filter((row) => !added.some((path) => row === `${path} full`));
-    expect(existing).toHaveLength(DEV_ROUTES.length - 3);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 4);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
   });
@@ -819,6 +836,7 @@ describe("what did not change", () => {
 // Batch 12 (rule D): and for #869's 6 new connected sign-in rows (/v1/dev/me/sign-ins*, /v1/dev/company/members/{personId}/sign-ins*; all added, none changed; removing exactly
 // those 6 rows still gives 0a31f2f4...).
 // Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
+// L4-LP12b (rule D): one new row, POST /v1/dev/projects/{project}/lessons/{lessonId}/keep (full; the answer to the weekly list's "Keep it?" card): added, none changed, so the digest of every other row is unchanged (it still gives the value below with this row removed).
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
 // Batch 14 (rule D): and for 4 new rows: GET/POST /v1/dev/projects/{project}/machine-size (tasks:read / full; #882/#901) and GET /v1/dev/tasks/{taskId}/people/candidates,
 // POST /v1/dev/tasks/{taskId}/people/add (tasks:act; #888). All added, none changed: removing exactly those 4 rows still gives 8e72149c....
@@ -832,4 +850,123 @@ describe("what did not change", () => {
 // those 2 rows still gives 8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80).
 // Batch 17 (rule D): with batch 16's table and the batch's 15 new /v1/dev rows (#992 lessons areas, learning-sources and its PUT; #1003's 9 graduation, Tidy, check-draft and rule rows; #995's POST lessons and
 // knowledge/areas; #994's GET company/egress-addresses). All added, none changed: removing exactly those 15 rows still gives eaf715d5... (the batch-16 pin above).
-const EXISTING_ROUTES_DIGEST = "d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711";
+// Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
+// PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
+// removing exactly those 11 rows gives back the batch 16+17 pin d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711.
+const EXISTING_ROUTES_DIGEST = "f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b";
+// L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
+
+// Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).
+describe("the Linear row reads the project's picked team", () => {
+  it("is done with the team's id and name once the project has a pick in its own company, and optional without one", async () => {
+    const h = companyA({ linear: true });
+    linearConnected(h, A);
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    pickTeam(h, A, "alpha");
+    const body = await h.ok();
+    expect(body.linear).toEqual({ state: "done", team: { id: "team-1234", name: "Engineering" } });
+    expect(body.progress.done).toBeGreaterThan(0);
+  });
+
+  it("never reads another company's pick, nor another project's", async () => {
+    const h = companyA({ linear: true });
+    linearConnected(h, A);
+    pickTeam(h, B, "alpha");
+    pickTeam(h, A, "beta", { project: "beta" });
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+  });
+
+  it("a pick filed in this company's partition that names another company is no pick; one that does not read back is the fixed unreadable answer, never a guess", async () => {
+    const h = companyA({ linear: true });
+    linearConnected(h, A);
+    pickTeam(h, A, "alpha", { companyId: B });
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    pickTeam(h, A, "alpha", { teamId: "bad id with spaces" });
+    expect(await h.call("GET", PATH())).toEqual({ status: 503, body: error("RUNTIME_UNAVAILABLE", SETUP_STATUS_UNREADABLE) });
+  });
+
+  it("keeps the name within the contract's bounds, and leaves out an empty one", async () => {
+    const h = companyA({ linear: true });
+    linearConnected(h, A);
+    pickTeam(h, A, "alpha", { teamName: "N".repeat(256) });
+    expect((await h.ok()).linear.team).toEqual({ id: "team-1234", name: "N".repeat(200) });
+    pickTeam(h, A, "alpha", { teamName: "  " });
+    expect((await h.ok()).linear.team).toEqual({ id: "team-1234" });
+  });
+
+  it("a pick whose company connection is disconnected, needs reconnecting, or missing leaves the row not done", async () => {
+    const h = companyA({ linear: true });
+    pickTeam(h, A, "alpha");
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    for (const status of ["disconnected", "needs_reconnect"] as const) {
+      linearConnected(h, A, status);
+      expect((await h.ok()).linear, status).toEqual({ state: "optional", team: null });
+    }
+    // Another company's live connection does not count for this one.
+    linearConnected(h, B);
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+    linearConnected(h, A);
+    expect((await h.ok()).linear.state).toBe("done");
+  });
+
+  it("without Linear wired the row stays optional whatever is stored (today's behaviour)", async () => {
+    const h = companyA();
+    pickTeam(h, A, "alpha");
+    expect((await h.ok()).linear).toEqual({ state: "optional", team: null });
+  });
+});
+
+// Audit gap 12c (2026-11-18; DEC 254n item 3, `lifecycleAccess`): a live company owner or admin manages every project of their company, so they see and change its members without a project grant.
+describe("a project's members, for a live company owner or admin without a project grant", () => {
+  const MEMBERS = (project = "alpha") => `/v1/dev/client/projects/${project}/members`;
+  const REFUSED = { status: 403, body: error("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED) };
+
+  it("an admin and an owner of the project's company list, add and remove its members", async () => {
+    for (const role of ["admin", "owner"] as const) {
+      const h = companyA();
+      h.join(ADA, A, role); h.join(CAT, A, "member");
+      expect(await h.call("GET", MEMBERS())).toEqual({ status: 200, body: { project: "alpha", members: [] } });
+      expect(await h.call("PUT", `${MEMBERS()}/${CAT}`)).toMatchObject({ status: 200, body: { project: "alpha", developerId: CAT, outcome: "granted" } });
+      expect(await h.call("GET", MEMBERS())).toMatchObject({ status: 200, body: { members: [{ developerId: CAT, name: "Cat", role: "developer" }] } });
+      expect(await h.call("DELETE", `${MEMBERS()}/${CAT}`)).toMatchObject({ status: 200, body: { outcome: "revoked" } });
+    }
+  });
+
+  it("refuses a member, with or without a developer grant, in fixed words that do not read like a missing project", async () => {
+    const h = companyA();
+    h.as(BEN, "s-ben");
+    expect(await h.call("GET", MEMBERS())).toEqual(REFUSED);
+    h.grant(BEN, "alpha", "developer");
+    expect(await h.call("GET", MEMBERS())).toEqual(REFUSED);
+    expect(await h.call("PUT", `${MEMBERS()}/${CAT}`)).toEqual(REFUSED);
+    expect(JSON.stringify(REFUSED.body)).not.toContain("not found");
+    // The project's own administrator still manages it, as before.
+    h.grant(BEN, "alpha", "administrator");
+    expect((await h.call("GET", MEMBERS())).status).toBe(200);
+  });
+
+  it("refuses an owner of another company, and a project with no company (the implicit company's, never the caller's)", async () => {
+    const h = companyA();
+    h.join(ADA, A, "owner");
+    h.project("beta", B);
+    h.project("legacy");
+    expect(await h.call("GET", MEMBERS("beta"))).toEqual(REFUSED);
+    expect(await h.call("PUT", `${MEMBERS("beta")}/${CAT}`)).toEqual(REFUSED);
+    expect(await h.call("GET", MEMBERS("legacy"))).toEqual(REFUSED);
+    // Company B's owner manages B's project, and not A's.
+    h.join(CAT, B, "owner");
+    h.as(CAT, "s-cat");
+    expect((await h.call("GET", MEMBERS("beta"))).status).toBe(200);
+    expect(await h.call("GET", MEMBERS())).toEqual(REFUSED);
+  });
+
+  it("refuses a removed owner, and anyone where the install has no company layer", async () => {
+    const h = companyA();
+    h.db.set({ pk: `COMPANY_MEMBER#${ADA}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: ADA, companyId: A, role: "owner", joinedAt: TIME, revokedAt: TIME });
+    // A removed person's sign-in no longer resolves a company: the sign-in refusal, before any project is read.
+    expect((await h.call("GET", MEMBERS())).status).toBe(401);
+    const plain = harness({ companies: false });
+    plain.join(ADA, A, "owner"); plain.project("alpha", A);
+    expect(await plain.call("GET", MEMBERS())).toEqual(REFUSED);
+  });
+});

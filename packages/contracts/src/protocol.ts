@@ -1,4 +1,5 @@
 import { PrepareSetupProveSchema } from "./setup-prove.js";
+import { PREPARE_EVAL_HEALTH_FEATURE, PrepareEvalHealthSchema } from "./eval-health-run.js";
 import { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
 export { TEST_ENV_PROVE_MEASURE_FEATURE } from "./machine-size.js";
 import {StageIdSchema} from "./stage-model-shared.js";
@@ -39,6 +40,7 @@ import { WORKER_CREDENTIAL_KINDS_FEATURE } from "./plugins/code-host.js";
 import { LearnedContextSchema, LearnedRefsSchema } from "./learned-context.js";
 import { KNOWLEDGE_CONTEXT_FEATURE, KnowledgeContextSchema } from "./knowledge-context.js";
 import { WIKI_AGENT_FEATURE, WikiContextSchema } from "./wiki-agents.js";
+import { ROVARA_SKILLS_FEATURE, RovaraSkillsPayloadSchema } from "./rovara-skills.js";
 import { SpecReviewInputSchema, SpecWriteBindingSchema } from "./spec-target.js";
 import { OWNER_REDIRECT_FEATURE, OwnerRedirectInvocationSchema, PEEK_FEATURE } from "./live-interaction.js";
 import { DIAGNOSIS_WORKER_FEATURE, DiagnosisInvocationSchema } from "./live-diagnosis.js";
@@ -81,8 +83,8 @@ export const EvalGatewayOriginSchema = z.string().max(512).refine((raw) => {
   return url.protocol === "https:" && url.username === "" && url.password === "" && url.search === "" && url.hash === "" && raw === url.origin;
 }, "the eval gateway address must be an https origin");
 
-export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", WIKI_AGENT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_ROUND_FEATURE, EVAL_GATEWAY_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TASK_FLAKY_RERUN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
-  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_BASELINE_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE] as const;
+export const WORKER_INVOCATION_FEATURES = [TEST_ENV_PROVE_MEASURE_FEATURE, "task.modelPolicy", "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "task.workflowReviewers", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks", "task.workflowE2EApplicationChecks.v2", "task.workflowE2EBaselineChecks", "task.workflowE2EBaselineSource", "task.workflowE2EAgentSteps.v1", "task.workflowE2ECaptureExtras.v1", "task.workflowE2EReplayChecks.v1", "task.workflowE2EModelFreeLimits.v1", "task.workflowE2EAgentModelChoice.v1", "task.agentStep", "task.agentRun", "task.agentGrounding.v1", "model.route", "task.workflowUnderstand", "task.workflowPlanCritique", "task.workflowParallelParts", "task.workflowFix", "task.workflowFeedbackAutonomy", "maintain.workflowSync", "task.setupDraft", "task.setupProposal.v2", "publish.branchOnly", "close.trashBundle", "task.workflowReviewRisk", "task.workflowPlanDryRun.v1", "task.workflowE2EGroundingChecks.v1", "task.workflowE2EMidStepSync.v1", "task.liveSteer.v1", "task.workflowApprovedPlan.v1", SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE, SETUP_RECIPES_FEATURE, "prepare.metaRepo", "task.contextSources.v1", "task.specWrite.v1", "task.workflowReviewSpec.v1", "task.learnedContext.v1", WIKI_AGENT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, OWNER_REDIRECT_FEATURE, PEEK_FEATURE, "publish.attribution", DIAGNOSIS_WORKER_FEATURE, EVIDENCE_CAPTURE_FEATURE, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_ROUND_FEATURE, EVAL_GATEWAY_FEATURE, PREPARE_EVAL_HEALTH_FEATURE, TEST_ENV_DETECT_FEATURE, TEST_ENV_PLAN_FEATURE, TEST_ENV_COVERAGE_PATH_FEATURE, TASK_FLAKY_RERUN_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_COMPANY_IMAGE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, PREPARE_REGISTRIES_FEATURE, PREPARE_SAVED_ENV_FEATURE, PREPARE_SAVED_ENV_BUILD_FEATURE, PREPARE_PINS_FEATURE, WORKER_CREDENTIAL_KINDS_FEATURE, SECOND_REVIEWER_FEATURE, DESIGN_REVIEW_WORKER_FEATURE,
+  NIGHTLY_RUN_FEATURE, STANDING_INSTRUCTIONS_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_BASELINE_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, ROVARA_SKILLS_FEATURE] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** An agent step's payload (`agentStep`) goes only to a worker that lists this; the agent kind also needs AGENT_RUN_FEATURE. */
 export const AGENT_STEP_FEATURE = "task.agentStep" as const;
@@ -283,7 +285,7 @@ export type InvocationModelRoute = z.infer<typeof ModelRouteSchema>;
  * (`SECOND_REVIEW_CANDIDATES_MAX`; the worker makes at most 3 tries in all). The key may call only the aliases the broker chose for these models and no others, and the proxy is configured with no router fallbacks (`litellmConfig` writes none and the guard refuses fallback fields in a request; checked by a test for Rovara's own config, and a deferred check for company sources), so the model named is the model that answers.
  */
 export const SecondReviewerSchema = z.object({
-  candidates: z.array(z.object({ model: ModelSelectionSchema, modelRoute: ModelRouteSchema.optional() }).strict()).min(1).max(SECOND_REVIEW_CANDIDATES_MAX),
+  candidates: z.array(z.object({ model: ModelSelectionSchema, modelRoute: ModelRouteSchema.optional(), keySlot: z.literal("second_review").optional() }).strict()).min(1).max(SECOND_REVIEW_CANDIDATES_MAX),
   /** What the second reviewer is shown besides the change: absent means `change_only` (no source tools, lessons, step instructions or skills). */
   context: SecondReviewContextSchema.optional(),
 }).strict();
@@ -383,11 +385,25 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       /** A proposal Prove on its own read-only, pinned preparation. Unadvertised until the broker result route lands. */
       setupProve: PrepareSetupProveSchema.optional(),
       /**
+       * L4-EVH: the opt-in eval health run of a project (a person said yes). The preparation is read only and pinned to main's heads (`pins`, the broker's own reading); after it the worker measures the project's evals three
+       * times in a fresh sandbox through the gateway and posts the baseline it made to `eval-health-result`, under the request and claim named here. Sent only to a worker that lists "prepare.evalHealth.v1"; never dropped.
+       */
+      evalHealth: PrepareEvalHealthSchema.optional(),
+      /** L4-EVH: the model gateway's https origin, delivered with an eval health run (the worker has no setting of its own), only with `evalHealth` and only to a worker that lists "task.evalGateway.v1". Built by the dispatcher at delivery, never stored. */
+      evalGatewayUrl: EvalGatewayOriginSchema.optional(),
+      /**
        * Test services (slice 1, Prove): a test environment's CANDIDATE check starts these dependencies (pinned by digest; no secret), runs the proposal's readiness commands against them with the sealed check runners and
        * reports a usage record under `testServicesUsage` in its result. Sent only with the switch `tx` on and only to a worker whose /ping lists `task.testServices.v1`; never dropped (delivery refuses an older worker).
        */
       testServices: z.object({ dependencies: z.array(TaskDependencyPlanSchema).min(1).max(TASK_DEPENDENCY_PLAN_MAX) }).strict().optional(),
     }).strict().superRefine((payload, context) => {
+      if (payload.evalGatewayUrl !== undefined && payload.evalHealth === undefined) {
+        context.addIssue({ code: "custom", path: ["evalGatewayUrl"], message: "the eval gateway address goes with an eval health run" });
+      }
+      if (payload.evalHealth !== undefined && (payload.readOnly !== true || payload.pins === undefined || payload.setupProve !== undefined || payload.savedEnvBuild !== undefined || payload.savedEnv !== undefined
+        || payload.checkout !== undefined || payload.meta !== undefined || payload.registries !== undefined || payload.testServices !== undefined)) {
+        context.addIssue({ code: "custom", path: ["evalHealth"], message: "an eval health run requires its own read-only pinned preparation" });
+      }
       if (payload.setupProve === undefined) return;
       const commits = new Map(Object.entries(payload.setupProve.commits));
       if (payload.readOnly !== true || payload.pins === undefined || payload.pins.length !== commits.size
@@ -567,6 +583,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * stored or queued. Sent only to a worker that lists "task.knowledgeContext.v1"; an older worker is sent none, which is safe (the task runs with the lessons block alone). Never carries a tool, a check, an approval or a limit.
          */
         knowledgeContext: KnowledgeContextSchema.optional(),
+        /**
+         * Lead 4 L4-AK3: the project's Rovara skills (approved by two people, versioned, digest-pinned) for `read_skill`, beside the meta repo's. Built at delivery from the task's OWN project, never stored or queued; at most 8
+         * skills and 96 KB of text. Sent only to a worker that lists "task.rovaraSkills.v1" and only for a plan or build step; an older worker is sent none, which is safe. A skill grants nothing: the worker removes any
+         * pre-run line and tool grant, and the meta repo's skill wins a name clash.
+         */
+        rovaraSkills: RovaraSkillsPayloadSchema.optional(),
         /**
          * Lessons replay, the file arm (DECISIONS 50.5, 68): the lessons file and its pointer the worker places in a replay copy's checkout before the agent starts, kept out of any diff. Built by the dispatcher at
          * delivery for a replay copy only; never stored or queued. Sent only to a worker that lists "task.evalFiles.v1"; never dropped (an older worker is refused the step).

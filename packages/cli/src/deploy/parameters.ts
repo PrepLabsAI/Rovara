@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -187,6 +187,27 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
   return uri;
 }
 
+/** L4-IAM: the one sentence every refusal of an off-prefix worker image uses (fixed words, no echo). */
+export const WORKER_IMAGE_OFF_PREFIX = "the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+
+/**
+ * L4-IAM: the worker role reads images only under the environment's ECR pull-through prefix (`agentx-<env>/`) and its test-service copies, so a worker image anywhere else
+ * would deploy cleanly and then fail every instance boot ("could not download the worker image"). Returns the fixed refusal, or undefined when the image is inside.
+ * `init` and `upgrade` call this when they read `--worker-image` (before anything is deployed); `stackParameters` repeats it as a backstop.
+ */
+export function workerImageProblem(uri: string, scope: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string | undefined {
+  const suffix = ECR_HOST_SUFFIX[scope.partition ?? "aws"];
+  if (suffix === undefined) throw new Error(`unknown AWS partition ${scope.partition}`);
+  return uri.startsWith(`${scope.account}.dkr.ecr.${scope.region}.${suffix}/${environmentPullThroughPrefix(scope.env)}/`) ? undefined : WORKER_IMAGE_OFF_PREFIX;
+}
+
+function checkedWorkerOverride(uri: string, answers: Pick<InstallAnswers, "env" | "account" | "region" | "partition">): string {
+  checkedImageOverride(uri, "worker");
+  const problem = workerImageProblem(uri, answers);
+  if (problem !== undefined) throw new Error(problem);
+  return uri;
+}
+
 /**
  * The image URI for `which`: the answers' override when given (validated to be a digest
  * reference, used as-is), otherwise the release's public image mapped through the account's
@@ -195,7 +216,7 @@ function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
  */
 function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
   const override = answers.images?.[which];
-  if (override !== undefined) return checkedImageOverride(override, which);
+  if (override !== undefined) return which === "worker" ? checkedWorkerOverride(override, answers) : checkedImageOverride(override, which);
   const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
   return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }

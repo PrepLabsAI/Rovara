@@ -14625,7 +14625,7 @@ exports[`named environment templates > agentx-staging-foundation is unchanged 1`
                     {
                       "Ref": "AWS::AccountId",
                     },
-                    ":repository/*",
+                    ":repository/agentx-staging/*",
                   ],
                 ],
               },

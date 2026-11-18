@@ -109,6 +109,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
     // Lead 4 N1: the nightly upkeep switch.
     ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
+    // L4-EVCI2: the setup card's eval check from the customer's CI (additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/ci-eval-check", "full"], ["PUT", "/v1/app/projects/payments/ci-eval-check", "full"],
     // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
     ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
     // Lead 4 PCF: the plan card's "Change" lists the open features (the same people as the filing).
@@ -116,7 +118,11 @@ describe("the /v1/app route table", () => {
     // L4-P3: the company's one control over Rovara's automatic runs.
     ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
     // L4-EVC (DEC 254zzz20): the eval card and its one approval.
-    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"],
+    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health", "full"],
+    // Audit gap 11b: a project's ticket-sharing settings (the laptop's intake/updates route; additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/intake/updates", "full"], ["PUT", "/v1/app/projects/payments/intake/updates", "full"],
+    // DEC 254zzz39 (6): the task owner's Accept findings on the web page (a security finding needs it). Additive: no existing row changed.
+    ["POST", "/v1/app/tasks/t1/review-findings", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -132,7 +138,7 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check's other methods) are not served on AWS, nor other methods on the setup run.
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
-      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
+      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/eval-health"], ["GET", "/v1/app/projects/payments/setup-agent/eval-decide"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The saved environment image has no Reset or setting write here (those stay Cloud's / the laptop's): only the read.
       ["POST", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-images"],
@@ -154,11 +160,23 @@ describe("the /v1/app route table", () => {
       ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
       // The upkeep switch: GET and PUT only, no other tail.
       ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
+      // The eval check card: GET and PUT only, no other tail.
+      ["POST", "/v1/app/projects/payments/ci-eval-check"], ["DELETE", "/v1/app/projects/payments/ci-eval-check"], ["PATCH", "/v1/app/projects/payments/ci-eval-check"], ["GET", "/v1/app/projects/payments/ci-eval-check/extra"], ["PUT", "/v1/app/projects/payments/ci-eval-checks"],
       ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
+      // The page's Accept findings: one POST, no other method or tail.
+      ["GET", "/v1/app/tasks/t1/review-findings"], ["PUT", "/v1/app/tasks/t1/review-findings"], ["POST", "/v1/app/tasks/t1/review-findings/x"], ["POST", "/v1/app/tasks/review-findings"],
       // The company's automatic-runs control: GET and PUT only, no other tail.
       ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
+      // Ticket-sharing settings: GET and PUT only (the laptop's POST alias is not served here), and none of the laptop's other intake routes (the waiting tickets are /v1/dev/projects/{p}/intake).
+      ["POST", "/v1/app/projects/payments/intake/updates"], ["DELETE", "/v1/app/projects/payments/intake/updates"], ["GET", "/v1/app/projects/payments/intake/updates/x"], ["GET", "/v1/app/projects/payments/intake"],
+      ["PUT", "/v1/app/projects/payments/intake/sources"], ["GET", "/v1/app/projects/payments/intake/notices"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
+  });
+
+  it("pins the lessons replay as a full-access company route, outside the core app table", () => {
+    expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toMatchObject({ method: "GET", requires: "full" });
+    expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toBeUndefined();
   });
 });
 

@@ -22,6 +22,7 @@ import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
+import type { LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
@@ -116,6 +117,7 @@ import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issu
 import { CompanyRecord, companyKey } from "../developer/company-membership.js";
 import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, installUsesCompanyLayout, mergeSurvivor } from "./install-company.js";
 import { installCompanyBindings } from "./slack-install-company.js";
+import { slackWorkspaceHint } from "../developer/providers.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -245,6 +247,8 @@ export interface DeveloperRouteDependencies {
   lessons?: Pick<LessonsApi, "answer">; /** L4-AK1H: the hosted team knowledge reads for tools outside Rovara (`core-host/knowledge-api.ts`), behind the same lessons switch. Absent: a person gets the fixed "off" answer, a script token is refused, and nothing is read. */ knowledge?: Pick<KnowledgeApi, "answer">;
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
+  /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`). It does not depend on the lessons switch. Absent: its route is not found. */
+  lessonsSlackSwitch?: Pick<LessonsSlackSwitchApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
@@ -1092,7 +1096,9 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   }
   scope?.check();
   if (access === undefined) throw refused();
-  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company };
+  // L4-SIGNIN: a Slack session of the person's own token also names its workspace (a convenience for the browser; best effort: unreadable is left out).
+  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId) : undefined;
+  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
@@ -1100,6 +1106,15 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const checked = AccessCheckResponseSchema.safeParse(ruled);
   if (!checked.success) throw refused();
   return checked.data;
+}
+
+/** L4-SIGNIN: the Slack workspace id on the person's own stored profile, only when it is a workspace id. Any failure is no workspace: it is a convenience, never a gate. */
+async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string): Promise<string | undefined> {
+  try {
+    return slackWorkspaceHint((await getSignIn<Pick<DeveloperRecord, "slackTeamId">>(deps, `DEVELOPER#${developerId}`))?.slackTeamId);
+  } catch {
+    return undefined;
+  }
 }
 
 /** DEC 253z: the person's company from Code's own company layer: live membership (with its role) and the company's stored profile. Any doubt refuses. */
@@ -1476,10 +1491,26 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   const status = await readProjectSetupStatus({
     documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories },
     viewer: { companyRole: role ?? null, projectAdmin },
-    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId) },
+    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId), ...linearTeamReader(deps, companyId, project) },
   });
   scope.check();
   return status;
+}
+
+/**
+ * Audit gap 11c: the checklist's Linear row reads the project's picked Linear team (linear-connect-routes.ts's `teamPick`, the company's own pick row) where the install wires Linear and has a company
+ * layer, while the company's Linear connection is connected; elsewhere the row stays optional, as before. A pick is shown by its id and name only (the contract's bounds); a read that fails is the checklist's fixed unreadable answer.
+ */
+function linearTeamReader(deps: DeveloperRouteDependencies, companyId: string | undefined, project: string): { linearTeam?: () => Promise<{ id: string; name?: string } | undefined> } {
+  const connections = deps.developer.linearConnect?.connections;
+  if (connections === undefined || companyId === undefined) return {};
+  return { linearTeam: async () => {
+    // A pick counts only while the company's Linear connection is live: a disconnected or needs-reconnect workspace leaves the row not done (its pick may outlive the connection).
+    const [connection, pick] = await Promise.all([connections.connection(companyId), connections.teamPick(companyId, project)]);
+    if (pick === undefined || connection?.status !== "connected") return undefined;
+    const name = pick.teamName.trim().slice(0, 200);
+    return { id: pick.teamId, ...(name === "" ? {} : { name }) };
+  } };
 }
 
 const CLIENT_LIFECYCLE = /^\/v1\/dev\/client\/projects\/([^/]+)\/(archive-preview|archive|restore-preview|restore)$/;
@@ -1525,6 +1556,27 @@ async function companyMayCreateProjects(deps: DeveloperRouteDependencies, creato
   return person !== undefined && person.revoked !== true;
 }
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
+/** Who may see and change a project's members; fixed words (no project name echoed), so the refusal never reads like a missing project. */
+export const CLIENT_MEMBERS_NOT_ALLOWED = "Only a company owner or admin, or the project's admin, can see and change its members.";
+
+/**
+ * Audit gap 12c (DEC 254n item 3, `lifecycleAccess` in project-lifecycle-routes.ts: "owners, admins and the project's administrators manage"): whether the caller is a LIVE owner or admin of the
+ * company this project belongs to. The role and company are membership's, read now (never a claim or the request); the sign-in's company, when the install resolved one, must be the same; the
+ * project's company is its latest revision's (a legacy row with none is the implicit company's, never the caller's). No company layer, no role reader, or no project: false.
+ */
+async function companyManagesProject(deps: DeveloperRouteDependencies, caller: { developerId: string; companyId?: string | undefined }, project: string): Promise<boolean> {
+  const reader = deps.companies ?? deps.developer.companies;
+  if (reader?.membershipOf === undefined) return false;
+  const membership = await reader.membershipOf(caller.developerId);
+  if (membership === undefined || (membership.role !== "owner" && membership.role !== "admin")) return false;
+  if (caller.companyId !== undefined && caller.companyId !== membership.companyId) return false;
+  const latest = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] };
+  const row = latest.Items?.[0];
+  return row !== undefined && recordInCompany(row, membership.companyId);
+}
 
 /**
  * Spec 065: a sign-in client acting as the signed-in person, within its scopes and the person's own rights. 065a: a
@@ -1548,7 +1600,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
       return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
     });
-    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
+    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator, companyId: reader.companyId }, url, deps.now());
   }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
@@ -1624,9 +1676,10 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const project = decodeURIComponent(members[1]!);
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const actions = memberActions(deps);
-  // FR-004: as the person: they administer the project, or they are a Rovara administrator.
+  // FR-004: as the person: they administer the project, they are a Rovara administrator, or (DEC 254n item 3, the rule of `lifecycleAccess`) they are a LIVE owner or admin of the company
+  // the project belongs to, grant or not.
   const own = await projectGrant(actions, project, caller.developerId);
-  if (!caller.administrator && own?.role !== "administrator") throw agentXError("FORBIDDEN", `you don't administer ${project}; ask one of its administrators`);
+  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
   const registered = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,
@@ -2108,10 +2161,10 @@ async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request:
 }
 
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
-export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40}))$/u;
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|tuning|replay|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
-export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
+export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/(?:areas|propose))$/u;
 
 /** Lessons phase 4: the weekly cards and what a person does with them (`core-host/lessons-graduation.ts` parses the same paths, with strict ids; a test holds the two equal where they are valid). Answered by the same lessons API. */
 export const LESSONS_GRADUATION_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/(?:(graduation)|tidy\/(retire-chosen|later)|check-drafts\/([^/]+)\/(started|dismiss)|rules\/([^/]+)\/(retire)|([^/]+)\/(graduate|graduate-later|both-places))$/u;
@@ -2430,6 +2483,10 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
+  }
+  if (url.pathname === "/v1/dev/me/lessons-slack") { // L4-SRC-SL (core-host/lessons-slack-switch-api.ts parses the same path; a test holds the two equal)
+    if (deps.lessonsSlackSwitch === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+    return deps.lessonsSlackSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
   }
   if (LESSONS_REPEATS_ROUTES.test(url.pathname)) {
     if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);

@@ -87,7 +87,7 @@ export const LESSON_STATUSES = ["candidate", "pending", "active", "stale", "reti
 export type LessonStatus = (typeof LESSON_STATUSES)[number];
 export type Tier = 0 | 1 | 2;
 
-export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "plan_comment", "design_comment"] as const;
+export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "plan_comment", "design_comment", "ticket_comment", "slack_reply"] as const;
 export type SpanKind = (typeof SPAN_KINDS)[number];
 
 /** What a STORED row's provenance reads an unknown span kind as: a kind a newer build wrote that this build does not know. */
@@ -279,9 +279,11 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.trial_started", "lesson.trial_retired", "lesson.trial_stable", "lesson.harm_reversed", "lesson.proposal_withdrawn", "lesson.preset_changed", "lesson.preset_proposed", "lesson.mode_changed", "lesson.trial_offer_answered", "lesson.digest_switched",
   "lesson.local_tools_switched",
   "lesson.replay_started", "lesson.replay_read", "lesson.snapshot_created",
-  "lesson.knowledge_read", "lesson.knowledge_read_alert",
+  "lesson.knowledge_read", "lesson.knowledge_read_alert", "lesson.knowledge_proposed",
+  "lesson.skill_drafted", "lesson.skill_edited", "lesson.skill_approved", "lesson.skill_activated", "lesson.skill_retired",
   "lesson.learning_source_switched",
   "lesson.graduated",
+  "lesson.kept",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];
 

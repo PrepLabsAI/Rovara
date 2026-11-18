@@ -48,6 +48,14 @@ describe("the environment beside the plan", () => {
     }
   });
 
+  it("an environment that makes the answer too big is dropped and the plan still goes (never a reason to withhold the plan)", async () => {
+    const big: EvalEnvironment = { kind: "install", commands: Array.from({ length: 8 }, () => ({ executable: "npm", args: Array.from({ length: 256 }, () => "x".repeat(700)), cwd: "." })) };
+    const { answer, events } = await deliver(big);
+    expect(answer.status).toBe("ready");
+    expect("environment" in answer).toBe(false);
+    expect(events).toEqual(["eval_environment_invalid"]);
+  });
+
   it("absent means absent: the answer has no environment key at all (byte-identical to before)", async () => {
     const { answer } = await deliver(undefined);
     expect(answer.status).toBe("ready");

@@ -78,8 +78,13 @@ describe("the hosted dispatcher declares the team-rule seam only where lessons a
     const block = await flow.standingInstructions!.forOperation({ project: "payments", mode: "IMPLEMENT" });
     expect(block?.text).toContain("integer cents");
     expect(writes).toEqual([]);
-    expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: `on:${A}` }, options(store, B))).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
-    expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" }, options(store, A))).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    // Not covered (or lessons off): no lessons reader and no team rules; the seam is still there for the company's rules and How we work pinned on the task (L4-HW3), which read nothing of the team rules row.
+    for (const [env, company] of [[`on:${A}`, B], ["off", A]] as const) {
+      const flow = hostedDispatcherFlow({ ROVARA_CORE_LESSONS: env }, options(store, company))!;
+      expect(flow.learned, env).toBeNull();
+      expect(await flow.standingInstructions!.forOperation({ project: "payments", mode: "IMPLEMENT" }), env).toBeUndefined();
+    }
+    expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" }, options(store, A))!.standingInstructions).not.toBeNull();
     const other = hostedDispatcherFlow({ ROVARA_CORE_LESSONS: `on:${A},${B}`.replace(",", ":") }, options(new MemoryDocumentStore(), B))!;
     expect(await other.standingInstructions!.forOperation({ project: "payments", mode: "IMPLEMENT" })).toBeUndefined();
   });

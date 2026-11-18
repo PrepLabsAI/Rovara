@@ -14,6 +14,7 @@
 // Every source answers only its own company: a scope naming another company is no answer. Nothing here reads the request.
 import { createDocumentBaseScoreCache, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { EvalPlanRead, EvalPlanRun, EvalPlanScope, EvalPlanSources } from "../proof/eval-plan-delivery.js";
+import type { EvalEnvironmentSource } from "./eval-environment-source.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { readApprovedEvalPlan } from "./eval-spend.js";
 import { createBoundEvalSpendCapabilities } from "./eval-reservation.js";
@@ -26,10 +27,15 @@ export interface EvalPlanSourceDeps {
   /** The install's members, for the approver's current role. Absent: the local owner only. */
   readonly members?: SessionMembers | undefined;
   readonly log?: ((event: "eval_spend_approval_invalid" | "eval_plan_invalid") => void) | undefined;
+  /**
+   * L4-EVS2: the environment the sealed eval runs in (the project's saved image, else its approved install steps), read for the run's own company and project (`createEvalEnvironmentSource`). Absent: the plan is
+   * answered with no environment (the bare worker image, as before).
+   */
+  readonly environment?: EvalEnvironmentSource | undefined;
 }
 
 /** The base commit of the plan's repository in the run's own pin, or undefined: the plan's named repository, else the run's only one. */
-function baseOf(run: EvalPlanRun | undefined, repository: string | undefined): string | undefined {
+export function baseOf(run: Pick<EvalPlanRun, "bases"> | undefined, repository: string | undefined): string | undefined {
   const bases = run?.bases;
   if (bases === undefined || bases.length === 0) return undefined;
   const found = repository === undefined ? (bases.length === 1 ? bases[0] : undefined) : bases.find(entry => entry.repositoryId === repository);
@@ -43,11 +49,17 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
       if (scope.companyId !== deps.companyId) return undefined;
       const found = await readApprovedEvalPlan(table, scope.project);
       if (found === undefined) return undefined;
+      // L4-EVH: a run made under one approved item (a health run's request) is answered by that item only.
+      if (run.spendDigest !== undefined && found.spend.digest !== run.spendDigest) return undefined;
       const baseCommit = baseOf(run, found.plan.repository);
       if (baseCommit === undefined) return undefined;
       const { key, ...body } = found.plan;
       const spend = found.spend;
+      // L4-EVS2: the environment of THIS company's project and the plan's own repository. Any fault is "no environment" (never a reason to withhold the plan).
+      let environment: Awaited<ReturnType<EvalEnvironmentSource>>;
+      try { environment = await deps.environment?.(scope, found.plan.repository); } catch { environment = undefined; }
       return {
+        ...(environment === undefined ? {} : { environment }),
         plan: {
           company: deps.companyId, project: scope.project, ...body,
           key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },

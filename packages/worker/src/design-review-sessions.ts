@@ -13,6 +13,7 @@ import { assistantOutcome, failedTurn, type AssistantOutcome } from "./session-e
 import { designReviewRuntime } from "./task-model.js";
 import { designMergeAnswerSpec, designReviewAnswerSpec } from "./design-review-answers.js";
 import { answerToolInstruction, createAnswerChannel, structuredAnswersEnabled } from "./structured-answer.js";
+import { createTaskUsageTelemetry } from "./usage.js";
 import { assistantText } from "./verification/extension.js";
 
 const CAPABILITY_HEADER = "x-agentx-callback-capability";
@@ -82,6 +83,8 @@ export interface ReviewSessionOptions {
   /** The model and adapter of one session. The default builds them from the binding's model and the key slot's proxy. */
   runtimeFor(open: OpenDesignReviewSession): { model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter | undefined; keyId?: (() => Promise<string | undefined>) | undefined };
   onDiagnostic?: (message: string) => void;
+  /** Internal worker hook: ordinary usage events, booked by the existing task ledger writer. */
+  onUsage?: (payload: unknown) => void;
   /**
    * Standing instructions (decision 57.2): the company's rules (and the plan check's own layers) the broker sent, added to the system text AFTER the role prompt, so the text still BEGINS with the role
    * prompt (`sentAsRendered`) and the addition is counted in `harnessSystemChars` like Pi's own sections.
@@ -117,6 +120,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
       ...(answers === undefined ? {} : { answerTools: [answers.tool] }),
     }, runtime.piAdapter);
     let lastOutcome: AssistantOutcome | undefined;
+    let finished = false, disposed = false;
     let lastText: string | undefined;
     let first: { system: string; user: string; messages: number; systemObserved: boolean } | undefined;
     const files = new Set<string>();
@@ -132,6 +136,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
     const session: DesignReviewSession = {
       sessionId,
       async prompt(text) {
+        finished = false;
         lastOutcome = undefined;
         lastText = undefined;
         // The first request of a session with no history is the system message and this one user message. A session that already holds messages would say so here.
@@ -144,6 +149,7 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
         await handle.prompt(text);
         const failure = failedTurn(lastOutcome);
         if (failure !== undefined) throw failure;
+        finished = true;
         // An accepted answer reaches the orchestration as the block its reader reads; with none (the model wrote its answer as text) the text is what it was.
         return answers?.take() ?? lastText;
       },
@@ -157,7 +163,19 @@ export function createReviewSessionOpener(options: ReviewSessionOptions): Design
         return { tokensIn: Math.max(0, Math.trunc(stats.tokens.input + stats.tokens.cacheRead + stats.tokens.cacheWrite)), tokensOut: Math.max(0, Math.trunc(stats.tokens.output)), costUsd: Number.isFinite(stats.cost) ? Math.max(0, stats.cost) : 0 };
       },
       abort: () => handle.abort(),
-      dispose: () => { unsubscribe(); handle.dispose(); },
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        try {
+          if (options.onUsage !== undefined) {
+            let payload: unknown;
+            try {
+              payload = createTaskUsageTelemetry(handle.getSessionStats(), { ...handle.getModel(), ...(runtime.model.cacheRetention === undefined ? {} : { cacheRetention: runtime.model.cacheRetention }) }, finished ? "SUCCEEDED" : lastOutcome?.stopReason === "aborted" ? "CANCELLED" : "FAILED");
+            } catch { payload = {}; } // Unreadable usage makes the existing ledger refuse further spend.
+            options.onUsage(payload);
+          }
+        } finally { unsubscribe(); handle.dispose(); }
+      },
     };
     return session;
   };
@@ -172,10 +190,16 @@ export function slotRuntimeFor(input: { controlPlaneUrl: string; capability: str
     const declared = open.purpose === "merge" ? input.binding.merge : input.binding.reviewers.find((entry) => entry.keySlot === open.keySlot);
     // The model and route come from the binding, never from the port's caller: a slot the binding does not hold is refused.
     if (declared === undefined || declared.keySlot !== open.keySlot) throw agentXError("CONFIG_INVALID", "a design review session was asked for with a key slot the binding does not hold");
+    let firstKeyId: string | undefined;
+    const source = modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) });
     const proxy = !input.proxyUrl && declared.modelRoute === undefined ? undefined
-      : lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: modelAccessSource({ ...(input.proxyUrl ? { fallbackBaseUrl: input.proxyUrl } : {}), controlPlaneUrl: input.controlPlaneUrl, capability: input.capability, slot: declared.keySlot, ...(input.fetch === undefined ? {} : { fetch: input.fetch }) }) });
+      : lazyModelProxy({ baseUrl: input.proxyUrl || input.controlPlaneUrl, source: async () => {
+        const answer = await source();
+        firstKeyId ??= modelKeyIdOf(answer.apiKey);
+        return answer;
+      } });
     const runtime = designReviewRuntime({ model: declared.model, modelRoute: declared.modelRoute }, proxy, input.environment);
-    return { ...runtime, keyId: async () => (proxy === undefined ? undefined : modelKeyIdOf(await proxy.apiKey())) };
+    return { ...runtime, keyId: async () => (proxy === undefined ? undefined : firstKeyId ?? modelKeyIdOf(await proxy.apiKey())) };
   };
 }
 

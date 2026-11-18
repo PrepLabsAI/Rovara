@@ -36,6 +36,7 @@ import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.j
 import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones, SessionBindingsReader } from "../merge/seams.js";
 import type { PlaybookMode } from "../playbook/service.js";
+import type { PinnedStanding } from "../instructions/pinned.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
@@ -43,7 +44,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
-import type { KnowledgeContext, LearnedContext, WikiContext } from "@agentx/contracts";
+import type { KnowledgeContext, LearnedContext, RovaraSkillFile, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
@@ -153,6 +154,8 @@ export interface StartExtras {
 
 export interface StartExtrasInput {
   taskId: string;
+  /** The task's workspace (made with the task): a row written in the start's own transaction that has to name it. */
+  workspaceId: string;
   project: string;
   title: string;
   principal: Principal;
@@ -187,9 +190,11 @@ export interface BuildSteps {
  * started after the rules changed carries the newest ones. A rejection with `CONFIG_INVALID` or `PROCESS_UNAVAILABLE` ends the operation with its sentence; any other waits and tries again.
  */
 export interface StandingInstructionsSeam {
-  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined }): Promise<StandingInstructionsPayload | undefined>;
+  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined; pinned?: unknown }): Promise<StandingInstructionsPayload | undefined>;
   /** The playbook commit a task starting now is pinned to, kept on its workspace; the task's steps read the file at it. Refuses (as `forOperation`) when the rules cannot be read, so a task does not start under rules it cannot be given. */
   pin(project: string): Promise<string | undefined>;
+  /** Hosted: the copy of the rules kept on the task's workspace for the dispatcher (see `createStandingInstructions`). Absent on a laptop. */
+  pinContent?(project: string, playbookCommit: string | undefined): Promise<PinnedStanding | undefined>;
 }
 
 /**
@@ -311,7 +316,7 @@ export interface TaskFlowDeps {
   /**
    * Lane L10, Rovara's own fixing of a block (the owner's rule: a code fault is sent back to coding by itself at most twice, one hiccup of the checks is retried once, anything unclear is asked
    * about). `capUsd` bounds what automatic rounds may add to a task whose spend is known; `taskSpendUsd` says what it is (undefined: nothing is priced, which Code treats as 0 so the
-   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead).
+   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead; the hosted roots fill it with `core-host/company-task-spend.ts`, which never answers undefined: anything not known to be complete, including a run whose usage is not booked yet, throws).
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
@@ -430,7 +435,7 @@ export interface TaskFlowDeps {
    * Lead 4 L4-AK2: for a worker that lists "task.knowledgeContext.v1" the answer may also carry the `knowledgeContext` (facts, skill names, the "more" line, the look-up's pull set), and a fix round passes the correction's
    * words in `fix` so the lessons are picked again by them (ranking only).
    */
-  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }) => Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
+  learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }) => Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; /** Lead 4 L4-AK3: the project's live Rovara skills for a plan or build step (absent: none). */ rovaraSkills?: RovaraSkillFile[] }>;
   /**
    * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
    * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the

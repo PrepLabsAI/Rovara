@@ -233,6 +233,9 @@ describe("the health route's grants (A13)", () => {
       // Web task channel C8 (option b): the attention email's reverse index, one ATTENTION_PERSON row per company and hashed person id, kept 90 days after it was last written, then expired. Not a
       // durable record (each new attention row for the person writes it again).
       "packages/broker/src/core/notify/person-index.ts",
+      // L4-HW5b (#1047), owner DEC 254zzz45: the hosted chat decision's CHANNEL_CLAIM row, one per pressed button event, kept EVENT_DEDUPE_SECONDS so a replayed press is a no-op, then expired.
+      // The hosted twin of the core/channel rows above; not a durable record (the decision itself is stored by the approval gate, with no expiry).
+      "packages/broker/src/core-host/chat-decision.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

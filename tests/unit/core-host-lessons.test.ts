@@ -3,7 +3,7 @@
 // that company only, an erased or outside person's words never teach, and learning model calls go only through the injected port and only while the switch covers the company.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, companyScoped, projectPk, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { digestWeekOf, writeDigestSetting } from "../../packages/broker/src/lessons/digest-notice.js";
@@ -16,10 +16,17 @@ import { reflectQueueOf } from "../../packages/broker/src/lessons/reflect-queue.
 import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
 import { createLessonRepositories, type LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
 import type { PipelineModel } from "../../packages/broker/src/lessons/ports.js";
+import type { KnowledgeSources } from "../../packages/broker/src/lessons/knowledge-brief.js";
+import { flakyFactsPort } from "../../packages/broker/src/lessons/knowledge-facts.js";
+import { baseFlakyTests } from "../../packages/broker/src/core/test-env/base-flaky.js";
+import { readKnowledgeDelivery } from "../../packages/broker/src/lessons/knowledge-use.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
+import { answersBriefingOf } from "../../packages/broker/src/aws/core-engine-root.js";
+import { routeHostedAnswers, type HostedAnswersWiring } from "../../packages/broker/src/core-host/answer-routes.js";
+import { HEAD, REFUND_TS, answer, goodSentence, scriptedModel } from "../support/answer-world.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
@@ -57,7 +64,7 @@ function recordingModel(): PipelineModel & { calls: string[] } {
 
 interface Company { runtime: CoreRuntime; lessons: CoreLessons | undefined; personId: string; taskId: string; workspaceId: string }
 
-async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: HostedLessonPeople, hosts: Map<string, CoreLessons>, model?: PipelineModel): Promise<Map<string, Company>> {
+async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: HostedLessonPeople, hosts: Map<string, CoreLessons>, model?: PipelineModel, knowledge?: (companyId: OrgId, world: FakeWorld) => KnowledgeSources): Promise<Map<string, Company>> {
   setCoreLessonsGate(env);
   const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
   const lessonsSwitch = readCoreLessonsSwitch(env).value;
@@ -71,6 +78,7 @@ async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: Ho
     const lessons = createCoreLessons({
       flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => hosts.get(id)?.host, now: () => world.clock.now,
       ...(model === undefined ? {} : { learning: { model, spend: { admit: async () => true } } }),
+      ...(knowledge === undefined ? {} : { knowledge: knowledge(companyId, world) }),
     });
     lessons?.attach();
     if (lessons !== undefined) hosts.set(companyId, lessons);
@@ -162,6 +170,145 @@ describe("delivery: a step gets its own company's lessons, never another's", () 
     const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
     const a = companies.get(A)!;
     expect(await a.runtime.flow.deps.lessonsUsed!({ taskId: a.taskId, project: "payments", startingRevision: 1 }, "demo")).toMatchObject({ count: 0, none: true });
+  });
+});
+
+describe("measured facts on the deployed engine (lead 4 L4-AK2b)", () => {
+  const BOTH = [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE];
+  const putBaseline = async (world: FakeWorld, company: string, project: string, flaky: string[]) => {
+    const finished = new Date(world.clock.now - 3_600_000).toISOString();
+    const baseline = { recordedAt: finished, envRevision: 1, branch: "main", headSha: "a".repeat(40), finishedAt: finished, tests: { total: 10, passed: 10, failed: 0, skipped: 0 }, failed: [], flaky };
+    await world.store.put({ item: { pk: projectPk(company, project), sk: "TESTENV#BASELINE#LATEST", entityType: "TEST_ENV_BASELINE_LATEST", orgId: company, project, baseline } });
+  };
+  // The deployment's wiring (aws/core-engine-root.ts): the base's flaky list of THIS company's own store rows.
+  const wired = (companyId: OrgId, world: FakeWorld): KnowledgeSources => ({ facts: flakyFactsPort((task) => baseFlakyTests({ store: world.store, now: () => world.clock.now }, task)) });
+
+  it("a Build step of a company carries the base's known-flaky tests of ITS project, counted from its nightly baseline, and never another company's or project's; the record names them", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map(), undefined, wired);
+    const a = companies.get(A)!;
+    const b = companies.get(B)!;
+    await putBaseline(world, A, "payments", ["tests/a-only.test.ts"]);
+    await putBaseline(world, B, "payments", ["tests/b-only.test.ts"]);
+    await putBaseline(world, A, "other-project", ["tests/other-project.test.ts"]);
+    const loadedA = await a.runtime.flow.deps.learned!({ workspaceId: a.workspaceId, operationId: "op-fa", workflowMode: "IMPLEMENT", features: BOTH });
+    expect(loadedA.knowledgeContext?.facts?.map((fact) => fact.statement).join("\n")).toContain("tests/a-only.test.ts");
+    expect(JSON.stringify(loadedA)).not.toMatch(/b-only|other-project/u);
+    const loadedB = await b.runtime.flow.deps.learned!({ workspaceId: b.workspaceId, operationId: "op-fb", workflowMode: "IMPLEMENT", features: BOTH });
+    expect(JSON.stringify(loadedB)).toContain("tests/b-only.test.ts");
+    expect(JSON.stringify(loadedB)).not.toMatch(/a-only|other-project/u);
+    const record = await readKnowledgeDelivery(world.store, A, "op-fa");
+    expect(record?.pushed).toEqual(loadedA.knowledgeContext!.facts!.map((fact) => `F-${fact.id}`));
+    expect(await readKnowledgeDelivery(world.store, B, "op-fa")).toBeUndefined();
+    // Not asked of an older worker, and without the wiring a deployment has no facts (the lessons-only briefing as before).
+    expect(await a.runtime.flow.deps.learned!({ workspaceId: a.workspaceId, operationId: "op-fo", workflowMode: "IMPLEMENT", features: [LEARNED_CONTEXT_FEATURE] })).toEqual({});
+    const bare = await companyWorld(createFakeWorld(), { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    const bareA = bare.get(A)!;
+    expect(await bareA.runtime.flow.deps.learned!({ workspaceId: bareA.workspaceId, operationId: "op-fx", workflowMode: "IMPLEMENT", features: BOTH })).toEqual({});
+  });
+});
+
+describe("the team knowledge briefing of an answer on the deployed engine (lead 4 L4-AK2b)", () => {
+  const ask = { project: "payments", question: "How do we retry network calls?", repos: ["demo"] };
+  const scopedLesson = (company: string, id: string, title: string) => ({ ...activeLesson(company, id, title), type: "convention" as const, scope: { repos: ["demo"], paths: ["src/net/**"] } });
+
+  it("a company's answer is briefed with ITS lessons and facts of the asked project alone: never another company's (same project name) or another project's", async () => {
+    const world = createFakeWorld();
+    const knowledge = (companyId: OrgId, w: FakeWorld): KnowledgeSources => ({ facts: flakyFactsPort((task) => baseFlakyTests({ store: w.store, now: () => w.clock.now }, task)) });
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["person-1"], [B]: ["person-1"] }), new Map(), undefined, knowledge);
+    const a = companies.get(A)!;
+    const b = companies.get(B)!;
+    await putLesson(a.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
+    await putLesson(b.lessons!, scopedLesson(B, "les_bbbb1111", "Retry network calls with the B helper"));
+    const finished = new Date(world.clock.now - 3_600_000).toISOString();
+    for (const [company, name] of [[A, "tests/a-flaky.test.ts"], [B, "tests/b-flaky.test.ts"]] as const) {
+      const baseline = { recordedAt: finished, envRevision: 1, branch: "main", headSha: "a".repeat(40), finishedAt: finished, tests: { total: 5, passed: 5, failed: 0, skipped: 0 }, failed: [], flaky: [name] };
+      await world.store.put({ item: { pk: projectPk(company, "payments"), sk: "TESTENV#BASELINE#LATEST", entityType: "TEST_ENV_BASELINE_LATEST", orgId: company, project: "payments", baseline } });
+    }
+    const forA = (await a.lessons!.host.answerBriefing(ask))!;
+    const forB = (await b.lessons!.host.answerBriefing(ask))!;
+    expect(forA).toContain("A helper");
+    expect(forA).toContain("a-flaky.test.ts");
+    expect(forA).not.toMatch(/B helper|b-flaky|bbbb1111/u);
+    expect(forB).toContain("B helper");
+    expect(forB).toContain("b-flaky.test.ts");
+    expect(forB).not.toMatch(/A helper|a-flaky|aaaa1111/u);
+    // Another project of the same company has none of them.
+    expect(await a.lessons!.host.answerBriefing({ ...ask, project: "other-project" })).toBeUndefined();
+    // Nothing is written by asking.
+    const rows = (await world.store.query({ pk: companyScoped(A, "LESSON_LOAD") })).items.length + (await world.store.query({ pk: companyScoped(A, "KNOWLEDGE_GIVEN") })).items.length;
+    expect(rows).toBe(0);
+  });
+
+  it("a company the switch does not cover has no briefing (nothing is built for it)", async () => {
+    const world = createFakeWorld();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: `on:${A}` }, peopleOf({ [A]: [], [B]: [] }), new Map());
+    expect(companies.get(B)!.lessons).toBeUndefined();
+    await putLesson(companies.get(A)!.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
+    expect(await companies.get(A)!.lessons!.host.answerBriefing(ask)).toContain("A helper");
+  });
+});
+
+describe("the hosted answer route with the engine's briefing join (lead 4 L4-AK2g)", () => {
+  const ANSWER_PATH = "/v1/app/projects/payments/answers";
+  const scopedLesson = (company: string, id: string, title: string) => ({ ...activeLesson(company, id, title), type: "convention" as const, scope: { repos: ["demo"], paths: ["src/net/**"] } });
+  async function hostedWorld(roles: Record<string, "view" | "manage">) {
+    const world = createFakeWorld();
+    const hosts = new Map<string, CoreLessons>();
+    const companies = await companyWorld(world, { [CORE_LESSONS_VARIABLE]: "on" }, peopleOf({ [A]: ["person-1"], [B]: ["person-1"] }), hosts);
+    await putLesson(companies.get(A)!.lessons!, scopedLesson(A, "les_aaaa1111", "Retry network calls with the A helper"));
+    await putLesson(companies.get(B)!.lessons!, scopedLesson(B, "les_bbbb1111", "Retry network calls with the B helper"));
+    const asked: string[] = [];
+    // The engine's own join, over the real lessons hosts; every ask of a company's host is recorded.
+    const hostOf = (companyId: OrgId) => {
+      const host = hosts.get(companyId)?.host;
+      return host === undefined ? undefined : { answerBriefing: async (input: Parameters<typeof host.answerBriefing>[0]) => { asked.push(companyId); return await host.answerBriefing(input); } };
+    };
+    const model = scriptedModel([answer([goodSentence])]);
+    const wiringOf = (runtimeCompany: OrgId): HostedAnswersWiring => ({
+      standing: async (personId, companyId, project) => { const access = roles[`${companyId}/${project}/${personId}`]; return access === "manage" ? { access, basis: "company-admin" } : { access: access ?? "none" }; },
+      repositories: async () => ({ names: ["demo"], handles: [{ name: "demo", defaultBranch: "main", repository: { url: "https://github.com/example/demo.git" }, scope: { orgId: runtimeCompany }, host: { baseBranchHead: async () => HEAD, fileAtRevision: async () => REFUND_TS } }] }),
+      model: () => model,
+      briefing: answersBriefingOf(runtimeCompany, hostOf),
+    });
+    const post = async (runtimeCompany: OrgId, companyId: OrgId, personId: string) => {
+      const body = JSON.stringify({ requestId: randomUUID(), question: "How do we retry network calls?" });
+      const response = await routeHostedAnswers({ request: { method: "POST", path: ANSWER_PATH, headers: {}, body }, path: ANSWER_PATH, personId, companyId, store: world.store, wiring: wiringOf(runtimeCompany), now: () => world.clock.now });
+      return { status: response.statusCode, raw: response.body ?? "" };
+    };
+    return { post, asked, model };
+  }
+
+  it("a company's answer is briefed with ITS lessons alone (same project name in both), and only the company's own host is asked", async () => {
+    const w = await hostedWorld({ [`${A}/payments/ada`]: "view", [`${B}/payments/bob`]: "view" });
+    expect((await w.post(A, A, "ada")).status).toBe(200);
+    expect(w.asked).toEqual([A]);
+    const forA = w.model.turns.map((turn) => turn.transcript).join("\n");
+    expect(forA).toContain("A helper");
+    expect(forA).not.toMatch(/B helper|bbbb1111/u);
+    const before = w.model.turns.length;
+    expect((await w.post(B, B, "bob")).status).toBe(200);
+    expect(w.asked).toEqual([A, B]);
+    const forB = w.model.turns.slice(before).map((turn) => turn.transcript).join("\n");
+    expect(forB).toContain("B helper");
+    expect(forB).not.toMatch(/A helper|aaaa1111/u);
+  });
+
+  it("another company's runtime never reads a company's lessons: a request for B on A's wiring is not briefed, and no host is asked", async () => {
+    const w = await hostedWorld({ [`${B}/payments/bob`]: "view" });
+    expect((await w.post(A, B, "bob")).status).toBe(200);
+    expect(w.asked).toEqual([]);
+    expect(w.model.turns.map((turn) => turn.transcript).join("\n")).not.toContain("team-knowledge");
+  });
+
+  it("the role is checked BEFORE the briefing: a person with no role gets the one 404, the briefing is never called, and the model is never opened", async () => {
+    const w = await hostedWorld({ [`${A}/payments/ada`]: "view" });
+    for (const [company, person] of [[A, "stranger"], [B, "ada"], [A, "bob"]] as const) {
+      const result = await w.post(company, company, person);
+      expect(result.status, `${company} ${person}`).toBe(404);
+    }
+    expect(w.asked).toEqual([]);
+    expect(w.model.opened).toHaveLength(0);
   });
 });
 

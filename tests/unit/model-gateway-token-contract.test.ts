@@ -12,7 +12,7 @@ describe("TC-1 claims", () => {
     expect(Reflect.get(taskContract, "TASK_KEY_PURPOSE_MEMBER")).toBe("rovara_purpose");
   });
   it("pins the shared bytes and module constants and field list", () => {
-    expect(createHash("sha256").update(bytes()).digest("hex")).toBe("1ee6a661a46f3a79cf61989d7fe19061fedd3e435a3ab1dd06f056d9bc24e7b3");
+    expect(createHash("sha256").update(bytes()).digest("hex")).toBe("2376aa1542f645db45d081fa0818e0b6952f8fe78e485df679e04a492096f6e1");
     expect(vector().constants).toEqual({ typ: TASK_TOKEN_TYP, aud: TASK_TOKEN_AUDIENCE, alg: TASK_TOKEN_ALGORITHM, lifetime: TASK_TOKEN_SECONDS, keyPurpose: taskContract.TASK_KEY_PURPOSE, keyPurposeMember: taskContract.TASK_KEY_PURPOSE_MEMBER });
     expect(vector().claims).toEqual(TASK_TOKEN_CLAIMS);
     expect(Object.keys(TaskTokenClaimsSchema.shape)).toEqual(vector().claims.map(f => f.name));

@@ -125,7 +125,8 @@ function routerPaths(): Set<string> {
 }
 
 describe("every /v1/dev route the broker registers", () => {
-  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}");
+  // A strictly typed id in a router pattern (a skill name, L4-AK3) is a path parameter like any other.
+  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}").replace(/\[a-z0-9\]\[a-z0-9-\]\{0,63\}/g, "{}");
   const tablePaths = new Set(DEV_ROUTES.map((route) => normal(route.path)));
 
   it("has a row, by path, and every row's path is a route", () => {
@@ -212,7 +213,7 @@ async function setUp(mode: "linking" | "developer") {
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
-    companyEgress: { addresses: () => "44.235.136.195,44.226.134.187" },
+    companyEgress: { addresses: () => "203.0.113.195,198.51.100.187" },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };

@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { LEARNING_SOURCE_KEYS } from "../../../packages/contracts/src/index.js";
 import { buildLearningSources, setLearningSourcePause, SOURCE_KINDS } from "../../../packages/broker/src/lessons/learning-sources.js";
+import { ALL_PAUSABLE_KINDS, pausedKindsFor } from "../../../packages/broker/src/lessons/paused-kinds.js";
 import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
@@ -30,6 +31,18 @@ describe("what each row stands for", () => {
       expect(SOURCE_KINDS[key].length).toBeGreaterThan(0);
       for (const kind of SOURCE_KINDS[key]) { expect(SPAN_KINDS).toContain(kind); expect(seen.has(kind), kind).toBe(false); seen.add(kind);  }
     }
+  });
+});
+
+describe("the ticket comments row", () => {
+  it("the tickets row stands for `ticket_comment`: its Pause writes the key the ticket source reads, and the unreadable-store answer includes it", async () => {
+    expect(SOURCE_KINDS.tickets).toEqual(["ticket_comment"]);
+    expect(LEARNING_SOURCE_KEYS).toContain("tickets");
+    const { store, pause } = setup();
+    expect(await pause("tickets", true)).toEqual({ ok: true, paused: true, changed: true });
+    expect(Object.keys((await store.flags(KEY)).stoppedKinds ?? {})).toEqual(["ticket_comment"]);
+    expect([...(await pausedKindsFor(store, KEY))]).toEqual(["ticket_comment"]);
+    expect(ALL_PAUSABLE_KINDS.has("ticket_comment")).toBe(true);
   });
 });
 

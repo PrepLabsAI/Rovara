@@ -176,6 +176,18 @@ describe("hosted wiring (d): company reads and the audit caller word", () => {
     expect(await reads.companyOf!("dev-1")).toBeUndefined();
   });
 
+  it("hands on the live role from the same membership row, read now; a revoked or another person's row is none (audit gap 4)", async () => {
+    const s = senders();
+    const reads = companyReadsFromEnvironment(env, s)!;
+    s.setMembership({ entityType: "COMPANY_MEMBERSHIP", personId: "dev-1", companyId: ORG_A, role: "owner", joinedAt: "2026-11-15T00:00:00.000Z" });
+    expect(await reads.membershipOf!("dev-1")).toEqual({ companyId: ORG_A, role: "owner" });
+    expect((s.calls.document.at(-1) as GetCommand).input).toEqual({ TableName: "agentx-staging-signin", Key: { pk: "COMPANY_MEMBER#dev-1", sk: "COMPANY" }, ConsistentRead: true });
+    s.setMembership({ entityType: "COMPANY_MEMBERSHIP", personId: "dev-1", companyId: ORG_A, role: "admin", joinedAt: "2026-11-15T00:00:00.000Z", revokedAt: "2026-11-16T00:00:00.000Z" });
+    expect(await reads.membershipOf!("dev-1")).toBeUndefined();
+    s.setMembership({ entityType: "COMPANY_MEMBERSHIP", personId: "dev-2", companyId: ORG_A, role: "owner", joinedAt: "2026-11-15T00:00:00.000Z" });
+    expect(await reads.membershipOf!("dev-1")).toBeUndefined();
+  });
+
   it("hands on only a query over the State table", async () => {
     const s = senders();
     const reads = companyReadsFromEnvironment(env, s)!;

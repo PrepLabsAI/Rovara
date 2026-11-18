@@ -10,6 +10,8 @@
 // POST /v1/app/org/lessons/local-tools refused: the switch is on the lessons page
 // POST /v1/dev/projects/{p}/lessons a local coding tool's read (decision 46b): the lessons the whole project may read, stable or person-approved, for the repository its git remote names. The owner's API token or a
 // script token with the `lessons` permission for that project; 60 a minute per person; the day's count per person and project holds numbers only (no lesson, task, file or repository text).
+// POST /v1/dev/projects/{p}/knowledge/propose a team SUGGESTION from a tool outside Rovara (`team_propose`, L4-AK3): a weak-source lesson that waits for a second sighting and then for a person (never applied by itself); same permission and
+// token rules as the reads, 10 a person a UTC day, no model call, audited before it is stored; the company's "Knowledge stays in Rovara" answers the one fixed sentence and stores nothing
 // POST /v1/dev/projects/{p}/knowledge/areas the table of contents: a tree project > repository > top folder of the project's team knowledge with unit counts by kind, names and numbers only (same permission, same limits)
 // Both reads are for tools OUTSIDE Rovara, so they carry the owner's limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person (a fixed refusal after that), no bulk mode (`all` is refused), one audit
 // record per answer holding the unit ids and no text, and one admin notice a day when a person's tools were served more than 150 DISTINCT units.
@@ -20,7 +22,7 @@ import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { LESSON_PAGE_MAX, buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
 import type { LocalToolsCounter } from "../../lessons/local-tools.js";
-import { KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
+import { KNOWLEDGE_NO_SUCH_PROJECT, KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
 import { knowledgeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
 import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
@@ -32,6 +34,8 @@ const PROJECT_LESSONS = /^\/v1\/app\/projects\/([^/]+)\/lessons(?:\/([A-Za-z0-9_
 const TASK_LESSONS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/lessons(?:\/([A-Za-z0-9_-]{4,64})\/feedback)?$/u;
 const LOCAL_LESSONS = /^\/v1\/dev\/projects\/([^/]+)\/lessons$/u;
 const KNOWLEDGE_AREAS = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/areas$/u;
+const KNOWLEDGE_PROPOSE = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/propose$/u;
+const LOCAL_REPLAY = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/replay$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export { LOCAL_LESSONS_PER_MINUTE };
 const UNAVAILABLE = KNOWLEDGE_UNAVAILABLE;
@@ -102,18 +106,35 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
   const localRead = async (project: string, request: BrokerRequest, caller: TaskCaller, tool: "lessons" | "areas"): Promise<object> =>
     await server.read({ project, developerId: caller.principal.personId, tool, body: request.body, ...(caller.scriptToken === undefined ? {} : { token: caller.scriptToken }) });
 
+  // A tool's team suggestion (L4-AK3): the shared server's `propose`, the one the hosted twin also runs.
+  const proposeFromTool = async (project: string, request: BrokerRequest, caller: TaskCaller): Promise<object> =>
+    await server.propose({ project, developerId: caller.principal.personId, body: request.body, ...(caller.scriptToken === undefined ? {} : { token: caller.scriptToken }) });
+
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
     const project = PROJECT_LESSONS.exec(path);
     const task = TASK_LESSONS.exec(path);
     const local = request.method === "POST" ? LOCAL_LESSONS.exec(path) : null;
     const areas = request.method === "POST" ? KNOWLEDGE_AREAS.exec(path) : null;
-    if (project === null && task === null && local === null && areas === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
+    const propose = request.method === "POST" ? KNOWLEDGE_PROPOSE.exec(path) : null;
+    const replay = LOCAL_REPLAY.exec(path);
+    if (project === null && task === null && local === null && areas === null && propose === null && replay === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
     try {
       if (caller.principal.companyId !== companyId) throw agentXError("FORBIDDEN", "this is not your install");
       const who = { orgId: companyId, developerId: caller.principal.personId };
       if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller, "lessons"));
       if (areas !== null) return json(200, await localRead(decodeURIComponent(areas[1]!), request, caller, "areas"));
+      if (propose !== null) return json(200, await proposeFromTool(decodeURIComponent(propose[1]!), request, caller));
+      if (replay !== null) {
+        if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+        if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", "This route needs a full-access person token.");
+        const name = decodeURIComponent(replay[1]!);
+        if (await flow.projects.latest(name) === undefined) throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT);
+        const params = new URLSearchParams(request.path.split("?")[1] ?? "");
+        const values = params.getAll("tasks");
+        if (values.length > 1 || (values[0] !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(values[0]))) throw agentXError("CONFIG_INVALID", "tasks: must be an integer from 1 to 50");
+        try { return json(200, { project: name, ...(await lessons.replay(name, values[0] === undefined ? 30 : Number(values[0]))) }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+      }
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
         if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");

@@ -84,3 +84,19 @@ describe("the local answer route", () => {
     expect(JSON.parse(answered!.body)).toMatchObject({ outcome: "not_set_up", honesty: ANSWER_WORDS.notSetUp });
   });
 });
+
+describe("the local answer route: the team knowledge briefing (lead 4 L4-AK2b)", () => {
+  it("the owner's answer is briefed by this install's seam with the project and its repositories; a non-owner never reaches it; no seam means no block", async () => {
+    const model = scriptedModel([answer([goodSentence])]);
+    const asked: Array<{ project: string; repos: readonly string[] }> = [];
+    const routes = createLocalProjectAnswers({ flow, registry, store: new MemoryDocumentStore(), model, now: () => T0, briefing: async (input) => { asked.push({ project: input.project, repos: input.repos }); return "<<team-knowledge>> local notes <</team-knowledge>>"; } });
+    expect((await routes.routes(request(), owner))?.statusCode).toBe(200);
+    expect(asked).toEqual([{ project: "app", repos: ["web"] }]);
+    expect(model.turns[0]!.transcript).toContain("local notes");
+    await routes.routes(request(), { principal: { ...principal, roles: ["developer"] } } as never);
+    expect(asked).toHaveLength(1);
+    const bare = make();
+    await bare.routes.routes(request(), owner);
+    expect(bare.model.turns[0]!.transcript).not.toContain("team-knowledge");
+  });
+});

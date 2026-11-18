@@ -83,10 +83,15 @@ export class Ec2WorkerFoundation extends Construct {
       }),
       description: `AgentX ${naming.environmentTagValue} EC2 worker instances`,
     });
+    // L4-IAM: a named environment's boot pulls the worker image (also the sandbox image) and the executor image, both under the environment's pull-through prefix
+    // (`agentx-<env>/`, also where the staging build pushes: agentx-<env>/worker, /executor). Its test-service starter copies have their own statement below. Nothing
+    // else is read, so the read is that prefix and not every repository in the account. It overlaps the read half of EcrPullThroughCache below on purpose (either could be dropped alone). A
+    // worker image outside the prefix is refused at plan time (packages/cli/src/deploy/parameters.ts). The legacy production template keeps its original statement.
+    const imageRepositories = naming.env === undefined ? "*" : `${naming.pullThroughPrefix}/*`;
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "EcrImageAccess",
       actions: ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-      resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/*`],
+      resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${imageRepositories}`],
     }));
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "EcrTokenAccess",

@@ -62,8 +62,8 @@ export async function keepQuietLesson(deps: LessonDeps, store: LessonStore, evid
   const now = deps.now();
   const renewed = await store.mutate(key, lessonId, (lesson) => (lesson.status === "active" ? { expiresAt: Math.max(lesson.expiresAt, now + expiryWindowMs(lesson.type, configuredDays)), lastValidatedAt: now } : undefined));
   if (renewed === undefined || renewed.status !== "active") return false;
-  await evidence.writeFade(key, lessonId, { renewals: 0 }, now);
-  return true;
+  // The question is answered only when its state is reset: a reset that could not be written is reported (the lesson is renewed all the same, and the question still stands for a second answer).
+  return await evidence.writeFade(key, lessonId, { renewals: 0 }, now);
 }
 
 /** What the fade rule decided for one due lesson: renewed quietly, kept for a person to answer, left alone because the chances are not known, or it fades (the sweep expires it). */

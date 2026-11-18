@@ -36,8 +36,11 @@ export interface DeveloperRecord { developerId: string; provider: DeveloperSignI
   /** True once the person chose their own name (`PUT /v1/dev/me/name`); a sign-in then leaves `displayName` alone. Absent: the provider's name. */
   displayNameChosen?: boolean;
   email?: string; slackUserId?: string; /** DEC 254w: a connected install-workspace Slack user (kept by every sign-in), and on a connected sign-in's own record the person it signs in as. */ linkedSlackUserId?: string; mergedInto?: string;
-  /** DEC 254zzz33 (4): on a connected sign-in's own record that was unlinked (kept, never deleted): when, and from which person. */
-  unlinkedAt?: string; unlinkedFrom?: string;
+  /** DEC 254zzz33 (4): on a connected sign-in's own record that was unlinked (kept, never deleted): when, and from which person. DEC 254zzz39: and that person's company (the only one
+   * it may be linked into again). All three go when it is linked again. */
+  unlinkedAt?: string; unlinkedFrom?: string; unlinkedCompany?: string;
+  /** DEC 253z: a sign-in with no company (never a legacy seat in the built-in company); also every kept unlinked record (DEC 254zzz33). */
+  companyless?: boolean;
   /** DEC 254e: the Slack workspace (id, and its name when Slack gives one) of a Slack sign-in with Code's company layer on. Never a company. */
   slackTeamId?: string; slackTeamName?: string;
   firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string;
@@ -381,11 +384,13 @@ export class DeveloperSignInStore {
       if (options.companyless !== true) await this.put({ ...emailIndexKey(profile.email, companyId), entityType: "DEVELOPER_EMAIL", developerId: profile.developerId, updatedAt: at });
       // ID-STEPUP-FOLLOWUPS (a): the factor email is captured on the FIRST sign-in only. Both conditions hold only for the write that created the record: if_not_exists keeps an earlier
       // first sign-in's time and mark (a record from before the mark has an older time), so a later sign-in, with whatever email the provider now says, never sets or moves it.
+      // DEC 254zzz39 (L1): a connected sign-in's record that was unlinked is kept (DEC 254zzz33) with no mark (a link writes none, an unlink removes it), so its FIRST OWN sign-in
+      // after the unlink is the write that sets the mark, and captures, as a deleted record's next sign-in did. Only while it is still marked unlinked (a link again clears that).
       try {
         await this.input.documentClient.send(new UpdateCommand({
           TableName: this.input.tableName, Key: { pk: `DEVELOPER#${profile.developerId}`, sk: META },
           UpdateExpression: "SET factorEmail = :email, factorEmailSetAt = :at, factorEmailSetBy = :by",
-          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(factorEmail) AND firstSignInAt = :at AND firstSignInMark = :mark",
+          ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(factorEmail) AND firstSignInMark = :mark AND (firstSignInAt = :at OR attribute_exists(unlinkedAt))",
           ExpressionAttributeValues: { ":email": profile.email, ":at": at, ":by": "first_sign_in", ":mark": mark },
         }));
       } catch (error) {

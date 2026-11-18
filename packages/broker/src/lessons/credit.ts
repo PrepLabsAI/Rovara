@@ -29,10 +29,13 @@ export function lessonIdOfUnit(unit: Pick<UseReportUnit, "id" | "kind">): string
  * Whether the change may have touched the lesson's code area. Unknown files (`undefined`): not ruled out. Known files: a lesson with no path scope is about the whole project, so any change touches it; a scoped lesson needs a changed
  * file in its area. A known empty list (nothing changed) touches nothing.
  */
-export function lessonAreaOverlap(lesson: Pick<Lesson, "scope">, touched: readonly string[] | undefined): boolean {
+export function lessonAreaOverlap(lesson: Pick<Lesson, "scope">, touched: readonly string[] | undefined, touchedRepos?: readonly string[]): boolean {
   if (touched === undefined) return true;
   const globs = lesson.scope.paths ?? [];
   if (touched.length === 0) return false;
+  // A lesson about named repositories is not touched by a change that only reached other ones (the same path in another repository is not its area). Repositories not known: no lesson is ruled out by them.
+  const repos = lesson.scope.repos ?? [];
+  if (repos.length > 0 && touchedRepos !== undefined && !repos.some((repo) => touchedRepos.includes(repo))) return false;
   if (globs.length === 0) return true;
   const patterns = globs.map(globToRegExp);
   return touched.some((file) => patterns.some((p) => p.test(normal(file))));
@@ -42,7 +45,7 @@ export function lessonAreaOverlap(lesson: Pick<Lesson, "scope">, touched: readon
  * The share of one clean merge each lesson is owed, `1/k` for each of the k eligible lessons. `loaded` are the lessons that reached the task's prompt (a lesson that never did earns nothing whatever a report says).
  * `reports` are the task's Build and Fix use reports; absent or empty means no report was made.
  */
-export function lessonCreditShares(input: { lessons: ReadonlyMap<string, Pick<Lesson, "scope">>; loaded: ReadonlySet<string>; reports: readonly UseReport[] | undefined; touched: readonly string[] | undefined }): Map<string, number> {
+export function lessonCreditShares(input: { lessons: ReadonlyMap<string, Pick<Lesson, "scope">>; loaded: ReadonlySet<string>; reports: readonly UseReport[] | undefined; touched: readonly string[] | undefined; /** The repositories the merged change reached (with `touched`); absent: not known. */ touchedRepos?: readonly string[] | undefined }): Map<string, number> {
   const reports = input.reports ?? [];
   if (reports.length > 0) {
     // The pure 1/k rule is the contract's (`knowledgeCreditShares`, L4-AK2): of the Build and Fix reports, a lesson is eligible when it was given and the agent said it used it (or, when no report was made at all, when its area was
@@ -53,7 +56,7 @@ export function lessonCreditShares(input: { lessons: ReadonlyMap<string, Pick<Le
       units: report.units.flatMap((unit) => {
         const id = lessonIdOfUnit(unit);
         if (id === undefined || !input.loaded.has(id) || !input.lessons.has(id) || !unit.areaTouched) return [];
-        if (input.touched !== undefined && !lessonAreaOverlap(input.lessons.get(id)!, input.touched)) return [];
+        if (input.touched !== undefined && !lessonAreaOverlap(input.lessons.get(id)!, input.touched, input.touchedRepos)) return [];
         return [{ id: `L-${id}`, kind: "lesson" as const, given: "push" as const, areaTouched: true, ...(unit.used === undefined ? {} : { used: unit.used }) }];
       }),
     }));
@@ -63,7 +66,7 @@ export function lessonCreditShares(input: { lessons: ReadonlyMap<string, Pick<Le
   const eligible = new Set<string>();
   for (const id of input.loaded) {
     const lesson = input.lessons.get(id);
-    if (lesson !== undefined && lessonAreaOverlap(lesson, input.touched)) eligible.add(id);
+    if (lesson !== undefined && lessonAreaOverlap(lesson, input.touched, input.touchedRepos)) eligible.add(id);
   }
   const share = eligible.size === 0 ? 0 : 1 / eligible.size;
   return new Map([...eligible].sort().map((id) => [id, share] as const));

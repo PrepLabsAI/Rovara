@@ -8,9 +8,11 @@
 // once per slot. A re-ask fails that slot closed: it is recorded on the slot's row (`askedAgain`), the slot's key is blocked at the proxy, and `designReviewKeyIds` no longer returns it, so the slot
 // counts as "no result". One key per slot also keeps "the first call of this key" (the proxy's record that proves what a reviewer was sent) unambiguous.
 //
+// Hosted gateway grants are the exception: the first claims stay on this same row; renewals preserve the jti, ceiling and first key id for at most 600 seconds.
+//
 // A slot's money is a fixed ceiling, allocated for the whole round in ONE conditional write at dispatch (`allocateSlotBudgets`); a slot's key can never be given more than its ceiling.
 import { createHash } from "node:crypto";
-import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, queryAll, when, type DesignReviewBinding, type DocumentStore, type ModelSelection, type OrgId } from "@agentx/contracts";
+import { parseTaskTokenClaims, type TaskTokenClaims, type JsonValue, INDEX_EXPIRY_ATTRIBUTE, agentXError, change, queryAll, when, type DesignReviewBinding, type DocumentStore, type ModelSelection, type OrgId } from "@agentx/contracts";
 import type { OperationRecord } from "../task-flow/records.js";
 import { designReviewKeyBudgets } from "./estimate.js";
 import { designReviewPartition, SLOT_PACKET_TTL_SECONDS, SLOT_PATTERN } from "./packet-store.js";
@@ -139,13 +141,17 @@ export interface SlotKeyRecord {
   expiresAt: number;
   /** How many times the slot was asked for a key after the first. Above 0 the slot has failed closed. */
   askedAgain: number;
+  /** Hosted only: first signed claims, never the token or signature. Laptop keys remain one-shot. */
+  reviewerGrant?: TaskTokenClaims;
 }
 
 function recordOf(item: Record<string, unknown> | undefined, scope: { orgId: string; operationId: string; slot: string }): SlotKeyRecord | undefined {
   if (item === undefined || item.entityType !== KEY_ENTITY || item.orgId !== scope.orgId || item.operationId !== scope.operationId || item.keySlot !== scope.slot) return undefined;
   const { keyId, purpose, budgetUsd, expiresAt, askedAgain } = item;
   if (typeof keyId !== "string" || !KEY_ID.test(keyId) || (purpose !== "reviewer" && purpose !== "merge") || typeof budgetUsd !== "number" || typeof expiresAt !== "number") return undefined;
-  return { keyId, purpose, budgetUsd, expiresAt, askedAgain: typeof askedAgain === "number" && askedAgain > 0 ? askedAgain : 0 };
+  const reviewerGrant = item.reviewerGrant === undefined ? undefined : parseTaskTokenClaims(item.reviewerGrant);
+  if (item.reviewerGrant !== undefined && reviewerGrant?.reviewer === undefined) return undefined;
+  return { keyId, purpose, budgetUsd, expiresAt, ...(reviewerGrant === undefined ? {} : { reviewerGrant }), askedAgain: typeof askedAgain === "number" && askedAgain > 0 ? askedAgain : 0 };
 }
 
 /** Whether the slot has a key row at all, damaged or not: any row means the slot's one key was already minted (or half-recorded), so the slot is closed. */
@@ -169,6 +175,7 @@ export interface SlotKeyRecordInput {
   budgetUsd: number;
   alias: string;
   nowMs: number;
+  reviewerGrant?: TaskTokenClaims;
 }
 
 /** Records the key just minted for a slot (its id and facts, never the key). False when the slot already has a key: the caller gives its own key back and the slot is asked-again. */
@@ -176,6 +183,7 @@ export async function putSlotKey(deps: Pick<DocumentStore, "put">, input: SlotKe
   const written = await deps.put({
     item: {
       ...keyItem(input.orgId, input.operationId, input.slot), entityType: KEY_ENTITY, orgId: input.orgId, operationId: input.operationId, keySlot: input.slot, purpose: input.purpose, round: input.round,
+      ...(input.reviewerGrant === undefined ? {} : { reviewerGrant: JSON.parse(JSON.stringify(input.reviewerGrant)) as JsonValue }),
       keyId: input.keyId, expiresAt: input.expiresAt, budgetUsd: input.budgetUsd, alias: input.alias, createdAt: input.nowMs, askedAgain: 0, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + SLOT_PACKET_TTL_SECONDS,
     },
     condition: when.absent(),

@@ -519,7 +519,7 @@ describe("agentx upgrade with the cdk engine", () => {
       loadRelease: async () => { throw new Error("test setup: no release directory or download expected"); },
       sourceRelease: async (input) => { built.push(input); return release("1.3.0"); },
     });
-    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/w@sha256:${"d".repeat(64)}` };
+    const images = { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/w@sha256:${"d".repeat(64)}` };
     const result = await runUpgrade({ ...options, source: "/src", images }, h.deps);
     expect(built).toEqual([{ source: "/src", images }]);
     expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0" });

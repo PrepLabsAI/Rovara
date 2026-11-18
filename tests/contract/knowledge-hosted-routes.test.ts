@@ -1,4 +1,4 @@
-// L4-AK1H at the broker's developer router: `POST /v1/dev/projects/{p}/lessons` and `.../knowledge/areas` on a hosted install. The CLI's own sign-in (a real sign-in, real broker checks) reaches the knowledge API as the signed-in
+// L4-AK1H at the broker's developer router: `POST /v1/dev/projects/{p}/lessons`, `.../knowledge/areas` and `.../knowledge/propose` on a hosted install. The CLI's own sign-in (a real sign-in, real broker checks) reaches the knowledge API as the signed-in
 // person; a script token (`Bearer rvst_...`) reaches it with no sign-in and is checked by the API itself; a registered client that is not the CLI or a full-access client is refused by the route table; without the wiring a person
 // gets the fixed "off" answer and a token is refused. The route table's rows are additive: no existing row changed.
 import { createHash } from "node:crypto";
@@ -42,6 +42,29 @@ describe("the knowledge routes at the developer router", () => {
     expect((await callOn(deps, "POST", `${P}/lessons`, undefined)).status).toBe(401);
     expect((await callOn(deps, "POST", `${P}/lessons`, "Bearer not.a.jwt")).status).toBe(401);
     expect(answer).toHaveBeenCalledTimes(2);
+  });
+
+  it("the suggestion route (team_propose) is answered by the same door: a person as that person, a script token as a token, and a GET or another path is not it (L4-AK3H)", async () => {
+    const w = world();
+    await w.setup();
+    const cli = await w.signIn("owner", { cli: true });
+    const answer = vi.fn(async () => ({ status: "received", message: "ok" }));
+    const deps = { ...w.routes, knowledge: { answer } satisfies KnowledgeApi } as DeveloperRouteDependencies;
+    const body = { advice: "Wrap network calls in withRetry" };
+    expect((await callOn(deps, "POST", `${P}/knowledge/propose`, `Bearer ${cli.access!}`, body)).status).toBe(200);
+    expect(answer).toHaveBeenLastCalledWith({ method: "POST", path: `${P}/knowledge/propose`, authorization: `Bearer ${cli.access!}`, body: JSON.stringify(body) }, { kind: "person", personId: person("owner") });
+    expect((await callOn(deps, "POST", `${P}/knowledge/propose`, `Bearer ${TOKEN}`, body)).status).toBe(200);
+    expect(answer).toHaveBeenLastCalledWith({ method: "POST", path: `${P}/knowledge/propose`, authorization: `Bearer ${TOKEN}`, body: JSON.stringify(body) }, { kind: "token" });
+    // No sign-in and a bad sign-in are refused before the API is asked; a GET, and a path next to it, are not this door (a token is refused there).
+    expect((await callOn(deps, "POST", `${P}/knowledge/propose`, undefined, body)).status).toBe(401);
+    expect((await callOn(deps, "POST", `${P}/knowledge/propose`, "Bearer not.a.jwt", body)).status).toBe(401);
+    expect((await callOn(deps, "GET", `${P}/knowledge/propose`, `Bearer ${TOKEN}`)).status).toBe(404);
+    expect((await callOn(deps, "POST", `${P}/knowledge/proposals`, `Bearer ${TOKEN}`, body)).status).toBe(404);
+    expect(answer).toHaveBeenCalledTimes(2);
+    // Without the wiring: a person is told the fixed off sentence, a token is refused.
+    const bare: DeveloperRouteDependencies = { ...w.routes };
+    expect(await callOn(bare, "POST", `${P}/knowledge/propose`, `Bearer ${cli.access!}`, body)).toMatchObject({ status: 200, body: { status: "off" } });
+    expect(await callOn(bare, "POST", `${P}/knowledge/propose`, `Bearer ${TOKEN}`, body)).toMatchObject({ status: 401, body: { error: { code: "AUTH_REQUIRED", message: "Script tokens are turned off here." } } });
   });
 
   it("a script token needs no sign-in: the API is asked with the token's header, as a token; a made-up sign-in is not mistaken for one", async () => {
@@ -95,15 +118,15 @@ describe("the knowledge routes at the developer router", () => {
     expect(answer).toHaveBeenCalledTimes(1);
   });
 
-  it("the route table's rows are additive: exactly these two rows are new, and each existing row keeps its method, path and scope", () => {
+  it("the route table's rows are additive: exactly these three rows are the knowledge rows, and each existing row keeps its method, path and scope", () => {
     const keyOf = (route: { method: string; path: string; requires: string }) => `${route.method} ${route.path} ${route.requires}`;
     const all = DEV_ROUTES.map(keyOf);
     expect(new Set(all).size).toBe(all.length);
-    const added = all.filter((row) => row.includes("/knowledge/areas") || row === "POST /v1/dev/projects/{project}/lessons full");
-    expect(added).toEqual(["POST /v1/dev/projects/{project}/lessons full", "POST /v1/dev/projects/{project}/knowledge/areas full"]);
+    const added = all.filter((row) => row.includes("/knowledge/areas") || row.includes("/knowledge/propose") || row === "POST /v1/dev/projects/{project}/lessons full");
+    expect(added).toEqual(["POST /v1/dev/projects/{project}/lessons full", "POST /v1/dev/projects/{project}/knowledge/areas full", "POST /v1/dev/projects/{project}/knowledge/propose full"]);
     // The digest of every other row (the order is the table's own).
     const others = all.filter((row) => !added.includes(row));
-    expect(others).toHaveLength(DEV_ROUTES.length - 2);
+    expect(others).toHaveLength(DEV_ROUTES.length - 3);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
   });
 });
@@ -111,4 +134,7 @@ describe("the knowledge routes at the developer router", () => {
 /** The digest of every DEV_ROUTES row except the two knowledge rows, as of the base this lane stacked on (code/next with #976): a changed, removed or loosened existing row changes it. */
 // Batch 17 (rule D): re-pinned on batch 16's table plus the batch's other 13 new /v1/dev rows (#992 lessons areas/learning-sources x3, #1003's 9 phase-4 rows, #994's company/egress-addresses). All added, none
 // changed: removing exactly those 13 rows gives 24c5e84b..., the digest of batch 16's whole DEV_ROUTES table.
-const OTHER_ROWS_DIGEST = "bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599";
+// Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
+// PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
+// removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
+const OTHER_ROWS_DIGEST = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";

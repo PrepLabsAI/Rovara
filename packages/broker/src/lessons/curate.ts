@@ -1,6 +1,7 @@
 // The curator, in the ACE pattern. It finds a draft's neighbours (a shortlist fused from code-aware keywords, cited paths and, where the install has one, the small open embedder:
 // lessons/similarity.ts), asks ONE tool-less listwise judge call what the draft is to each of the top few, and applies the result as delta operations (ADD, MERGE, UPDATE, RETIRE) by code in one conditional
 // write. A model never rewrites the lesson set. With no judge (no provider, the month's cap, a refusal, a failed call) only a copy merges (the same words in the same order); everything else stays its own candidate. A judge's "same" merges only a pair that is the same advice by structure; any other "same" is kept as a possible duplicate for a person.
+import { weakSourceWaits } from "./weak-source.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { firstExpiry } from "./expiry.js";
@@ -39,6 +40,8 @@ export interface CurateDeps extends LessonDeps {
   access?: AccessCheckPort | undefined;
   /** The project's configured expiry window in days (14-365), if any. */
   expiryDays?: number;
+  /** No judge call at all (a team suggestion from a tool or an agent, L4-AK3: no model call is made for it): the ordered word test decides alone, exactly as with no judge. */
+  noJudge?: boolean;
   /** The sources (and the project's volume, `PROJECT_VOLUME_KEY`) an earlier try of the same draft already counted (a retry): they are not counted again, and the ones it did not reach still are. */
   alreadyNoted?: ReadonlySet<string>;
   /**
@@ -320,7 +323,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     const hitIds = new Set(rejectedHits.map((l) => l.id));
     const reserved = [...rejectedHits.filter((l) => visible.has(l.id)), ...rejectedGated.filter((l) => !hitIds.has(l.id))].slice(0, JUDGE_REJECTED);
     const top = [...live.slice(0, JUDGE_CANDIDATES).map((c) => c.lesson), ...reserved];
-    const judged = top.length === 0 ? undefined : await judgeList(deps, key, draft, top);
+    const judged = top.length === 0 || deps.noJudge === true ? undefined : await judgeList(deps, key, draft, top);
     if (judged !== undefined) {
       judgeEscalate = judged.escalate;
       top.forEach((lesson, i) => { verdicts.set(lesson.id, judged.verdicts[i]!); judgedBy.add(lesson.id); });
@@ -358,9 +361,11 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
    */
   // A draft the judge called "same" as a rejected lesson (not the same advice by structure) is acted on through a live neighbour below as well: the card still says it resembles rejected advice.
   const rejectedNote: string[] = unconfirmedRejected === undefined ? [] : ["matches_rejected"];
+  // L4-SRC-TK: a draft that rests on a weak source alone and has not been seen twice is kept as a candidate (nobody is alerted, nothing waits for a person) until its second sighting (`weak-source.ts`).
+  const weakWaits = weakSourceWaits(draft.provenance);
   const toPerson = async (other: Lesson, matchesRejectedLesson: boolean): Promise<CurateOutcome> => {
     const named = !matchesRejectedLesson || visible.has(other.id);
-    const created = newLesson(deps, key, draft, "pending", { ...(named ? { contradictsWith: other.id } : {}), tierReasons: matchesRejectedLesson ? ["contradiction", "matches_rejected"] : ["contradiction", ...rejectedNote] });
+    const created = newLesson(deps, key, draft, weakWaits ? "candidate" : "pending", { ...(named ? { contradictsWith: other.id } : {}), tierReasons: matchesRejectedLesson ? ["contradiction", "matches_rejected"] : ["contradiction", ...rejectedNote] });
     const written = await commitWith(deps, key, async () => [created]);
     if (written === undefined) return drop("conflict");
     await keepVector(sim, key, created, queryVector);
@@ -371,7 +376,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     if (!matchesRejectedLesson && isTrialLesson(other) && other.status === "active" && draft.provenance.memberCorrection === true) {
       try { await retireLesson(deps, key, other.id, "contradicted", undefined, "lesson.trial_retired"); } catch { deps.log?.("lessons.trial_retire_deferred", { lesson: logRef(key.workspaceId, other.id) }); }
     }
-    try { await deps.alerts?.alert(key.workspaceId, key.project, "lesson_contradiction"); } catch { /* the card is already in the queue */ }
+    if (!weakWaits) try { await deps.alerts?.alert(key.workspaceId, key.project, "lesson_contradiction"); } catch { /* the card is already in the queue */ }
     return { outcome: "contradiction", lesson: created, ...(named ? { other: other.id } : {}), ...(matchesRejectedLesson ? { matchesRejected: true as const } : {}) };
   };
 
@@ -402,7 +407,7 @@ export async function curateDraft(deps: CurateDeps, key: ScopeKey, draft: Lesson
     if (chosen.verdict === "contradicts") return toPerson(other, false);
     // A possible duplicate: the draft is its own lesson, linked to the one it may duplicate. It goes to a person (merge, keep both or reject) and is never started on trial or applied by itself while the link stands.
     if (chosen.verdict === "duplicate") {
-      const created = newLesson(deps, key, draft, "pending", { possibleDuplicateOf: other.id, tierReasons: ["possible_duplicate", ...rejectedNote] });
+      const created = newLesson(deps, key, draft, weakWaits ? "candidate" : "pending", { possibleDuplicateOf: other.id, tierReasons: ["possible_duplicate", ...rejectedNote] });
       const written = await commitWith(deps, key, async () => [created]);
       if (written === undefined) return drop("conflict");
       await keepVector(sim, key, created, queryVector);

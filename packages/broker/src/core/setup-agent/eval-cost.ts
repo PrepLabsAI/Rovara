@@ -1,7 +1,7 @@
 // L4-EVC (DEC 254zzz20 D8): the eval's cost as the setup card says it, in plain dollars. Pure: no store, no clock, no model. One function works out the figures from the numbers the BROKER holds (the
 // question count and the per-question bounds the confirmed suite carries, and the company's monthly cap), and the same words are used on every surface (the setup page, the hosted card, the "Needs
 // approval" line), so a person is never shown one figure and asked to approve another. No calls, tokens or micro-dollars reach a sentence.
-import type { EvalSpendDollars } from "@agentx/contracts";
+import type { EvalSpendDollars, EvalSpendPlan } from "@agentx/contracts";
 
 /** How many changed cases a check re-asks (the question rule's ten down and ten up), each three times on both sides. */
 const REASK_CASES_MAX = 20;
@@ -47,6 +47,11 @@ export function dollarRangeOf(lowMicros: number, highMicros: number): string {
 /** The card's one sentence (DEC 254zzz20 D8), in dollars only. */
 export function evalApprovalSentence(dollars: EvalSpendDollars): string {
   return `Running your evals on each AI change will cost ${dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros)} per PR, at most ${dollarsUpOf(dollars.monthlyCapMicros)} a month. Approve?`;
+}
+
+/** The opt-in health run's button words (DEC 254zzz20 D5): three runs of every case on the project's main code, shown with its cost. */
+export function evalHealthButtonLabel(plan: Pick<EvalSpendPlan, "estimate">): string {
+  return `Check my evals now (about ${dollarsOf(plan.estimate.costMicros)})`;
 }
 
 /** The fixed reasons an approval asks again (DEC 254zzz20 D6). The first carries the approved ceiling it grew past. */

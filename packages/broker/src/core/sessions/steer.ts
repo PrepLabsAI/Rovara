@@ -25,7 +25,7 @@ export const WAITING_FOR_ANSWERS_REASON = (sessionId: string): string => `it is 
 export type SteerRoute = { kind: "note" } | { kind: "not_delivered"; reason: string } | { kind: "ended" };
 
 /** Whether the task is waiting for the owner's answers to Understand's questions (nothing reads a note until they are given). */
-const waitingForAnswers = (workflow: TaskRecord["workflow"]): boolean => {
+export const waitingForAnswers = (workflow: TaskRecord["workflow"]): boolean => {
   const asked = workflow?.intent?.assessment;
   return workflow?.definitionVersion === "1.1.0" && workflow.stage === "UNDERSTAND" && workflow.state === "WAITING" && asked?.kind === "questions";
 };

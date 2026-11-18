@@ -23,6 +23,8 @@ import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { taskPointerKey } from "../developer/task-records.js";
+import type { ChatThreadInput, ChatThreadInputResult } from "../core-host/chat-thread-input.js";
+import type { ChatDecisionPress, ChatDecisionResult } from "../core-host/chat-decision.js";
 
 /** The state table, as every AWS reader holds it. */
 export interface EngineStateTable {
@@ -164,6 +166,23 @@ export interface CoreTaskEntry {
    * the task must be one this caller may act on, and the conversation's tenant must belong to that company; anything else records nothing (`false`). Written once: a repeat changes nothing. Absent: the deployment keeps no thread.
    */
   recordThread?(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean>;
+  /**
+   * L4-U5d: a later message in the chat thread the task was started from, as input for that task (`core-host/chat-thread-input.ts`): an answer to Understand's questions, a note for the plan, or a follow-up note, under the
+   * rule the web uses for a core task (the caller's live company, the thread's workspace that company's, the task's owner). A refusal writes nothing and is an answer, not a throw; a throw means nothing was saved (the chat retries).
+   * Absent: the deployment takes no input from a thread.
+   */
+  threadInput?(caller: CoreEntryCaller, input: ChatThreadInput): Promise<ChatThreadInputResult>;
+  /**
+   * Core task web routes (Cloud #188 item 5): what one of the caller's own core tasks has cost and its limit, for the task list's detail. The company is the caller's live membership's and the task must be one they may
+   * act on; `undefined` for anything else (and for any failure). Absent: the deployment gives the list no money for core tasks.
+   */
+  taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  /**
+   * HW5b: a press of Approve (or the words typed for Request changes) on the plan card a core task's chat thread was given, as a request to the company's approval gate (`core-host/chat-decision.ts`): the caller is the person the broker
+   * resolved from the chat account, and the core checks the account, the workspace, the card, the risk and the person's authority again. A refusal writes nothing and is an answer, not a throw; a throw means nothing was decided (the chat
+   * may try again). Absent: the deployment takes no decision from a chat (the card is the sign-in card).
+   */
+  chatDecision?(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult>;
 }
 
 /**
@@ -187,6 +206,8 @@ export interface CoreEntryCaller {
   name: string;
   stepUp?: { at: string; method: string } | undefined;
   clientId?: string | undefined;
+  /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. Everything else that reads the wiki is a tool outside Rovara (L4-WKS). */
+  webApp?: true | undefined;
 }
 
 /** The developer start route's path: a start is the core's only where the core's routes say so (`undefined` keeps the old start). */
@@ -199,12 +220,42 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
+  /** L4-U5d: the deployment's thread input, asked with the caller as the core knows them. Absent: the entry has no `threadInput`. */
+  threadInput?: (deployed: DeployedCaller, input: ChatThreadInput) => Promise<ChatThreadInputResult>,
+  /** HW5b: the deployment's chat decision, asked with the caller as the core knows them. Absent: the entry has no `chatDecision`. */
+  chatDecision?: (deployed: DeployedCaller, press: ChatDecisionPress) => Promise<ChatDecisionResult>,
 ): CoreTaskEntry {
+  const taskMoney = routes.taskMoney?.bind(routes);
   return {
+    ...(chatDecision === undefined ? {} : {
+      async chatDecision(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult> {
+        // No membership is the same refusal as a person who may not: nothing is written.
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { deployed = undefined; }
+        if (deployed === undefined) return { outcome: "refused", reason: "not_approved" };
+        return await chatDecision(deployed, press);
+      },
+    }),
+    ...(threadInput === undefined ? {} : {
+      async threadInput(caller: CoreEntryCaller, input: ChatThreadInput): Promise<ChatThreadInputResult> {
+        // No membership is the same refusal as a person who may not: nothing is written.
+        const deployed = await deployedCallerOf(caller);
+        if (deployed === undefined) return { outcome: "refused", notice: "not_allowed" };
+        return await threadInput(deployed, input);
+      },
+    }),
+    ...(taskMoney === undefined ? {} : {
+      async taskMoney(caller: CoreEntryCaller, taskId: string) {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        if (deployed === undefined) return undefined;
+        try { return await taskMoney(deployed, taskId); } catch { return undefined; }
+      },
+    }),
     ...(recordThread === undefined ? {} : {
       async recordThread(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean> {
         let deployed: DeployedCaller | undefined;

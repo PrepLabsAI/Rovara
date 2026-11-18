@@ -11,10 +11,13 @@
 //           (`mergedInto`, which every sign-in already follows: the session, membership and role are the person's), the person's connected-method
 //           row (`SIGNIN_LINKS#<person>` / `METHOD#<method>`, one per method), the company log row, and checks the person's membership and session.
 //   unlink  the person, or an owner or admin of their company, with a fresh step-up, removes a connected method (never the first one), ends every
-//           session of the person (a removed method's sessions must not live on), and logs it.
+//           session of the person (a removed method's sessions must not live on), and logs it. The identity's record is kept, marked unlinked (when, from
+//           whom, from which company; DEC 254zzz33, 254zzz39).
+//   relink  (DEC 254zzz39) a kept unlinked identity is linked again by the same finish, in place: to the person it was unlinked from or another person of
+//           that company, never another company's; never one an admin turned off or one with a membership of its own. Its own sessions end; logged as a relink.
 //
-// Refusals: one fixed answer (`refused`) for every reason a link cannot be made: the identity is already someone's (any existing record, or a
-// membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
+// Refusals: one fixed answer (`refused`) for every reason a link cannot be made: the identity is already someone's (any existing record but a kept
+// unlinked one of this company, or a membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
 // sign-in refuses the method, a revoked person or member, the person already has that method, or a used, expired or foreign link. Logs carry
 // fixed reasons and opaque ids only; never a code, a token, an email address or a provider's words.
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -81,6 +84,29 @@ const LinkRow = z.object({
 type Link = z.infer<typeof LinkRow>;
 const ConnectedRow = z.object({ entityType: z.literal("SIGNIN_LINK_ROW"), personId: z.string(), method: z.enum(["slack", "github"]),
   linkedId: z.string().regex(/^[a-f0-9]{64}$/), linkedAt: z.iso.datetime(), linkedBy: z.string() }).strict();
+
+/** DEC 254zzz39: what a kept unlinked record (DEC 254zzz33) must be to be linked again; anything else about it is left as it is. */
+const KeptRecord = z.object({
+  entityType: z.literal("DEVELOPER"), developerId: z.string().regex(/^[a-f0-9]{64}$/), provider: z.enum(["slack", "github"]), revoked: z.literal(false), companyless: z.literal(true),
+  mergedInto: z.never().optional(), unlinkedAt: z.iso.datetime(), unlinkedFrom: z.string().regex(/^[a-f0-9]{64}$/), unlinkedCompany: OrgIdSchema.optional(),
+}).passthrough();
+
+/**
+ * DEC 254zzz39: a kept unlinked record linked again, in place (the sign-in role deletes no DEVELOPER# row). It points at the person again and is no longer marked unlinked; its own
+ * sessions from while it was nobody's end; it carries no email (a linked record never does) and no first-sign-in mark. Conditioned on being exactly the record that was read: still
+ * nobody's, on, company-less, the same unlink (time and person), from this company (or, unlinked before the company was kept, none: then the person read was checked to be this one).
+ */
+function relinkWrite(tableName: string, linkedId: string, personId: string, companyId: string, kept: { unlinkedAt: string; unlinkedFrom: string; unlinkedCompany?: string }, identity: Proved, at: string): Write {
+  const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
+  const set = ["mergedInto = :person", "linkedAt = :at", "linkedBy = :person", "sessionsEndedAt = :at", ...(slackUserId === undefined ? [] : ["slackUserId = :su"]), ...(identity.slackTeamId === undefined ? [] : ["slackTeamId = :team"])];
+  const remove = ["unlinkedAt", "unlinkedFrom", "unlinkedCompany", "firstSignInMark", "email", "slackTeamName", ...(slackUserId === undefined ? ["slackUserId"] : []), ...(identity.slackTeamId === undefined ? ["slackTeamId"] : [])];
+  return { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" },
+    UpdateExpression: `SET ${set.join(", ")} REMOVE ${remove.join(", ")}`,
+    ConditionExpression: `attribute_exists(pk) AND attribute_not_exists(mergedInto) AND revoked = :false AND companyless = :true AND provider = :method AND unlinkedAt = :unlinkedAt AND unlinkedFrom = :from AND ${
+      kept.unlinkedCompany === undefined ? "attribute_not_exists(unlinkedCompany)" : "unlinkedCompany = :company"}`,
+    ExpressionAttributeValues: { ":person": personId, ":at": at, ":false": false, ":true": true, ":method": identity.method, ":unlinkedAt": kept.unlinkedAt, ":from": kept.unlinkedFrom,
+      ...(kept.unlinkedCompany === undefined ? {} : { ":company": companyId }), ...(slackUserId === undefined ? {} : { ":su": slackUserId }), ...(identity.slackTeamId === undefined ? {} : { ":team": identity.slackTeamId }) } } };
+}
 
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const HTML_HEADERS = {
@@ -248,7 +274,16 @@ export function createSignInLinks(options: SignInLinkOptions) {
       if (!await methodAllowed(company, member.companyId, link.method, identity)) return refuse("signin.link_refused", developerId, "method_refused");
       if (!await slackAllowed(identity, member.companyId)) return refuse("signin.link_refused", developerId, "workspace_refused");
       // The identity is nobody's yet: no record of its own (a person, a merged or revoked sign-in) and no membership. Checked again in the transaction.
-      if (await read({ pk: `DEVELOPER#${linkedId}`, sk: "META" }) !== undefined) return refuse("signin.link_refused", developerId, "identity_taken");
+      // DEC 254zzz39: or its record is one an unlink kept (DEC 254zzz33): unlinked, nobody's, on, never a person of a company, and unlinked from this company (a record unlinked
+      // before the company was kept: only by the person it was unlinked from). It is linked again in place; every condition is checked again in the transaction.
+      const { pk: keptPk, sk: keptSk, ...keptFields } = await read({ pk: `DEVELOPER#${linkedId}`, sk: "META" }) ?? {};
+      let relink: { unlinkedAt: string; unlinkedFrom: string; unlinkedCompany?: string } | undefined;
+      if (keptPk !== undefined) {
+        const kept = KeptRecord.safeParse(keptFields);
+        if (keptPk !== `DEVELOPER#${linkedId}` || keptSk !== "META" || !kept.success || kept.data.developerId !== linkedId || kept.data.provider !== link.method
+          || !(kept.data.unlinkedCompany === undefined ? kept.data.unlinkedFrom === developerId : kept.data.unlinkedCompany === member.companyId)) return refuse("signin.link_refused", developerId, "identity_taken");
+        relink = { unlinkedAt: kept.data.unlinkedAt, unlinkedFrom: kept.data.unlinkedFrom, ...(kept.data.unlinkedCompany === undefined ? {} : { unlinkedCompany: kept.data.unlinkedCompany }) };
+      }
       const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
       if (slackUserId !== undefined && ((person.slackUserId !== undefined && person.slackUserId !== slackUserId) || person.linkedSlackUserId !== undefined)) {
         return refuse("signin.link_refused", developerId, "other_slack");
@@ -257,11 +292,13 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const writes: Write[] = [
         { Update: { TableName: tableName, Key: { pk: `SIGNIN_LINK#${linkId}`, sk: "META" }, UpdateExpression: "SET finishedAt = :at",
           ConditionExpression: "attribute_not_exists(finishedAt) AND attemptAt = :attempt", ExpressionAttributeValues: { ":at": at, ":attempt": attemptAt } } },
-        { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-          pk: `DEVELOPER#${linkedId}`, sk: "META", entityType: "DEVELOPER", developerId: linkedId, provider: identity.method, issuer: identity.issuer, subject: identity.subject,
-          displayName: identity.displayName, revoked: false, firstSignInAt: at, lastSignInAt: at, mergedInto: developerId, linkedAt: at, linkedBy: developerId,
-          ...(slackUserId === undefined ? {} : { slackUserId }), ...(identity.slackTeamId === undefined ? {} : { slackTeamId: identity.slackTeamId }),
-        } } },
+        relink === undefined
+          ? { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
+            pk: `DEVELOPER#${linkedId}`, sk: "META", entityType: "DEVELOPER", developerId: linkedId, provider: identity.method, issuer: identity.issuer, subject: identity.subject,
+            displayName: identity.displayName, revoked: false, firstSignInAt: at, lastSignInAt: at, mergedInto: developerId, linkedAt: at, linkedBy: developerId,
+            ...(slackUserId === undefined ? {} : { slackUserId }), ...(identity.slackTeamId === undefined ? {} : { slackTeamId: identity.slackTeamId }),
+          } } }
+          : relinkWrite(tableName, linkedId, developerId, member.companyId, relink, identity, at),
         slackUserId === undefined
           ? { ConditionCheck: { TableName: tableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
             ConditionExpression: "attribute_exists(pk) AND revoked = :false AND attribute_not_exists(mergedInto) AND provider <> :method",
@@ -279,6 +316,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
           pk: companyScoped(OrgIdSchema.parse(member.companyId), "COMPANY_LOG"), sk: `${at}#${randomBytes(16).toString("hex")}`, entityType: "COMPANY_LOG", event: "company-signin-link",
           companyId: member.companyId, personId: developerId, createdBy: developerId, createdAt: at, method: link.method,
+          ...(relink === undefined ? {} : { relink: true, previousPersonId: relink.unlinkedFrom }),
         } } },
       ];
       try { await documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
@@ -286,7 +324,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         if (conditionFailed(error)) return refuse("signin.link_refused", developerId, "changed_meanwhile");
         throw error;
       }
-      options.log({ event: "signin.linked", developerId, method: link.method });
+      options.log({ event: "signin.linked", developerId, method: link.method, ...(relink === undefined ? {} : { relink: true }) });
       return { ok: true, method: link.method };
     },
 
@@ -338,8 +376,11 @@ export function createSignInLinks(options: SignInLinkOptions) {
         // DEC 254zzz33 (4): the linked identity's record is kept, never deleted (the sign-in role deletes no DEVELOPER# row): it no longer points at the person, and records when and
         // from whom it was unlinked. One an admin turned off stays turned off. Any other signs in again as nobody's person, as a deleted record did: `companyless` (DEC 253z) so the
         // kept record is never "legacy" (company-membership.ts join would otherwise seat it in the built-in company with no invitation) and it may take a company-less session.
-        { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, UpdateExpression: "REMOVE mergedInto SET unlinkedAt = :at, unlinkedFrom = :person, companyless = :true",
-          ConditionExpression: "mergedInto = :person AND revoked = :revoked", ExpressionAttributeValues: { ":person": personDeveloperId, ":revoked": linked.revoked === true, ":at": at, ":true": true } } },
+        // DEC 254zzz39: and the person's company, the only one it may be linked into again; its first-sign-in mark goes, so its own next sign-in captures its factor email (store.ts).
+        { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" },
+          UpdateExpression: "REMOVE mergedInto, firstSignInMark SET unlinkedAt = :at, unlinkedFrom = :person, unlinkedCompany = :company, companyless = :true",
+          ConditionExpression: "mergedInto = :person AND revoked = :revoked",
+          ExpressionAttributeValues: { ":person": personDeveloperId, ":revoked": linked.revoked === true, ":at": at, ":true": true, ":company": membership.companyId } } },
         // An admin's own membership still stands as checked (live, the person's company, owner or admin).
         ...(self ? [] : [{ ConditionCheck: { TableName: tableName, Key: membershipKey(developerId), ConditionExpression: "companyId = :company AND attribute_not_exists(revokedAt) AND (#role = :owner OR #role = :admin)",
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":company": membership.companyId, ":owner": "owner", ":admin": "admin" } } } satisfies Write]),

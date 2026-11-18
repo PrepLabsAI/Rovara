@@ -133,6 +133,36 @@ describe("the company audit read on the developer API", () => {
   });
 });
 
+// Audit gap 4 (2026-11-18): an owner or admin of a real company signs in without the built-in company's administrator flag; the host's live role reader lets them read their own company.
+describe("the company reads for a live company owner or admin (no Rovara administrator flag)", () => {
+  const DEE = "d".repeat(64);
+  const roles: Record<string, { companyId: string; role: "owner" | "admin" | "member" }> = { [CY]: { companyId: COMPANY_A, role: "owner" }, [DEE]: { companyId: COMPANY_B, role: "member" } };
+  const liveCompanyOf = async (developerId: string) => roles[developerId]?.companyId ?? (await companyOf(developerId));
+  beforeEach(async () => {
+    await broker({ clientRoutes: true, companyReads: { store, companyOf: liveCompanyOf, membershipOf: async (developerId: string) => roles[developerId] } });
+    session("s-dee", DEE);
+    db.set({ pk: `DEVELOPER#${DEE}`, sk: "META", developerId: DEE, provider: "oidc", issuer: "https://idp.example.test", subject: "dee", displayName: "Dee", firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+  });
+
+  it("answers an owner their own company's records and events through the mounted route", async () => {
+    const read = await call("GET", AUDIT, await token({ sub: CY, sid: "s-cy" }));
+    expect(read.status).toBe(200);
+    // The shared store holds company A's rows (and what earlier tests planted in A); never company B's.
+    expect((read.body as unknown as Records).records.map((record) => record.eventId)).toEqual(expect.arrayContaining(["evt_a1", "evt_a0"]));
+    expect(JSON.stringify(read.body)).not.toContain("evt_b");
+    const events = await call("GET", EVENTS, await token({ sub: CY, sid: "s-cy" }), "from=2026-11-01T00%3A00%3A00.000Z");
+    expect(events.status).toBe(200);
+    expect(JSON.stringify(events.body)).not.toContain(COMPANY_B);
+  });
+
+  it("refuses a member of a company with 403, and still serves the Rovara administrator as before", async () => {
+    const refused = await call("GET", AUDIT, await token({ sub: DEE, sid: "s-dee" }));
+    expect(refused.status).toBe(403);
+    expect(JSON.stringify(refused.body)).not.toContain("evt_b");
+    expect(((await call("GET", AUDIT, await token())).body as unknown as Records).records.map((record) => record.eventId)).toEqual(expect.arrayContaining(["evt_a1", "evt_a0"]));
+  });
+});
+
 describe("the company event read on the developer API", () => {
   const window = "from=2026-11-01T00%3A00%3A00.000Z&to=2026-11-30T00%3A00%3A00.000Z";
   type Events = { events: Array<{ orgId: string }>; next: string; hasMore: boolean };

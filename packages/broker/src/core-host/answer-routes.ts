@@ -12,7 +12,7 @@
 import { ANSWER_FEEDBACK_WORDS, ANSWER_WORDS, AgentXError, NotRightBodySchema, NotRightResponseSchema, WikiIdSchema, WikiProjectSchema, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { pressNotRight } from "../core/answers/feedback.js";
-import { createAnswerService, type AnswerService } from "../core/answers/service.js";
+import { createAnswerService, type AnswerService, type AnswerServiceDeps } from "../core/answers/service.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../core/answers/code-source.js";
 import type { AnswerModel } from "../core/answers/ports.js";
 import { createWikiStore } from "../core/wiki/store.js";
@@ -28,6 +28,8 @@ export interface HostedAnswersWiring {
   repositories(companyId: OrgId, project: string): Promise<{ handles: readonly AnswerRepositoryHandle[]; names: readonly string[] } | undefined>;
   /** The company's answers model through the gateway. Absent (L4-E not wired, or the company has none): answers are not set up here. */
   model?: ((companyId: OrgId) => AnswerModel | undefined) | undefined;
+  /** Lead 4 L4-AK2b: the team knowledge briefing of THIS company's answers (its own lessons host; never another company's). Absent: answers are made without one. */
+  briefing?: ((companyId: OrgId) => AnswerServiceDeps["briefing"]) | undefined;
 }
 
 export interface HostedAnswersInput {
@@ -73,6 +75,7 @@ export function hostedAnswerService(input: { companyId: OrgId; store: DocumentSt
       return found === undefined ? undefined : createAnswerCodeSource(found.handles, found.names);
     },
     model: input.wiring.model?.(input.companyId),
+    briefing: input.wiring.briefing?.(input.companyId),
   });
 }
 

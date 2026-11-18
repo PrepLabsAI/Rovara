@@ -189,6 +189,22 @@ describe("init questions", () => {
       .rejects.toThrow("--worker-image must be referenced by digest (repository@sha256:...)");
   });
 
+  // L4-IAM: the worker role reads only agentx-<env>/, so a worker image elsewhere is refused before anything is deployed.
+  it("refuses a --worker-image outside this account, region or the environment's image prefix, with fixed words", async () => {
+    const refused = "--worker-image: the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+    const digest = `@sha256:${"d".repeat(64)}`;
+    const host = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+    for (const image of [`${host}/agentx/worker${digest}`, `${host}/agentx-staging-2/worker${digest}`, `${"7".repeat(12)}.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker${digest}`, `${host.replace("us-east-1", "eu-west-1")}/agentx-staging/worker${digest}`]) {
+      const result = collectWithFlags({ ...base, flags: { ...everyFlag, workerImage: image } });
+      await expect(result).rejects.toThrow(refused);
+      await expect(result).rejects.not.toThrow(image);
+    }
+    // the prefix follows the install's own name
+    await expect(collectWithFlags({ ...base, env: "dev-2", flags: { ...everyFlag, workerImage: `${host}/agentx-staging/worker${digest}` } })).rejects.toThrow(refused);
+    const inside = `${host}/agentx-staging/worker${digest}`;
+    expect((await collectWithFlags({ ...base, flags: { ...everyFlag, workerImage: inside } })).answers.images?.worker).toBe(inside);
+  });
+
   it("with --yes and no GitHub account, names the flag", async () => {
     await expect(collectInitAnswers({ ...base, flags: withExplicitUndefined(everyFlag, "githubAccount"), prompter: unattendedPrompter() }))
       .rejects.toThrow("with --yes, pass --github-account");
