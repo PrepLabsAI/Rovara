@@ -37,6 +37,11 @@ export interface HostedLessonPeople {
   approvers(companyId: OrgId, project: string | undefined): Promise<HostedApprovers>;
   /** Whether the person is on the project's roster now (a company owner or admin, or a person with a role on the project). */
   onProjectRoster(companyId: OrgId, project: string, personId: string): Promise<boolean>;
+  /**
+   * Everyone on the project's roster now (a company owner or admin, or a person with a role on the project), with whether the list is complete. Optional: a port that gives it makes the names a unit that leaves Rovara must not
+   * hold cover the whole roster; one that does not is covered by the project's approvers (`approvers`) and the people the units name.
+   */
+  projectMembers?(companyId: OrgId, project: string): Promise<{ complete: boolean; ids: string[] }>;
   /** The outside accounts the person linked (a code host's account ids). */
   linkedAccounts(companyId: OrgId, personId: string): Promise<readonly string[]>;
   /** The display name of a person who is or was in the company; undefined for someone who never was. */
@@ -44,12 +49,6 @@ export interface HostedLessonPeople {
   isErased(companyId: OrgId, personId: string): Promise<boolean>;
   /** The member an id that was merged into another stands for (the end of the chain). Absent: ids compare as they are. */
   resolveMember?(companyId: OrgId, personId: string): Promise<string>;
-  /**
-   * Every person on the project's roster now (a live company owner or admin, or a live member with a role on the project): the complete list, in the same terms as `onProjectRoster` (who is in it
-   * here is who that answers yes for). Throws when the list cannot be completed (never a partial list). For a consumer that must know every name a project's people carry (the knowledge names filter);
-   * a consumer that finds this absent treats the roster as unknown and withholds.
-   */
-  projectMembers?(companyId: OrgId, project: string): Promise<readonly string[]>;
 }
 
 /** What a task is, as lessons need it: its company, project and person. Undefined when there is no such task. */

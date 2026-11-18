@@ -13,7 +13,7 @@
 // Not stored anywhere new, no cache, no model. Nothing here writes.
 //
 // `membershipVersion` is a generation id, not a counter: a hash of the two lists, so it differs whenever who may approve differs (compare for equality only). `lastEligibleLossAtMs` is the newest time the
-// company's member records say an owner or admin was removed or demoted (a removed PROJECT maintainer leaves no record, so that loss is not seen: the sole-owner cool-off cannot count it).
+// company's member records say an owner or admin was removed or demoted (for a project, any removed member counts, as a removed maintainer is a plain member; a maintainer whose GRANT alone was removed leaves no record, so that loss is not seen).
 import { createHash } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { OrgIdSchema, type DocumentStore, type OrgId } from "@agentx/contracts";
@@ -138,7 +138,8 @@ export function createHostedLessonsPeople(base: HostedLessonsPeopleBase): (compa
         let loss: number | undefined;
         const lost = (at: number | undefined): void => { if (at !== undefined && (loss === undefined || at > loss)) loss = at; };
         for (const { row } of answers) {
-          if (row.revokedAt !== undefined && (row.role === "owner" || row.role === "admin")) lost(msOf(row.revokedAt));
+          // For a project, ANY removed member may have been its maintainer (a plain company member holding an administrator grant, whose grant row is not kept): over-counting only delays the sole-owner exception.
+          if (row.revokedAt !== undefined && (scope !== undefined || row.role === "owner" || row.role === "admin")) lost(msOf(row.revokedAt));
           if (row.role === "member") lost(msOf(row.updatedAt));
         }
         const generation = createHash("sha256").update(JSON.stringify([company, scope ?? null, ownerIds, eligibleIds])).digest().readUIntBE(0, 6);
@@ -152,7 +153,8 @@ export function createHostedLessonsPeople(base: HostedLessonsPeopleBase): (compa
         const scope = checkedProject(project);
         const rows = await listedMembers();
         const on = await mapLimited(rows, async (row) => ({ id: row.personId, on: await onProjectRoster(company, scope, row.personId) }));
-        return on.filter((answer) => answer.on).map((answer) => answer.id).sort();
+        // Complete or thrown: a list that could not be finished never comes back as `complete: false` with some of the people.
+        return { complete: true, ids: on.filter((answer) => answer.on).map((answer) => answer.id).sort() };
       },
 
       async linkedAccounts(companyId) {
