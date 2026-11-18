@@ -61,6 +61,17 @@ const KNOWLEDGE_EXTRAS_MS = 900;
 /** The correction text of a fix round is used only to rank lessons: this many characters of it. */
 const FIX_TEXT_CHARS = 2_000;
 
+/** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names (the same read for the loader and for "would have applied", `recent-tasks.ts`). */
+export async function taskPlanFacts(readText: ReturnType<typeof textReaderOf>, task: Pick<TaskRecord, "workflow">): Promise<{ summary: string; files: string[] } | undefined> {
+  const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
+  if (artifact === undefined) return undefined;
+  const loaded = await loadWorkflowDocument(readText, artifact, {});
+  if (loaded === undefined) return undefined;
+  if (loaded.format === "structured") return planLoadFacts(loaded.plan);
+  // A Markdown plan: its first words are the summary, and the files it names in words are the files.
+  return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
+}
+
 export interface LessonsHostInput {
   flow: TaskFlowDeps;
   runtime: LessonsRuntime;
@@ -124,15 +135,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   // ---- loading
 
   /** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names. */
-  async function planFactsOf(task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> {
-    const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
-    if (artifact === undefined) return undefined;
-    const loaded = await loadWorkflowDocument(readText, artifact, {});
-    if (loaded === undefined) return undefined;
-    if (loaded.format === "structured") return planLoadFacts(loaded.plan);
-    // A Markdown plan: its first words are the summary, and the files it names in words are the files.
-    return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
-  }
+  const planFactsOf = (task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> => taskPlanFacts(readText, task);
 
   /** An answer or "undefined" when the time passes: the extras never hold up the lessons. */
   const within = async <T>(work: Promise<T>, ms: number): Promise<T | undefined> => {

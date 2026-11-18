@@ -8,6 +8,7 @@
 //   POST /v1/dev/projects/{project}/lessons/decisions                   { decisions: [...] }                 Keep or Drop for up to 20 proposed lessons at once (the inbox's batch row); one answer each
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/retire           { reason }                           reason: one of RETIRE_REASONS; clears the lesson's retire request
 //   POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request   {}                                   anyone on the project asks the people who decide to retire it
+//   POST /v1/dev/projects/{project}/lessons/{lessonId}/keep             {}                                   the answer to the weekly list's "Keep it?" card: the people who decide renew a lesson nobody had needed for a long time (`lessons/keep.ts`); audited before the write
 //   GET  /v1/dev/projects/{project}/lessons/retire-requests                                                  the open requests (people who decide)
 //   GET  /v1/dev/projects/{project}/tasks/{taskId}/lessons                                                   the lessons a task was given ("Lessons used")
 //   POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful   {}                       a person on the project marks a lesson the task was given as not helpful (thumbs-down)
@@ -32,6 +33,7 @@
 import { AgentXError, AgentXNameSchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
+import { keepByPerson } from "../lessons/keep.js";
 import { recordFeedback } from "../lessons/counters.js";
 import { writeLearningMode, writeLearningModeFromSuggest } from "../lessons/document-settings.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -48,7 +50,7 @@ import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -208,7 +210,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
     const method = request.method;
     const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST" };
     if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -440,6 +442,13 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       // The request (if any) is answered: best effort, it no longer shows once the lesson is retired either way.
       await runtime.documents.delete({ key: retireAskKey(lessonId) }).catch(() => undefined);
       return { project, lessonId, status: "retired" };
+    }
+    if (action === "keep") {
+      // The answer to "Keep it?": the people who decide (read live) renew a lesson a question stands on. Audited before the write by the library; a refusal is its fixed words.
+      bodyOf(EmptyBody, request.body, "keep takes no fields");
+      const result = await keepByPerson({ ...deps, evidence: runtime.evidence }, { ...where, lessonId, actorId: personId });
+      if (!result.ok) throw refusalOf(result.code);
+      return { project, lessonId, kept: true };
     }
     // A retire request: anyone on the project who can see the lesson asks; the people who decide answer it.
     bodyOf(EmptyBody, request.body, "a retire request takes no fields");

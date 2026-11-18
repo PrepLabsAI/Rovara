@@ -63,6 +63,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.trial_offer_answered": { action: "lesson.trial_offer_answered", facts: (e) => ({ answer: word(e.facts["answer"], "unknown"), approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) }) },
   // A project or company admin turned the weekly lessons summary in the chats on or off (developer API).
   "lesson.digest_switched": { action: "lesson.digest_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
+  // A person who decides lessons answered "Keep it?" on a lesson nobody had needed for a long time: it is renewed for a window (the lesson and the person; no words).
+  "lesson.kept": { action: "lesson.kept", facts: () => ({}) },
   "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
   // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
   "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },

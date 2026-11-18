@@ -56,6 +56,8 @@ export interface TaskOutcome {
   corrections: readonly TaskCorrection[];
   /** The files the task's change touched (the merged change's own file list), for the area overlap a clean merge's credit needs. Absent: not known (only a lesson with no code area can then share the credit unless a use report says its area was touched). */
   touchedPaths?: readonly string[];
+  /** The repositories (the project's names for them) those files are in, with `touchedPaths`: a lesson about other repositories is not touched. Absent: not known. */
+  touchedRepos?: readonly string[];
   /** An eval run writes no counters. */
   evalRun?: boolean;
 }
@@ -186,7 +188,7 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
     try { reports = await deps.useReports?.(key, outcome.taskId); } catch { result.deferred = true; return result; }
     // With no report the credit is shared among the lessons of the Build and Fix steps (the steps whose change was merged); with reports the reports name them.
     const buildLoaded = reachedLessonIds((await deps.store.manifests(key, outcome.taskId)).filter((m) => m.stage === "IMPLEMENT" && m.memory === "live"));
-    shares = lessonCreditShares({ lessons: new Map(lessons.map((l) => [l.id, l] as const)), loaded: reports !== undefined && reports.length > 0 ? loaded : buildLoaded, reports, touched: outcome.touchedPaths });
+    shares = lessonCreditShares({ lessons: new Map(lessons.map((l) => [l.id, l] as const)), loaded: reports !== undefined && reports.length > 0 ? loaded : buildLoaded, reports, touched: outcome.touchedPaths, touchedRepos: outcome.touchedRepos });
   }
   let judgeCalls = 0;
   for (const lesson of lessons) {

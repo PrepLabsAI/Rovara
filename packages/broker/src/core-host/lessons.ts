@@ -18,7 +18,8 @@ import { createDocumentMilestones, type DocumentMilestones } from "../core/miles
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
-import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanFacts, type LessonsHost } from "../lessons/host-glue.js";
+import { RECENT_PLAN_BYTES_MAX, cachedRecentTasks } from "../lessons/recent-tasks.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
@@ -134,6 +135,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   // The model is gated on this company's switch as well as the install's: no learning call for a company the switch stopped covering.
   const model = options.learning === undefined ? undefined : gatedByLessonsSwitch(options.learning.model, enabled);
 
+  const blobs = registry.require("object-storage");
+  const readText = textReaderOf(blobs);
   const runtime = createLessonsRuntime({
     store: deps.store, companyId, now, log: (event, fields) => log(event, fields), audit: registry.require("audit-sink"), reader,
     repositoriesOf: async (workspaceId, project) => {
@@ -145,10 +148,16 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     projectRepoScopes: repositories.scopes(), learning: options.learningAdapter, edition: options.edition ?? "public",
     ...(model === undefined || options.learning === undefined ? {} : { model, spend: options.learning.spend }),
     hosted: { people: options.people, readTask: readOwnTask },
+    // "Would have applied to N tasks last month" (the weekly list's tie-break): the project's tasks of the last 30 days from its own load rows, each read from this company's own task record and plan, as the loader reads them.
+    recentTasks: cachedRecentTasks({
+      documents: deps.store, companyId, now,
+      ports: {
+        task: async (taskId) => { const task = await readTask(deps, taskId); return task === undefined || task.companyId !== companyId ? undefined : { project: task.project, files: (await taskPlanFacts((objectKey, max) => readText(objectKey, Math.min(max, RECENT_PLAN_BYTES_MAX)), task))?.files ?? [] }; },
+        repositories: async (project) => { const latest = await deps.projects.latest(project); return latest === undefined ? undefined : codeRepositoriesOf(latest.definition).map((repository) => repository.name); },
+      },
+    }),
   });
 
-  const blobs = registry.require("object-storage");
-  const readText = textReaderOf(blobs);
   const sources = createLocalLessonSources({
     flow: deps, companyId, ownerId: SYSTEM_ACTOR.id, repos: repositories, readObject: readText, now, log: (event, fields) => log(event, fields),
     hosted: { people: options.people, ...(options.personOfAccount === undefined ? {} : { personOfAccount: options.personOfAccount }) },

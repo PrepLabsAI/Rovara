@@ -130,6 +130,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
+  // L4-LP12b: the answer to the weekly list's "Keep it?" card (a lesson no task had needed for a long time); the people who decide lessons, read live; full access only like the rows around it.
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/keep", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
