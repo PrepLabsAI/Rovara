@@ -84,7 +84,7 @@ const refused = (answer: { status: number; body: Answer }) => ({ status: answer.
 const startAgain = { status: 403, error: { code: "FORBIDDEN", message: START_AGAIN } };
 
 describe("connect start", () => {
-  it("an admin gets a single-use state (stored only as its hash) and Linear's consent address: actor=app, the three scopes, consent, PKCE S256, Cloud's callback", async () => {
+  it("an admin gets a single-use state (stored only as its hash) and Linear's consent address: actor=app, the four scopes, consent, PKCE S256, Cloud's callback", async () => {
     const w = world(); w.as(PERSON, A);
     const answer = await w.start();
     expect(answer.status).toBe(200);
@@ -93,10 +93,11 @@ describe("connect start", () => {
     const url = new URL(answer.body.authorizeUrl as string);
     expect(`${url.origin}${url.pathname}`).toBe("https://linear.app/oauth/authorize");
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,comments:create,issues:create", state, actor: "app", prompt: "consent",
+      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,write,comments:create,issues:create", state, actor: "app", prompt: "consent",
       code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as string, code_challenge_method: "S256",
     });
     expect(LINEAR_SCOPES).not.toContain("admin");
+    expect(LINEAR_SCOPES).toEqual(["read", "write", "comments:create", "issues:create"]);
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
     expect(w.db.get(linearStateKey(state).pk, "META")).toMatchObject({ companyId: A, personId: PERSON, provider: "linear", status: "live", indexExpiresAt: Date.parse(TIME) / 1000 + 600 + 86_400 });
     expect(w.stored()).not.toContain(state);

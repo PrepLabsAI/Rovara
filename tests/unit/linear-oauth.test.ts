@@ -19,7 +19,7 @@ const token = (n: number) => ["tok", String(n), "abcdefghij"].join("_");
 describe("the Linear OAuth client", () => {
   it("builds the consent address with PKCE S256 and no admin scope", () => {
     const url = new URL(linearAuthorizeUrl(LINEAR_APP, "state-value", "v".repeat(43)));
-    expect(url.searchParams.get("scope")).toBe("read,comments:create,issues:create");
+    expect(url.searchParams.get("scope")).toBe("read,write,comments:create,issues:create");
     expect(url.searchParams.get("actor")).toBe("app");
     expect(url.searchParams.get("code_challenge")).toBe(createHash("sha256").update("v".repeat(43)).digest("base64url"));
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");

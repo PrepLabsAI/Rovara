@@ -36,7 +36,7 @@ export function fakeLinear(now: () => number) {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const issue = (grant: Grant) => {
     const access = mint("access"); grant.access.add(access); accessOf.set(access, grant);
-    return { access_token: access, refresh_token: grant.current, token_type: "Bearer", expires_in: 86_400, scope: "read,comments:create,issues:create" };
+    return { access_token: access, refresh_token: grant.current, token_type: "Bearer", expires_in: 86_400, scope: "read,write,comments:create,issues:create" };
   };
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;

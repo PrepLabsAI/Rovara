@@ -20,11 +20,13 @@ export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
 /**
  * The scopes Rovara asks for, and why each (the Linear tracker's own calls, plugins/tracker/linear/api.ts):
  *   read             read an issue, what is asked for now, the workspace and its teams (every app needs it);
+ *   write            edit Rovara's own comment in the ticket thread (`commentUpdate`); Linear's comments:create is creation only;
  *   comments:create  post Rovara's answer on an issue (`commentCreate`);
  *   issues:create    move an issue to a named status (`issueUpdate`): Linear's issues:create covers creating AND updating issues.
- * Not `write` (more than the tracker does) and never `admin` (refused with actor=app, and nothing Rovara does needs it).
+ * The targeted scopes stay beside `write` so the consent screen still says what Rovara does. Never `admin` (refused with actor=app, and nothing Rovara does needs it).
+ * Linear takes the scopes comma-separated in the authorize address (`LINEAR_SCOPES.join(",")` below). Adding a scope later forces every connected workspace to authorize again, so it is added before workspaces connect.
  */
-export const LINEAR_SCOPES = ["read", "comments:create", "issues:create"] as const;
+export const LINEAR_SCOPES = ["read", "write", "comments:create", "issues:create"] as const;
 
 const TIMEOUT_MS = 10_000;
 const ANSWER_MAX_BYTES = 1_000_000;
