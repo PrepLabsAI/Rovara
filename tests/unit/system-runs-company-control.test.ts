@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a JSON answer is read field by field */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SYSTEM_RUNS_CONSENT_AUDIT, SystemRunsViewSchema, queryAll, type AuditEvent, type OrgId, type OrgRole } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, SYSTEM_RUNS_CONSENT_AUDIT, SystemRunsViewSchema, queryAll, type AuditEvent, type OrgId, type OrgRole } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "../../packages/broker/src/core-host/system-runs-routes.js";
 import { SYSTEM_RUNS_WORDS } from "../../packages/broker/src/core/system-runs/consent-control.js";
@@ -16,7 +16,7 @@ import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
 const PERSON = "p1".repeat(32);
 type Body = Record<string, any>;
-interface Options { store?: MemoryDocumentStore; company?: OrgId; role?: OrgRole; ceiling?: boolean; consent?: boolean; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail" }
+interface Options { webApp?: boolean; store?: MemoryDocumentStore; company?: OrgId; role?: OrgRole; ceiling?: boolean; consent?: boolean; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail" }
 
 function control(options: Options = {}) {
   const base = options.store ?? new MemoryDocumentStore();
@@ -43,6 +43,8 @@ function control(options: Options = {}) {
       request: { method, path, headers: {}, body: who.raw ?? (body === undefined ? "" : JSON.stringify(body)) }, path,
       principal: { companyId: company, personId: PERSON, displayName: "x", roles: [], provider: "test" }, companyId: company, flow, role: who.role ?? options.role ?? "owner",
       ...(options.ceiling === false ? {} : { available: () => true }), audit, now: () => T0 + (calls - 1) * 1000,
+      // Owner DEC 254zzz91: the Rovara website's own client by default.
+      webApp: options.webApp ?? true,
     });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
   };
@@ -279,5 +281,35 @@ describe("two companies", () => {
     const damaged = new MemoryDocumentStore();
     await damaged.put({ item: { ...systemRunsConsentKey(COMPANY_A), entityType: "SYSTEM_RUNS_CONSENT", orgId: COMPANY_B, enabled: true } });
     expect((await control({ store: damaged }).call("GET")).body).toMatchObject({ allowed: false, systemRunsOn: false });
+  });
+});
+
+describe("owner DEC 254zzz91: allowing is the Rovara website's own client's act", () => {
+  it("the website's client allows; a CLI or AI-tool client gets 403 with the website words and nothing is done", async () => {
+    const web = control();
+    expect((await web.put(true)).status).toBe(200);
+    expect((await consentOf(web.store)).enabled).toBe(true);
+    for (const role of ["owner", "admin"] as const) {
+      const w = control({ webApp: false, role });
+      const answer = await w.put(true);
+      expect(answer.status).toBe(403);
+      expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+      await nothingDone(w);
+    }
+  });
+
+  it("a member on the website's client is still refused for the role, not for the client", async () => {
+    const w = control({ role: "member" });
+    const answer = await w.put(true);
+    expect(answer.status).toBe(403);
+    expect(errorOf(answer).message).not.toBe(ON_THE_WEBSITE_MESSAGE);
+    await nothingDone(w);
+  });
+
+  it("withdrawing from a CLI or AI-tool client still works", async () => {
+    const w = control({ webApp: false, consent: true });
+    await Promise.resolve();
+    expect((await w.put(false)).status).toBe(200);
+    expect((await consentOf(w.store)).enabled).toBe(false);
   });
 });

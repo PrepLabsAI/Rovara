@@ -10,11 +10,12 @@
 // Rules:
 //   - The record is company-scoped in its key (`CODE_SETTINGS#<company>#<project>`), so two companies with the same project name never share settings; it also names its company,
 //     and a record naming another company is refused, never applied.
-//   - DEC 254zzz73: no step-up. Any change, loosening included, needs the project's administrator or a company administrator (`mayChange`, read live by the developer API).
+//   - DEC 254zzz73: no step-up. Any change needs the project's administrator or a company administrator (`mayChange`, read live by the developer API); LOOSENING a rule
+//     (self-approval on, a required reviewer off) also needs the Rovara website's own client (DEC 254zzz91).
 //   - A stale revision is refused with Code's fixed words; the body is validated at runtime (strict); refusals never echo what was sent.
 import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CODE_SETTINGS_STALE_MESSAGE, CodeSettingsBodySchema, CodeSettingsSchema, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID, agentXError, type CodeSettings, type OrgId,
+  CODE_SETTINGS_STALE_MESSAGE, ON_THE_WEBSITE_MESSAGE, CodeSettingsBodySchema, CodeSettingsSchema, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID, agentXError, type CodeSettings, type OrgId,
 } from "@agentx/contracts";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 
@@ -64,7 +65,7 @@ export function loosens(current: CodeSettings, next: Omit<CodeSettings, "revisio
 
 /** A checked change. `mayChange` is the caller's right (project administrator or company administrator), decided by the developer API before any body is read. */
 export async function putCodeSettings(store: Store & { now: () => number; log(entry: Record<string, unknown>): void }, input: {
-  companyId: string | undefined; project: string; personId: string; clientId: string; mayChange: boolean; body: unknown;
+  companyId: string | undefined; project: string; personId: string; clientId: string; mayChange: boolean; webApp?: boolean; body: unknown;
 }): Promise<{ settings: CodeSettings }> {
   if (!input.mayChange) throw agentXError("FORBIDDEN", NOT_A_PROJECT_ADMIN);
   const body = CodeSettingsBodySchema.safeParse(input.body);
@@ -77,6 +78,8 @@ export async function putCodeSettings(store: Store & { now: () => number; log(en
     mergeMethod: body.data.mergeMethod ?? current.mergeMethod,
     codeReviewers: body.data.codeReviewers ?? current.codeReviewers,
   };
+  // Owner DEC 254zzz91: LOOSENING a rule is made only from the Rovara website's own client (never the CLI's or an AI tool's token); tightening and the merge method are not.
+  if (loosens(current, next) && input.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   const settings: CodeSettings = { ...next, revision: current.revision + 1 };
   try {
     await store.documentClient.send(new PutCommand({

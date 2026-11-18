@@ -25,7 +25,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, companyLog, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, companyLog, ON_THE_WEBSITE_MESSAGE, OrgIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import { githubUninstallUrl, projectsUsingInstallation } from "./github-lifecycle.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -186,7 +186,7 @@ export async function routeGithubConnect(ctx: GithubConnectContext, caller: Deve
   const one = INSTALLATION_PATH.exec(url.pathname);
   if (one !== null && url.pathname !== CONNECT && url.pathname !== CLAIM && url.pathname !== CHOOSE) {
     if (request.method !== "DELETE") throw agentXError("NOT_FOUND", "not found");
-    return disconnect(ctx, member, caller.developerId, one[1]!);
+    return disconnect(ctx, member, caller.developerId, one[1]!, caller.webApp === true);
   }
 
   if (url.pathname === GITHUB_CONNECT_PATH) {
@@ -281,8 +281,10 @@ async function readConnections(ctx: GithubConnectContext, companyId: string): Pr
  * the installation is this company's (else the one 404, the same for another company's and for none), no project of this company uses it (409 naming
  * them), then the conditional unbind with its audit row. The answer: GitHub's page where the installation itself is removed.
  */
-async function disconnect(ctx: GithubConnectContext, member: z.infer<typeof Membership>, personId: string, rawId: string): Promise<unknown> {
+async function disconnect(ctx: GithubConnectContext, member: z.infer<typeof Membership>, personId: string, rawId: string, webApp: boolean): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", DISCONNECT_OWNER_ONLY);
+  // Owner DEC 254zzz99: a disconnect is made only from the Rovara website's own client (never the CLI's or an AI tool's token), after the owner rule.
+  if (!webApp) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   const parsed = /^[1-9][0-9]{0,15}$/.test(rawId) ? InstallationId.safeParse(Number(rawId)) : undefined;
   if (parsed?.success !== true) throw agentXError("NOT_FOUND", CONNECTION_NOT_FOUND);
   const installationId = parsed.data;

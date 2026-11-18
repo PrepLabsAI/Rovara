@@ -85,7 +85,12 @@ the same identity provider as the admin client and its ID token carries the admi
 ## No step-up
 
 Rovara has no step-up ("confirm it's you", owner decision 254zzz73). Every press is checked against the signed-in
-person's live role and company, read on each request. An `acr_values` value (`step-up` included) is ignored: the
+person's live role and company, read on each request. A few company changes are made only from the Rovara website's own sign-in client (the operator-marked
+web app; owner decision 254zzz91): changing a member's role or removing them, making a script token, erasing a person,
+changing a project's cost or approval settings or loosening its merge rules, allowing automatic runs, and
+disconnecting GitHub, Slack or Linear (owner decision 254zzz99). Any other
+client (the Rovara CLI, an AI tool, another full-access client) gets 403 "Do this on the Rovara website". There is no
+extra confirm step. An `acr_values` value (`step-up` included) is ignored: the
 sign-in is an ordinary one, and no token carries `step_up_at` or `step_up_amr`. There is no factor email, no passkey
 and no `StepUpEmailSender` stack parameter.
 

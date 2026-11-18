@@ -29,7 +29,7 @@ function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean
   const db = new FakeDynamoDb({ seed: 11 });
   // Cloud's web app: a full-access, install-level sign-in client (as company-member-routes.test.ts).
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADMIN, sid: SESSIONS[ADMIN], amr };
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   const join = (id: string, companyId: string, role: "owner" | "admin" | "member") => {
     db.set({ ...membershipKey(id), entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME });
     db.set({ pk: `ORG#${companyId}#MEMBERS`, sk: `MEMBER#${id}`, entityType: "COMPANY_MEMBER_VIEW", personId: id, companyId, role, joinedAt: TIME });

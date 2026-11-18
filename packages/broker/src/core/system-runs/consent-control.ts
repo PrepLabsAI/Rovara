@@ -5,7 +5,7 @@
 //   - A withdrawal changes ONLY the company's consent row. Projects keep their own switch (they read as off while the consent is off, `effectiveSystemRunsGate`), and the nightly job is not touched: the effective gate is
 //     read on every use, so the next run is refused at once.
 //   - The row changes only if it is still the row this act read (a concurrent change loses and is told to try again). The same choice again is no change and records nothing.
-import { SystemRunsBodySchema, agentXError, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, SystemRunsBodySchema, agentXError, type DocumentStore, type OrgId, type SystemRunsView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "./consent.js";
 
 export const SYSTEM_RUNS_WORDS = {
@@ -23,6 +23,8 @@ export interface SystemRunsControlDeps {
   isCompanyAdmin(): Promise<boolean>;
   /** Whether the operator's ceiling covers this company (`CoreSystemRuns`). Absent, a throw and anything but `true` read as not available. */
   available?: (() => boolean | Promise<boolean>) | undefined;
+  /** Owner DEC 254zzz91: the request comes from the Rovara website's own client (`webApp`). Anything else may read and withdraw, never ALLOW. */
+  webApp?: boolean | undefined;
   /** The audit record, written before the row. Throws when it could not write. `previous` names the row this act replaces (its `changedAt`, or "none"). */
   record(details: { requestId: string; on: boolean; previous: string }): Promise<void>;
 }
@@ -54,6 +56,7 @@ export async function setSystemRunsConsent(deps: SystemRunsControlDeps, readBody
   const body = SystemRunsBodySchema.safeParse(readBody());
   if (!body.success) throw agentXError("CONFIG_INVALID", "the request is not valid");
   const { requestId, allowed } = body.data;
+  if (allowed && deps.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   if (allowed && !(await availableOf(deps))) throw agentXError("NOT_AVAILABLE_HERE", SYSTEM_RUNS_WORDS.unavailable);
   const key = systemRunsConsentKey(deps.companyId);
   const before = await deps.store.get(key).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", SYSTEM_RUNS_WORDS.unreadable); });

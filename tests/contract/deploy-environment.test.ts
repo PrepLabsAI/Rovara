@@ -978,6 +978,25 @@ describe("an upgrade whose answers leave github.appId out keeps the deployed Git
     expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"], dropped: [] });
   });
 
+  it.each(["cdk", "templates"] as const)("review L3 (DEC 254zzz73): a stack that still has StepUpEmailSender upgrades cleanly on the %s engine: the removed parameter is neither kept nor sent, and the upgrade does not fail", async (engine) => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).not.toContain("StepUpEmailSender");
+    expect(keptOperatorParameters({ part: "control-plane", computed: {}, deployed: { StepUpEmailSender: "codes@example.com", BudgetMonthlyUsd: "260" }, declared: new Set(["BudgetMonthlyUsd"]) }))
+      .toEqual({ kept: { BudgetMonthlyUsd: "260" }, dropped: [] });
+    {
+      const { store, secrets } = await installedEnvironment(engine);
+      const upgrade = fakeDeployer(scriptedOutputs());
+      const events: unknown[] = [];
+      await deployEnvironment({
+        mode: "upgrade", engine, answers: withoutAppId(), release: engine === "templates" ? fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd", "BudgetScope", "GitHubAppId"]) : fakeRelease(),
+        deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+        deployedParameters: deployedControlPlane(engine === "templates" ? { GitHubAppId: "", BudgetMonthlyUsd: "260", BudgetScope: "account", StepUpEmailSender: "codes@example.com" } : { GitHubAppId: "", StepUpEmailSender: "codes@example.com" }), onEvent: (event) => events.push(event),
+      });
+      expect(upgrade.requests.find((request) => request.part === "control-plane")).toBeDefined();
+      for (const request of upgrade.requests) expect(request.parameters, `${engine} ${request.part}`).not.toHaveProperty("StepUpEmailSender");
+      expect(JSON.stringify(events)).not.toContain("StepUpEmailSender");
+    }
+  });
+
   it("an upgrade whose answers name an appId still sends the answers' one", async () => {
     const { store, secrets } = await installedEnvironment();
     const upgrade = fakeDeployer(scriptedOutputs());

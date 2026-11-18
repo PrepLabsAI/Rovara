@@ -1403,7 +1403,7 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
   const companyAdmin = companyId === undefined ? person.administrator : membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
   return putCodeSettings({ ...store, now: deps.now, // The file's one company-less logger (already in the log-site inventory), with the company added when there is one.
     log: (entry) => logDeveloperEvent({ ...entry, ...(companyId === undefined ? {} : { companyId }) }) }, {
-    companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, body: jsonBody(request),
+    companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, webApp: person.client.fullAccess === true && person.client.webApp === true, body: jsonBody(request),
   });
 }
 const CLIENT_SETUP_STATUS = /^\/v1\/dev\/client\/projects\/([^/]+)\/setup-status(\/skips|\/eval-none)?$/;
@@ -2169,12 +2169,11 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   // The member helper's caller is the signed-in person only (its schema is strict and pinned): the web-app mark (DEC 236h) is not the helper's.
   const { webApp: _webApp, ...person } = caller;
-  void _webApp;
   return routeCompanyMembers({
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
     ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
-  }, { caller: person, companyId }, request, url);
+  }, { caller: person, companyId, webApp: _webApp === true }, request, url);
 }
 
 /** Guided onboarding PR 1: the GitHub connect routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */

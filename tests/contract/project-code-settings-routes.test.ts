@@ -1,7 +1,7 @@
 // Lane W (contract v0 client.projects.codeSettings.*): a project's merge rules on the deployed developer API, in Code's own CodeSettings shape (the one the merge core enforces).
 // Company-scoped records; another company's project looks missing; loosening a rule needs the same role as any change (DEC 254zzz73: no step-up); a stale revision is refused in Code's fixed words.
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, CODE_SETTINGS_STALE_MESSAGE, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { AgentXError, CODE_SETTINGS_STALE_MESSAGE, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID, ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -17,10 +17,12 @@ const REQUEST = "0b9f1c3e-7a51-4c1e-9d55-0f3a4b6c7d8e";
 const CANARY = "leak-canary-31";
 const PATH = (project = "alpha") => `/v1/dev/client/projects/${project}/code-settings`;
 
-function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
+function harness(options: { companies?: boolean; fullAccess?: boolean; webApp?: boolean } = {}) {
   const db = new FakeDynamoDb({ seed: 3 });
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADA, sid: "s-ada", amr: "slack" };
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), ...(options.fullAccess === false ? {} : { fullAccess: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), ...(options.fullAccess === false ? {} : { fullAccess: true }),
+    // Owner DEC 254zzz91: the operator-marked Rovara website client by default (loosening a merge rule is its act alone).
+    ...(options.fullAccess === false || options.webApp === false ? {} : { webApp: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   for (const [id, name, sid] of [[ADA, "Ada", "s-ada"], [BEN, "Ben", "s-ben"], [CAL, "Cal", "s-cal"]] as const) {
     db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "slack", displayName: name, revoked: false });
     db.set({ pk: `SESSION#${sid}`, sk: "META", sessionId: sid, developerId: id, amr: "slack", clientId: "web-app", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
@@ -119,6 +121,18 @@ describe("changing a project's merge rules", () => {
     h.as(ADA, "s-ada");
     expect(await h.call("GET", PATH())).toMatchObject({ body: { settings: { allowSelfApproval: false, revision: 1 } } });
     expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 1, allowSelfApproval: true, codeReviewers: ["OCTO-ORG/core"] })).toMatchObject({ status: 200, body: { settings: { allowSelfApproval: true, revision: 2 } } });
+  });
+
+  it("owner DEC 254zzz91: another full-access client (an AI tool's) tightens and changes the merge method, but loosening is refused with the website words and nothing is saved", async () => {
+    const h = harness({ webApp: false }); h.join(ADA, COMPANY_A.orgId, "member"); h.project("alpha", COMPANY_A.orgId); h.grant(ADA, "alpha", "administrator");
+    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, mergeMethod: "merge", codeReviewers: ["octo-org/core"] })).toMatchObject({ status: 200, body: { settings: { revision: 1 } } });
+    const website = { status: 403, body: error("FORBIDDEN", ON_THE_WEBSITE_MESSAGE) };
+    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 1, allowSelfApproval: true })).toEqual(website);
+    expect(await h.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 1, codeReviewers: [] })).toEqual(website);
+    expect(await h.call("GET", PATH())).toMatchObject({ body: { settings: { allowSelfApproval: false, codeReviewers: ["octo-org/core"], revision: 1 } } });
+    // The website's own client loosens the same rule.
+    const web = harness(); web.join(ADA, COMPANY_A.orgId, "member"); web.project("alpha", COMPANY_A.orgId); web.grant(ADA, "alpha", "administrator");
+    expect(await web.call("PUT", PATH(), { requestId: REQUEST, expectedRevision: 0, allowSelfApproval: true })).toMatchObject({ status: 200, body: { settings: { allowSelfApproval: true } } });
   });
 
   it("lets a company administrator change it, and refuses a plain member or developer of the project", async () => {

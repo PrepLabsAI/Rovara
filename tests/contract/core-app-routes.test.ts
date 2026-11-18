@@ -6,7 +6,7 @@
 //   - Two companies over one core: a person of one company never sees or reaches the other's script tokens or people.
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CLIENT_SCOPES, orgProjectCatalogKey, projectRevisionKey, type ClientScope, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { CLIENT_SCOPES, ON_THE_WEBSITE_MESSAGE, orgProjectCatalogKey, projectRevisionKey, type ClientScope, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { APP_ROUTES, DEV_ROUTES, appRouteOf, devRouteOf, type DevRoute } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { CORE_APP_SIGN_IN_AGAIN, CORE_APP_UNAVAILABLE, coreAppEntryFrom, type CoreAppEntry } from "../../packages/broker/src/aws/core-app-routes.js";
 import { deployedCallerFromMembership, membershipWithRoleFromDynamo, personStandingFromDynamo, projectGrantFromDynamo } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -414,11 +414,17 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     membership(BO, OTHER, "admin");
     membership(CY, FAKE_COMPANY, "member", new Date(T0 - 86_400_000).toISOString());
     for (const who of [ADA, BO]) db.set({ pk: `MEMBER#${who}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: who, projectName: "payments", role: "developer" });
+    // Owner DEC 254zzz91: the Rovara website's own client (operator-marked: full access AND webApp), with a web session for each person.
+    const at = new Date(T0 - 60_000).toISOString();
+    db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: at, updatedAt: at, updatedBy: "admin" });
+    for (const who of [ADA, BO, CY]) db.set({ pk: `SESSION#w-${who.slice(0, 2)}`, sk: "META", sessionId: `w-${who.slice(0, 2)}`, developerId: who, amr: "oidc", clientId: "web-app", startedAt: at, endsAt: T0 / 1000 + 604_800 });
   });
   const makeToken = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
+  /** The Rovara website's own client's token for a person (owner DEC 254zzz91: making a script token and erasing a person are its acts alone). */
+  const site = (who = ADA) => bearer({ aud: "web-app", azp: "web-app", sub: who, sid: `w-${who.slice(0, 2)}` });
 
   it("makes a script token for a live owner or admin with no step-up (DEC 254zzz73), and shows it only within the maker's company", async () => {
-    const made = await call("POST", "/v1/app/script-tokens", await cli(ADA), { body: { ...makeToken, requestId: randomUUID() } });
+    const made = await call("POST", "/v1/app/script-tokens", await site(ADA), { body: { ...makeToken, requestId: randomUUID() } });
     expect(made.status).toBe(201);
     expect(made.headers["cache-control"]).toBe("no-store");
     const tokenId = (made.body as { token: { tokenId: string } }).token.tokenId;
@@ -434,7 +440,7 @@ describe("the core's /v1/app routes over the core, two companies", () => {
   });
 
   it("uses live membership for canCreate and creation, while a demoted member can still list and revoke their own tokens", async () => {
-    const authorization = await cli(ADA);
+    const authorization = await site(ADA);
     const create = () => call("POST", "/v1/app/script-tokens", authorization, { body: { ...makeToken, requestId: randomUUID() } });
     const own = await create();
     expect(own.status).toBe(201);
@@ -442,7 +448,7 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: true });
     // A second person's token in this company stays hidden from the demoted member.
     membership(BO, FAKE_COMPANY, "owner");
-    const others = await call("POST", "/v1/app/script-tokens", await cli(BO), { body: { ...makeToken, requestId: randomUUID() } });
+    const others = await call("POST", "/v1/app/script-tokens", await site(BO), { body: { ...makeToken, requestId: randomUUID() } });
     expect(others.status).toBe(201);
     const otherId = (others.body as { token: { tokenId: string } }).token.tokenId;
     membership(ADA, FAKE_COMPANY, "member");
@@ -457,12 +463,21 @@ describe("the core's /v1/app routes over the core, two companies", () => {
   });
 
   it("erases a removed person only for an admin of that person's company (no step-up, DEC 254zzz73); another company's admin is told 'not found'", async () => {
-    const erase = async (who: string) => await call("POST", `/v1/app/people/${CY}/erase`, await cli(who), { body: { requestId: randomUUID() } });
+    const erase = async (who: string) => await call("POST", `/v1/app/people/${CY}/erase`, await site(who), { body: { requestId: randomUUID() } });
     expect(await erase(BO)).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
     const done = await erase(ADA);
     expect(done.status).toBe(200);
     expect(done.body).toMatchObject({ receipt: expect.any(Object) as unknown });
     expect(JSON.stringify(done.body)).not.toContain("Cy");
+  });
+
+  it("owner DEC 254zzz91: an admin's CLI token makes no script token and erases nobody: 403 with the website words, nothing made or erased", async () => {
+    const website = { status: 403, body: { error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } } };
+    expect(await call("POST", "/v1/app/script-tokens", await cli(ADA), { body: { ...makeToken, requestId: randomUUID() } })).toMatchObject(website);
+    expect((await call("GET", "/v1/app/script-tokens", await cli(ADA))).body).toMatchObject({ tokens: [] });
+    expect(await call("POST", `/v1/app/people/${CY}/erase`, await cli(ADA), { body: { requestId: randomUUID() } })).toMatchObject(website);
+    // The website's own client erases the same person, so nothing was erased above.
+    expect((await call("POST", `/v1/app/people/${CY}/erase`, await site(ADA), { body: { requestId: randomUUID() } })).status).toBe(200);
   });
 
   it("takes the company from LIVE membership: a person removed from their company, or never in one, is asked to sign in again", async () => {

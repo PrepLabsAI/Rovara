@@ -1,7 +1,7 @@
 // Lane W part 4: the company administrator's routes on the deployed developer API, through T3b's member helper and the real identity-side operator and store.
 // Two companies; full access only; a live admin or owner; only an owner changes or removes an owner; no step-up (DEC 254zzz73); fixed refusals that echo nothing.
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
@@ -23,10 +23,12 @@ const SESSIONS: Record<string, string> = { [OWNER]: "s-owner", [ADMIN]: "s-admin
 const MEMBERS = "/v1/dev/company/members";
 const member = (id: string, action: "removal-preview" | "removal" | "role") => `${MEMBERS}/${id}/${action}`;
 
-function world(options: { fullAccess?: boolean; helper?: boolean } = {}) {
+function world(options: { fullAccess?: boolean; helper?: boolean; webApp?: boolean } = {}) {
   const db = new FakeDynamoDb({ seed: 7 });
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADMIN, sid: "s-admin", amr: "slack" };
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), ...(options.fullAccess === false ? { scopes: ["tasks:read"] } : { fullAccess: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), ...(options.fullAccess === false ? { scopes: ["tasks:read"] } : { fullAccess: true }),
+    // Owner DEC 254zzz91: the operator-marked Rovara website client by default (role changes and removals are its acts alone).
+    ...(options.webApp === false || options.fullAccess === false ? {} : { webApp: true }), createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   const join = (id: string, companyId: string, role: "owner" | "admin" | "member", extra: Record<string, unknown> = {}) => {
     db.set({ ...membershipKey(id), entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME, ...extra });
     db.set({ pk: `ORG#${companyId}#MEMBERS`, sk: `MEMBER#${id}`, entityType: "COMPANY_MEMBER_VIEW", personId: id, companyId, role, joinedAt: TIME, ...extra });
@@ -183,7 +185,7 @@ describe("who may use the routes", () => {
     const h = world({ helper: false });
     const verify = vi.spyOn(h.deps.developer, "verifyAccessToken");
     expect(await h.call("GET", MEMBERS)).toEqual(refusal(404, "NOT_FOUND", "route not found"));
-    expect(await h.call("POST", member(MEMBER, "removal"), {})).toEqual(refusal(404, "NOT_FOUND", "route not found"));
+    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(refusal(404, "NOT_FOUND", "route not found"));
     expect(verify).not.toHaveBeenCalled();
     delete h.deps.companies;
     h.deps.developer.companyMembers = companyMemberActionsThroughLambda({ documentClient: h.db, tableName: "SignIn", invoke: async () => { throw new Error("must not run"); } });
@@ -205,7 +207,7 @@ describe("removal and role change", () => {
     expect(await h.call("POST", member(MEMBER, "removal"))).toEqual({ status: 200, body: { ok: true } });
     expect(h.revoked(MEMBER)).toBe(true);
     expect(h.forwarded).toEqual([{ kind: "company-member-revoke", companyId: A, personId: MEMBER, createdBy: ADMIN }]);
-    expect(await h.call("POST", member(MEMBER, "removal"), {})).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
+    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
   });
 
   it("an admin demotes another admin with no step-up (DEC 254zzz73: T3b has no step-up seam)", async () => {
@@ -357,5 +359,45 @@ describe("transport failures", () => {
     // A concurrent change revokes the caller's own ownership witness between the route's read and the write: T3b's store refuses with its fixed last-owner words.
     h.deps.developer.companyMembers = companyMemberActionsThroughLambda({ documentClient: h.db, tableName: "SignIn", invoke: async () => ({ Payload: Buffer.from(JSON.stringify({ ok: false, error: "unavailable", message: MEMBER_LAST_OWNER })) }) });
     expect(await h.call("POST", member(OWNER2, "removal"))).toEqual(refusal(409, "LAST_OWNER", MEMBER_LAST_OWNER));
+  });
+});
+
+describe("owner DEC 254zzz91: a role change or a removal is the Rovara website's own client's act", () => {
+  const website = refusal(403, "FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
+  it("another full-access client (an AI tool's) reads and previews, but changes no role and removes nobody: 403 with the website words, nothing forwarded", async () => {
+    const h = world({ webApp: false });
+    expect((await h.call("GET", MEMBERS)).status).toBe(200);
+    expect((await h.call("GET", member(MEMBER, "removal-preview"))).status).toBe(200);
+    h.forwarded.length = 0;
+    expect(await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).toEqual(website);
+    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(website);
+    expect(h.forwarded.filter((event) => event["kind"] !== "company-member-list")).toEqual([]);
+    expect([h.role(MEMBER), h.revoked(MEMBER)]).toEqual(["member", false]);
+  });
+
+  it("the Rovara CLI's own token (no registered client) is refused the same way", async () => {
+    const h = world();
+    delete h.claims.azp;
+    Object.assign(h.claims, { iss: "https://signin.example.test", aud: "agentx-developer", iat: NOW / 1000, exp: NOW / 1000 + 3600 });
+    // The CLI path takes the session's own method: a session made by the CLI has no client.
+    h.db.set({ pk: "SESSION#s-admin", sk: "META", sessionId: "s-admin", developerId: ADMIN, amr: "slack", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
+    expect((await h.call("GET", MEMBERS)).status).toBe(200);
+    expect(await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).toEqual(website);
+    expect(await h.call("POST", member(MEMBER, "removal"))).toEqual(website);
+    expect([h.role(MEMBER), h.revoked(MEMBER)]).toEqual(["member", false]);
+  });
+
+  it("on the website's own client the change is made, and the role and company rules still refuse first", async () => {
+    const h = world();
+    expect((await h.call("PUT", member(MEMBER, "role"), { role: "admin" })).status).toBe(200);
+    expect(h.role(MEMBER)).toBe("admin");
+    // An admin on an owner: the owner-only rule, not the client; another company's person: not found.
+    expect(await h.call("POST", member(OWNER, "removal"))).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
+    expect((await h.call("POST", member(OTHER, "removal"))).status).toBe(404);
+    // A plain member, on the website's own client, is refused for the role (the member routes answer not found).
+    const m = world();
+    m.as(MEMBER);
+    expect((await m.call("PUT", member(ADMIN, "role"), { role: "member" })).status).toBe(404);
+    expect(m.role(ADMIN)).toBe("admin");
   });
 });

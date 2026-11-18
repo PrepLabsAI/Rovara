@@ -2,6 +2,7 @@
 // sealer (the encryption context is its additional data) and a fake Linear behind the fetch seam. Two companies throughout.
 import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, LINEAR_REDIRECT, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, WORKSPACE_B, WORKSPACE_C, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
@@ -385,7 +386,7 @@ describe("team pick", () => {
 });
 
 describe("disconnect", () => {
-  it("needs a live owner (no step-up, DEC 254zzz73); then revokes both tokens, unbinds, clears every pick and names the projects", async () => {
+  it("needs a live owner on the Rovara website (no step-up, DEC 254zzz73; website only, DEC 254zzz99); then revokes both tokens, unbinds, clears every pick and names the projects", async () => {
     const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
     w.projectOf("alpha", A); w.projectOf("gamma", A);
     await w.call("PUT", `${BASE}/projects/alpha`, { teamId: "team-a-eng" });
@@ -395,6 +396,11 @@ describe("disconnect", () => {
     w.asWeb(PERSON, A, "member");
     expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "FORBIDDEN", message: DISCONNECT_OWNER_ONLY } });
     expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeDefined();
+    // Owner DEC 254zzz99: the owner's CLI (or AI-tool) token is refused with the website words, and nothing changes.
+    w.as(PERSON, A, "owner");
+    expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } });
+    expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeDefined();
+    expect(w.linear.grants[0]!.revoked).not.toBe(true);
     w.asWeb(PERSON, A, "owner");
     expect(w.claims).not.toHaveProperty("step_up_at");
    

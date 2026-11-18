@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
-import { resolvePolicy, companyScoped, AgentXError, IMPLICIT_COMPANY_ID, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
+import { resolvePolicy, companyScoped, AgentXError, ON_THE_WEBSITE_MESSAGE, POLICY_FIELDS, POLICY_FIELD_SURFACES, policyFieldPageOnly, IMPLICIT_COMPANY_ID, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { createProjectSettingsPolicySource } from "../../packages/broker/src/aws/project-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -16,16 +16,21 @@ function partitionProject(db: FakeDynamoDb, companyId: string, name = "web", rev
   db.set({ ...projectRevisionKey(companyId, name, revision), entityType: "PROJECT", definition: { name, revision } });
   db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", name, latestRevision: revision, ...extra });
 }
-function world() {
+function world(options: { webApp?: boolean } = {}) {
   const db = new FakeDynamoDb();
+  // Owner DEC 254zzz91: by default the caller is the Rovara website's own client (the operator-marked full-access web app); `webApp: false` is the Rovara CLI's own token.
+  const web = options.webApp !== false;
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const webBearer = `Bearer ${part({ alg: "none" })}.${part({ azp: "web-app" })}.sig`;
   let company: string | undefined = COMPANY;
   // Extra claims on the verified access token (DEC 254zzz73: a leftover step-up claim is ignored). None by default.
   let extraClaims: Record<string, unknown> = {};
   const companies = { companyOf: vi.fn(async () => company) };
   const deps: DeveloperRouteDependencies = { documentClient: db, tableName: "state", companies, now: () => now,
     developer: { issuer: ISSUER, env: "test", methods: { slack: true, oidc: false }, signInTableName: "signin", channelMembers: async () => ({ ok: false, error: "slack_unavailable" }),
-      verifyAccessToken: async () => ({ iss: ISSUER, aud: "agentx-developer", sub: person, amr: "slack", env: "test", sid: "session", iat: now / 1000, exp: now / 1000 + 3600, companyId: COMPANY, ...extraClaims }) } };
-  db.set({ pk: "SESSION#session", sk: "META", sessionId: "session", developerId: person, amr: "slack", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600 });
+      verifyAccessToken: async () => ({ iss: ISSUER, aud: "agentx-developer", sub: person, amr: "slack", env: "test", sid: "session", iat: now / 1000, exp: now / 1000 + 3600, companyId: COMPANY, ...(web ? { azp: "web-app" } : {}), ...extraClaims }) } };
+  db.set({ pk: "SESSION#session", sk: "META", sessionId: "session", developerId: person, amr: "slack", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600, ...(web ? { clientId: "web-app" } : {}) });
+  if (web) db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), updatedBy: "admin" });
   db.set({ pk: `DEVELOPER#${person}`, sk: "META", displayName: "Test", revoked: false });
   // A project in BOTH layouts: the legacy shared row (read only by the implicit company's unmarked path) and the company partition rows, without companyId as the switch-over left them.
   const project = (cid: string) => {
@@ -35,7 +40,7 @@ function world() {
   const role = (value = "administrator", cid = COMPANY) => db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: cid, projectName: "web", role: value });
   project(COMPANY); role();
   const send = vi.spyOn(db, "send");
-  const call = (method = "GET", body?: unknown, query = "", headers: Record<string, string> = {}) => routeDeveloperRequest(deps, { method, path, headers: { authorization: "Bearer fixture", "x-company-id": COMPANY, ...headers }, requestId: "test", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path + query, ISSUER)).catch((error: unknown) => {
+  const call = (method = "GET", body?: unknown, query = "", headers: Record<string, string> = {}) => routeDeveloperRequest(deps, { method, path, headers: { authorization: web ? webBearer : "Bearer fixture", "x-company-id": COMPANY, ...headers }, requestId: "test", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path + query, ISSUER)).catch((error: unknown) => {
     if (error instanceof AgentXError) throw Object.assign(new Error(error.message.slice(error.code.length + 2)), { code: error.code, statusCode: error.statusCode });
     throw error;
   });
@@ -333,6 +338,35 @@ it("DEC 254zzz73: a leftover step-up claim of any form is ignored, and nothing i
   await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }, `?step_up_at=${now / 1000}&step_up_amr=passkey`, { "x-step-up-at": new Date(now).toISOString() })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
   await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 }, stepUp: { at: new Date(now).toISOString(), method: "passkey" } })).rejects.toMatchObject({ code: "FORBIDDEN" });
   expect(await w.call()).toMatchObject({ revision: 1, overrides: { model_budget_usd: 3 } });
+});
+// Owner DEC 254zzz91: a cost or approval field (and the preset) changes only from the Rovara website's own client; the Rovara CLI's token (or an AI tool holding it) is refused, nothing written.
+const PAGE_ONLY = Object.entries(CHANGES).filter(([field]) => field !== "after_merge_revert");
+it("owner DEC 254zzz91: classifies every settings field, and a field nobody classified is website-only", () => {
+  expect(Object.keys(POLICY_FIELD_SURFACES).sort()).toEqual(POLICY_FIELDS.map((field) => field.id).sort());
+  expect(policyFieldPageOnly("brand_new_field")).toBe(true);
+  expect(policyFieldPageOnly("__proto__")).toBe(true);
+  expect(policyFieldPageOnly("constructor")).toBe(true);
+  expect(POLICY_FIELDS.filter((field) => !policyFieldPageOnly(field.id)).map((field) => field.id)).toEqual(["after_merge_revert"]);
+});
+it.each(PAGE_ONLY)("owner DEC 254zzz91: the project's administrator's CLI token cannot change %s (the website words, nothing written)", async (field, value) => {
+  const w = world({ webApp: false });
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { [field]: value } })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: ON_THE_WEBSITE_MESSAGE });
+  expect(writes(w)).toEqual([]);
+});
+it("owner DEC 254zzz91: the CLI token cannot change the preset, but may change a report-only field (after_merge_revert) and read", async () => {
+  const w = world({ webApp: false });
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+  expect(writes(w)).toEqual([]);
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { after_merge_revert: "report_only" } })).toMatchObject({ revision: 1, overrides: { after_merge_revert: "report_only" } });
+  expect(await w.call()).toMatchObject({ revision: 1 });
+});
+it("owner DEC 254zzz91: on the website's own client the role and company rules still refuse first", async () => {
+  const w = world();
+  w.role("developer");
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  w.role("administrator"); w.setCompany(B);
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.not.toMatchObject({ message: ON_THE_WEBSITE_MESSAGE });
+  expect(writes(w)).toEqual([]);
 });
 it("without a step-up, a person who may not write, or who is in another company, still changes nothing and learns nothing", async () => {
   const w = world();
