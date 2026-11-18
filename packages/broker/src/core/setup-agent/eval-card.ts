@@ -5,7 +5,7 @@ import { EVAL_OUTPUT_UNREADABLE_MESSAGE, evalOutputNeedsWrapper, type DocumentSt
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
-import { evalCommandFingerprintOf } from "@agentx/contracts";
+import { evalCommandFingerprintOf, evalProductRowLabel } from "@agentx/contracts";
 import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
 import { evalHealthNotRunWords } from "@agentx/contracts";
 import { readEvalHealthView, type EvalHealthResultSummary } from "./eval-health-request.js";
@@ -19,6 +19,8 @@ export interface EvalCardDeps {
   members?: SessionMembers | undefined;
   /** The host's monthly cap source (the bound reservation adapter's). Absent or no answer: no card can be offered for an unconfirmed eval. */
   monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
+  /** L4-T3: whether the project's own AI provider is connected (the bound adapter's, the model gateway's own key check). Absent or no answer: "connected" is unknown and the card says neither. */
+  providerConnected?: ((scope: { company: string; project: string }) => Promise<boolean | undefined>) | undefined;
   /** D5: whether this install has a health runner that reads the person's yes. False or absent: the card offers no health button (a button nothing answers would be a lie). */
   healthRuns?: boolean | undefined;
   /** The host's clock (milliseconds), for the health check's age and window. Absent: the stored row is read as it is. */
@@ -27,6 +29,8 @@ export interface EvalCardDeps {
 
 export interface EvalCardSuiteView {
   selection: string;
+  /** L4-T3: the AI provider this suite's evals call, as a person knows it ("Google Gemini", "Vertex AI"), from what discovery found. Absent for a row this install cannot name. */
+  provider?: string;
   files: string[];
   cases: number;
   /** "Running your evals on each AI change will cost about $A-$B per PR, at most $X a month. Approve?" */
@@ -52,6 +56,9 @@ export interface EvalCardView {
   suites: EvalCardSuiteView[];
   /** L4-EVW4 (DEC 254zzz43): ONE card per eval whose results Rovara cannot read as they are: the file (path and text, for everyone to view and copy), where it stands, and what this person may do about it. */
   wrappers: EvalWrapperCard[];
+  /** L4-T3 (G2): the AI provider the evals call (the approved item's, else the first suite's) and whether the company's own connection to it stands right now. `connected` is absent when this install cannot tell. */
+  provider?: string;
+  connected?: boolean;
   spend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; perPr?: string; monthly?: string; needsApproval?: string; carried?: boolean; setupRevision?: number; approval?: { requestId: string; revision: number; artifactDigest: string } };
   /** D5: the opt-in health run, offered only once the spend is approved. `seenCostMicros` is what a yes echoes. */
   health?: { state: "none" | "requested" | "running" | "finished" | "not_run"; label: string; cost: string; seenCostMicros: number;
@@ -75,7 +82,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   let monthlyCap: number | undefined;
   try { const cap = deps.monthlyCap === undefined ? undefined : await deps.monthlyCap({ company: deps.companyId, project }); monthlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? cap : undefined; } catch { monthlyCap = undefined; }
   const table = { store: deps.store, companyId: deps.companyId, ...members, ...(monthlyCap === undefined ? {} : { monthlyCapMicros: monthlyCap }) };
-  const [item, record, found] = await Promise.all([readEvalSpendItem(table, project), readEvalSpendRecord(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project)]);
+  const [item, record, found, connection] = await Promise.all([readEvalSpendItem(table, project), readEvalSpendRecord(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project),
+    (async () => { try { const answer = deps.providerConnected === undefined ? undefined : await deps.providerConnected({ company: deps.companyId, project }); return typeof answer === "boolean" ? answer : undefined; } catch { return undefined; } })()]);
   // An approval counts for the preview only while its approver still may approve (the item's own live reading) and it carries the dollars the person saw.
   const standing = item?.state === "approved" && record?.state === "approved" && record.plan.dollars !== undefined ? record.plan : undefined;
   const suites: EvalCardSuiteView[] = [];
@@ -91,7 +99,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
       const sameSuite = standing !== undefined && suite.selection === standing.selection && suite.model === standing.inputs.model && suite.modelVersion === standing.inputs.modelVersion
         && suite.catalogRowId === standing.inputs.catalogRowId && evalCommandFingerprintOf(suite.command, suite.report) === standing.inputs.commandFingerprint;
       const within = sameSuite && standing?.dollars !== undefined && dollars.perCheckHighMicros <= standing.dollars.perCheckHighMicros && estimate.calls <= standing.budget.maximum.calls && estimate.costMicros <= standing.budget.maximum.costMicros;
-      suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
+      const provider = evalProductRowLabel(suite.catalogRowId);
+      suites.push({ selection: suite.selection, ...(provider === undefined ? {} : { provider }), files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
         ...(readableThroughFile(files, needs, suite) ? { readable: true } : { readable: false, needsFile: EVAL_OUTPUT_UNREADABLE_MESSAGE }),
         seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros },
         ...(standing?.dollars === undefined ? {} : { versusApproved: within ? { within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." } : { within: false, words: evalAsksAgainWords({ reason: sameSuite ? "grew" : "changed", approvedHighMicros: standing.dollars.perCheckHighMicros }) } }) });
@@ -100,6 +109,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   const state: EvalCardView["state"] = found?.state === "reported" ? "propose"
     : item === undefined ? (found === undefined ? "none" : "waiting")
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
+  // The provider of the item that stands (its approved row), else of the first suite the card shows. Said only while there is an eval to run (not for none or rejected).
+  const provider = state === "none" || state === "rejected" ? undefined : (record !== undefined && item !== undefined ? evalProductRowLabel(record.plan.inputs.catalogRowId) : undefined) ?? suites.find(s => s.provider !== undefined)?.provider;
   const card = item?.card;
   const wrappers = await readEvalWrapperCards({ store: deps.store, companyId: deps.companyId }, project, found === undefined ? undefined : { reportDigest: found.reportDigest, report: found.report }, role !== undefined);
   const health = deps.healthRuns === true && role !== undefined && item?.state === "approved" && card !== undefined && record !== undefined
@@ -110,7 +121,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     })()
     : undefined;
   return {
-    state, canApprove: role !== undefined, wrappers, ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,
+    state, canApprove: role !== undefined, wrappers, ...(provider === undefined ? {} : { provider, ...(connection === undefined ? {} : { connected: connection }) }),
+    ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,
     ...(item === undefined ? {} : { spend: { state: item.state,
       ...(card === undefined ? {} : { perPr: card.perPr, monthly: card.monthly, ...(card.needsApproval === undefined ? {} : { needsApproval: card.needsApproval }), ...(card.carried === true ? { carried: true } : {}), ...(card.setupRevision === undefined ? {} : { setupRevision: card.setupRevision }) }),
       ...(item.approval === undefined ? {} : { approval: { requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest } }) } }),

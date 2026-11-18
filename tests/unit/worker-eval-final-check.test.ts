@@ -34,10 +34,27 @@ describe("final-check guard order", () => {
   it.each([undefined, "working", "unknown"]) ("requires a fresh sandbox for %s", async roundKind => { const w = await world(); const a = await runFinalCheckEval(request, { ...w.ports, roundKind } as EvalFinalCheckPorts, facts()); expect(reasonOf(a)).toBe("needs_fresh_sandbox"); expect(w.planned()).toBe(0); expect(w.holds).toEqual([]); });
   it.each(["not_verified", "regression", "unknown", undefined])("does not spend when checks are %s", async status => { const w = await world(); expect(reasonOf(await runFinalCheckEval(request, w.ports, { ...facts(), status } as never))).toBe("checks_failed"); expect(w.planned()).toBe(0); expect(w.calls).toEqual([]); });
   it.each(["undefined", "throws"])("refuses an unreadable plan %s without leaking", async kind => { const w = await world(); w.ports.plan = async () => { if (kind === "throws") throw new Error("secret-cause"); return undefined; }; const a = await runFinalCheckEval(request, w.ports, facts()); expect(reasonOf(a)).toBe("not_connected"); expect(JSON.stringify(a)).not.toContain("secret-cause"); expect(w.approvals()).toBe(0); });
-  it.each(["absent", "company", "project", "selection", "role", "provider", "connected", "inputsDigest", "maxCalls", "maxCostMicros"])("rejects the %s grant before reserving", async field => {
-    const w = await world(); const value = field === "connected" ? false : field === "maxCalls" ? NaN : field === "maxCostMicros" ? -1 : field === "inputsDigest" ? "d".repeat(64) : "secret-invalid";
+  it.each(["absent", "company", "project", "selection", "role", "provider", "inputsDigest", "maxCalls", "maxCostMicros"])("rejects the %s grant before reserving", async field => {
+    const w = await world(); const value = field === "maxCalls" ? NaN : field === "maxCostMicros" ? -1 : field === "inputsDigest" ? "d".repeat(64) : "secret-invalid";
     w.ports.approval = { read: async () => field === "absent" ? undefined : ({ ...w.grant, [field]: value }) };
     const a = await runFinalCheckEval(request, w.ports, facts()); expect(reasonOf(a)).toBe("spend_not_approved"); expect(w.holds).toEqual([]); expect(w.stages).toEqual([]); expect(JSON.stringify(a)).not.toContain("secret-invalid");
+  });
+  // L4-T3 (G2): an approval that stands for this eval but whose AI provider is not connected reads as that, never as "not approved".
+  it("an approved grant whose provider is not connected reads provider_not_connected, with no hold, no stage and no call, and never 'not approved'", async () => {
+    const w = await world(); w.ports.approval = { read: async () => ({ ...w.grant, connected: false }) };
+    const a = await runFinalCheckEval(request, w.ports, facts());
+    expect(reasonOf(a)).toBe("provider_not_connected"); expect(w.holds).toEqual([]); expect(w.stages).toEqual([]); expect(w.calls).toEqual([]);
+    expect(evalResultFromArtifact(a).summary).toContain("the AI your evals call is not connected for this project"); expect(JSON.stringify(a)).not.toMatch(/spend_not_approved|confirm the eval's call estimate/u);
+  });
+  it("a connected grant is unchanged (it runs), and a not-connected grant with a wrong company or selection is still 'not approved' (nothing about it is believed)", async () => {
+    const w = await world(); const ran = await runFinalCheckEval(request, w.ports, facts()); expect(ran?.outcome).toBe("done"); expect(w.calls.length).toBeGreaterThan(0);
+    for (const field of ["company", "selection", "inputsDigest"] as const) {
+      const v = await world(); v.ports.approval = { read: async () => ({ ...v.grant, connected: false, [field]: field === "inputsDigest" ? "d".repeat(64) : "other" }) };
+      expect(reasonOf(await runFinalCheckEval(request, v.ports, facts())), field).toBe("spend_not_approved"); expect(v.holds).toEqual([]);
+    }
+  });
+  it("a delivered grant must say connected as a boolean: anything else is 'not approved'", async () => {
+    for (const value of ["false", 0, null, undefined]) { const w = await world(); w.ports.approval = { read: async () => ({ ...w.grant, connected: value }) as never }; expect(reasonOf(await runFinalCheckEval(request, w.ports, facts())), String(value)).toBe("spend_not_approved"); }
   });
   it("DEC 200 needs no grant and never reserves", async () => { const w = await world(); w.plan.evalConfigured = false; const a = await runFinalCheckEval(request, w.ports, facts()); expect(evalResultFromArtifact(a).summary).toContain("Prompt changed. No eval found"); expect(w.approvals()).toBe(0); expect(w.holds).toEqual([]); });
   it("returns measuring immediately with no task-stage hold", async () => { const w = await world(); w.ports.cache.read = async () => undefined; w.ports.baselines.forTask = async () => "measuring"; const a = await runFinalCheckEval(request, w.ports, facts()); expect(evalResultFromArtifact(a)).toMatchObject({ outcome: "not_run", notices: ["baseline still being measured"], disposition: { check: "neutral" } }); expect(w.holds).toEqual([]); });

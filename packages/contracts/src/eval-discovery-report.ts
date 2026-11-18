@@ -42,6 +42,9 @@ export function evalImageDigestOf(image: unknown): string | undefined {
 export const EVAL_PRODUCT_ROW = "gemini";
 export const EVAL_VERTEX_ROW = "vertex";
 export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google", [EVAL_VERTEX_ROW]: "google" });
+/** L4-T3: the words a person knows each row by. A row this install cannot run has no label (the card then says nothing about a provider). */
+const EVAL_PRODUCT_ROW_LABELS: Readonly<Record<string, string>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "Google Gemini", [EVAL_VERTEX_ROW]: "Vertex AI" });
+export const evalProductRowLabel = (row: unknown): string | undefined => (typeof row === "string" && Object.hasOwn(EVAL_PRODUCT_ROW_LABELS, row) ? EVAL_PRODUCT_ROW_LABELS[row] : undefined);
 /** The rows a setup draft may name for its eval's provider. Absent is `gemini`. */
 export const EVAL_DRAFT_PROVIDERS = ["gemini", "vertex"] as const;
 export type EvalDraftProvider = (typeof EVAL_DRAFT_PROVIDERS)[number];

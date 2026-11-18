@@ -41,7 +41,7 @@ const post = (path: string, body: unknown = {}) => ({ method: "POST", path, head
 const RUN = `/v1/app/projects/${PROJECT}/setup-agent`;
 interface Person { companyId: OrgId; role: OrgRole; grants: Record<string, "developer" | "administrator"> }
 
-async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown> } = {}) {
+async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown>; providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined> } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, PROJECT); await register(world, OTHER, PROJECT);
   const app = appOver(world);
@@ -69,7 +69,7 @@ async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; hea
   const wiringFor = (companyId: OrgId): HostedSetupRunWiring => ({
     standing, modelAccessConfigured: () => true,
     approval: createHostedSetupApproval({ flow: { store: world.store, companyId, now: () => new Date(world.clock.now) }, store: world.store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now: () => new Date(world.clock.now) }),
-    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
+    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), ...(options.providerConnected === undefined ? {} : { providerConnected: options.providerConnected }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
   });
   const wirings = new Map<string, HostedSetupRunWiring>([[FAKE_COMPANY, wiringFor(FAKE_COMPANY)], [OTHER, wiringFor(OTHER)]]);
   const routes = createCoreDevRoutes({
@@ -111,6 +111,22 @@ describe("GET eval: the card", () => {
     const reader = await call(get(`${RUN}/eval`), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }));
     expect(reader.body).toMatchObject({ canApprove: false, state: "propose" });
     expect((await call(get(`${RUN}/eval`), person("p-none", FAKE_COMPANY, "member"))).body).toEqual({ error: { code: "NOT_FOUND", message: SETUP_RUN_PROJECT_NOT_FOUND } });
+  });
+  it("L4-T3: the hosted card names the provider and carries the company's own connection answer (asked for exactly this company and project), and says neither where the install cannot tell", async () => {
+    const asked: Array<{ company: string; project: string }> = [];
+    const { person, call, reported } = await hosted({ providerConnected: async (scope) => { asked.push(scope); return scope.company === FAKE_COMPANY ? false : true; } });
+    await reported(FAKE_COMPANY);
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    const card = await call(get(`${RUN}/eval`), admin);
+    expect(card.body).toMatchObject({ state: "propose", provider: "Google Gemini", connected: false, suites: [{ provider: "Google Gemini" }] });
+    expect(asked).toEqual([{ company: FAKE_COMPANY, project: PROJECT }]);
+    // Another company never reads this one's eval or its connection: nothing is said of a provider.
+    const other = await call(get(`${RUN}/eval`), person("o-admin", OTHER, "admin"));
+    expect(other.body).toMatchObject({ state: "none" }); expect(other.body["provider"]).toBeUndefined(); expect(other.body["connected"]).toBeUndefined();
+    expect(asked.every((scope) => scope.company === FAKE_COMPANY || scope.company === OTHER)).toBe(true);
+    const unknown = await hosted(); await unknown.reported(FAKE_COMPANY);
+    const plain = await unknown.call(get(`${RUN}/eval`), unknown.person("p-admin", FAKE_COMPANY, "admin"));
+    expect(plain.body).toMatchObject({ provider: "Google Gemini" }); expect(plain.body["connected"]).toBeUndefined();
   });
   it("answers 'not available' where the deployment wires no eval card", async () => {
     const { person, call } = await hosted({ evalWiring: false });
