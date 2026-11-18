@@ -14,6 +14,7 @@ import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-ca
 import { confirmEvalDiscovery, readEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { EVAL_SPEND_KIND, createEvalSpendSubject, readEvalSpendItem, readEvalSpendRecord } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
+import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
@@ -70,8 +71,10 @@ function people(companyId: string, roles: Record<string, Role>) {
 }
 
 /** One company with a store shared by every setup run made on it (a later run is a later report on the same project). */
-export function company(companyId: string, roles: Record<string, Role> = { ...ROLES }, store: DocumentStore = new MemoryDocumentStore()) {
-  const members = deployedSessionMembers(companyId, people(companyId, roles));
+export type EvalCardWorld = ReturnType<typeof makeCompany>;
+export const company = (...args: Parameters<typeof makeCompany>): EvalCardWorld => makeCompany(...args);
+function makeCompany(companyId: string, roles: Record<string, Role> = { ...ROLES }, store: DocumentStore = new MemoryDocumentStore()) {
+  const members: SessionMembers = deployedSessionMembers(companyId, people(companyId, roles));
   let decider: Principal = person(companyId, "admin");
   const approvers: Approvers = { requirement: async () => ({ methods: ["local-session"], minApprovers: 1, selfApprovalAllowed: true }), verify: async (_request, proof) => ({ approved: true, approver: decider, method: proof.method, proofId: proof.proofId }) };
   const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), subjects: [createEvalSpendSubject({ store, companyId, members })], now: () => new Date(NOW) });
