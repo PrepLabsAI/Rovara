@@ -185,8 +185,11 @@ export interface BrokerCoreRootInputs {
   lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
   /** The pilot companies, whose projects have the weekly lessons summary ON until a project chooses otherwise. Absent: the companies ROVARA_CORE_LESSONS names (`on:<ids>`). One list for the sender and the API. */
   lessonsDigestPilot?: (companyId: OrgId) => boolean;
-  /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
-  lessonsLearning?: CoreLessonsOptions["learning"];
+  /**
+   * The learning model port for one company's lessons (`hostedLessonsLearning`: the gateway's learning route, on the company's own provider account and inside its learning cap). Asked only for a company
+   * the lessons switch names. Absent, or undefined for a company (or a throw): learning calls refuse and nothing is spent.
+   */
+  lessonsLearning?: (companyId: OrgId) => CoreLessonsOptions["learning"];
   /**
    * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
    * The runtime validates this reader and passes the same checked function to merge tracking.
@@ -695,6 +698,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
   const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // L4-HW2: the company's learning port, asked for only where the lessons switch names the company (nothing is made, no token minted, for any other), and never allowed to break the runtime: a throw is "no port".
+  const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
+    if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
+    try {
+      const port = inputs.lessonsLearning(companyId);
+      // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a non-Claude agent model) learns nothing, and that is never silent.
+      if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
+      return port;
+    } catch { log({ event: "core_engine.lessons_learning_unavailable", companyId }); return undefined; }
+  };
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
@@ -761,7 +774,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
             knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
-            ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
+            ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId)),
             // L4-SRC-TK: ticket comments as a (weak) lessons source, through the company's own Linear connection and its own account links only.
             ...(inputs.linearIntake === undefined ? {} : {
               tickets: {
