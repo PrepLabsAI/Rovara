@@ -92,7 +92,9 @@ export interface HostedSetupRunWiring {
    * L4-EVC: the eval card (DEC 254zzz20). The company's monthly eval cap (the bound `eval-reservation` adapter's source; absent: no eval can be confirmed here) and the code host's file read for the
    * broker's own hashing of the confirmed files. Served only together with `approval` (whose gate decides the eval spend item and whose members read the live roles).
    */
-  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"] } | undefined;
+  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"];
+    /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
+    healthRuns?: boolean } | undefined;
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
 }
@@ -373,7 +375,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     if (input.request.method === "GET" && tail === "eval") {
       const approval = input.wiring.approval;
       if (approval === undefined || input.wiring.eval === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap }, project, input.principal)) });
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
@@ -447,6 +449,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       if (approval === undefined || evalWiring === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
       const stamp = String(input.now());
       if (tail === "eval-health") {
+        if (evalWiring.healthRuns !== true) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
         // The opt-in (D5): a person's yes, kept as one request row. Nothing runs here; the host's health runner reads the row.
         const body = parsed(EvalHealthRequestBodySchema, raw);
         await recorded(input, auditEvent(input, "eval.health_requested", `eval.health:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));

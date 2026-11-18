@@ -41,7 +41,7 @@ const post = (path: string, body: unknown = {}) => ({ method: "POST", path, head
 const RUN = `/v1/app/projects/${PROJECT}/setup-agent`;
 interface Person { companyId: OrgId; role: OrgRole; grants: Record<string, "developer" | "administrator"> }
 
-async function hosted(options: { evalWiring?: boolean } = {}) {
+async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, PROJECT); await register(world, OTHER, PROJECT);
   const app = appOver(world);
@@ -69,7 +69,7 @@ async function hosted(options: { evalWiring?: boolean } = {}) {
   const wiringFor = (companyId: OrgId): HostedSetupRunWiring => ({
     standing, modelAccessConfigured: () => true,
     approval: createHostedSetupApproval({ flow: { store: world.store, companyId, now: () => new Date(world.clock.now) }, store: world.store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now: () => new Date(world.clock.now) }),
-    ...(options.evalWiring === false ? {} : { eval: { monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
+    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
   });
   const wirings = new Map<string, HostedSetupRunWiring>([[FAKE_COMPANY, wiringFor(FAKE_COMPANY)], [OTHER, wiringFor(OTHER)]]);
   const routes = createCoreDevRoutes({
@@ -224,6 +224,14 @@ describe("POST eval-decide: a waiting item", () => {
 });
 
 describe("POST eval-health: the opt-in", () => {
+  it("is not offered where no health runner reads the yes: no button on the card, and the route says it is not available", async () => {
+    const { person, call, reported } = await hosted({ healthRuns: false });
+    await reported(FAKE_COMPANY);
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    expect((await call(post(`${RUN}/eval-approve`, await approveBody(call, admin)), admin)).status).toBe(200);
+    expect((await call(get(`${RUN}/eval`), admin)).body["health"]).toBeUndefined();
+    expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 600_000 }), admin)).body).toEqual({ error: { code: "NOT_FOUND", message: EVAL_APPROVAL_UNAVAILABLE } });
+  });
   it("records a person's yes and runs nothing; approving alone never does", async () => {
     const { world, person, call, reported, audit } = await hosted();
     await reported(FAKE_COMPANY);

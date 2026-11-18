@@ -15,6 +15,8 @@ export interface EvalCardDeps {
   members?: SessionMembers | undefined;
   /** The host's monthly cap source (the bound reservation adapter's). Absent or no answer: no card can be offered for an unconfirmed eval. */
   monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
+  /** D5: whether this install has a health runner that reads the person's yes. False or absent: the card offers no health button (a button nothing answers would be a lie). */
+  healthRuns?: boolean | undefined;
 }
 
 export interface EvalCardSuiteView {
@@ -72,7 +74,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     : item === undefined ? (found === undefined ? "none" : "waiting")
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
   const card = item?.card;
-  const health = item?.state === "approved" && card !== undefined && record !== undefined
+  const health = deps.healthRuns === true && item?.state === "approved" && card !== undefined && record !== undefined
     ? { state: await evalHealthState(table, project), label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros }
     : undefined;
   return {

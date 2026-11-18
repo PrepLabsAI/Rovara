@@ -120,10 +120,17 @@ describe("one approval (D8)", () => {
     expect(answer.evalSpend?.state).toBe("waiting");
     expect(w.approved).toEqual([]);
   });
+  it("no health button is offered by an install that has no health runner", async () => {
+    const w = company(A); const r = await w.run(filesOf(2), reportOf());
+    await r.approve();
+    const card = await readEvalCard({ store: w.store, companyId: A, members: w.members, monthlyCap: async () => CAP }, project, person(A, "admin"));
+    expect(card.spend).toMatchObject({ state: "approved" });
+    expect(card.health).toBeUndefined();
+  });
   it("the card after approval shows the approved dollars and the opt-in health button with its cost", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
     await r.approve();
-    const after = await readEvalCard({ store: w.store, companyId: A, members: w.members, monthlyCap: async () => CAP }, project, person(A, "admin"));
+    const after = await readEvalCard({ store: w.store, companyId: A, members: w.members, monthlyCap: async () => CAP, healthRuns: true }, project, person(A, "admin"));
     expect(after.spend).toMatchObject({ state: "approved", perPr: "about $0.20-$1.80", monthly: "$50.00" });
     expect(after.health).toMatchObject({ state: "none", label: "Check my evals now (about $0.60)", cost: "$0.60", seenCostMicros: 600_000 });
   });
