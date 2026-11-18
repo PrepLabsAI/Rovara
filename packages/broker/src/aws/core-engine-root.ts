@@ -57,7 +57,13 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
-import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../core-host/system-runs.js";
+import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
+import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
+import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
+import { admissionEnforcesCost } from "../core/automation/run-seam.js";
+import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
+import { CompanySignInStore } from "../developer/company-membership.js";
+import { listProjectMembers } from "./admin-actions.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -68,7 +74,8 @@ import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
-import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict } from "../core/system-runs/access.js";
+import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type WikiRefreshMark } from "../core/system-runs/access.js";
+import { readWikiBuildPointer } from "../core/wiki-build/run.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
@@ -336,23 +343,23 @@ export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) =
   };
 }
 
-/**
- * L4-P1 (owner DEC 254zzl): puts the company's SystemRuns gate on its task flow. A hosted runtime ALWAYS gets one (flag off = `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every
- * hosted company would then get Rovara's automatic re-checks. The root calls this for every company's runtime, whether or not the flag covers it; tests/unit/system-runs-hosted-gate.test.ts holds both the function and the call.
- */
-export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean } }, companyId: string, flag: Parameters<typeof systemRunsGateOf>[0]): { enabled(): boolean } {
-  const gate = systemRunsGateOf(flag, companyId);
-  deps.systemRuns = gate;
-  return gate;
-}
+// L4-P1/L4-P2: the gate every hosted runtime carries (core-host/system-runs.ts). Re-exported: tests/unit/system-runs-hosted-gate.test.ts holds the function and the call on the broker AND on the dispatcher.
+export { hostedSystemRunsFor };
 
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
   /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
-  systemRunsOn?: () => boolean;
+  systemRunsOn?: () => boolean | Promise<boolean>;
 }): TaskAccess {
+  // The gate may read the company's consent (async): it is settled once per decision, and anything but an explicit true is off (a gate that throws is off).
+  const settledOn = async (gate: (() => boolean | Promise<boolean>) | undefined): Promise<(() => boolean) | undefined> => {
+    if (gate === undefined) return undefined;
+    let on = false;
+    try { on = (await gate()) === true; } catch { on = false; }
+    return () => on;
+  };
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
@@ -375,9 +382,9 @@ export function hostedTaskAccess(inputs: {
   };
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
   return {
-    async checkStart(principal, project, purpose) {
+    async checkStart(principal, project, purpose, origin) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
-      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, principal, project, purpose).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
+      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn) }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
@@ -400,8 +407,15 @@ export function hostedTaskAccess(inputs: {
     async checkStep(task) {
       // A task whose developer is a system owner takes the system rule (the task's own stored row, read now), never the member rules.
       if (isSystemOwnerId(task.developerId)) {
-        const stored = inputs.storage === undefined ? undefined : await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
-        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
+        const store = inputs.storage === undefined ? undefined : await inputs.storage();
+        const stored = store === undefined ? undefined : await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
+        // A wiki refresh's mark: the project's build pointer, read only for a wiki purpose (never for the free kinds), and only this company's (`readWikiBuildPointer` checks company and project).
+        let wikiRefreshMark: WikiRefreshMark | undefined;
+        if (store !== undefined && stored?.["purpose"] === "wiki_build") {
+          const pointer = await readWikiBuildPointer(store, inputs.companyId, task.project).catch(() => undefined);
+          if (pointer !== undefined) wikiRefreshMark = { taskId: pointer.taskId, unattended: pointer.unattended === true, requestedBy: pointer.requestedBy };
+        }
+        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), wikiRefreshMark }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
       }
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
@@ -565,6 +579,35 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
   // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off. A value that cannot be read is off (reported once).
   const systemRunsFlag: ReturnType<typeof readSystemRunsSwitch> = coreActive ? readSystemRunsSwitch(env) : { value: { mode: "off" } };
+  // L4-P2: what one company's system runs need beyond the flag: the effective gate (ceiling AND consent), the admins' recipients and live "administers" read, and the pause hooks (the notice of a paused night).
+  // Stateless, so the services builder and the worker callback each build their own over the same stores.
+  const upkeepPartsFor = (registry: AdapterRegistry, companyId: OrgId) => {
+    const store = registry.require("storage");
+    const gate = effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, store);
+    const memberStore = inputs.signInTableName === undefined || inputs.signInTableName === "" ? undefined : new CompanySignInStore({ documentClient: inputs.documentClient, tableName: inputs.signInTableName, now: () => now().getTime() });
+    const sources = {
+      membershipOf, projectGrantRole,
+      // Owners and admins of THIS company: the install's member list, bounded (20 pages of 100); a list that cannot be read throws.
+      companyAdmins: async (company: OrgId): Promise<string[]> => {
+        if (memberStore === undefined) throw new Error("no sign-in table");
+        const found: string[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 20; page += 1) {
+          const answer = await memberStore.listMembers(company, cursor, 100);
+          for (const member of answer.members) if (member.revokedAt === undefined && (member.role === "owner" || member.role === "admin")) found.push(member.personId);
+          if (!answer.more) return found;
+          cursor = answer.cursor;
+        }
+        return found;
+      },
+      projectAdmins: async (project: string): Promise<string[]> =>
+        (await listProjectMembers({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, limitDefaults: { member: 1, organization: 1 }, now: () => now().getTime() }, project)).filter((member) => member.role === "administrator").map((member) => member.developerId),
+    };
+    const recipients = createUpkeepRecipients(companyId, sources);
+    const administers = createUpkeepAdministers(companyId, sources);
+    const pauses = upkeepPauseHooks({ store, companyId, now: () => now().getTime(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.upkeep", ...entry }) });
+    return { gate, administers, pauses };
+  };
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -603,7 +646,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => systemRunsGateOf(systemRunsFlag.value, companyId).enabled(), people: taskPeople }),
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(), people: taskPeople }),
       repositoryCredential: inputs.repositoryCredential,
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
@@ -654,10 +697,20 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         }
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
         hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
-        const systemRuns = createHostedSystemRuns({ flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log });
+        const upkeep = upkeepPartsFor(registry, companyId);
+        // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
+        const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
+        const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
+        const systemRuns = createHostedSystemRuns({
+          flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
+          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
+          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, log }),
+        });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, attention === undefined ? wiring : { ...wiring, notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }), ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service }),
+          ...(inputs.services?.(companyId, flow, registry, { ...wiring, ...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }), upkeep: { administers: upkeep.administers } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
+          ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
@@ -907,6 +960,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // Lead 4 W4: a hosted wiki build's callback: the requester's live standing, the project's own code host read for the citation re-read, and THIS company's wiki store as the page sink.
           wikiBuild: wikiBuildCallbackWiring({
             store: registry.require("storage"), companyId, now: () => now().getTime(),
+            // L4-P2: a nightly refresh has no person: each page asks whether system runs are still on for the company (ceiling AND consent) and the project's upkeep is still ON, and ends `access_lost` when not; a pause
+            // by the gateway tells the project's admins once (company-bound hooks, recipients read live).
+            upkeepOn: hostedUpkeepOn({ gate: upkeepPartsFor(registry, companyId).gate, store: registry.require("storage"), companyId }),
+            onUpkeepPaused: (scope, reason) => upkeepPartsFor(registry, companyId).pauses.onRunPaused({ orgId: scope.orgId, project: scope.project }, reason),
             standing: async (personId, project) => {
               const standing = await setupRunStanding(personId, companyId, project);
               return standing?.access === "manage" ? { access: "manage" } : standing?.access === "view" ? { access: "view" } : { access: "none" };

@@ -104,7 +104,7 @@ async function driftAtStart(deps: TaskFlowDeps, input: { project: string; taskId
   if (drift.drift === "none") { log(deps, { event: "setup_drift.none", taskId }); return []; }
   // DEC 254zzl: with the company's system runs OFF (hosted default) Rovara starts nothing by itself. The comparison above only read names, so it still says quietly that the setup may be out of date; the task starts
   // normally, and a person starts "Re-check setup". The laptop has no such switch (absent: on).
-  if (deps.systemRuns?.enabled() === false) {
+  if (await systemRunsAreOff(deps)) {
     log(deps, { event: "setup_drift.system_runs_off", taskId, classes: drift.drift === "changed" ? drift.classes.length : 0 });
     return [uncheckedLink(deps, project, taskId, drift.drift === "changed" ? drift.classes : [], "off")];
   }
@@ -276,7 +276,7 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
   const claimId = claimIdOf(row.key, 2);
   const at = iso(deps);
   // The company's system runs were switched OFF after the first attempt began: nothing more is started by itself. The re-check ends unclear (it never blocks) and the task page says it could not be made.
-  if (deps.systemRuns?.enabled() === false) {
+  if (await systemRunsAreOff(deps)) {
     await deps.store.transact([{ kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("state", "unclear"), change.set("decidedAt", at)], condition: still }]);
     return readRecheck(deps, project, row.key);
   }
@@ -393,3 +393,11 @@ export async function setupGateBeforeBuild(deps: TaskFlowDeps, input: { project:
   }
 }
 
+/**
+ * Whether this company's system runs are OFF for this flow. An ABSENT gate is the laptop's rule (on); a PRESENT gate is on only when it explicitly says `true` (L4-P2: the operator's ceiling AND the company's consent;
+ * a gate that throws or rejects is off, so a re-check never starts or retries on a read that failed).
+ */
+async function systemRunsAreOff(deps: Pick<TaskFlowDeps, "systemRuns">): Promise<boolean> {
+  if (deps.systemRuns === undefined) return false;
+  try { return (await deps.systemRuns.enabled()) !== true; } catch { return true; }
+}

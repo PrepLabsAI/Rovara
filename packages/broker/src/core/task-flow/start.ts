@@ -118,7 +118,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   };
 
   // Access first, from the identity adapter's own answer; it is asked again at every step that spends.
-  const verdict = await deps.access.checkStart(principal, request.project, run?.setupAgent !== undefined ? "setup_agent" : run?.wikiBuild !== undefined ? "wiki_build" : undefined);
+  const verdict = await deps.access.checkStart(principal, request.project, run?.setupAgent !== undefined ? "setup_agent" : run?.wikiBuild !== undefined ? "wiki_build" : undefined, origin.data);
   if (!verdict.allowed) return refused(agentXError(verdict.code, verdict.message));
   if (request.agent !== undefined || request.input !== undefined) return refused(agentXError("CONFIG_INVALID", "agents are not set up in this deployment"));
   if (request.shareToChannel === true || request.shareMode !== undefined || request.channel !== undefined) return refused(agentXError("CONFIG_INVALID", "sharing a task to a channel is not set up in this deployment"));

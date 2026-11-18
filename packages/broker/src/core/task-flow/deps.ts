@@ -103,10 +103,10 @@ export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | {
  */
 export interface TaskAccess {
   /**
-   * `purpose` is what a TASK start is for (`setup_agent`, `wiki_build`, ...): absent for an ordinary task. Only the hosted rule reads it, and only for a project's system owner (L4-P1): the system owner is accepted for
+   * `origin` is the work origin of the start (`nightly` only for upkeep AI): a system owner's wiki refresh is accepted only with it. `purpose` is what a TASK start is for (`setup_agent`, `wiki_build`, ...): absent for an ordinary task. Only the hosted rule reads it, and only for a project's system owner (L4-P1): the system owner is accepted for
    * a listed system purpose and for nothing else.
    */
-  checkStart(principal: Principal, project: string, purpose?: string): Promise<StartVerdict>;
+  checkStart(principal: Principal, project: string, purpose?: string, origin?: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /**
@@ -237,7 +237,7 @@ export interface TaskFlowDeps {
    * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
-  systemRuns?: { enabled(): boolean };
+  systemRuns?: { enabled(): boolean | Promise<boolean> };
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */

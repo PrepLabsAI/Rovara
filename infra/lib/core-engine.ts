@@ -111,10 +111,11 @@ export class CoreEngine extends Construct {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
     }
-    // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off (written out: tests/contract/config-keys.test.ts reads the declaration). BROKER ONLY: the dispatcher refuses every access question (it holds no
-    // people), so it never reads this flag. It also holds the hourly `upkeep-night` schedule off (below).
+    // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off (written out: tests/contract/config-keys.test.ts reads the declaration). It also holds the hourly `upkeep-night` schedule off (below).
+    // L4-P2: also packed for the dispatcher (an environment value only, no IAM): its setup gate before a build can RETRY a re-check, and that retry must stop when the flag (or the company's consent) goes off.
     this.systemRuns = new CfnParameter(stack, "CoreSystemRuns", { type: "String", default: SYSTEM_RUNS_DEFAULT, maxLength: 64, allowedPattern: SYSTEM_RUNS_PARAMETER_PATTERN, description: "Core system-started runs (Rovara's own setup re-check and nightly check): off (the default), on, or on:<company id>[:<company id>]. Also enables the hourly upkeep-night schedule" });
     addBrokerSetting(broker, props.naming, "coreSystemRuns", this.systemRuns.valueAsString);
+    addPackedSetting(dispatcher, "coreSystemRuns", this.systemRuns.valueAsString);
     addBrokerSetting(broker, props.naming, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);

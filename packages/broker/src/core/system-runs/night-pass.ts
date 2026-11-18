@@ -9,6 +9,7 @@
 //   5. the night itself is the injected `night` (core/upkeep/night.ts `runUpkeepNight`): it reads the switch again, and starts the nightly check through the system starter only when something merged.
 // A missed hour (a deploy, an outage): the next pass starts any project whose hour has passed today and has no claim. A missed day is skipped, not doubled.
 import { AGENTX_NAME_PATTERN, UPKEEP_NIGHT_WINDOW, upkeepNightDue, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { systemRunsGateSaysOn } from "./consent.js";
 import { upkeepExpiryOf, upkeepPartition } from "../upkeep/keys.js";
 import { readUpkeepSetting } from "../upkeep/settings.js";
 import type { UpkeepNightResult } from "../upkeep/night.js";
@@ -20,8 +21,8 @@ export interface UpkeepPassDeps {
   store: DocumentStore;
   companyId: OrgId;
   now: () => number;
-  /** The company's SystemRuns flag, read now. */
-  enabled(): boolean;
+  /** The company's system runs (L4-P2: ceiling AND consent), read now. Only an explicit `true` is on. */
+  enabled(): boolean | Promise<boolean>;
   /** Every project of the company (its catalog). Throws when it cannot be read. */
   projects(): Promise<readonly string[]>;
   /** One project's night (`runUpkeepNight`). */
@@ -47,7 +48,7 @@ export const upkeepClaimKey = (orgId: OrgId, project: string, day: string) => {
 
 export async function runUpkeepNightPass(deps: UpkeepPassDeps, options: { budgetMs: number }): Promise<UpkeepPassReport> {
   const report: UpkeepPassReport = { due: 0, started: 0, claimedAlready: 0, failed: 0, deferred: 0 };
-  if (!deps.enabled()) return { ...report, skipped: "system_runs_off" };
+  if (!(await systemRunsGateSaysOn(deps))) return { ...report, skipped: "system_runs_off" };
   const startedAt = deps.now();
   const hour = new Date(startedAt).getUTCHours();
   if (hour < UPKEEP_NIGHT_WINDOW.startHourUtc || hour >= UPKEEP_NIGHT_WINDOW.endHourUtc) return { ...report, skipped: "outside_window" };

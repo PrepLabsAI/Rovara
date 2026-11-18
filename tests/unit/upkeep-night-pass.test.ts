@@ -1,6 +1,7 @@
 // L4-P1 (owner DEC 254zzl 6): the hourly upkeep night. Each project has a fixed hour inside 07:00-11:00 UTC from a hash of company and project; the `upkeep-night` job's pass starts only the projects that are DUE
 // (inside the window, at or after their hour, upkeep ON, not claimed today), once a day each, at most five per pass, through the system starter, and the whole thing is behind the SystemRuns flag (default off).
 // Two-company and two-project cases are below. Mutants are listed in the PR body with the test that kills each.
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   CORE_JOB_SCHEDULES, IMPLICIT_COMPANY_ID, UPKEEP_NIGHT_JOB, UPKEEP_NIGHT_WINDOW, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, upkeepHourOf, upkeepNightDue,
@@ -10,7 +11,7 @@ import { MAX_STARTS_PER_PASS, runUpkeepNightPass, upkeepClaimKey, type UpkeepPas
 import { setUpkeepEnabled } from "../../packages/broker/src/core/upkeep/settings.js";
 import { upkeepPartition } from "../../packages/broker/src/core/upkeep/keys.js";
 import type { UpkeepNightResult } from "../../packages/broker/src/core/upkeep/night.js";
-import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../../packages/broker/src/core-host/system-runs.js";
+import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedUpkeepOn, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../../packages/broker/src/core-host/system-runs.js";
 import { CORE_JOBS } from "../../packages/broker/src/core-host/jobs.js";
 import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
@@ -278,7 +279,7 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
   const URL_ = "https://examplehost.test/acme/app";
   const project = (name: string): ProjectDefinition => ({ ...definition, name, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }] });
 
-  async function hosted(flag: ReturnType<typeof parseCoreSwitch>["value"], company: OrgId = A) {
+  async function hosted(flag: ReturnType<typeof parseCoreSwitch>["value"], company: OrgId = A, extra: { consent?: boolean; refresh?: Parameters<typeof createHostedSystemRuns>[0]["refresh"]; enforcesDollars?: boolean; paused?: Parameters<typeof createHostedSystemRuns>[0]["paused"] } = {}) {
     const h = createHarness({ companyId: company, audit: "recording", machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] } });
     const [name] = namesByHour(company, 1)[7]!;
     await h.registerProject(project(name!));
@@ -290,8 +291,10 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     const modelRoute = vi.fn(async () => undefined);
     h.deps.modelAccess = { route: modelRoute };
     await setUpkeepEnabled({ store: h.store, companyId: company, now: () => h.clock.now, standing: async () => ({ access: "manage" }) }, { personId: PERSON, project: name!, requestId: crypto.randomUUID(), on: true, fromPage: true });
+    // The company's consent (L4-P2), the second lock: given here (the ceiling is `flag`); the tests of the two locks are in system-runs-consent.test.ts.
+    if (extra.consent !== false) await h.store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(h.clock.now).toISOString() } });
     h.clock.now = at(DAY, 8, 10);
-    const runs = createHostedSystemRuns({ flow: h.flow, companyId: company, flag, now: () => h.clock.now });
+    const runs = createHostedSystemRuns({ flow: h.flow, companyId: company, flag, now: () => h.clock.now, ...(extra.refresh === undefined ? {} : { refresh: extra.refresh }), ...(extra.enforcesDollars === undefined ? {} : { enforcesDollars: extra.enforcesDollars }), ...(extra.paused === undefined ? {} : { paused: extra.paused }) });
     return { h, name: name!, model, runs, modelRoute, company };
   }
   const checks = async (w: Awaited<ReturnType<typeof hosted>>): Promise<number> => {
@@ -344,5 +347,69 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     const w = await hosted(parseCoreSwitch(`on:${A}`).value);
     expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 1 });
     expect(systemRunsGateOf({ mode: "off" }, A).enabled()).toBe(false);
+  });
+
+  // MUTANT: the night reads the flag alone (the consent row is not asked).
+  it("the ceiling on but no consent: the pass starts nothing, and a direct start says system_runs_off", async () => {
+    const w = await hosted(parseCoreSwitch("on").value, A, { consent: false });
+    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ skipped: "system_runs_off", started: 0 });
+    expect(await w.runs!.starter.start({ project: w.name, kind: "nightly_check", reason: { code: "nightly" }, requestId: crypto.randomUUID() })).toEqual({ outcome: "refused", reason: "system_runs_off" });
+    expect(w.h.audit.filter((event) => event.action === "system_run.requested")).toHaveLength(0);
+  });
+
+  it("withdrawing the consent stops the very next pass", async () => {
+    const w = await hosted(parseCoreSwitch("on").value);
+    await w.h.store.put({ item: { ...(await w.h.store.get(systemRunsConsentKey(A)))!, enabled: false } });
+    expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ skipped: "system_runs_off" });
+  });
+
+  // MUTANT: the night asks the AI step although no dollar cap is enforced (or the refresh is not wired).
+  it("no enforced dollar cap, or no refresh starter wired: the night starts NO AI (`no_cost_cap`) and calls nothing", async () => {
+    for (const extra of [{ enforcesDollars: false }, { enforcesDollars: true }, {}] as const) {
+      const calls: string[] = [];
+      const w = await hosted(parseCoreSwitch("on").value, A, { ...extra, refresh: "enforcesDollars" in extra && extra.enforcesDollars === true ? undefined : async (project) => { calls.push(project); return { outcome: "started" as const, taskId: "t", duplicate: false }; } });
+      await w.runs!.service.pass({ budgetMs: 10_000 });
+      expect(calls, JSON.stringify(extra)).toEqual([]);
+    }
+  });
+
+  it("an enforced cap and a wired refresh: the night asks it once for the project and the day, and the pause hook is the night's own", async () => {
+    const calls: Array<{ project: string; day: string }> = [];
+    const paused: string[] = [];
+    const w = await hosted(parseCoreSwitch("on").value, A, {
+      enforcesDollars: true, refresh: async (project, day) => { calls.push({ project, day }); return { outcome: "started" as const, taskId: "t", duplicate: false }; }, paused: async (input) => { paused.push(input.project); },
+    });
+    await w.runs!.service.pass({ budgetMs: 10_000 });
+    expect(calls).toEqual([{ project: w.name, day: DAY }]);
+    expect(paused).toEqual([]);
+  });
+});
+
+describe("the unattended refresh's standing at each page (hostedUpkeepOn)", () => {
+  const consent = async (store: MemoryDocumentStore, company: OrgId, enabled = true) => { await store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled, changedAt: "2026-11-17T00:00:00.000Z" } }); };
+  const upkeep = async (store: MemoryDocumentStore, company: OrgId, project: string, on = true) => { await setUpkeepEnabled({ store, companyId: company, now: () => 1, standing: async () => ({ access: "manage" }) }, { personId: PERSON, project, requestId: crypto.randomUUID(), on, fromPage: true }); };
+  const gateOf = (store: MemoryDocumentStore, company: OrgId, flag = "on") => effectiveSystemRunsGateOf(parseCoreSwitch(flag).value, company, store);
+
+  // MUTANT: the standing reads the project's switch alone (consent withdrawn mid-run does not end it), or the gate alone.
+  it("is on only with the ceiling, the consent AND the project's own switch; each one going off ends it", async () => {
+    const store = new MemoryDocumentStore();
+    await consent(store, A);
+    await upkeep(store, A, "beacon");
+    expect(await hostedUpkeepOn({ gate: gateOf(store, A), store, companyId: A })("beacon")).toBe(true);
+    expect(await hostedUpkeepOn({ gate: gateOf(store, A), store, companyId: A })("other")).toBe(false);
+    expect(await hostedUpkeepOn({ gate: gateOf(store, A, "off"), store, companyId: A })("beacon")).toBe(false);
+    await consent(store, A, false);
+    expect(await hostedUpkeepOn({ gate: gateOf(store, A), store, companyId: A })("beacon")).toBe(false);
+    await consent(store, A, true);
+    await upkeep(store, A, "beacon", false);
+    expect(await hostedUpkeepOn({ gate: gateOf(store, A), store, companyId: A })("beacon")).toBe(false);
+  });
+
+  it("two companies: company A's consent and switch say nothing for company B's project of the same name; a gate that throws is off", async () => {
+    const store = new MemoryDocumentStore();
+    await consent(store, A);
+    await upkeep(store, A, "beacon");
+    expect(await hostedUpkeepOn({ gate: gateOf(store, B, "on"), store, companyId: B })("beacon")).toBe(false);
+    expect(await hostedUpkeepOn({ gate: { enabled: async () => { throw new Error("x"); } }, store, companyId: A })("beacon")).toBe(false);
   });
 });
