@@ -116,7 +116,7 @@ describe("the /v1/app route table", () => {
     // L4-P3: the company's one control over Rovara's automatic runs.
     ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
     // L4-EVC (DEC 254zzz20): the eval card and its one approval.
-    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"],
+    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -132,7 +132,7 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check's other methods) are not served on AWS, nor other methods on the setup run.
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
-      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
+      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/eval-health"], ["GET", "/v1/app/projects/payments/setup-agent/eval-decide"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The saved environment image has no Reset or setting write here (those stay Cloud's / the laptop's): only the read.
       ["POST", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-images"],
