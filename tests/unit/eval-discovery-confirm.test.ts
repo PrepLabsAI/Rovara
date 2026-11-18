@@ -341,8 +341,8 @@ describe("EVAL-APPROVED-ROLE-NO-PRINCIPAL", () => {
     // A same-item re-propose keeps the live approval (it is not asked again).
     const item = (await w.store.get(evalSpendKey(A, project)))!;
     const plan = (await w.store.get(evalPlanKey(A, project)))!["plan"] as never;
-    const spend = item["plan"] as { selection: string; inputs: never; estimate: never; budget: never };
-    const again = await proposeEvalSpendApproval({ store: w.store, companyId: A, members: w.members, monthlyCapMicros: 50_000_000 }, project, { selection: spend.selection, inputs: spend.inputs, estimate: spend.estimate, budget: spend.budget }, plan);
+    const spend = item["plan"] as { selection: string; inputs: never; estimate: never; budget: never; dollars: never };
+    const again = await proposeEvalSpendApproval({ store: w.store, companyId: A, members: w.members, monthlyCapMicros: 50_000_000 }, project, { selection: spend.selection, inputs: spend.inputs, estimate: spend.estimate, budget: spend.budget, dollars: spend.dollars }, plan);
     expect(again.state).toBe("approved");
   });
 });

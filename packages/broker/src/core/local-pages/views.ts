@@ -339,7 +339,9 @@ export interface SetupPageView {
   /** No eval was discovered and this install could not confirm one anyway (no eval budget): the fixed reason, shown in the empty eval panel. */
   evalNoBudget?: string;
   /** The independent eval-spend item. No repository text reaches its labels. */
-  evalSpend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; label: string; budget: string; approval?: ApprovalOffer };
+  evalSpend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; label: string; budget: string; approval?: ApprovalOffer;
+    /** L4-EVC (DEC 254zzz20): the card in plain dollars, for an item that carries its approved dollars (`setup-agent/eval-spend.ts` `EvalSpendCardView`). */
+    card?: { sentence: string; perPr: string; monthly: string; needsApproval?: string; carried?: boolean; setupRevision?: number } };
   /** The websites the owner approved for this project, with when, each to be taken back on the page. */
   approvedHosts: Array<{ host: string; at: string | undefined }>;
 }

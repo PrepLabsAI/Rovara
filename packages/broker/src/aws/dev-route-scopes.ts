@@ -331,6 +331,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it (a fresh step-up) or withdraws it.
   { method: "GET", path: "/v1/app/company/system-runs", requires: "full" },
   { method: "PUT", path: "/v1/app/company/system-runs", requires: "full" },
+  // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: a fresh step-up, then the live owner/admin/maintainer rule). Full access only, like the setup candidate.
+  { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

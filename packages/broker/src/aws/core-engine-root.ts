@@ -51,6 +51,7 @@ import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
+import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -849,6 +850,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
               .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
             displayName: displayNameOf,
+            // L4-EVC (DEC 254zzz20): the eval card. The monthly cap comes only from the install's bound `eval-reservation` adapter (no adapter: no eval is confirmed); the broker hashes the confirmed files from the company's own code host.
+            eval: {
+              ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
+              readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+                .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+            },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
             approval: createHostedSetupApproval({
               flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
