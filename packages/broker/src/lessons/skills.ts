@@ -176,10 +176,7 @@ export interface SkillOffer { lessonId: string; title: string; tasks: number; da
 /** The "Make this a skill?" cards: the project's proven procedure lessons that no skill was made from and that the whole project may read. Counts only the active procedure lessons given (so one count call is bounded), at most `max` offers. */
 export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "access" | "now" | "signals" | "log">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
   const max = options.max ?? 20;
-  const candidates = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
-  if (candidates.length === 0) return [];
-  // The same view a skill is made from: what the WHOLE project may read (a title from a private place or a task kept private is not offered, whoever is looking).
-  const active = await readVisible({ access: deps.access, key, viewer: undefined, lessons: candidates.slice(0, 200), where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
+  const active = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
   if (active.length === 0) return [];
   const used = new Set((await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } })).flatMap((row) => headOf(row)?.fromLessons ?? []));
   const unused = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
