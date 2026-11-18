@@ -58,7 +58,7 @@
    - Service 8: 3 requests
    - Service 9: 3 requests
    - and 2 more
-7. **6 recorded fakes are old.** Recorded more than 90 days ago (or the date is unknown). Real behaviour may have changed.
+7. **6 recorded fakes are old.** More than 90 days old (or the date is unknown). Real behaviour may have changed.
    - Service 0: recorded 138 days before this pull request
    - Service 2: recorded 138 days before this pull request
    - Service 4: recorded 138 days before this pull request

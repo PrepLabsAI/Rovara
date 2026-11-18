@@ -1,7 +1,7 @@
 // The project wiki store (lead 4, W2): rows only, one partition per company AND project. Two-project and two-company isolation on every read and write; the agents' read; quotes redacted
 // and cut; removed repositories; the person erase step; answer expiry; the company purge removes every wiki row (no purge change).
 import { describe, expect, it } from "vitest";
-import { WIKI_QUOTE_MAX, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
+import { WIKI_QUOTE_MAX, answerThreadKey, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
 import { WIKI_FORMER_MEMBER, createWikiStore, storedQuote } from "../../packages/broker/src/core/wiki/store.js";
@@ -50,6 +50,23 @@ async function everything(store: MemoryDocumentStore): Promise<StoredDocument[]>
   } while (cursor !== undefined);
   return out;
 }
+
+describe("wiki store: Delete wiki with answer threads (batch 14, from #932)", () => {
+  it("removes the project's J1 thread rows with the rest of the wiki, and leaves another project's and company's threads alone", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A-alpha"));
+    const own = answerThreadKey(A, "alpha", "thread-1", { personId: "person-1" });
+    const shared = answerThreadKey(A, "alpha", "thread-2", "shared");
+    const otherProject = answerThreadKey(A, "beta", "thread-1", "shared");
+    const otherCompany = answerThreadKey(B, "alpha", "thread-1", "shared");
+    for (const key of [own, shared, otherProject, otherCompany]) await w.store.put({ item: { ...key, entityType: "WIKI_THREAD", turns: [] } });
+    await expect(w.a.deleteWiki("alpha")).resolves.toBeGreaterThan(0);
+    const left = (await everything(w.store)).map((item) => `${item.pk}|${item.sk}`);
+    expect(left.filter((row) => row.startsWith(`${wikiPartition(A, "alpha")}|`))).toEqual([]);
+    expect(left).toContain(`${otherProject.pk}|${otherProject.sk}`);
+    expect(left).toContain(`${otherCompany.pk}|${otherCompany.sk}`);
+  });
+});
 
 describe("wiki store: two companies and two projects never meet", () => {
   it("every read of company A, project alpha sees only its own rows (index, page, notes, flags, builds, answers)", async () => {

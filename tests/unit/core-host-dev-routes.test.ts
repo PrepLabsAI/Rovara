@@ -234,7 +234,7 @@ describe("the project wiki's reads on the deployed API", () => {
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, wiki }) });
     const index = await routes.route(get(WIKI), remember(OTHER));
     expect(index?.statusCode).toBe(200);
-    expect(JSON.parse(index!.body)).toEqual({ project: "payments", state: "empty", pages: [] });
+    expect(JSON.parse(index!.body)).toEqual({ project: "payments", state: "empty", agentsEnabled: false, pages: [] });
     expect(seen).toEqual([`${OTHER}/payments`]);
     void world;
   });
