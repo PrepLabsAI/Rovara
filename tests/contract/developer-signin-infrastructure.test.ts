@@ -15,6 +15,7 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
@@ -675,6 +676,8 @@ describe("task-token key and membership IAM", () => {
     withoutDispatcherHookSigner(remainder);
     // L4-HW8b (DEC 254zzz42 (a)): the broker's Slack poster variables and the Slack adapter secret's policy are exactly what broker-slack-poster-infrastructure.test.ts asserts; taken out so the digest still pins everything else.
     withoutBrokerSlackPoster(remainder, "staging");
+    // L4-SE6: the saved environment images' roles, creation template, outputs and the broker's four variables are asserted exactly (tests/support/saved-env-images-template.ts) and taken out too.
+    withoutSavedEnvImages(remainder, "staging");
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -801,6 +804,8 @@ describe("task key deployment boundary coverage", () => {
       "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::Scheduler::ScheduleGroup": "scheduler", "AWS::StepFunctions::StateMachine": "states",
       // ENV-ROOM 2: the broker names parameter.
       "AWS::SSM::Parameter": "ssm",
+      // L4-SE6: the saved environment images' repository creation template (ecr:* is in both the deploy role and the boundary).
+      "AWS::ECR::RepositoryCreationTemplate": "ecr",
     };
     for (const type of new Set(Object.values(named.Resources).map((r) => r.Type))) {
       let action: string;
@@ -1775,7 +1780,8 @@ const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
-    expect([...accessTuples(named)].sort(byText)).toEqual(pinnedTuples);
+    // L4-SE6: the three saved environment image roles' tuples are asserted in saved-env-images-infrastructure.test.ts; taken out here so every other role's tuples are still pinned exactly.
+    expect([...accessTuples(withoutSavedEnvImages(structuredClone(named), "staging"))].sort(byText)).toEqual(pinnedTuples);
   });
 
   it("has the same semantic results for every role, resource, condition and sibling", () => {
