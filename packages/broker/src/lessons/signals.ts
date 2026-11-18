@@ -65,9 +65,11 @@ export async function readCleanMergeRate(store: Pick<DocumentStore, "query">, in
 /** Everything for one project, read once. Throws only for a store fault (the cached reader below swallows it). */
 export async function readProjectSignals(store: Pick<DocumentStore, "query">, input: { companyId: OrgId; project: string; now: number; settings?: Pick<RankingSettings, "evidenceWindowDays"> }): Promise<ProjectSignals> {
   const settings = input.settings ?? DEFAULT_RANKING;
+  // A read of the question or area rows that stopped at its row cap with more waiting is "truncated" too: a lesson whose mark was not reached must not look clean.
+  const cut = { truncated: false };
   const [rate, totals, reverts, marks] = await Promise.all([
     readCleanMergeRate(store, input), readEvidenceTotals(store, { companyId: input.companyId, project: input.project, now: input.now, windowMs: evidenceWindowMs(settings) }),
-    readUnderQuestion(store, input.companyId, input.project, input.now), readAreaMarks(store, input.companyId, input.project, input.now),
+    readUnderQuestion(store, input.companyId, input.project, input.now, cut), readAreaMarks(store, input.companyId, input.project, input.now, cut),
   ]);
   const questions = new Map<string, QuestionInfo>();
   for (const revert of reverts) questions.set(revert.lessonId, { revertTasks: revert.tasks, areaGone: false, areaRewritten: false });
@@ -75,7 +77,7 @@ export async function readProjectSignals(store: Pick<DocumentStore, "query">, in
     const known = questions.get(lessonId) ?? { revertTasks: 0, areaGone: false, areaRewritten: false };
     questions.set(lessonId, { ...known, areaGone: kinds.has("area_gone"), areaRewritten: kinds.has("area_rewritten") });
   }
-  return { cleanMergeRate: rate, evidence: totals.evidence, repeats: totals.repeats, questions, underQuestion: new Set(questions.keys()), askedToKeep: totals.asked, at: input.now, truncated: totals.truncated };
+  return { cleanMergeRate: rate, evidence: totals.evidence, repeats: totals.repeats, questions, underQuestion: new Set(questions.keys()), askedToKeep: totals.asked, at: input.now, truncated: totals.truncated || cut.truncated };
 }
 
 /**

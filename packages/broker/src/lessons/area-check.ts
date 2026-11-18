@@ -100,7 +100,7 @@ export async function runAreaChecks(deps: AreaCheckDeps, key: ScopeKey, options:
 }
 
 /** The area marks that hold now, by lesson. Reads this company's partition for this project and checks every row again; rows past their `keepUntil`, or of another shape, are left out. */
-export async function readAreaMarks(docs: Pick<DocumentStore, "query">, companyId: OrgId, project: string, now: number): Promise<Map<string, Set<AreaMarkKind>>> {
+export async function readAreaMarks(docs: Pick<DocumentStore, "query">, companyId: OrgId, project: string, now: number, report?: { truncated: boolean }): Promise<Map<string, Set<AreaMarkKind>>> {
   const out = new Map<string, Set<AreaMarkKind>>();
   if (!NAME.test(project)) return out;
   const pk = questionPk(companyId, project);
@@ -117,6 +117,7 @@ export async function readAreaMarks(docs: Pick<DocumentStore, "query">, companyI
     }
     cursor = page.cursor;
     if (cursor === undefined) break;
+    if (read >= 2_000 && report !== undefined) report.truncated = true;
   }
   return out;
 }

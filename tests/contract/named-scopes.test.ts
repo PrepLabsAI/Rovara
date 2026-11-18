@@ -124,7 +124,8 @@ function routerPaths(): Set<string> {
 }
 
 describe("every /v1/dev route the broker registers", () => {
-  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}");
+  // A strictly typed id in a router pattern (a skill name, L4-AK3) is a path parameter like any other.
+  const normal = (path: string) => path.replace(/\{[A-Za-z]*\}/g, "{}").replace(/\[a-z0-9\]\[a-z0-9-\]\{0,63\}/g, "{}");
   const tablePaths = new Set(DEV_ROUTES.map((route) => normal(route.path)));
 
   it("has a row, by path, and every row's path is a route", () => {
