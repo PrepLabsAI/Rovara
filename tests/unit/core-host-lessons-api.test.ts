@@ -855,3 +855,75 @@ describe("lessons phase 0: the measurement read (GET lessons/measure)", () => {
     expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A] } }).api, "b-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF" });
   });
 });
+
+describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted task loaded under question only where the revert's files are in the lesson's own code area", () => {
+  const VIA = "e".repeat(40);
+  const key = (company: OrgId) => ({ workspaceId: company, project: "payments" });
+  const questionRows = async (w: World, company: OrgId) => (await w.world.store.query({ pk: companyScoped(company, "LESSON_QUESTION#payments") })).items;
+  /** One approved lesson with a code area, loaded (reached the prompt) by the company's task. */
+  async function loaded(w: World, company: OrgId, id: string, paths: string[] | undefined): Promise<void> {
+    await put(w, company, lesson(company, id, { approvals: [{ approvalId: "a1", by: "person-1", at: 1, mode: "one" }], scope: paths === undefined ? {} : { paths } }));
+    const store = w.lessons.get(company)!.runtime.store;
+    await store.putManifest({
+      taskId: w.tasks.get(company)!, workspaceId: company, project: "payments", stage: "IMPLEMENT", round: 1, setVersion: 1, memory: "live", at: 1, bytes: 10,
+      lessons: [{ id, version: 1, score: 0.5, why: "scope", citation: "valid" }],
+    });
+  }
+  const countersOf = async (w: World, company: OrgId, id: string) => (await w.lessons.get(company)!.runtime.store.get(key(company), id))!;
+
+  it("a revert whose files are in the lesson's area flags it as evidence only: the lesson, its marks and its status are untouched, and the revert is still counted", async () => {
+    const w = await setUp();
+    await loaded(w, A, "les_aaaa1111", ["src/billing/**"]);
+    const before = JSON.stringify(await countersOf(w, A, "les_aaaa1111"));
+    await w.lessons.get(A)!.host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/billing/money.ts"] });
+    expect((await questionRows(w, A)).map((row) => [row["lessonId"], row["taskId"], row["via"]])).toEqual([["les_aaaa1111", w.tasks.get(A), VIA]]);
+    expect(JSON.stringify(await countersOf(w, A, "les_aaaa1111"))).toBe(before);
+    expect(await countersOf(w, A, "les_aaaa1111")).toMatchObject({ status: "active", counters: { harmful: 0 } });
+    // the clean-merge count (phase 0) sees the revert as before
+    const rows = (await w.world.store.query({ pk: companyScoped(A, "LESSON_MERGE#payments") })).items;
+    expect(rows.map((row) => row["kind"])).toEqual(["reverted"]);
+  });
+
+  it("a revert in files outside every lesson's area, one with unreadable files, and a lesson with no area flag nothing; the revert is still counted", async () => {
+    const w = await setUp();
+    await loaded(w, A, "les_aaaa1111", ["src/billing/**"]);
+    const host = w.lessons.get(A)!.host;
+    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/search/index.ts"] });
+    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: undefined });
+    expect(await questionRows(w, A)).toEqual([]);
+    const wide = await setUp();
+    await loaded(wide, A, "les_aaaa1111", undefined);
+    await wide.lessons.get(A)!.host.noteReverted(wide.tasks.get(A)!, { via: VIA, files: ["src/billing/money.ts"] });
+    expect(await questionRows(wide, A)).toEqual([]);
+  });
+
+  it("the same revert told again is one piece of evidence; with no revert detail (the old call) nothing is flagged", async () => {
+    const w = await setUp();
+    await loaded(w, A, "les_aaaa1111", ["src/**"]);
+    const host = w.lessons.get(A)!.host;
+    await host.noteReverted(w.tasks.get(A)!);
+    expect(await questionRows(w, A)).toEqual([]);
+    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
+    await host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
+    expect(await questionRows(w, A)).toHaveLength(1);
+  });
+
+  it("company B's host told of company A's task flags nothing in either company", async () => {
+    const w = await setUp();
+    await loaded(w, A, "les_aaaa1111", ["src/**"]);
+    await loaded(w, B, "les_bbbb1111", ["src/**"]);
+    await w.lessons.get(B)!.host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
+    expect(await questionRows(w, A)).toEqual([]);
+    expect(await questionRows(w, B)).toEqual([]);
+    await w.lessons.get(A)!.host.noteReverted(w.tasks.get(A)!, { via: VIA, files: ["src/a.ts"] });
+    expect(await questionRows(w, A)).toHaveLength(1);
+    expect(await questionRows(w, B)).toEqual([]);
+    expect(JSON.stringify(await questionRows(w, A))).not.toContain(B);
+  });
+
+  it("the lessons pass runs the revert watch for the company (its report is in the pass's answer), with no model call", async () => {
+    const w = await setUp();
+    const report = await w.lessons.get(A)!.service.pass({ budgetMs: 30_000 });
+    expect(report).toMatchObject({ reverts: { repositories: 0, found: 0 } });
+  });
+});

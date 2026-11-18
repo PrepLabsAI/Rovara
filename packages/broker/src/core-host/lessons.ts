@@ -20,6 +20,7 @@ import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
+import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
@@ -189,6 +190,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     return found;
   };
 
+  const revertWatch = createLessonsRevertWatch({ store: deps.store, registry, companyId, host, projectsOf: () => deps.projects, now, log: (event, fields) => log(event, fields) });
   const service: CoreService = {
     async pass({ budgetMs }) {
       if (!enabled()) return { skipped: "lessons_off" };
@@ -213,7 +215,9 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
         log("reflect_pass_failed", { error: error instanceof Error ? error.name : "unknown" });
         return { received: 0, reflected: 0, dropped: 0, retried: 0 };
       });
-      return { milestones: delivered.attempted, ...reflected, nightly, digests: digests.sent, digestsHeld: digests.held, digestsFailed: digests.failed };
+      // What happened after merge (revert detection): the company's own merged Rovara pull requests are watched for a revert on the default branch, in what is left of the pass (at most 10 s). Its failure never stops the pass.
+      const reverts = await revertWatch.pass({ budgetMs: Math.max(0, Math.min(10_000, deadlineAt - now())) }).catch((error: unknown) => { log("revert_watch_failed", { error: error instanceof Error ? error.name : "unknown" }); return { failed: true }; });
+      return { milestones: delivered.attempted, ...reflected, nightly, digests: digests.sent, digestsHeld: digests.held, digestsFailed: digests.failed, reverts };
     },
   };
 

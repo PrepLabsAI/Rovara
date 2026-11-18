@@ -2,7 +2,7 @@ import { createHash, createSign } from "node:crypto";
 import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
-import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -2261,6 +2261,53 @@ export class GitHubAppCredentialProvider {
     return { statuses: [...byEnvironment].map(([environment, state]) => ({ environment, state })), complete };
   }
 
+  /**
+   * Lane L4-LM1b (revert detection): the newest `max` commits of a branch (`GET /repos/<owner>/<name>/commits?sha=<branch>&per_page=<max>`), ONE request with a contents-read token, newest first. What a revert check needs is kept: the message (cut at
+   * `RECENT_COMMIT_MESSAGE_MAX`), the number of parents, GitHub's own verification verdict, and the author and committer accounts by login and numeric id. `isWebFlow` is true only when the committer's numeric id is GitHub's web-flow
+   * account (never decided from a login or the message). An entry without a usable sha is left out and the answer is not `complete`; a listing GitHub cut (a next page) is not `complete` either. Throws when GitHub cannot answer;
+   * a limited caller is told to slow down with the neutral signal.
+   */
+  async listRecentCommits(repositoryUrl: string, branch: string, max: number, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ commits: Array<{ sha: string; message: string; parents: number; verified: boolean; author?: { login: string; id?: string; isBot: boolean }; committer?: { login: string; id?: string; isWebFlow: boolean } }>; complete: boolean }> {
+    if (!GitBranchNameSchema.safeParse(branch).success) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (!Number.isInteger(max) || max < 1 || max > RECENT_COMMITS_MAX) throw agentXError("CONFIG_INVALID", "the commit count limit is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.readTokenFor(repository, scope);
+    beforeRequest?.();
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/commits?sha=${encodeURIComponent(branch)}&per_page=${String(max)}`,
+      { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
+    );
+    if (!response.ok) {
+      const limitedBody: unknown = response.status === 403 ? await response.json().catch(() => undefined) : undefined;
+      const retryAt = compareRateLimitRetryAt(response, limitedBody, this.now());
+      await response.body?.cancel().catch(() => undefined);
+      if (retryAt !== undefined) throw new GithubCompareRateLimitError(retryAt);
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit listing failed with HTTP ${response.status}`);
+    }
+    const body: unknown = await response.json();
+    if (!Array.isArray(body) || body.length > max) throw agentXError("RUNTIME_UNAVAILABLE", "Invalid commit listing.");
+    let complete = !(response.headers.get("link") ?? "").split(",").some((link) => /;\s*rel="next"/u.test(link));
+    const commits: Array<{ sha: string; message: string; parents: number; verified: boolean; author?: { login: string; id?: string; isBot: boolean }; committer?: { login: string; id?: string; isWebFlow: boolean } }> = [];
+    const accountOf = (value: unknown): { login: string; id?: string; type?: string } | undefined => {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const record = value as { login?: unknown; id?: unknown; type?: unknown };
+      if (typeof record.login !== "string" || record.login === "" || record.login.length > 200) return undefined;
+      return { login: record.login, ...(typeof record.id === "number" && Number.isSafeInteger(record.id) && record.id > 0 ? { id: String(record.id) } : {}), ...(typeof record.type === "string" ? { type: record.type } : {}) };
+    };
+    for (const raw of body as unknown[]) {
+      const entry = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw as { sha?: unknown; commit?: { message?: unknown; verification?: { verified?: unknown } }; parents?: unknown; author?: unknown; committer?: unknown } : {};
+      if (typeof entry.sha !== "string" || !/^[a-f0-9]{40}$/u.test(entry.sha) || typeof entry.commit?.message !== "string" || !Array.isArray(entry.parents)) { complete = false; continue; }
+      const author = accountOf(entry.author);
+      const committer = accountOf(entry.committer);
+      commits.push({
+        sha: entry.sha, message: entry.commit.message.slice(0, RECENT_COMMIT_MESSAGE_MAX), parents: entry.parents.length, verified: entry.commit.verification?.verified === true,
+        ...(author === undefined ? {} : { author: { login: author.login, ...(author.id === undefined ? {} : { id: author.id }), isBot: author.type === "Bot" || /\[bot\]$/iu.test(author.login) } }),
+        ...(committer === undefined ? {} : { committer: { login: committer.login, ...(committer.id === undefined ? {} : { id: committer.id }), isWebFlow: committer.id === GITHUB_WEB_FLOW_ACCOUNT_ID } }),
+      });
+    }
+    return { commits, complete };
+  }
+
   /** The commit a branch points at now, as GitHub says; throws when the branch does not exist. */
   async getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string> {
     if (!/^agentx\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
@@ -3549,6 +3596,8 @@ async function workingBranchPageJson(response: Response): Promise<unknown> {
 const COMMIT_FILES_PAGES_MAX = 3;
 /** M7 slice 2: the most deployments of one commit `getDeploymentStatuses` reads the status of (one request each). */
 const DEPLOYMENTS_LISTED_MAX = 10;
+/** GitHub's own web committer (`web-flow`, the committer of a squash or web edit made on github.com): decided by this numeric account id, never by a login or a message. */
+const GITHUB_WEB_FLOW_ACCOUNT_ID = "19864447";
 /** DEC 213: GitHub lists at most 300 changed files of a comparison; a list that long may have been cut. */
 const COMPARE_FILES_MAX = 300;
 

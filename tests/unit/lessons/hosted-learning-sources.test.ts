@@ -1,7 +1,8 @@
 // Lessons phase 0, "confirm the wiring" (learning review, phase 0): which learning sources really run on a HOSTED install today. Each source is a test of what the hosted glue and source do, so the wiring table in
 // the pull request is evidence, not memory. Where a source is NOT wired, the test pins the gap in plain words, so whoever wires it must change the test (and the table) with the change.
 //   runs on hosted: decisions in tasks (a person's send-back, a close reason, learn on send-back, the merged/closed end), PR review comments.
-//   not wired:      the human-edit extractor (nothing queues it, the worker answers "unavailable"), reverts (the detector has no caller), plan and design comments (a gate's "request changes" reason is not read).
+//   wired by lane L4-LM1b: reverts (core/proof/revert/revert-watch.ts calls the detectors from the lessons pass and the laptop's lessons timer; tests/unit/lessons/revert-watch.test.ts).
+//   not wired:      the human-edit extractor (nothing queues it, the worker answers "unavailable"), plan and design comments (a gate's "request changes" reason is not read).
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -127,7 +128,7 @@ describe("PR review comments run on hosted", () => {
   });
 });
 
-describe("NOT wired on hosted today (the gaps, pinned)", () => {
+describe("NOT wired on hosted today (the gaps, pinned; reverts are wired and pinned below)", () => {
   it("human edits: nothing queues the job, and the worker answers 'unavailable' (retry, then the dead-letter queue) because the hosted worker is given no human-edit handler", async () => {
     const w = await hostedWorld();
     const message = humanEditMessageOf({
@@ -137,7 +138,7 @@ describe("NOT wired on hosted today (the gaps, pinned)", () => {
     expect(await w.lessons.host.reflectOne(JSON.stringify(message))).toMatchObject({ result: "failed", retry: true });
   });
 
-  it("human edits and reverts have no producer: no production module builds the extractor, queues a human-edit message, or calls the revert detector or the host's noteReverted", () => {
+  it("human edits have no producer: no production module builds the extractor or queues a human-edit message", () => {
     const root = join(process.cwd(), "packages/broker/src");
     const files: string[] = [];
     const walk = (dir: string): void => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const path = join(dir, entry.name); if (entry.isDirectory()) walk(path); else if (path.endsWith(".ts")) files.push(path); } };
@@ -147,12 +148,20 @@ describe("NOT wired on hosted today (the gaps, pinned)", () => {
     expect(where("createHumanEditExtractor")).toEqual(["lessons/human-edit.ts"]);
     expect(where("humanEditMessageOf")).toEqual(["lessons/reflect-queue.ts"]);
     expect(where("learnFromHumanEdit")).toEqual(["lessons/human-edit.ts"]);
-    expect(where("detectRevertFromMergedChangeRequest")).toEqual(["core/proof/revert/revert-detect.ts"]);
-    expect(where("detectRevertFromPushedCommit")).toEqual(["core/proof/revert/revert-detect.ts"]);
-    // The laptop wrapper delegates to the host's `noteReverted`, and nothing calls the wrapper (or the host) from a revert hook.
-    expect(where(".noteReverted(")).toEqual(["local/app/lessons.ts"]);
-    expect(where("lessons.noteReverted")).toEqual([]);
-    expect(where("lessons?.noteReverted")).toEqual([]);
+  });
+
+  it("reverts ARE wired (lane L4-LM1b): the revert watch is the one caller of the two detectors, and the lessons glue is the one caller of the host's noteReverted", () => {
+    const root = join(process.cwd(), "packages/broker/src");
+    const files: string[] = [];
+    const walk = (dir: string): void => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const path = join(dir, entry.name); if (entry.isDirectory()) walk(path); else if (path.endsWith(".ts")) files.push(path); } };
+    walk(root);
+    const where = (needle: string): string[] => files.filter((file) => readFileSync(file, "utf8").includes(needle)).map((file) => relative(root, file).split(sep).join("/")).sort();
+    expect(where("detectRevertFromMergedChangeRequest")).toEqual(["core/proof/revert/revert-detect.ts", "core/proof/revert/revert-watch.ts"]);
+    expect(where("detectRevertFromPushedCommit")).toEqual(["core/proof/revert/revert-detect.ts", "core/proof/revert/revert-watch.ts"]);
+    // The laptop wrapper delegates to the host's `noteReverted`; the glue (one per company, hosted and laptop alike) calls it once for each newly recorded revert.
+    expect(where(".noteReverted(")).toEqual(["lessons/revert-watch-glue.ts", "local/app/lessons.ts"]);
+    // The lessons pass (hosted) and the lessons timer (laptop) are the two places the watch runs.
+    expect(where("createLessonsRevertWatch(")).toEqual(["core-host/lessons.ts", "lessons/revert-watch-glue.ts", "local/app/lessons.ts"]);
   });
 
   it("plan and design comments: a person's 'request changes' at a plan or design gate (their reason is a decision on the task) is not read by the hosted subject, and is not a send-back either", async () => {

@@ -147,8 +147,8 @@ export interface LessonMeasure {
   meanFitLoaded: number | null;
   meanFitLeftOut: number | null;
   cleanMerge: { merged: number; reverted: number; clean: number; rate: number | null };
-  /** Nothing in Code calls the revert detector yet, so `cleanMerge.reverted` is 0 whatever happened: the rate is "merged and not known to be reverted". Change this word when a producer is wired. */
-  revertDetection: "not_wired";
+  /** The revert watch (`core/proof/revert/revert-watch.ts`) calls the revert detectors from the periodic lessons pass, so `cleanMerge.reverted` counts the reverts it found (a revert is found within the pass's interval, and only on a host that can list commits). */
+  revertDetection: "wired";
   /** Some input was cut by the total limit or the deadline: the answer is for what was read. */
   truncated: boolean;
   /** Rows that were not shaped as a row of this module (they are left out, never guessed from). */
@@ -251,6 +251,6 @@ export async function readLessonMeasure(store: Pick<DocumentStore, "query">, inp
     project: input.project, windowDays, floor: MEASURE_FIT_FLOOR, loads, lessonsInUse, loadedLessons, loadedBelowFloor: loadedBelow, loadsWithBelowFloor: loadsWithBelow, loadedNoMatch: noMatch, meanWordsLoaded: loadedLessons === 0 ? null : Math.round((wordsLoaded / loadedLessons) * 1000) / 1000, meanWordsLeftOut: leftCount === 0 ? null : Math.round((wordsLeft / leftCount) * 1000) / 1000, loadsCapBound: capBound,
     leftOutAtOrAboveFloor: leftOutAbove, meanFitLoaded: loadedLessons === 0 ? null : Math.round((fitLoaded / loadedLessons) * 1000) / 1000, meanFitLeftOut: leftCount === 0 ? null : Math.round((fitLeft / leftCount) * 1000) / 1000,
     cleanMerge: { merged: merged.size, reverted: revertedOfMerged, clean, rate: merged.size === 0 ? null : Math.round((clean / merged.size) * 1000) / 1000 },
-    revertDetection: "not_wired", truncated, unreadable,
+    revertDetection: "wired", truncated, unreadable,
   };
 }
