@@ -112,10 +112,14 @@ describe("project lesson replay", () => {
     embed.mockClear(); embedMany.mockClear(); warm.mockClear(); complete.mockClear();
     const writes = [vi.spyOn(documents, "put"), vi.spyOn(documents, "update"), vi.spyOn(documents, "delete"), vi.spyOn(documents, "transact")];
 
+    // The live load's plan reading (stored plan artifact only) is replayed too.
+    const planFacts = vi.fn(async () => ({ summary: "Wrap HTTP calls in withRetry", files: ["src/http.ts", "src/http.ts"] }));
     const result = await replayProjectLessons({
       companyId: WS, project: PROJECT, limit: 1, store: documents,
-      projects: { revision: async () => undefined }, runtime, now: clock.now,
+      projects: { revision: async () => undefined }, runtime, now: clock.now, planFacts,
     });
+    expect(planFacts).toHaveBeenCalledTimes(1);
+    expect(planFacts).toHaveBeenCalledWith(expect.objectContaining({ taskId, companyId: WS, project: PROJECT }));
     expect(result.tasks).toEqual([{
       taskId, stage: "PLAN", round: 1, actual: ["les_aaaa1111"], replayed: ["les_aaaa1111"], gained: [], lost: [], changed: false,
     }]);

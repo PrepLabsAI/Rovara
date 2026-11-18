@@ -61,7 +61,7 @@ export const REFLECT_PER_PASS = 2;
 const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
 /** The use rows ("used in N tasks", `use-count.ts`) are kept as long as that module counts them. */
 const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
-const INTENT_REQUEST_CHARS = 600;
+export const INTENT_REQUEST_CHARS = 600;
 
 /** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
 const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "PLAN_CRITIQUE" | "REVIEW">> = { UNDERSTAND: "UNDERSTAND", PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", PLAN_CRITIQUE: "PLAN_CRITIQUE", REVIEW: "REVIEW" };
@@ -150,6 +150,9 @@ export interface LessonsHost {
   /** The task, when it is this company's. */
   ownTask(taskId: string): Promise<TaskRecord | undefined>;
 }
+
+/** The replay check's name for the live load's plan reading (#1051): the same function as `taskPlanFacts` (#1029), one implementation. */
+export const taskPlanLoadFacts = taskPlanFacts;
 
 export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   const { flow, runtime, companyId, now, log, enabled } = input;

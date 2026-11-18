@@ -133,7 +133,7 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
         const params = new URLSearchParams(request.path.split("?")[1] ?? "");
         const values = params.getAll("tasks");
         if (values.length > 1 || (values[0] !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(values[0]))) throw agentXError("CONFIG_INVALID", "tasks: must be an integer from 1 to 50");
-        return json(200, await lessons.replay(name, values[0] === undefined ? 30 : Number(values[0])));
+        try { return json(200, { project: name, ...(await lessons.replay(name, values[0] === undefined ? 30 : Number(values[0]))) }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
       }
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);

@@ -8,6 +8,7 @@ import { resolveLoadBudget, resolveLearning } from "./policy.js";
 import { hasStaleCitation } from "./trial.js";
 import { compareLessonReplay, type ReplayLoadInput } from "./replay.js";
 import { readVisible } from "./read-visible.js";
+import { INTENT_REQUEST_CHARS } from "./host-glue.js";
 
 /** Replay recent finished tasks through the current selector. Every task and lesson read is company and project scoped. */
 export async function replayProjectLessons(input: {
@@ -18,6 +19,8 @@ export async function replayProjectLessons(input: {
   projects: Pick<TaskFlowDeps["projects"], "revision">;
   runtime: LessonsRuntime;
   now: () => number;
+  /** The live load's plan reading (`taskPlanLoadFacts`): the latest stored plan's summary and named files. Absent: the replay ranks by title and request alone. */
+  planFacts?: ((task: TaskRecord) => Promise<{ summary: string; files: readonly string[] } | undefined>) | undefined;
 }): Promise<ReturnType<typeof compareLessonReplay>> {
   const { companyId, project, limit, store, projects, runtime } = input;
   const key = { workspaceId: companyId, project };
@@ -64,12 +67,14 @@ export async function replayProjectLessons(input: {
       repos = revision === undefined ? [] : codeRepositoriesOf(revision.definition).map((repo) => repo.name);
       reposByRevision.set(task.startingRevision, repos);
     }
-    const plan = await runtime.planFacts?.({ orgId: companyId, taskId: task.taskId, workflow: task.workflow });
-    const intent = [task.title, task.requestText ?? ""].filter((part) => part.trim() !== "").join("\n");
+    // The same task facts the live load ranked by (`host-glue.ts` learnedFor): the plan reading, the request cut to the same length, the plan's files capped the same. A fix round's correction text is not stored, so it is not replayed.
+    const plan = input.planFacts === undefined ? undefined : await input.planFacts(task).catch(() => undefined);
+    const intent = [task.title, (task.requestText ?? "").slice(0, INTENT_REQUEST_CHARS)].filter((part) => part.trim() !== "").join("\n");
+    const files = [...new Set(plan?.files ?? [])].slice(0, 50);
     for (const manifest of manifests) {
       const selection = await selectLessons(replayDeps, {
         key, stage: manifest.stage, resolved, active, intent, ...(plan?.summary === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }),
-        repos, files: plan?.files ?? [], languages: [], reader: { running: { taskId: task.taskId } }, where: "replay",
+        repos, files, languages: [], reader: { running: { taskId: task.taskId } }, where: "replay",
         budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }), push: true,
       });
       loads.push({ taskId: task.taskId, stage: manifest.stage, round: manifest.round, actual: manifest.lessons.filter((entry) => visible.has(entry.id)).map((entry) => entry.id), replayed: selection.ok ? selection.picked.map((lesson) => lesson.id) : [] });
