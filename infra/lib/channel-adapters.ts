@@ -316,4 +316,19 @@ export class ChannelAdapters extends Construct {
     // The channel API already reads every adapter's secret, by name only.
     if (options.readsAdapterSecrets !== true) this.slackAdapterSecret.grantRead(fn);
   }
+
+  /**
+   * L4-HW8b (owner DEC 254zzz42 (a)): the broker reads the Slack adapter's signing secret, to sign the one `thread_messages` command the hosted lessons source sends. It is granted in the
+   * SECRET's own policy, not the broker role's (the broker's inline policy is at its ceiling: tests/contract/developer-signin-infrastructure.test.ts, "broker IAM headroom"): this one
+   * secret, GetSecretValue only (no Put, Update, Describe, Create or Delete), this one role. `"*"` in a secret's own policy is that secret. The secret has no customer key (the AWS managed
+   * key for Secrets Manager), so no kms:Decrypt grant is needed or given; the other readers of this secret (the channel API, the orchestrator) have none either.
+   */
+  allowBrokerToReadSlackAdapterSecret(role: iam.IRole): void {
+    this.slackAdapterSecret.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "ReadSlackAdapterSecretBroker",
+      principals: [new iam.ArnPrincipal(role.roleArn)],
+      actions: ["secretsmanager:GetSecretValue"],
+      resources: ["*"],
+    }));
+  }
 }

@@ -15,6 +15,7 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
@@ -672,6 +673,8 @@ describe("task-token key and membership IAM", () => {
     expect(companyImportPolicies(remainder)).toEqual([]);
     // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer, asserted and taken out (rule D: the digest is unchanged, so nothing else in the template moved).
     withoutDispatcherHookSigner(remainder);
+    // L4-HW8b (DEC 254zzz42 (a)): the broker's Slack poster variables and the Slack adapter secret's policy are exactly what broker-slack-poster-infrastructure.test.ts asserts; taken out so the digest still pins everything else.
+    withoutBrokerSlackPoster(remainder, "staging");
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
