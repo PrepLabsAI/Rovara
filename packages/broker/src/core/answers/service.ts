@@ -164,7 +164,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         await rate.give(personId);
         if (error instanceof AnswerModelRefused) {
           if (error.reason === "not_set_up") return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
-          throw agentXError("TOO_MANY_REQUESTS", error.reason === "over_budget" ? ANSWER_WORDS.limitReached : ANSWER_WORDS.unavailable);
+          throw agentXError("TOO_MANY_REQUESTS", error.reason === "over_budget" ? ANSWER_WORDS.limitReached : error.reason === "paused" ? ANSWER_WORDS.paused : ANSWER_WORDS.unavailable);
         }
         throw unavailable();
       }
@@ -182,7 +182,13 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         try {
           reply = await session.complete({ system: ANSWER_SYSTEM_RULES, transcript, maxOutputTokens: ANSWER_LIMITS.outputTokens, signal, remainingCents: ceilingCents - (spentCents ?? 0) });
         } catch (error) {
-          if (error instanceof AnswerModelRefused && error.reason === "over_budget") { ranOut = true; break; }
+          if (error instanceof AnswerModelRefused && (error.reason === "over_budget" || (error.reason === "paused" && turn > 0))) { ranOut = true; break; }
+          // The hosted gateway holds the money call by call, so its refusals (no key connected, the month's limit) come on the first turn: nothing was asked of the model, so the place is given back.
+          if (turn === 0 && error instanceof AnswerModelRefused && (error.reason === "not_set_up" || error.reason === "paused")) {
+            await rate.give(personId);
+            if (error.reason === "paused") throw agentXError("TOO_MANY_REQUESTS", ANSWER_WORDS.paused);
+            return AnswerResponseSchema.parse({ threadId, outcome: "not_set_up", text: "", honesty: ANSWER_WORDS.notSetUp, unconfirmed: [], sources: [], wikiPages: [] });
+          }
           if (turn === 0) throw unavailable();
           ranOut = true;
           break;

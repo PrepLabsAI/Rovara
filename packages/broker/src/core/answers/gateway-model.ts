@@ -1,9 +1,9 @@
 // The hosted model seam (lead 4, J1; DEC 254z-amend2): hosted answers call the gateway's "answers" purpose through this interface. The gateway side (a TC-1 token with a reserved step accepted only on its
-// own path, the company's own key, its own meter row folded into the company cap, its own monthly limit) is Cloud lane L4-E. Until it lands the hosted wiring passes no gateway, and the service answers
-// the fixed "answers are not set up here yet" outcome (never a dead button).
+// own path, the company's own key, its own meter row folded into the company cap, its own monthly limit) is Cloud lane L4-E; the hosted adapter that speaks to it is core-host/gateway-answers.ts. With no gateway
+// configured the hosted wiring passes none, and the service answers the fixed "answers are not set up here yet" outcome (never a dead button).
 import { AnswerModelRefused, type AnswerModel, type AnswerModelReply, type AnswerModelSession, type AnswerModelTurn } from "./ports.js";
 
-export type AnswersGatewayRefusal = "not_set_up" | "over_budget" | "unavailable";
+export type AnswersGatewayRefusal = "not_set_up" | "over_budget" | "paused" | "unavailable";
 
 /** What L4-E provides: reserve the answer's ceiling once, call the model inside that reservation, and settle (or release) it. Every method rejects with `AnswersGatewayError` for a refusal. */
 export interface AnswersGateway {
