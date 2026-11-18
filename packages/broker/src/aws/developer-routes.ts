@@ -24,7 +24,7 @@ import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
-import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js";
+import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js"; import { isCompanyEgressPath, routeCompanyEgress, type CompanyEgressWiring } from "./company-egress-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type OrgRole,
@@ -201,7 +201,7 @@ export interface DeveloperApiConfiguration {
   /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
-  companyEngineModel?: CompanyEngineModelWiring;
+  companyEngineModel?: CompanyEngineModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
   /**
    * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
    * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
@@ -2142,6 +2142,19 @@ async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request
   return routeCompanyEngineModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
 }
 
+/** L4-EGR: the company's view of Rovara's outbound addresses. Unknown, before anyone is authenticated, without the company layer or the wiring. */
+async function companyEgressRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const wiring = deps.developer.companyEgress;
+  if (deps.companies === undefined || wiring === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (the route table's row), checked while authenticating, before any membership is read.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return routeCompanyEgress({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, wiring }, caller, companyId, request);
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
@@ -2151,6 +2164,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   const intakeMatch = HOSTED_INTAKE_ROUTES.exec(url.pathname);
   if (intakeMatch !== null) return hostedIntakeRoute(deps, request, url, intakeMatch);
   if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
+  if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.

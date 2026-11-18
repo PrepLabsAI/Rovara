@@ -379,7 +379,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -15499,6 +15499,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       ...(linear === undefined ? {} : { linearConnect: linear.connect }),
       // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
       ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }),
+      // L4-EGR: Rovara's outbound addresses (the stack parameter NatEgressAddresses); an empty or absent value reads as an empty list.
+      companyEgress: { addresses: () => process.env[EGRESS_ADDRESSES_VARIABLE] },
       // DEC 254w: connected sign-ins, through the same sign-in Lambda (it owns the sign-in table).
       signInLinks: signInLinksThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))) } : {}),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),

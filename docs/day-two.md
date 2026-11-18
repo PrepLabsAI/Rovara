@@ -300,3 +300,7 @@ agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
 The mode stays within the project's settings: with continue not allowed, the task stays view only.
 An admin cannot share a private task or move a shared one to another channel. `agentx --env <env>
 admin turns export --since 7d` shows task IDs.
+
+## Outbound addresses
+
+Companies that allow-list Rovara read its fixed outbound addresses in Company settings. You read them from the foundation stack output `NatEgressAddresses`. See [Rovara's outbound addresses](outbound-addresses.md). The Elastic IPs behind them are retained when a stack is deleted (billed until released by hand); never release one a customer may have allowed.

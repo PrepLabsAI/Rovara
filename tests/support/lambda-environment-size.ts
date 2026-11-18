@@ -39,6 +39,8 @@ export const DEPLOY_PARAMETER_VALUES: Record<string, string> = {
   GitHubAppPrivateKeySecretArn: `arn:aws:secretsmanager:${RESOLVER_REGION}:${RESOLVER_ACCOUNT}:secret:agentx/a1234567890123456789/github-app-AbCdEf`,
   Ec2WorkerSubnets: [`${RESOLVER_REGION}a=subnet-0123456789abcdef0`, `${RESOLVER_REGION}b=subnet-0123456789abcdef1`].join(","),
   Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+  // L4-EGR: the NAT gateways' addresses at the parameter's longest (four addresses of 15 characters, three commas).
+  NatEgressAddresses: ["255.255.255.255", "255.255.255.254", "255.255.255.253", "255.255.255.252"].join(","),
   // A Slack team id is [TE][A-Z0-9]{2,31} (the parameter's AllowedPattern): 32 characters at most.
   SlackTeamId: `T${"0123456789ABCDEFGHIJKLMNOPQRSTUV".slice(0, 31)}`,
   DeveloperOidcIssuer: "https://login.example-company.okta.com/oauth2/default",

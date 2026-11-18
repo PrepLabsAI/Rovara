@@ -8,6 +8,7 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
+import { withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
@@ -631,6 +632,8 @@ describe("task-token key and membership IAM", () => {
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
+    // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts checks them in full).
+    withoutNatEgressControlPlane(remainder);
     withoutGithubSignIn(remainder, "staging");
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring

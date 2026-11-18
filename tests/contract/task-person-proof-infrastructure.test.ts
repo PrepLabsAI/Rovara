@@ -9,6 +9,7 @@ import { environmentNaming } from "../../infra/lib/naming.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
+import { withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
@@ -73,6 +74,8 @@ function parentRemainderDigest(template: TemplateJson): string {
     withoutCoreEngine(remainder);
     // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
+    // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts).
+    withoutNatEgressControlPlane(remainder);
   } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that

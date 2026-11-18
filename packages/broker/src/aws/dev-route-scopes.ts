@@ -170,6 +170,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },
+  // L4-EGR: Rovara's fixed outbound addresses (read only; a live owner or admin of the company).
+  { method: "GET", path: "/v1/dev/company/egress-addresses", requires: "full" },
   // L2-4: a project's waiting tickets (Linear app intake on the core); full access only (the route also checks the company owner/admin or the project's admin, live).
   { method: "GET", path: "/v1/dev/projects/{project}/intake", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/start", requires: "full" },
