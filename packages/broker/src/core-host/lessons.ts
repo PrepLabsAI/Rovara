@@ -25,7 +25,9 @@ import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import type { ChannelCompanyOf } from "../core/channel/company.js";
+import type { ChannelCompanyOf, ChannelMemberRule } from "../core/channel/company.js";
+import { slackThreadSource } from "../lessons/slack-wiring.js";
+import { eraseSlackOptOut } from "../lessons/slack-switch.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
@@ -101,8 +103,12 @@ export interface CoreLessonsOptions {
   edition?: Edition;
   /** Where the knowledge briefing's measured facts and skill names come from (lead 4 L4-AK2b: the base's known-flaky tests, read from this company's own nightly baseline). Absent: the briefing carries lessons and the look-up only. */
   knowledge?: KnowledgeSources | undefined;
-  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places. Absent: one company, whose every tenant is. */
+  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places and the task's Slack thread. Absent: one company, whose every tenant is. */
   channelCompanyOf?: ChannelCompanyOf;
+  /** Whether a person is one the host serves now (owner decision 131's explicit-member rule), for the people whose replies in a task's Slack thread are read. Absent: every linked person. */
+  channelMemberRule?: ChannelMemberRule;
+  /** Sends the `thread_messages` command for a deployment whose Slack adapter is not in the registry (a signed webhook adapter). Absent: the registry's in-process `channel` adapter, and none means no Slack source. */
+  slackThreadCommand?: Parameters<typeof slackThreadSource>[0]["sendCommand"];
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -192,6 +198,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
         paused: (project: string) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
       },
     }),
+    // L4-SRC-SL: the task's own Slack thread, read once at task end. Only where the Slack adapter declares it can read a thread (`history`); everywhere else no span is made and nothing changes.
+    slack: slackThreadSource({ store: deps.store, companyId, registry, companyOf: options.channelCompanyOf, isMember: options.channelMemberRule, sendCommand: options.slackThreadCommand, now, lessonStore: () => runtime.store }),
   });
   const host = createLessonsHost({
     flow: deps, runtime, companyId, blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
@@ -348,6 +356,8 @@ export async function erasePersonLessons(input: { store: DocumentStore; audit: A
     // The weekly summary's "sent this week" row of the person.
     await removeAll(companyScoped(companyId, `LESSON_DIGEST#${project}`), (row) => row.sk !== `SENT#${personId}`);
   }
+  // The person's own "Don't learn from my Slack messages" row (one per person, in the company's partition, not under any project).
+  rows += await eraseSlackOptOut(store, companyId, personId);
   input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
   return { projects: projects.length, purged, scrubbed, rows };
 }

@@ -61,6 +61,7 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
+import { createLessonsSlackSwitchApi, type LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
 import { createHostedSetupRepair } from "../core-host/setup-repair.js";
@@ -252,6 +253,8 @@ export interface BrokerCoreRoot {
   readonly knowledge: KnowledgeApi | undefined;
   /** L4-AK1H: whether a person may be told an admin notice now (they are one of the company's admins, read live). Handed to the notice delivery (`notification.adminNotice`). Undefined with `knowledge`. */
   readonly adminNotice: ((orgId: string, developerId: string) => Promise<boolean>) | undefined;
+  /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`), whenever the core serves. */
+  readonly lessonsSlackSwitch?: LessonsSlackSwitchApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
@@ -1213,6 +1216,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     lessons,
     knowledge,
     adminNotice,
+    // The person's own switch: company from live membership, rows in the company's partition of the registry's store. Only where the core serves (no company's data is read otherwise).
+    ...(settingsBlocked || !app.serving ? {} : { lessonsSlackSwitch: createLessonsSlackSwitchApi({
+      companyOf: async (caller) => await membershipOf(caller.personId),
+      store: async () => (await app.registry()).require("storage"),
+      now: () => now().getTime(),
+    }) }),
     intake,
     ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {

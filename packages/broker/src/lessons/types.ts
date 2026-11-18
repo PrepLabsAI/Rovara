@@ -87,7 +87,7 @@ export const LESSON_STATUSES = ["candidate", "pending", "active", "stale", "reti
 export type LessonStatus = (typeof LESSON_STATUSES)[number];
 export type Tier = 0 | 1 | 2;
 
-export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "plan_comment", "design_comment", "ticket_comment"] as const;
+export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "plan_comment", "design_comment", "ticket_comment", "slack_reply"] as const;
 export type SpanKind = (typeof SPAN_KINDS)[number];
 
 /** What a STORED row's provenance reads an unknown span kind as: a kind a newer build wrote that this build does not know. */

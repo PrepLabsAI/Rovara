@@ -22,6 +22,7 @@ import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
+import type { LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
@@ -245,6 +246,8 @@ export interface DeveloperRouteDependencies {
   lessons?: Pick<LessonsApi, "answer">; /** L4-AK1H: the hosted team knowledge reads for tools outside Rovara (`core-host/knowledge-api.ts`), behind the same lessons switch. Absent: a person gets the fixed "off" answer, a script token is refused, and nothing is read. */ knowledge?: Pick<KnowledgeApi, "answer">;
   /** The Home number "Corrections you had to repeat" (`core-host/lessons-repeats-api.ts`), behind the same switch. Absent: its routes answer "Lessons are off." and read nothing. */
   lessonRepeats?: Pick<LessonsRepeatsApi, "answer">;
+  /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`). It does not depend on the lessons switch. Absent: its route is not found. */
+  lessonsSlackSwitch?: Pick<LessonsSlackSwitchApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
   createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
@@ -2430,6 +2433,10 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
+  }
+  if (url.pathname === "/v1/dev/me/lessons-slack") { // L4-SRC-SL (core-host/lessons-slack-switch-api.ts parses the same path; a test holds the two equal)
+    if (deps.lessonsSlackSwitch === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+    return deps.lessonsSlackSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
   }
   if (LESSONS_REPEATS_ROUTES.test(url.pathname)) {
     if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);

@@ -45,6 +45,7 @@ import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-mo
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources, type LessonTicketWiring } from "./lessons-sources.js";
 import { ticketSourcePaused } from "../../lessons/ticket-comments.js";
+import { slackThreadSource } from "../../lessons/slack-wiring.js";
 import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
@@ -170,7 +171,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     },
     paused: (project) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
   };
-  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields), tickets });
+  // L4-SRC-SL: the owner's own replies in the task's Slack thread, read once at task end (the adapter must declare `history`; any other adapter or none: no span). The lessons store is built just below and asked at each read.
+  const sourcesRuntime: { current?: LessonsRuntime } = {};
+  const slack = slackThreadSource({ store: flow.store, companyId, registry, now, lessonStore: () => { if (sourcesRuntime.current === undefined) throw new Error("the lessons runtime is not built yet"); return sourcesRuntime.current.store; } });
+  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields), tickets, slack });
 
   const runtime = createLessonsRuntime({
     store: flow.store, companyId, now, log: (event, fields) => log(event, fields), audit: options.audit, reader,
@@ -190,6 +194,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       },
     }),
   });
+
+  sourcesRuntime.current = runtime;
 
   // ---- capture, loading, the pull request and the upkeep: the same for every host (`lessons/host-glue.ts`)
 

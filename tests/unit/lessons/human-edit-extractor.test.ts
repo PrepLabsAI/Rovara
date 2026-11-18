@@ -40,15 +40,22 @@ function setup(over: { base?: TaskSubjectBase | undefined; mode?: "Off" | "On"; 
     verifier: verifier("valid"), facts: facts(), settings: configured, newId: (() => { let n = 0; return () => `les_${String(++n).padStart(4, "0")}`; })(),
   };
   const base = "base" in over ? over.base : baseOf();
+  const reads: Array<Parameters<HumanEditExtractorDeps["source"]["read"]>[0]> = [];
   const deps: HumanEditExtractorDeps = {
-    source: { read: async () => base }, settings: configured, reflect: { model, spend: new Spend(), audit, settings: configured, edition: "public", now: clock.now, newId: () => "run-1" }, process,
+    source: { read: async (asked) => { reads.push(asked); return base; } }, settings: configured, reflect: { model, spend: new Spend(), audit, settings: configured, edition: "public", now: clock.now, newId: () => "run-1" }, process,
     standing: async (_org, who) => (over.outsiders?.includes(who) ? "outsider" : "member"),
     isErased: async (_org, who) => { if (over.erasedThrows) throw new Error("cannot tell"); return over.erased?.includes(who) === true; },
   };
-  return { extractor: createHumanEditExtractor(deps), store, model, audit, process };
+  return { extractor: createHumanEditExtractor(deps), store, model, audit, process, reads };
 }
 
 describe("the human-edit extractor", () => {
+  it("never reads the task's chat thread: neither the edits' own read nor the repo-only pass asks for it (Slack is read once, at the task's end)", async () => {
+    const w = setup();
+    await w.extractor.extract(input());
+    expect(w.reads.length).toBeGreaterThan(0);
+    expect(w.reads.every((asked) => asked.context === "human_edit" || asked.withoutSlack === true)).toBe(true);
+  });
   it("makes lessons from the changed lines, names the authors, cites the pull request, and keeps no diff", async () => {
     const w = setup();
     expect(await w.extractor.extract(input())).toEqual({ candidates: 1 });

@@ -33,6 +33,7 @@ import type { Audience, TrustClass } from "../../lessons/types.js";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
 import type { HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { queryAll } from "@agentx/contracts";
+import { slackReplySpans, type SlackLessonSourceOptions } from "../../lessons/slack-source.js";
 
 const PLAN_MAX_BYTES = 70_000;
 const MAX_FINDINGS = 20;
@@ -137,6 +138,11 @@ export interface LocalSubjectSourceOptions {
    * is erased (or whose standing cannot be read) teaches nothing. A code host account is the person the port links it to, or a host account name. `ownerId` is then unused. Any read that fails throws.
    */
   hosted?: { people: HostedLessonPeople; personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined> } | undefined;
+  /**
+   * The task's own Slack thread as a source (L4-SRC-SL, `lessons/slack-source.ts`): the reader of the thread, the person's opt-out switch and the project's pause, read NOW at each task end. Absent: no Slack span, and the
+   * source is exactly what it was. The person's standing is this source's own (`standingOf` below), so the rules a hosted install and a laptop follow are the ones for every other person's words.
+   */
+  slack?: Pick<SlackLessonSourceOptions, "reader" | "optedOut" | "paused"> | undefined;
 }
 
 export interface LocalLessonSources { source: TaskSubjectSource; rows: OutcomeRowReader; reverts: RevertedTasksReader }
@@ -393,6 +399,11 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
 
       // L4-SRC-TK: only a task that ENDED teaches from its ticket's comments (a send-back reflection of an open task reads none), and never for the human-edit job.
       if (input.context !== "human_edit" && outcomeOf(workflow) !== undefined) spans.push(...(await ticketComments(task)));
+
+      // The task's own Slack thread, read once now (never when a human edit's reflection is the one asking: it wants the task's own facts only). Every rule is in `slackReplySpans`.
+      if (options.slack !== undefined && input.context !== "human_edit" && input.withoutSlack !== true) {
+        spans.push(...(await slackReplySpans({ ...options.slack, standingOf: (person, forProject) => (hosted === undefined && person !== ownerId ? Promise.resolve(undefined) : standingOf(person, forProject)), now: options.now, log: options.log }, { companyId: options.companyId, project, taskId: task.taskId })));
+      }
 
       const outcome = outcomeOf(workflow);
       const links = (workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.url).slice(0, 32);

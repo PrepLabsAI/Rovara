@@ -57,7 +57,7 @@ export interface TaskSubjectSource {
    */
   projectOf?(input: { workspaceId: string; taskId: string }): Promise<string | undefined>;
   /** `context: "human_edit"`: only the task's own facts and steering are wanted (a human edit's reflection keeps the intent and plan); the pull request's comments are not read from the host. */
-  read(input: { workspaceId: string; taskId: string; context?: "human_edit"; /** Lead 4 L4-LP3Wc: kinds of evidence a person paused: the source reads none of them (no host call, nothing gathered). */ skip?: ReadonlySet<SpanKind> }): Promise<TaskSubjectBase | undefined>;
+  read(input: { workspaceId: string; taskId: string; context?: "human_edit"; /** Lead 4 L4-LP3Wc: kinds of evidence a person paused: the source reads none of them (no host call, nothing gathered). */ skip?: ReadonlySet<SpanKind>; /** The task's Slack thread is read only once, when the task has really ended: a send-back of an open task, a revert's re-reflection and the repo-only pass never read it. */ withoutSlack?: true }): Promise<TaskSubjectBase | undefined>;
 }
 
 export interface TaskLearningDeps {
@@ -151,7 +151,7 @@ async function subjectFrom(deps: TaskLearningDeps, given: TaskSubjectBase, works
 export async function subjectForTask(deps: TaskLearningDeps, input: { workspaceId: string; taskId: string; outcome?: ReflectSubject["outcome"] }): Promise<ReflectSubject | undefined> {
   const known = await deps.source.projectOf?.({ workspaceId: input.workspaceId, taskId: input.taskId });
   const early = known === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: known });
-  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}), ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
   if (base === undefined) return undefined;
   return subjectFrom(deps, base, input.workspaceId, input.outcome, await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, base.lifetime ?? "unknown"));
 }
@@ -294,7 +294,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     }
     // Lead 4 L4-LP3Wc: the kinds a person paused are read live, BEFORE the source reads anything (the source reads none of them), and again for the project the facts name. A pause is a stop: what is paused is never gathered.
     const early = knownProject === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: knownProject });
-    const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+    const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}), ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
     if (given === undefined || given.facts.workspaceId !== input.workspaceId) return final("no_facts");
     const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: given.facts.project }, given.lifetime ?? "unknown");
     // "After merge" stopped (now, or at any time while the task lived): a revert is not read and no model is called for it, whether it was queued before the pause, retried, or found again after the resume.
