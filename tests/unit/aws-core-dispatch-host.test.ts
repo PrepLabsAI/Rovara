@@ -26,7 +26,7 @@ import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { LambdaBatchQueue, coreDispatchMessage, createCoreDispatchHost, type CoreDispatchHostDependencies } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import {
-  DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
+  DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, evalGatewayOf, hostedDispatcherFlow, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
 } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
@@ -403,6 +403,34 @@ describe("the core on the dispatcher", () => {
     const step = { project: "alpha", taskId: "11111111-1111-4111-8111-111111111111", operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["web"] };
     expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_B })).toEqual({});
     expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_A })).toEqual({});
+  });
+
+  it("L4-EVW: each company's runtime on the dispatcher carries the gateway's checked https origin for the eval request, only where the model gateway is configured", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
+    const gatewayEnv = { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test/", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-5" };
+    const built = async (extra: Record<string, string | undefined>) => {
+      const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on", ...extra }));
+      const host = createDispatcherCoreHost({ ...made.inputs, extraModules, flow: () => hostedDispatcherFlow(made.inputs.env)! });
+      return [(await host.app.runtimeFor(COMPANY_A)).flow.deps.evalGatewayUrl, (await host.app.runtimeFor(COMPANY_B)).flow.deps.evalGatewayUrl] as const;
+    };
+    expect(await built(gatewayEnv)).toEqual(["https://gateway.example.test", "https://gateway.example.test"]);
+    // no gateway: nothing is built, nothing is sent (a laptop and an install without the gateway are exactly as before)
+    expect(await built({})).toEqual([undefined, undefined]);
+  });
+
+  it("L4-EVW: the eval gateway flow option is the checked origin or nothing", () => {
+    const route = { route: async () => undefined };
+    expect(evalGatewayOf({ ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test" }, route)).toEqual({ evalGatewayUrl: "https://gateway.example.test" });
+    expect(evalGatewayOf({ ROVARA_CORE_MODEL_GATEWAY_URL: " https://gateway.example.test/ " }, route)).toEqual({ evalGatewayUrl: "https://gateway.example.test" });
+    expect(evalGatewayOf({ ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test:8443" }, route)).toEqual({ evalGatewayUrl: "https://gateway.example.test:8443" });
+    // no model route configured (null or absent): nothing, even with a good address
+    expect(evalGatewayOf({ ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test" }, null)).toEqual({});
+    expect(evalGatewayOf({ ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example.test" }, undefined)).toEqual({});
+    // unset, blank or not exactly an https origin: nothing
+    for (const bad of [undefined, "", "  ", "http://gateway.example.test", "https://gateway.example.test/v1", "https://u:p@gateway.example.test", "https://gateway.example.test?a=b", "gateway.example.test", `https://${"a".repeat(600)}.example.test`]) {
+      expect(evalGatewayOf(bad === undefined ? {} : { ROVARA_CORE_MODEL_GATEWAY_URL: bad }, route), String(bad)).toEqual({});
+    }
   });
 
   it("builds no company's runtime until every flow input a worker job carries is declared, and places the worker on the install's own workers only", async () => {
