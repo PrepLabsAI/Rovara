@@ -15,14 +15,12 @@ export function pausedKindsOfFlags(flags: ProjectFlags): ReadonlySet<SpanKind> {
 }
 
 // Lead 4 L4-LP3Wd: a person's stop that could not be written (the flags row kept changing for every try, `flags-fence.ts`) is held HERE, in this process, and read as stopped until a later write of that kind settles
-// (a successful stop or resume). It is a bridge, not the record: the person was told "that could not be saved" and presses again. Bounded: a project holds at most the pausable kinds, and a process at most `MAX_FAILED_STOP_PROJECTS` projects.
-const MAX_FAILED_STOP_PROJECTS = 1_000;
+// (a successful stop or resume). It is a bridge, not the record: the person was told "that could not be saved" and presses again. Bounded by what can be stopped: a project holds at most the pausable kinds, and an entry exists only after five lost writes in a row. It is per process and does not expire (a stop that was never pressed again keeps reading as stopped until a stop or a resume lands, or the process restarts): the safe side.
 const failedStops = new Map<string, Set<SpanKind>>();
 const failedKey = (key: ScopeKey): string => `${key.workspaceId}\u0001${key.project}`;
 /** Remembers kinds a person stopped whose stop could not be saved: they read as stopped from now on. */
 export function noteFailedStop(key: ScopeKey, kinds: readonly SpanKind[]): void {
   const id = failedKey(key);
-  if (!failedStops.has(id) && failedStops.size >= MAX_FAILED_STOP_PROJECTS) failedStops.delete(failedStops.keys().next().value as string);
   const set = failedStops.get(id) ?? new Set<SpanKind>();
   for (const kind of kinds) set.add(kind);
   failedStops.set(id, set);

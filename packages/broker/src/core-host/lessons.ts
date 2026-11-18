@@ -299,7 +299,7 @@ export interface ErasePersonLessonsReport {
  */
 export async function erasePersonLessons(input: { store: DocumentStore; audit: AuditSink; companyId: OrgId; personId: string; now: () => number; vectors?: LessonVectors; log?: (entry: Record<string, unknown>) => void }): Promise<ErasePersonLessonsReport> {
   const { store, companyId, personId, now } = input;
-  const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
+  const lessons = new DocumentLessonStore(store, now, (id) => id, (event, fields) => input.log?.({ component: "lessons-erase", event, ...fields }));
   const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now, onGone: graduatedCleanup(store, now) });
   const projects = await companyProjects(store, companyId);
   let purged = 0;

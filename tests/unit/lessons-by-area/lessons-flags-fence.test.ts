@@ -79,8 +79,14 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
     const store = make();
     const w = world();
     await store.setFlags(KEY, { pausedSources: { "member:Ann": { at: 1, reason: "spike" } } });
-    const racedErasure = racing(store, async () => { await stopSource(store, w); });
-    await racedErasure.forgetSource(KEY, "member:ann");
+    if (store instanceof InMemoryLessonStore) {
+      // The in-memory erasure is one synchronous step: it cannot be raced, so it runs before and after a stop.
+      await stopSource(store, w);
+      await store.forgetSource(KEY, "member:ann");
+    } else {
+      const racedErasure = racing(store, async () => { await stopSource(store, w); });
+      await racedErasure.forgetSource(KEY, "member:ann");
+    }
     expect((await store.flags(KEY)).pausedSources).toEqual({});
     expect(stoppedOf(await store.flags(KEY))).toEqual(STOPPED);
   });
@@ -150,6 +156,8 @@ describe.each(factories)("the flags row is a conditional write (%s)", (_name, ma
     expect(stoppedOf(await store.flags(KEY))).toEqual(STOPPED);
     expect([...(await pausedKindsFor(store, KEY_B))].sort()).toEqual(STOPPED);
     expect([...(await pausedKindsFor(store, { workspaceId: B, project: "other" }))]).toEqual([]);
+    // A third company on the same project name sees nothing of the failed stop in B (a key by project name alone would leak it).
+    expect([...(await pausedKindsFor(store, { workspaceId: "org_cccccccccccccccccccc", project: "web" }))]).toEqual([]);
     expect([...(await pausedKindsFor(store, KEY))].sort()).toEqual(STOPPED);
     // The in-process stop of the failed company is lifted by its own resume (the test leaves nothing behind).
     await stopSource(store, w, KEY_B, false);
@@ -200,10 +208,21 @@ describe.each(factories)("the tries run out (%s)", (_name, make) => {
     // Nothing is recorded, but Rovara reads nothing of these kinds (and an unrelated kind is read as before).
     expect([...(await pausedKindsFor(store, KEY))].sort()).toEqual(STOPPED);
     expect([...(await pausedKindsFor(store, KEY, { from: 1 }))].sort()).toEqual(STOPPED);
-    // The person presses again and it lands: the record decides.
+    // The person presses again and it lands: the record decides (the in-process stop is gone, so wiping the record leaves nothing stopped).
     await stopSource(store, w);
     expect(stoppedOf(await store.flags(KEY))).toEqual(STOPPED);
+    await store.setFlags(KEY, {});
+    expect([...(await pausedKindsFor(store, KEY))]).toEqual([]);
+  });
+
+  it("a failed stop is also settled by a resume that lands, whatever the record then holds", async () => {
+    const store = make();
+    const w = world();
+    await expect(stopSource(alwaysLosing(store).store, w)).rejects.toBeInstanceOf(FlagsConflictError);
+    // The record shows the stop (another instance saved it), the person resumes: the in-process stop goes with it.
+    await store.setFlags(KEY, { stoppedKinds: { send_back: { at: 1 }, close_reason: { at: 1 } } });
     await stopSource(store, w, KEY, false);
+    await store.setFlags(KEY, {});
     expect([...(await pausedKindsFor(store, KEY))]).toEqual([]);
   });
 
@@ -258,10 +277,14 @@ describe.each(factories)("the tries run out (%s)", (_name, make) => {
 
 describe("no other writer of the flags row", () => {
   const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => { const path = join(dir, name); return statSync(path).isDirectory() ? walk(path) : path.endsWith(".ts") ? [path] : []; });
-  it("only the stores themselves call setFlags (the unconditional seed); every other writer goes through updateFlags", () => {
-    const callers = walk(join(__dirname, "../../../packages")).filter((file) => /\bsetFlags\(/u.test(readFileSync(file, "utf8"))).map((file) => file.slice(file.indexOf("packages/"))).sort();
-    expect(callers).toEqual(["packages/broker/src/lessons/document-store.ts", "packages/broker/src/lessons/store.ts"]);
-    const writers = walk(join(__dirname, "../../../packages")).filter((file) => /\bsetFlagsIf\(/u.test(readFileSync(file, "utf8"))).map((file) => file.slice(file.indexOf("packages/"))).sort();
-    expect(writers).toEqual(["packages/broker/src/lessons/document-store.ts", "packages/broker/src/lessons/flags-fence.ts", "packages/broker/src/lessons/store.ts"]);
+  const files = walk(join(__dirname, "../../../packages")).map((file) => ({ name: file.slice(file.indexOf("packages/")), text: readFileSync(file, "utf8") }));
+  const count = (text: string, pattern: RegExp): number => text.match(pattern)?.length ?? 0;
+  it("setFlags (the unconditional seed) is only DEFINED in the two stores and called nowhere else", () => {
+    const withSetFlags = files.filter((file) => /\bsetFlags\(/u.test(file.text)).map((file) => [file.name, count(file.text, /\bsetFlags\(/gu)]);
+    expect(withSetFlags).toEqual([["packages/broker/src/lessons/document-store.ts", 1], ["packages/broker/src/lessons/store.ts", 2]]);
+  });
+  it("setFlagsIf is called only by updateFlags and the flags row is touched only by the document store's four flag methods", () => {
+    expect(files.filter((file) => /\.setFlagsIf\(/u.test(file.text)).map((file) => file.name)).toEqual(["packages/broker/src/lessons/flags-fence.ts"]);
+    expect(files.filter((file) => file.text.includes("LESSONSET#FLAGS")).map((file) => [file.name, count(file.text, /LESSONSET#FLAGS/gu)])).toEqual([["packages/broker/src/lessons/document-store.ts", 4]]);
   });
 });
