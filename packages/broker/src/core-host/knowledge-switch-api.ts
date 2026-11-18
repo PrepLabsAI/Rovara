@@ -13,6 +13,7 @@
 //     (`lessons-api.ts` `mayChange`) is a project maintainer or a company owner or admin, read live. There is no step-up here (it is being removed from the product); the role is the check.
 //   - The company comes ONLY from live membership (`companyOf`); a reader that throws or answers something malformed is "sign in again". Nothing in a path, query or body names a company or a person.
 //   - A project the company does not have is "No such project." (the lessons API's words); so is a project the person has no part in (not on its roster and not an owner or admin), so names cannot be probed.
+//   - Both PUTs are made only from the Rovara website's own client (`webApp`, DEC 254zzz99): the CLI's token or an AI tool's is refused with the fixed "Do this on the Rovara website" words; the GETs are unchanged.
 //   - A script token neither reads nor sets either switch (the knowledge a tool reads is gated BY these; a tool must never change its own gate).
 //   - Every change is audited BEFORE it is made (the ledger records who and the new value; the stored row names no person); no record, no change.
 //   - It does NOT depend on the lessons switch: a company that wants its knowledge to stay in Rovara can say so whether or not lessons are on (the wiki tools gate reads the same row either way).
@@ -34,7 +35,10 @@ const SIGN_IN_AGAIN = "Sign in again.";
 const UNAVAILABLE = "That can't be read or saved right now. Try again.";
 const NOT_RECORDED = "That could not be recorded, so nothing was changed. Try again.";
 
-export interface KnowledgeSwitchCaller { personId: string; scriptToken?: unknown }
+/** Owner DEC 254zzz99 (same check and words as DEC 254zzz91, Code PR #1086 `ON_THE_WEBSITE_MESSAGE`; use the contract constant once #1086 lands): a change is made only from the Rovara website's own client. */
+export const ON_THE_WEBSITE = "Do this on the Rovara website: the command line and AI tools cannot make this change.";
+/** `webApp`: set by the router only for the Rovara web app's own sign-in client (registered full access AND marked web app), never for the CLI's or another client's token. */
+export interface KnowledgeSwitchCaller { personId: string; scriptToken?: unknown; webApp?: boolean }
 export interface KnowledgeSwitchRequest { method: string; path: string; body?: string | undefined }
 export interface KnowledgeSwitchOptions {
   /** The caller's company and their live role in it, from membership. Undefined, malformed or a throw: sign in again. */
@@ -73,6 +77,8 @@ export function createKnowledgeSwitchApi(options: KnowledgeSwitchOptions): Knowl
     const projectMatch = PROJECT_PATH.exec(request.path);
     if ((request.path !== KNOWLEDGE_SWITCH_COMPANY_PATH && projectMatch === null) || (request.method !== "GET" && request.method !== "PUT")) throw agentXError("NOT_FOUND", "route not found");
     if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+    // Owner DEC 254zzz99: both PUTs (opening or closing knowledge to tools) need the website's own client; the reads do not.
+    if (request.method === "PUT" && caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE);
     let found: unknown;
     try { found = await options.companyOf(caller); } catch { found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;

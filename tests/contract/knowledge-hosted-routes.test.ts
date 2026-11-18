@@ -118,6 +118,31 @@ describe("the knowledge routes at the developer router", () => {
     expect(answer).toHaveBeenCalledTimes(1);
   });
 
+  it("the two knowledge-switch PUTs are made only from the website's own client (owner DEC 254zzz99): the CLI's full-access token gets the fixed words, the web app succeeds, and the GETs are the same for both", async () => {
+    const w = world();
+    await w.setup();
+    const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
+    const { createKnowledgeSwitchApi, ON_THE_WEBSITE } = await import("../../packages/broker/src/core-host/knowledge-switch-api.js");
+    const events: unknown[] = [];
+    const api = createKnowledgeSwitchApi({
+      store: new MemoryDocumentStore(), audit: { stage: () => [], record: async (event) => { events.push(event); } }, now: () => 1_800_000_000_000,
+      companyOf: async () => ({ companyId: "org_aaaaaaaaaaaaaaaaaaaa", role: "owner" as const }), projectExists: async () => true, projectRole: async () => undefined,
+    });
+    const deps = { ...w.routes, knowledgeSwitch: api } as DeveloperRouteDependencies;
+    const cli = await w.signIn("owner", { cli: true });
+    const web = await w.signIn("owner");
+    for (const [path, body] of [["/v1/dev/company/lessons/local-tools", { stays: true }], [`${P}/lessons/local-tools`, { enabled: false }]] as const) {
+      expect(await callOn(deps, "PUT", path, `Bearer ${cli.access!}`, body), path).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: ON_THE_WEBSITE } } });
+      expect(await callOn(deps, "GET", path, `Bearer ${cli.access!}`), path).toMatchObject({ status: 200 });
+    }
+    expect(events).toEqual([]);
+    expect(await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${web.access!}`, { stays: true })).toEqual({ status: 200, body: { stays: true } });
+    expect(await callOn(deps, "PUT", `${P}/lessons/local-tools`, `Bearer ${web.access!}`, { enabled: false })).toMatchObject({ status: 200, body: { enabled: false } });
+    expect(events).toHaveLength(2);
+    // Another full-access client that is not the web app (an AI tool's) is refused too.
+    expect((await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${TOKEN}`, { stays: false })).status).toBe(401);
+  });
+
   it("the route table's rows are additive: exactly these three rows are the knowledge rows, and each existing row keeps its method, path and scope", () => {
     const keyOf = (route: { method: string; path: string; requires: string }) => `${route.method} ${route.path} ${route.requires}`;
     const all = DEV_ROUTES.map(keyOf);

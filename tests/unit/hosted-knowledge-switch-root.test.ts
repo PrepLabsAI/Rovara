@@ -71,7 +71,7 @@ async function setup(env: Record<string, string> = { ROVARA_CORE_LESSONS: "on" }
   return { root, rows, world };
 }
 type Setup = Awaited<ReturnType<typeof setup>>;
-const call = (s: Setup, method: string, path: string, personId: string, body?: unknown) => s.root.knowledgeSwitch!.answer({ method, path, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, { personId });
+const call = (s: Setup, method: string, path: string, personId: string, body?: unknown) => s.root.knowledgeSwitch!.answer({ method, path, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, { personId, webApp: true });
 
 /** The lessons runtime the company's knowledge read and wiki gate use (the one `createCoreLessons` built for company `A`). */
 const lessonsRuntimeOf = (company: OrgId) => {
