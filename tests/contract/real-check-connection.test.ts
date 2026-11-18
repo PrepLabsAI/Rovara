@@ -29,7 +29,7 @@ const vendor = (over: Record<string, unknown> = {}) => stamp({ ...base, id: "tik
 /** Whether the record passes the schema. A record built by spreading a stamped one has the old digest: it is stamped again first, so a test of one rule tests that rule and not the approval's digest (the tests of the digest say so). */
 const ok = (value: unknown, options: rc.RealCheckSchemaOptions = {}) => {
   const record = value as { approvals?: Array<Record<string, unknown>> };
-  const restamped = Array.isArray(record.approvals) && record.approvals.every((each) => each.approvedDigest !== "0".repeat(64)) ? stamp({ ...record, approvals: record.approvals.map(({ approvedDigest: _old, ...rest }) => rest) }) : value;
+  const restamped = Array.isArray(record.approvals) && record.approvals.every((each) => each.approvedDigest !== "0".repeat(64)) ? stamp({ ...record, approvals: record.approvals.map((each) => Object.fromEntries(Object.entries(each).filter(([name]) => name !== "approvedDigest"))) }) : value;
   return rc.realCheckSchemaFor(options).safeParse(restamped).success;
 };
 const parsed = (value: Record<string, unknown>) => rc.RealCheckConnectionSchema.parse(value);

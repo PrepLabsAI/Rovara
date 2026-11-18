@@ -211,8 +211,8 @@ function queryProblem(url: ParsedUrl): "write" | undefined {
     if ((lower === "query" || lower === "mutation") && value.length > 0) {
       const verdict = parseGraphqlDocument(value);
       if (!verdict.ok && (verdict.code === "mutation" || verdict.code === "subscription")) return "write";
-      // A document this check cannot read that still names one is refused too: unreadable is not "no mutation".
-      if (!verdict.ok && verdict.code === "unreadable" && /mutation|subscription/iu.test(value)) return "write";
+      // A document this check cannot read, or reads as no operation (a description in front, a type-system document), that still names one is refused too: not readable is not "no mutation".
+      if (!verdict.ok && /mutation|subscription/iu.test(value)) return "write";
     }
   }
   return undefined;
@@ -400,6 +400,7 @@ const NAME_CHAIN = /(?:`[^`]*`|[A-Za-z0-9_][A-Za-z0-9_-]*)(?:\s*\.\s*(?:`[^`]*`|
 /** Namespaces of BigQuery's own functions (`SAFE.PARSE_DATE(..)`): the only dotted names that may be called. */
 const BUILTIN_NAMESPACES = new Set(["SAFE", "NET", "KEYS", "AEAD", "HLL_COUNT", "DETERMINISTIC_ENCRYPT"]);
 
+const CALL_PAREN = /\s*\(/uy;
 const nameParts = (chain: string): string[] => chain.replace(/\s+/gu, "").match(/`[^`]*`|[^.`]+/gu)?.flatMap((part) => (part.startsWith("`") ? part.slice(1, -1).split(".") : [part])) ?? [];
 
 /**
@@ -413,8 +414,13 @@ export function bigQueryProjectRefs(sql: unknown): string[] | undefined {
   const refs: string[] = [];
   for (const match of read.cleaned.matchAll(NAME_CHAIN)) {
     const parts = nameParts(match[0]);
-    if (parts.length >= 3 && /[A-Za-z_]/u.test(parts[0] as string)) refs.push(parts[0] as string);
-    else if (parts.length >= 3 && /^[1-9][0-9]*$/u.test(parts[0] as string)) refs.push(parts[0] as string);
+    if (parts.length >= 3) refs.push(parts[0] as string);
+    // A quoted name with a colon is the legacy `project:dataset.table` form: the part before the colon is its project. A name with an empty first part (`.p.d.t`) names none we know: refused as a project of "".
+    else if (match[0].includes("`") && match[0].replace(/`[^`]*`/gu, "").trim() === "") {
+      const inner = match[0].slice(1, -1);
+      if (inner.includes(":")) refs.push(inner.slice(0, inner.indexOf(":")));
+    }
+    if (parts.length >= 2 && parts[0] === "") refs.push("");
   }
   return refs;
 }
@@ -435,7 +441,9 @@ export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unrea
   for (const match of cleaned.matchAll(NAME_CHAIN)) {
     const parts = nameParts(match[0]);
     const end = (match.index ?? 0) + match[0].length;
-    if (parts.length >= 2 && /^\s*\(/u.test(cleaned.slice(end, end + 40)) && !BUILTIN_NAMESPACES.has((parts[0] as string).toUpperCase())) return "write";
+    // Any whitespace may sit between a function's name and its parenthesis: the sticky match reads from the end of the name, however long the gap.
+    CALL_PAREN.lastIndex = end;
+    if (parts.length >= 2 && CALL_PAREN.test(cleaned) && !BUILTIN_NAMESPACES.has((parts[0] as string).toUpperCase())) return "write";
   }
   return "read";
 }
@@ -499,6 +507,9 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
   const statement = bigQueryStatementIsRead(members.query);
   if (statement !== "read") return refuse(statement === "write" ? "write" : "unreadable", label);
   if (members.dryRun !== undefined && typeof members.dryRun !== "boolean") return refuse("unreadable", label);
+  // Standard SQL only: legacy SQL names tables `[project:dataset.table]` (a form the project check does not read) and is BigQuery's default when the member is missing. An explicit request for it is refused, the flag is forced off in what is forwarded, and a `#legacySQL` first line (which overrides the flag) is refused.
+  if (members.useLegacySql === true) return refuse("not_allowed", label);
+  if (typeof members.query === "string" && /^\s*#\s*legacysql/iu.test(members.query)) return refuse("not_allowed", label);
   for (const flag of ["useLegacySql", "useQueryCache"]) if (members[flag] !== undefined && typeof members[flag] !== "boolean") return refuse("unreadable", label);
   const dataset = members.defaultDataset;
   if (dataset !== undefined) {
@@ -520,7 +531,7 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
     requested = Math.min(Number(text), cap);
   }
   const maximumBytesBilled = String(requested);
-  const forwarded = JSON.stringify({ ...members, maximumBytesBilled });
+  const forwarded = JSON.stringify({ ...members, maximumBytesBilled, useLegacySql: false });
   return { allow: true, protocol: "google", method: "POST", host, operation: label, bigQuery: { maximumBytesBilled, dryRun: members.dryRun === true }, forwardBody: forwarded };
 }
 

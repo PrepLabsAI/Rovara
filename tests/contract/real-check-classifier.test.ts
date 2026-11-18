@@ -100,6 +100,9 @@ describe("plain HTTP: every write shape is refused", () => {
     const deep = `query Q${"{a".repeat(70)}${"}".repeat(70)} mutation M{deleteAllUsers{ok}}`;
     expect(reason(run("GET", http(`/api/gql?query=${encodeURIComponent(deep)}&operationName=M`)))).toBe("write");
     expect(reason(run("GET", http(`/api/gql?query=${encodeURIComponent("{ unreadable Mutation")}`)))).toBe("write");
+    // A description in front of an operation reads as a type-system document, not an operation: still refused when it names a mutation.
+    expect(reason(run("GET", http(`/api/gql?query=${encodeURIComponent('"d" mutation M{deleteAllUsers{ok}}')}`)))).toBe("write");
+    expect(reason(run("GET", http(`/v2/search?query=${encodeURIComponent("subscription")}`)))).toBe("write");
   });
 });
 
@@ -432,6 +435,30 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     expect(bigQueryProjectRefs("SELECT * FROM `p-1.d.t` JOIN p2.d.t USING (id)")).toEqual(["p-1", "p2"]);
     expect(bigQueryProjectRefs("SELECT 'it' ")).toEqual([]);
     expect(bigQueryProjectRefs("SELECT 'open")).toBeUndefined();
+  });
+
+  it("legacy SQL is never forwarded: the flag is forced off, an explicit request or a #legacySQL line is refused, and the legacy table form names a project like the other", () => {
+    const plain = query("SELECT 1");
+    if (!plain.allow) throw new Error("expected allow");
+    expect(JSON.parse(plain.forwardBody ?? "{}")).toMatchObject({ useLegacySql: false });
+    const explicit = query("SELECT 1", { useLegacySql: false });
+    if (!explicit.allow) throw new Error("expected allow");
+    expect(JSON.parse(explicit.forwardBody ?? "{}")).toMatchObject({ useLegacySql: false });
+    expect(reason(query("SELECT 1", { useLegacySql: true }))).toBe("not_allowed");
+    for (const sql of ["#legacySQL\nSELECT 1", "  # LegacySQL\nSELECT 1", "#legacysql\nSELECT * FROM [acme-prod-1234:sales.orders]"]) expect(reason(query(sql)), sql).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM [acme-prod-1234:sales.orders]"))).toBe("allowed");
+    const rewritten = query("SELECT * FROM [acme-prod-1234:sales.orders]");
+    if (!rewritten.allow) throw new Error("expected allow");
+    expect((JSON.parse(rewritten.forwardBody ?? "{}") as { useLegacySql: boolean }).useLegacySql).toBe(false);
+    expect(reason(query("SELECT * FROM `acme-prod-1234:sales.orders`"))).toBe("prod");
+    expect(reason(query("SELECT * FROM `other-project-9:sales.orders`"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM `.acme-prod-1234.sales.orders`"))).toBe("not_allowed");
+    expect(reason(query("SELECT * FROM `google.com:x`.d.t"))).toBe("not_allowed");
+    expect(bigQueryProjectRefs("SELECT * FROM `acme-prod-1234:sales.orders`")).toEqual(["acme-prod-1234"]);
+  });
+
+  it("a user-defined, remote or model function is not a read, however far the parenthesis is from its name", () => {
+    for (const sql of [`SELECT d.remote_fn${" ".repeat(60)}(x) FROM d.t`, `SELECT * FROM ML.GENERATE_TEXT${"\n".repeat(60)}(MODEL d.m, TABLE d.t)`, `SELECT d.fn /* c */${" ".repeat(60)}(x)`]) expect(query(sql).allow, sql.slice(0, 40)).toBe(false);
   });
 
   it("a user-defined, remote or model function is not a read: a dotted name that is not a BigQuery namespace, and ML.* and AI.* with it", () => {
