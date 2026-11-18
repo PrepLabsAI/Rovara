@@ -96,9 +96,9 @@ function api(w: World, over: Partial<LessonsApiOptions> = {}) {
 }
 
 /** Calls the API; the answer, or the refusal's code, status and words. */
-async function call(target: ReturnType<typeof createLessonsApi>, personId: string, method: string, path: string, body?: unknown, query?: Record<string, string>, caller: Partial<LessonsApiCaller> = {}) {
+async function call(target: ReturnType<typeof createLessonsApi>, personId: string, method: string, path: string, body?: unknown, query?: Record<string, string> | URLSearchParams, caller: Partial<LessonsApiCaller> = {}) {
   try {
-    return { ok: true as const, body: await target.answer({ method, path, ...(query === undefined ? {} : { query: new URLSearchParams(query) }), ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }, { personId, ...caller }) as Record<string, unknown> };
+    return { ok: true as const, body: await target.answer({ method, path, ...(query === undefined ? {} : { query: query instanceof URLSearchParams ? query : new URLSearchParams(query) }), ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) }, { personId, ...caller }) as Record<string, unknown> };
   } catch (error) {
     if (!(error instanceof AgentXError)) throw error;
     return { ok: false as const, code: error.code, status: error.statusCode, message: error.message.slice(error.code.length + 2) };
@@ -1257,7 +1257,7 @@ describe("Rovara skills (L4-AK3)", () => {
     // The list carries no text; the one-skill read does, for anyone on the project (a contributor reads what the agents are sent).
     const list = await call(target, "a-contrib", "GET", `${P}/skills`);
     expect(JSON.stringify(list)).not.toContain("Register the handler");
-    const one = await call(target, "a-contrib", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { ok: true; body: { project: string; canDecide: boolean; skills: Array<Record<string, any>> } };
+    const one = await call(target, "a-contrib", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { ok: true; body: { project: string; canDecide: boolean; skills: Array<Record<string, unknown>> } };
     expect(one).toMatchObject({ ok: true, body: { project: "payments", canDecide: false, skills: [{ name: "add-a-queue-handler", currentVersion: 1, approvals: 0, approvedByYou: false }] } });
     expect(one.body.skills).toHaveLength(1);
     const detail = one.body.skills[0]!;
@@ -1268,13 +1268,13 @@ describe("Rovara skills (L4-AK3)", () => {
     // Saving the form as it was read gives a new version with the very same text, so nothing is lost by an edit that changes one step.
     const form = detail["form"] as { description: string; when: string; steps: string[]; doneWhen?: string; why?: string };
     expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, ...form })).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 2 } });
-    const second = (await call(target, "a-maint", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { body: { skills: Array<Record<string, any>> } }).body.skills[0]!;
+    const second = (await call(target, "a-maint", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { body: { skills: Array<Record<string, unknown>> } }).body.skills[0]!;
     expect(second["currentVersion"]).toBe(2);
     expect(second["content"]).toBe(detail["content"]);
     // Bad asks: another query, a name twice, a name that is not one, a skill that is not there, a skill of the other company.
     for (const query of [{ x: "1" }, { name: "Bad" }, { name: "" }, { name: "a-b", x: "1" }]) expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, query), JSON.stringify(query)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
     // A name given twice is refused too (a record cannot say it, so the request is made by hand).
-    await expect(target.answer({ method: "GET", path: `${P}/skills`, query: new URLSearchParams("name=a-b&name=c-d") }, { personId: "a-admin" } as any)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, new URLSearchParams("name=a-b&name=c-d"))).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
     expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, { name: "no-such-skill" })).toMatchObject({ ok: false, status: 404, message: "That skill is no longer there." });
     expect(await call(target, "b-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" })).toMatchObject({ ok: false, status: 404 });
   });
@@ -1287,9 +1287,11 @@ describe("Rovara skills (L4-AK3)", () => {
     const documents = w.lessons.get(A)!.runtime.documents;
     const key = { pk: companyScoped(A, "SKILL#payments"), sk: "v#add-a-queue-handler#000001" };
     const row = (await documents.get(key))!;
-    await documents.put({ item: { ...row, content: `${String(row["content"])}\nA line added by hand.\n`, bytes: 9_000 } });
+    const originalContent = row["content"];
+    if (typeof originalContent !== "string") throw new Error("Expected the skill document content to be text");
+    await documents.put({ item: { ...row, content: `${originalContent}\nA line added by hand.\n`, bytes: 9_000 } });
     const got = await call(target, "a-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" });
-    const read = (got as { body: { skills: Array<Record<string, any>> } }).body.skills[0]!;
+    const read = (got as { body: { skills: Array<Record<string, unknown>> } }).body.skills[0]!;
     expect(read["form"]).toBeUndefined();
     expect(read["content"]).toContain("A line added by hand.");
     expect(read["note"]).toBe("This skill is long. Consider splitting it into smaller skills.");
