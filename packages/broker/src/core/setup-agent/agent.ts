@@ -18,7 +18,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
+  isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
   type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StandInWriterCard, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
@@ -270,7 +270,7 @@ export function resultOf(task: Pick<TaskRecord, "startingRevision" | "preparedBa
     // L4-T5: a worker that refused to start for a reason trying again cannot change says so in its own fixed sentence; the broker answers with what to fix.
     const refused = outcome.status === "FAILED" ? refusalOf(outcome.error) : undefined;
     if (refused !== undefined) return failed("infrastructure", SETUP_AGENT_FAILURES[refused], kept);
-    const stop = outcome.status !== "CANCELLED" && outcome.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE ? "budget_used" : "infrastructure";
+    const stop = outcome.status !== "CANCELLED" && isBudgetExhaustedMessage(outcome.error) ? "budget_used" : "infrastructure";
     return failed(stop, SETUP_AGENT_FAILURES[stop], kept);
   }
   const { proposal, summary } = learned;
