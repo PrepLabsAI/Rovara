@@ -72,6 +72,11 @@ const feat = (w: FakeWorld, companyId: string = FAKE_COMPANY) => createFeatureSt
 const SYSTEM = { type: "system", id: "test" } as const;
 
 describe("the plan card's feature line", () => {
+  it("the card's source words are the report's: one list, in the same order", async () => {
+    const { FEATURE_SOURCES, PLAN_FEATURE_SOURCES } = await import("@agentx/contracts");
+    expect([...PLAN_FEATURE_SOURCES]).toEqual([...FEATURE_SOURCES]);
+  });
+
   it("words each source in one line, and a person's name stays one line", () => {
     expect(planFeatureLine(null)).toBe("Feature: No feature");
     expect(planFeatureLine({ name: "Checkout v2", source: "tracker", tracker: "linear" })).toBe("Feature: Checkout v2 (from the Linear parent)");

@@ -633,6 +633,16 @@ describe("the plan card's feature line in the chat", () => {
     }
   });
 
+  it("a feature name goes into the chat text as the task title does: no formatting, mention or link characters", async () => {
+    const w = await world({ risk: "low" });
+    const made = await features(w).create({ name: "*Checkout* _v2_ @here <https://evil.example|x> `code`" }, SYSTEM);
+    await features(w).setTaskFeature({ taskId: TASK, project: "web", featureId: made.id, source: "chosen" }, SYSTEM);
+    const line = (await card(w))!.data.text.split("\n").find((entry) => entry.startsWith("Feature:"))!;
+    expect(line).not.toMatch(/[*_`<>@|\[\]~#!]/u);
+    expect(line).toContain("Checkout");
+    expect(line.endsWith("(chosen)")).toBe(true);
+  });
+
   it("another company's feature on the same task id never shows, and a store that fails leaves the line out without holding the card back", async () => {
     const w = await world({ risk: "low" });
     const theirs = await features(w, OTHER).create({ name: "Other company canary" }, SYSTEM);

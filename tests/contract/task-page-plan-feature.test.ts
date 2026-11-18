@@ -102,6 +102,24 @@ describe("the task page's feature, from the broker (an owner, a channel reader a
     expect(await f2.taskFeature(t2.t.taskId)).toBeUndefined();
   });
 
+  it("reads the page's feature in the deployment's own company: another company's filing for this task id never shows", async () => {
+    const { t } = waiting();
+    const COMPANY = `org_${"p".repeat(19)}a`, OTHER = `org_${"p".repeat(19)}b`;
+    const store = new DynamoDocumentStore({ client: t.deps.documentClient, tableName: t.deps.tableName });
+    const inCompany = (companyId: string) => createFeatureStore({ store, companyId: companyId as never, audit: new DocumentAuditSink({ store: () => store }), now: () => t.deps.now() });
+    const mine = await inCompany(COMPANY).create({ name: "Mine" }, SYSTEM);
+    const theirs = await inCompany(OTHER).create({ name: "Other company canary" }, SYSTEM);
+    await inCompany(OTHER).setTaskFeature({ taskId: t.taskId, project: "payments", featureId: theirs.id, source: "chosen" }, SYSTEM);
+    const deps = { ...t.deps, companyId: COMPANY } as typeof t.deps;
+    const view = await getTaskDocumentView(deps, PRIYA, t.taskId);
+    expect(view.planFeature).toMatchObject({ line: "Feature: No feature", feature: null });
+    expect(JSON.stringify(view.planFeature)).not.toContain("canary");
+    expect((await pageFeatureChoices(deps, PRIYA, t.taskId)).features.map((item) => item.name)).toEqual(["Mine"]);
+    await expect(setPageFeature(deps, PRIYA, t.taskId, { feature: theirs.id })).rejects.toBeDefined();
+    expect(await inCompany(COMPANY).taskFeature(t.taskId)).toBeUndefined();
+    expect(await setPageFeature(deps, PRIYA, t.taskId, { feature: mine.id })).toEqual({ line: "Feature: Mine (chosen)", featureId: mine.id });
+  });
+
   it("a feature store that fails leaves the page without the line (the documents still show)", async () => {
     const { t } = waiting();
     const memory = holder.store as MemoryDocumentStore;

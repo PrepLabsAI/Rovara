@@ -196,7 +196,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const taskUrl = deps.taskUrl?.(taskId);
         // Lead 4 PCF: the task's feature as one line (no cost, no controls here: "Change" is on the task page). A read that fails leaves the line out and never holds the card back.
         const feature = await readPlanFeature({ store: deps.store, companyId: orgId, now: deps.now }, { taskId, project: typeof task["project"] === "string" ? task["project"] : "" }, { mayFile: false, manager: false, admin: false });
-        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.${feature === undefined ? "" : `\n${feature.line}`}`;
+        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.${feature === undefined ? "" : `\n${feature.feature === null ? feature.line : feature.line.replace(feature.feature.name, inertTicketTitle(feature.feature.name))}`}`;
         // Request changes asks "What should change?" in a form the chat opens (an adapter that declares `forms`); a chat with none sends the person to the task page for it instead, and the card offers Approve alone.
         const asks = adapter.capabilities.forms === true;
         const extra = chatTakes
