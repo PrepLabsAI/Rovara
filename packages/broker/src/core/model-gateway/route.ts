@@ -6,7 +6,6 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { mintTaskToken, MODEL_ACCESS_INVALID, type TaskTokenDeps } from "./token.js";
 import { readTaskTokenRecords } from "./records.js";
 import { withinTaskTokenDeadline } from "./deadline.js";
-import { evalHealthTokenDescriber } from "./health.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
 export type ModelGateway = Omit<TaskTokenDeps, "now"> & { gatewayUrl: string };
@@ -33,10 +32,8 @@ export async function handleModelAccess(flow: TaskFlowDeps, capabilities: Callba
       const parsed = scopeSchema.safeParse(capability);
       if (!parsed.success) throw agentXError("CALLBACK_FORBIDDEN", "invalid capability");
       const scope = parsed.data;
-      // L4-EVH: an opt-in eval health run's own preparation (no task) is described from the broker's own claim; every other operation takes the task path below, exactly as before.
-      const health = await evalHealthTokenDescriber(flow, scope, deadline);
-      const records = health === undefined ? await readTaskTokenRecords(flow, scope, deadline) : undefined;
-      const minted = await mintTaskToken({ ...gateway, ...(health === undefined ? {} : { describer: health }), now: () => (flow.now?.() ?? new Date()).getTime() }, scope, records, deadline);
+      const records = await readTaskTokenRecords(flow, scope, deadline);
+      const minted = await mintTaskToken({ ...gateway, now: () => (flow.now?.() ?? new Date()).getTime() }, scope, records, deadline);
       deadline.check();
       // Only these three metadata fields may be logged; never the token or a description.
       flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - 900, exp: minted.expiresAt / 1000 });

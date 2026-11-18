@@ -32,7 +32,7 @@ export type CurrentSetupRead = { status: "read"; repositories: CurrentSetupRepos
  * The head of the branch the repository's record names, else the host's own default branch when the record's branch is not there; the same rule as the playbook's pin (`createCodeHostPlaybookSource`). Throws what
  * the host throws; a branch nobody can find is a refusal.
  */
-export async function headOf(host: CodeHost, repository: { url: string; defaultBranch: string }, scope: HostScope): Promise<string> {
+async function headOf(host: CodeHost, repository: { url: string; defaultBranch: string }, scope: HostScope): Promise<string> {
   const tryBranch = async (branch: string): Promise<string | undefined> => {
     try {
       const sha = await host.baseBranchHead({ url: repository.url }, branch, scope);

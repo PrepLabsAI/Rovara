@@ -44,7 +44,7 @@ const planSchema = z.object({
   maxCallsPerQuestion: whole.min(1), maxCostMicrosPerQuestion: whole.min(1),
 }).strict();
 const grantSchema = z.object({ company: z.string(), project: z.string(), selection: z.string(), role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.literal(true), maxCalls: whole.min(1).optional(), maxCostMicros: whole.min(1).optional() });
-export function validPlan(input: unknown): EvalFinalCheckPlan | undefined {
+function validPlan(input: unknown): EvalFinalCheckPlan | undefined {
   // Bound arrays before schema traversal. All other arrays are rejected by the schema.
   if (typeof input !== "object" || input === null || !Array.isArray((input as EvalFinalCheckPlan).questions) || (input as EvalFinalCheckPlan).questions.length > EVAL_QUESTION_LIMIT) return undefined;
   const parsed = planSchema.safeParse(input); if (!parsed.success) return undefined;

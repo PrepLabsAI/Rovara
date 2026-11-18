@@ -8,7 +8,7 @@ import { locateWorkspace, workspaceKeys } from "../core/task-flow/workspace-loca
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  AgentXError, DESIGN_REVIEW_ARTIFACT, EVAL_HEALTH_RESULT_MAX_BYTES, EVAL_HEALTH_RESULT_PATH, EVAL_PLAN_DELIVERY_ACTION, PrepareEvalHealthSchema, EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
+  AgentXError, DESIGN_REVIEW_ARTIFACT, EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES, INDEX_EXPIRY_ATTRIBUTE, ObjectConflictError, UNDERSTAND_ARTIFACT_NAME, WorkflowArtifactSchema, WorkflowReviewBaseSchema, agentXError, change, readIntentArtifact, when,
 } from "@agentx/contracts";
 import { CallbackCapabilities, type CallbackAction } from "../callbacks.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -19,7 +19,6 @@ import { handleE2EEvidenceUpload, readE2EAdmissionChunk, type RoundRecordReaders
 import { handleBrowserEvidenceUpload } from "../core/proof/browser-evidence-upload.js";
 import { handleBrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in-callback.js";
 import { handleEvalPlanDelivery, type EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
-import { deliverEvalHealthPlan, recordEvalHealthResult, type EvalHealthRunDeps } from "../core/setup-agent/eval-health-run.js";
 import type { BrowserEvidenceSignIn } from "../core/proof/browser-evidence-sign-in.js";
 import type { UploadStores } from "../core/e2e/uploads-chunks.js";
 import { openPullRequest } from "../core/build-step/publish.js";
@@ -27,7 +26,7 @@ import { updatePullRequest } from "../core/build-step/maintain.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { recordWorkItemProgress } from "../core/work-breakdown/progress.js";
 import type { StepOutcome } from "../core/task-flow/outcome.js";
-import { fromDocument, type OperationRecord, type TaskPointerRecord, type WorkspaceRecord } from "../core/task-flow/records.js";
+import { fromDocument, type OperationRecord, type TaskPointerRecord } from "../core/task-flow/records.js";
 import { isTerminalStatus, recordOperationResult } from "../core/task-flow/results.js";
 import { isSpendStopCode, requestSpendStop } from "../core/task-flow/money-stop.js";
 import { iso } from "../core/task-flow/support.js";
@@ -97,11 +96,6 @@ export interface CallbackDeps {
   browserEvidenceSignIn?: Pick<BrowserEvidenceSignIn, "read"> | undefined;
   /** EVAL-WIRE-SOURCES (DEC 253c): the trusted eval plan, spend approval and base-score cache, answered to a CHECKS run the broker asked for an eval. Absent: `eval-plan` is answered "not available". */
   evalPlan?: EvalPlanSources | undefined;
-  /**
-   * L4-EVH: the opt-in eval health run's own preparation asks for its plan (`eval-plan`) and posts its one result (`eval-health-result`) here. The broker's runner deps (the store, the install's bound adapters, the audit):
-   * nothing the worker sends is read but the result's own body, and only for the request and claim this operation was made for. Absent: a health run is not served.
-   */
-  evalHealth?: EvalHealthRunDeps | undefined;
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -120,7 +114,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -319,7 +313,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
       if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "wiki-build" && deps.wikiBuild === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
-        || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined) || (action === EVAL_HEALTH_RESULT_PATH && deps.evalHealth === undefined)) {
+        || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
         throw agentXError("NOT_FOUND", "this callback is not available on this install");
@@ -330,7 +324,6 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (capability.workspaceId !== workspaceId || capability.operationId !== operationId) throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
       // The eval plan's request is bounded before any store read (the capability is already checked).
       if (action === EVAL_PLAN_DELIVERY_ACTION && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_PLAN_DELIVERY_REQUEST_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval plan request is too large");
-      if (action === EVAL_HEALTH_RESULT_PATH && request.body !== undefined && Buffer.byteLength(request.body, "utf8") > EVAL_HEALTH_RESULT_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the eval health result is too large");
       const operation = await operationOf(deps, workspaceId, operationId);
       if (operation.fence !== capability.fence) throw agentXError("STALE_FENCE", "callback no longer owns the workspace");
       if (action !== "result" && isTerminalStatus(operation.status)) {
@@ -359,29 +352,16 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === EVAL_PLAN_DELIVERY_ACTION) {
         // The run's own company and task project, never the request's: the body is bounded and must be an object, and no field of it is read. The answer is for this one ask; no cache keeps it.
         bodyOf(request);
-        const evalHealth = deps.evalHealth;
-        const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId,
-          ...(evalHealth === undefined ? {} : { health: { read: (lease: { requestId: string; claimId: string }, scope: { project: string }) => deliverEvalHealthPlan(evalHealth, scope.project, lease) } }), log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
+        const answer = await handleEvalPlanDelivery({ sources: deps.evalPlan!, companyId: deps.flow.companyId, log: (event) => deps.flow.log?.({ component: "callbacks", event }), async projectOf() {
           // T1: the workspace is located in the run's own company (the operation record's), and only then is its task pointer read from that workspace's own keys.
           const located = await locateWorkspace({ store: deps.flow.store, companyId: operation.companyId }, operation.workspaceId);
           if (located === undefined) return undefined;
-          // L4-EVH: a health run's preparation has no task: its project is the workspace the broker made for it (its own record, in this company).
-          if (operation.kind === "prepare") { const named = fromDocument<WorkspaceRecord>(located.workspace)?.projectName; return typeof named === "string" && named !== "" ? named : undefined; }
           const pointer = fromDocument<TaskPointerRecord>(await deps.flow.store.get((await workspaceKeys(deps.flow, operation.workspaceId)).taskPointerKey()));
           const task = pointer === undefined ? undefined : await readTask(deps.flow, pointer.taskId);
           // The pointer's task must be this company's AND this operation's workspace's own.
           return task !== undefined && task.companyId === deps.flow.companyId && task.workspaceId === operation.workspaceId ? task.project : undefined;
         } }, operation);
         return { ...json(200, answer), headers: { "content-type": "application/json", "cache-control": "no-store" } };
-      }
-      if (action === EVAL_HEALTH_RESULT_PATH) {
-        // The run's own preparation only, for the request and claim it was made for (its stored dispatch, never the body); the project is its workspace's. The broker checks the result against its own plan.
-        const job = operation.kind === "prepare" ? PrepareEvalHealthSchema.safeParse((operation.dispatch?.payload as Record<string, unknown> | undefined)?.["evalHealth"]) : undefined;
-        const located = await locateWorkspace({ store: deps.flow.store, companyId: operation.companyId }, operation.workspaceId);
-        const project = located === undefined ? undefined : fromDocument<WorkspaceRecord>(located.workspace)?.projectName;
-        const posted = bodyOf(request);
-        if (job?.success !== true || typeof project !== "string" || project === "" || posted["requestId"] !== job.data.requestId || posted["claimId"] !== job.data.claimId) throw agentXError("CALLBACK_FORBIDDEN", "the eval health result is taken only from the run's own preparation");
-        return json(200, await recordEvalHealthResult(deps.evalHealth!, project, posted));
       }
       if (action === "pull-request") return json(200, await openPullRequest(deps.flow, operation, bodyOf(request)));
       if (action === "pull-request-update") return json(200, await updatePullRequest(deps.flow, operation, bodyOf(request)));

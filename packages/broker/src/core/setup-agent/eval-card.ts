@@ -7,8 +7,7 @@ import type { SessionMembers } from "../sessions/access.js";
 import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
 import { evalCommandFingerprintOf } from "@agentx/contracts";
 import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
-import { evalHealthNotRunWords } from "@agentx/contracts";
-import { readEvalHealthView, type EvalHealthResultSummary } from "./eval-health-request.js";
+import { evalHealthState } from "./eval-health-request.js";
 import { readEvalSpendItem, readEvalSpendRecord, roleFor } from "./eval-spend.js";
 
 export interface EvalCardDeps {
@@ -19,8 +18,6 @@ export interface EvalCardDeps {
   monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
   /** D5: whether this install has a health runner that reads the person's yes. False or absent: the card offers no health button (a button nothing answers would be a lie). */
   healthRuns?: boolean | undefined;
-  /** The host's clock (milliseconds), for the health check's age and window. Absent: the stored row is read as it is. */
-  now?: (() => number) | undefined;
 }
 
 export interface EvalCardSuiteView {
@@ -47,9 +44,7 @@ export interface EvalCardView {
   suites: EvalCardSuiteView[];
   spend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; perPr?: string; monthly?: string; needsApproval?: string; carried?: boolean; setupRevision?: number; approval?: { requestId: string; revision: number; artifactDigest: string } };
   /** D5: the opt-in health run, offered only once the spend is approved. `seenCostMicros` is what a yes echoes. */
-  health?: { state: "none" | "requested" | "running" | "finished" | "not_run"; label: string; cost: string; seenCostMicros: number;
-    /** L4-EVH: why it did not run (fixed words), or how the run went. */
-    words?: string; result?: EvalHealthResultSummary };
+  health?: { state: "none" | "requested" | "finished"; label: string; cost: string; seenCostMicros: number };
   /** Why no card can be offered (the install has no eval budget). */
   unavailable?: string;
 }
@@ -85,11 +80,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
   const card = item?.card;
   const health = deps.healthRuns === true && role !== undefined && item?.state === "approved" && card !== undefined && record !== undefined
-    ? await (async () => {
-      const view = await readEvalHealthView({ ...table, ...(deps.now === undefined ? {} : { now: deps.now }) }, project);
-      return { state: view.state, label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros,
-        ...(view.reason === undefined ? {} : { words: evalHealthNotRunWords(view.reason) }), ...(view.result === undefined ? {} : { result: view.result }) };
-    })()
+    ? { state: await evalHealthState(table, project), label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros }
     : undefined;
   return {
     state, canApprove: role !== undefined, ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,

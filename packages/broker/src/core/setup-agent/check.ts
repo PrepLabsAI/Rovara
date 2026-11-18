@@ -223,8 +223,3 @@ export async function closeSetupCheck(deps: TaskFlowDeps, workspaceId: string): 
   }
 }
 
-/** The check record of a workspace with no task (what closes the workspace and its machine when its preparation ends), for a start that is not a project's own check (the opt-in eval health run). */
-export function setupCheckRecordItem(deps: Pick<TaskFlowDeps, "companyId">, input: { project: string; workspaceId: string; revision: number; nowMs: number }): TransactItem {
-  const now = new Date(input.nowMs).toISOString();
-  return { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, input.workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId: input.workspaceId, revision: input.revision, candidate: false, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + 31 * 86_400 }, condition: when.absent() };
-}

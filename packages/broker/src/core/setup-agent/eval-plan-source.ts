@@ -35,7 +35,7 @@ export interface EvalPlanSourceDeps {
 }
 
 /** The base commit of the plan's repository in the run's own pin, or undefined: the plan's named repository, else the run's only one. */
-export function baseOf(run: Pick<EvalPlanRun, "bases"> | undefined, repository: string | undefined): string | undefined {
+function baseOf(run: EvalPlanRun | undefined, repository: string | undefined): string | undefined {
   const bases = run?.bases;
   if (bases === undefined || bases.length === 0) return undefined;
   const found = repository === undefined ? (bases.length === 1 ? bases[0] : undefined) : bases.find(entry => entry.repositoryId === repository);
@@ -49,8 +49,6 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
       if (scope.companyId !== deps.companyId) return undefined;
       const found = await readApprovedEvalPlan(table, scope.project);
       if (found === undefined) return undefined;
-      // L4-EVH: a run made under one approved item (a health run's request) is answered by that item only.
-      if (run.spendDigest !== undefined && found.spend.digest !== run.spendDigest) return undefined;
       const baseCommit = baseOf(run, found.plan.repository);
       if (baseCommit === undefined) return undefined;
       const { key, ...body } = found.plan;
