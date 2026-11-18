@@ -30,7 +30,7 @@ import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingRec
 import type { MergePeople } from "../core/merge/people.js";
 import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
-import type { CodeMilestones, CodeSettingsReader, MergeTask, SessionTimeline } from "../core/merge/seams.js";
+import type { CodeMilestones, CodeSettingsReader, HumanEditSink, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
@@ -150,6 +150,8 @@ export interface MergeTrackingServiceOptions {
   ciMode?: MergeTrackingDependencies["ciMode"];
   /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
   repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
+  /** L4-LM1c: told when a pass sees a head a person pushed (learning from people's edits to Rovara's pull requests). Absent: nothing is told. */
+  humanEdit?: HumanEditSink | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
   now: () => number;
   log?: Log;
@@ -208,6 +210,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
     readyHold: (task, current) => scopeHoldOf(flow, task, current),
     ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
+    ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 

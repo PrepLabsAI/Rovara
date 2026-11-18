@@ -62,7 +62,7 @@ function identityWithAnn(): IdentityProvider {
   };
 }
 
-async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
+async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
   const h = createHarness({ audit: "recording" });
   await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPOSITORY }] });
   const owner = localOwnerPrincipal({ companyId: COMPANY });
@@ -70,7 +70,7 @@ async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; ena
   registry.register("storage", "memory", h.store, { isDefault: true });
   registry.register("queue", "memory", h.queues, { isDefault: true });
   // The one repository of the project is private as far as its host says, so the pull request names the lessons it used.
-  if (options.codeHost !== false) registry.register("code-host", "github", { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) } as never, { isDefault: true });
+  if (options.codeHost !== false) registry.register("code-host", "github", (options.host ?? { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) }) as never, { isDefault: true });
   const handlers: CodeMilestoneHandler[] = [];
   let enabled = options.enabled ?? true;
   const prompts: string[] = [];
@@ -728,5 +728,65 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     // With lessons switched off for the install, a tool is told so, in one sentence.
     w.setEnabled(false);
     expect(await ask(w, {})).toMatchObject({ status: 200, body: { status: "off", reason: "install_switch" } });
+  });
+});
+
+describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () => {
+  const sha = (n: number): string => n.toString(16).padStart(40, "0");
+  const BASE = sha(1);
+  const HEAD = sha(2);
+  const URL = "https://github.com/example/demo/pull/7";
+  const FIVE = ["@@ -1,1 +1,5 @@ function load()", "-load()", "+await withRetry(() => load())", "+await withRetry(() => save())", "+await withRetry(() => sync())", "+const a = 1", "+const b = 2"].join("\n");
+  const by = (id: string) => ({ author: { login: `user-${id}`, hostUserId: id, accountType: "person" as const }, committer: { login: `user-${id}`, hostUserId: id, accountType: "person" as const }, webFlow: false });
+  const candidate = { type: "pitfall", title: "Network calls use withRetry", description: "Retries go through the retry helper.", body: "Wrap network calls in withRetry from the retry helper instead of a hand-written loop.", scope: {}, stages: ["IMPLEMENT"], citations: [], evidenceSpanIds: ["S1"] };
+
+  async function editWorld(identityOf: ReturnType<typeof by> | undefined) {
+    const host = {
+      kind: "github",
+      repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true, defaultBranch: "main" }),
+      commitChanges: async (_repo: unknown, revision: string) => {
+        if (revision !== HEAD) throw new Error("no such commit");
+        return { files: [{ path: "src/load.ts", status: "modified", additions: 5, deletions: 1, patch: FIVE }], complete: true, parents: [BASE], ...(identityOf === undefined ? {} : { identity: identityOf }) };
+      },
+      getChangeRequest: async () => ({ ref: { repository: { url: REPOSITORY }, id: "7", url: URL }, state: "open", sourceBranch: "agentx/branch", targetBranch: "main", headRevision: HEAD, title: "Add", body: "" }),
+    };
+    const w = await world({ candidates: () => [candidate], host });
+    await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "pullRequests"], [{ repositoryId: "demo", number: 7, url: URL, headSha: BASE, headTreeSha: "d".repeat(40), candidateDigest: "c".repeat(64), required: true, state: "OPEN" }])] });
+    const push = { task: { taskId: w.taskId, orgId: COMPANY, project: "payments" } as never, pullRequest: { repositoryId: "demo", number: 7, url: URL }, repository: { url: REPOSITORY, codeHost: host as never, scope: { orgId: COMPANY } }, base: BASE, head: HEAD, headRef: "agentx/branch" };
+    return { w, push };
+  }
+
+  it("the owner's own linked account: the push is queued once, the laptop's pass runs the job with the owner's own model, and what it learned is kept for the owner to decide", async () => {
+    const { w, push } = await editWorld(by("owner-gh"));
+    await w.lessons.noteHumanEdit(push);
+    await w.lessons.noteHumanEdit(push);
+    await w.lessons.tick();
+    expect(w.prompts).toHaveLength(1);
+    expect(w.prompts[0]).toContain("withRetry");
+    expect((await w.lessons.runtime.store.list(w.key)).map((lesson) => lesson.title)).toEqual(["Network calls use withRetry"]);
+    await w.lessons.tick();
+    expect(w.prompts).toHaveLength(1);
+  });
+
+  it("another person the identity point knows is not the owner, and an account it does not know is nobody: the job makes no model call", async () => {
+    for (const account of ["ann-gh", "stranger-gh"]) {
+      const { w, push } = await editWorld(by(account));
+      await w.lessons.noteHumanEdit(push);
+      await w.lessons.tick();
+      expect(w.prompts, account).toEqual([]);
+    }
+  });
+
+  it("a bot's push, and the switch off, queue nothing", async () => {
+    const bot = { author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" as const }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" as const }, webFlow: false };
+    const { w, push } = await editWorld(bot);
+    await w.lessons.noteHumanEdit(push);
+    await w.lessons.tick();
+    expect(w.prompts).toEqual([]);
+    const off = await editWorld(by("owner-gh"));
+    off.w.setEnabled(false);
+    await off.w.lessons.noteHumanEdit(off.push);
+    await off.w.lessons.tick();
+    expect(off.w.prompts).toEqual([]);
   });
 });

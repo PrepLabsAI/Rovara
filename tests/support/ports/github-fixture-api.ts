@@ -267,7 +267,11 @@ export class GitHubFixtureApi {
       }));
       const stats = { additions: all.reduce((total, file) => total + file.additions, 0) + (this.commitReads.extraAdditions ?? 0), deletions: all.reduce((total, file) => total + file.deletions, 0) };
       const parents = page > 1 && this.commitReads.parentsAfterFirstPage !== undefined ? this.commitReads.parentsAfterFirstPage : revision.parents;
-      return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size) },
+      // Who GitHub says wrote the commit (L4-LM1c): the accounts it linked, as its API words them; an unlinked identity is `null`.
+      const identity = this.model.commitIdentities.get(revision.sha);
+      const accountJson = (account: { login: string; hostUserId?: string | undefined; accountType: string } | undefined) => account === undefined ? null : { login: account.login, ...(account.hostUserId === undefined ? {} : { id: Number(account.hostUserId) }), type: account.accountType === "person" ? "User" : account.accountType === "bot" ? "Bot" : "Organization" };
+      return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size),
+        author: accountJson(identity?.author), committer: identity?.webFlow === true ? { login: "web-flow", id: 19864447, type: "User" } : accountJson(identity?.committer) },
         all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
     }
     if (method === "GET" && path === `${ROOT}/deployments`) {

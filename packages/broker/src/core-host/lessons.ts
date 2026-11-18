@@ -13,7 +13,7 @@
 //
 // Wiring (the deployment, per company, in the runtime's `services`): `const lessons = createCoreLessons({ flow, ... }); lessons?.attach(); return { ..., ...(lessons === undefined ? {} : { lessons: lessons.service }) }`.
 // The worker callbacks then hand a step's events to `lessons.host.onEvents`.
-import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView } from "@agentx/contracts";
+import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type IdentityProvider, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView } from "@agentx/contracts";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
@@ -70,6 +70,11 @@ export interface CoreLessonsOptions {
   people: HostedLessonPeople;
   /** The person a code host account is linked to, for the review comments a task's pull requests got. Absent: the account's own name. */
   personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined>;
+  /**
+   * Who a code host account is, for a person's edit to a Rovara pull request (L4-LM1c): the identity point's `resolveExternalAccount`, by the host's stable account id. Default: the registry's identity point. An account it
+   * cannot place (or one of another company) is nobody here, and an edit by it is not learned from.
+   */
+  identity?: Pick<IdentityProvider, "resolveExternalAccount"> | undefined;
   /** The model-access port for learning calls (the gateway on the company's own account, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   learning?: { model: PipelineModel; spend: LearningSpend } | undefined;
   /** How lessons are compared (an embedder and where vectors live). Absent: keywords and cited paths, the vectors beside the lessons. */
@@ -157,6 +162,20 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       if (found.length === 0) return "unknown";
       if (found.some((repository) => repository.private === false)) return "public";
       return found.every((repository) => repository.private === true) ? "private" : "unknown";
+    },
+    // L4-LM1c: a person's edit to a Rovara pull request is learned from for this company: its task, its project's repository, its member by the host's stable account id, each author checked on the roster now.
+    humanEdit: {
+      repos: repositories,
+      async personOf(account, provider) {
+        let identity = options.identity;
+        if (identity === undefined) { try { identity = registry.require("identity"); } catch { return undefined; } }
+        const principal = await identity.resolveExternalAccount(companyId, { provider, tenant: "", accountId: account.hostUserId });
+        if (principal === undefined || principal.companyId !== companyId) return undefined;
+        return (await options.people.resolveMember?.(companyId, principal.personId)) ?? principal.personId;
+      },
+      standing: async (orgId, developerId, project) => (orgId === companyId && await options.people.onProjectRoster(companyId, project, developerId) ? "member" : "outsider"),
+      // Another company's person is never "not erased": the answer for it is yes (nothing is learned).
+      isErased: async (orgId, developerId) => (orgId !== companyId ? true : await options.people.isErased(companyId, developerId)),
     },
     now, log,
   });

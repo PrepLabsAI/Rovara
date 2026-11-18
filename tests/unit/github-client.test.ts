@@ -126,6 +126,26 @@ describe("the real GitHub client under the adapters", () => {
     expect((await world.host.commitChanges!(world.repository, three, world.scope)).parents).toEqual([world.model.headOf("main")]);
   });
 
+  it("L4-LM1c: a commit's read says who GitHub linked as its author and committer, by id, with the account's kind; an unlinked identity says nothing and the web committer is told by its id, never its login", async () => {
+    const world = codeHostWorld();
+    const read = async (identity: Parameters<typeof world.model.commitIdentities.set>[1] | undefined) => {
+      const sha = world.model.commit(`feature/${String(world.model.revisions.size)}`, { [`src/f${String(world.model.revisions.size)}.ts`]: "export const f = 1;\n" });
+      if (identity !== undefined) world.model.commitIdentities.set(sha, identity);
+      return (await world.host.commitChanges!(world.repository, sha, world.scope)).identity;
+    };
+    const rae = { login: "rae", hostUserId: "1001", accountType: "person" as const };
+    expect(await read({ author: rae, committer: rae, webFlow: false })).toEqual({ author: rae, committer: rae, webFlow: false });
+    expect(await read({ author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false }))
+      .toEqual({ author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false });
+    expect(await read({ author: { login: "acme-org", hostUserId: "5", accountType: "other" }, webFlow: false })).toEqual({ author: { login: "acme-org", hostUserId: "5", accountType: "other" }, webFlow: false });
+    // An unlinked identity (GitHub gives `null`, as it does for Rovara's own git identity) is no account at all.
+    expect(await read(undefined)).toEqual({ webFlow: false });
+    // The host's web committer, by its id: an edit made on the web pages.
+    expect(await read({ author: rae, committer: rae, webFlow: true })).toEqual({ author: rae, committer: { login: "web-flow", hostUserId: "19864447", accountType: "person" }, webFlow: true });
+    // An account that only CALLS itself web-flow is not the host's web committer.
+    expect((await read({ author: rae, committer: { login: "web-flow", hostUserId: "42", accountType: "person" }, webFlow: false }))?.webFlow).toBe(false);
+  });
+
   it("DEC 213 (review of #608): a merge's changes against its second parent (GitHub's compare), with a contents-read token, one page, and a cut list said to be cut", async () => {
     const world = codeHostWorld();
     const mine = world.model.commit("feature/mine", { "src/mine.ts": "export const mine = 1;\n" });

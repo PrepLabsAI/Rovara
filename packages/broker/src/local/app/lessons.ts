@@ -25,6 +25,7 @@ import { readTask } from "../../core/task-flow/reads.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { recordFeedback } from "../../lessons/counters.js";
+import type { HumanEditSink } from "../../core/merge/seams.js";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import { approveLesson, retireByPerson } from "../../lessons/approve.js";
 import { readVisible } from "../../lessons/read-visible.js";
@@ -112,6 +113,8 @@ export interface LocalLessons {
   tick(): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
   noteReverted(taskId: string): Promise<void>;
+  /** A person pushed to a pull request of a task (merge tracking saw a head that is not Rovara's): their commits are proved and read, and one human-edit job is queued for the head (L4-LM1c). */
+  noteHumanEdit: HumanEditSink;
   /** The owner sent the task back with their words: its correction is queued for reflection now (learn on send-back; `LessonsHost.noteSentBack`). */
   noteSentBack(taskId: string): Promise<void>;
 }
@@ -189,6 +192,17 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       if (found.length === 0) return "unknown";
       if (found.some((repository) => repository.private === false)) return "public";
       return found.every((repository) => repository.private === true) ? "private" : "unknown";
+    },
+    // L4-LM1c: a person's edit to a Rovara pull request. On a laptop the one person is the owner: an account the identity point links to the owner (the owner's own, or one they linked in the config) is a member; any other
+    // account is nobody here, so an edit by it is not learned from (nothing is guessed from a login).
+    humanEdit: {
+      repos: repositories,
+      async personOf(account, provider) {
+        const principal = await options.identity.resolveExternalAccount(companyId, { provider, tenant: "", accountId: account.hostUserId });
+        return principal !== undefined && principal.companyId === companyId ? principal.personId : undefined;
+      },
+      standing: async (_orgId, developerId) => (developerId === ownerId ? "member" : "outsider"),
+      isErased: async () => false,
     },
     now, log: (event, fields) => log(event, fields),
   });
@@ -414,5 +428,6 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteReverted: LocalLessons["noteReverted"] = (taskId) => host.noteReverted(taskId);
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteSentBack };
+  const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
 }

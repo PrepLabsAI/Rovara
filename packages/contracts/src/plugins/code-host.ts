@@ -321,8 +321,18 @@ export const ChangeRequestFileSchema = z.object({
 export type ChangeRequestFile = z.infer<typeof ChangeRequestFileSchema>;
 export const ChangeRequestFilesPageSchema = z.object({ files: z.array(ChangeRequestFileSchema).max(1_000), nextPage: z.number().int().positive().optional() }).strict();
 export type ChangeRequestFilesPage = z.infer<typeof ChangeRequestFilesPageSchema>;
-/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). */
-export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[] }
+/**
+ * Who the host says wrote a commit (L4-LM1c, add-only): the accounts the host linked to the commit's author and committer, by its own stable ids. An account is absent when the host could not tie the commit's
+ * author (or committer) to any account (a commit made with an unlinked identity, as Rovara's own git identity is). `webFlow`: the committer is the host's own web committer (an edit or squash made on the host's
+ * web pages), whose commit has the author as the person. Never an email or a name: nothing here can be a person's contact detail.
+ */
+export interface CommitIdentity {
+  author?: { login: string; hostUserId?: string | undefined; accountType: HostAccountKind } | undefined;
+  committer?: { login: string; hostUserId?: string | undefined; accountType: HostAccountKind } | undefined;
+  webFlow: boolean;
+}
+/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). `identity` is optional and add-only: a host that does not say who wrote a commit leaves it out. */
+export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[]; identity?: CommitIdentity | undefined }
 /** One revision's changes against an earlier revision it builds on (`CodeHost.compareChanges`, DEC 213): a merge against its second parent. */
 export interface CompareChanges { files: ChangeRequestFile[]; complete: boolean }
 /** DEC 213: the hook a multi-page read calls before EACH page it asks the host for (it throws when the pass's read allowance or time is used up; the read then stops and throws it on). */

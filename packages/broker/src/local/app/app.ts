@@ -69,6 +69,7 @@ import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
+import type { HumanEditSink } from "../../core/merge/seams.js";
 import { createLessonRoutes } from "./lessons-routes.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
@@ -508,7 +509,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const repositoryEdges = createTaskRepositoryEdgesSeam({ flow: flow.deps, blobs, companyId });
   flow.deps.mergeOrderLines = createMergeOrderLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
   flow.deps.ciWaitLines = createCiWaitLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
-  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges });
+  // L4-LM1c: a person's push to a Rovara pull request is told to lessons, which are built below (the tracking service is made first, so the notice reaches them through this reference).
+  const lessonsForHumanEdits: { current?: { noteHumanEdit: HumanEditSink } } = {};
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges, humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
@@ -610,6 +613,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     learning: lessonNames.length === 0 ? undefined : registry.get("learning", lessonNames.find((name) => name !== "local") ?? lessonNames[0]!),
     ...(options.lessonsEnabled === undefined ? {} : { enabled: options.lessonsEnabled }), now: () => clock().getTime(), log,
   });
+  lessonsForHumanEdits.current = lessons;
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
   flow.deps.lessonsSentBack = (taskId) => lessons.noteSentBack(taskId);

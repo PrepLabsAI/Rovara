@@ -24,6 +24,8 @@ import {
   workflowFixRounds,
   type AgentXError,
   type Autonomy,
+  type CodeHost,
+  type PageBudget,
   type ChangeRequestStatus,
   type HostAccountKind,
   type CodeSettings,
@@ -49,7 +51,7 @@ import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryR
 import { orderHoldsReady, providersWaitingFor } from "./order-watch.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import { SETTINGS_UNKNOWN, ciEvidencePass, readEvidenceSettings } from "../ci-evidence/tracking.js";
-import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
+import type { CodeMilestones, CodeSettingsReader, HumanEditSink, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
 import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, recoveryRowKey, trackingItemOf, trackingWriteItem, workflowUpdateItem } from "./store.js";
 
@@ -191,6 +193,11 @@ export interface MergeTrackingDependencies {
   dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
   hooks?: MergePassHooks;
+  /**
+   * L4-LM1c: learning from a person's edit to Rovara's pull request. Told when a pass sees a head that is not one of Rovara's recorded pushes (see `HumanEditPush`); the receiver does everything else (the proof of who wrote
+   * the commits, the size bounds, the once-per-head queue). Absent: nothing is told and the pass is what it was.
+   */
+  humanEdit?: HumanEditSink;
   /**
    * MR3b: the dependency facts between the task's repositories (the merge's `repositoryEdges` seam, see `createRepositoryEdgesSeam`). With them, a pull request that depends on a repository that is still waiting stays a
    * draft once a pull request was merged ahead of that repository (`order-watch.ts`). Absent, or with no facts that can be read: tracking is what it always was.
@@ -631,6 +638,30 @@ interface PassSeen {
   requestedReviewerIds?: string[];
 }
 
+/** L4-LM1c: the requests the person's-edit receiver may spend in one pass (the commits it walks, a page or two each), inside the pass's own allowance. */
+export const HUMAN_EDIT_REQUESTS_MAX = 30;
+
+/** The receiver of a person's push, held to its own small allowance. Its failure never fails the pass; the host's rate limit and the pass's spent allowance do go up. */
+async function tellHumanEdit(deps: MergeTrackingDependencies, input: { task: TrackedTask & { workflow: WorkflowSnapshot; orgId: OrgId }; pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number]; repository: { url: string; codeHost: CodeHost; scope: HostScope }; base: string; head: string; headRef: string; budget: MergeReadBudget | undefined }): Promise<void> {
+  let used = 0;
+  let exhausted = false;
+  const own: PageBudget = {
+    beforeRequest: () => {
+      if (used >= HUMAN_EDIT_REQUESTS_MAX) { exhausted = true; throw new TrackingRequestCapError(); }
+      used += 1;
+      input.budget?.beforeRequest();
+    },
+  };
+  try {
+    await deps.humanEdit!({ task: input.task, pullRequest: { repositoryId: input.pullRequest.repositoryId, number: input.pullRequest.number, url: input.pullRequest.url }, repository: input.repository, base: input.base, head: input.head, headRef: input.headRef, budget: own });
+  } catch (error) {
+    // The receiver ran out of its OWN allowance: it is told again on the next pass. The pass's allowance, or the host's rate limit, is the pass's to stop on.
+    if (exhausted && error instanceof TrackingRequestCapError) { deps.log?.("merge_tracking.human_edit_allowance", { taskId: input.task.taskId }); return; }
+    if (error instanceof TrackingRequestCapError || rateLimitRetryAt(error) !== undefined || (error instanceof Error && error.name === "GithubBudgetExhaustedError")) throw error;
+    deps.log?.("merge_tracking.human_edit_failed", { taskId: input.task.taskId, error: error instanceof Error ? error.name : "unknown" });
+  }
+}
+
 async function trackOne(
   deps: MergeTrackingDependencies,
   task: TrackedTask & { workflow: WorkflowSnapshot; orgId: OrgId },
@@ -680,6 +711,11 @@ async function trackOne(
   if (status.headRevision !== pullRequest.headSha && (recordedHead === undefined || status.headRevision !== recordedHead)) {
     const details = await codeHost.getChangeRequest(ref, scope);
     await noteBranchHead(deps.store, { orgId: task.orgId, repositoryId: pullRequest.repositoryId, branch: details.sourceBranch }, { headIsRecordedRovaraPush: false, now: new Date(now).toISOString() });
+    const base = recordedHead ?? pullRequest.headSha;
+    if (deps.humanEdit !== undefined && status.state === "open" && base !== undefined) {
+      // After the strict fact is written: a person's head is told to learning, with the commit Rovara last pushed as the base. Never fails the pass; a host's "slow down" and a spent pass allowance go up.
+      await tellHumanEdit(deps, { task, pullRequest, repository: { url, codeHost, scope }, base, head: status.headRevision, headRef: details.sourceBranch, budget });
+    }
   }
   // TE-E0 option A: the customer's marked checks, read once a pass. Settings that cannot be read are logged and treated as none (today's behaviour), never guessed.
   const read = await readEvidenceSettings(deps, task);

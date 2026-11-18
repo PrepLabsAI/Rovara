@@ -212,7 +212,8 @@ export class FakeCodeHost implements CodeHost {
     this.checkScope(scope);
     const model = this.registered(repository);
     budget?.beforeRequest();
-    return { files: model.commitChangedFiles(revision), complete: true, parents: [...model.revision(revision).parents] };
+    const identity = model.commitIdentities.get(revision);
+    return { files: model.commitChangedFiles(revision), complete: true, parents: [...model.revision(revision).parents], ...(identity === undefined ? {} : { identity }) };
   }
 
   /** DEC 213: a revision's changes against one it builds on (a merge against its second parent), in one page. The fake never cuts the list; a base the head does not build on throws. */

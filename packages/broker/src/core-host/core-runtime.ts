@@ -15,6 +15,7 @@ import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
+import type { HumanEditSink } from "../core/merge/seams.js";
 import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
 
 /** A core service a scheduled job runs, per company. */
@@ -44,6 +45,8 @@ export interface CoreRuntime {
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
   ciMode?: CheckedCiReporting["ciMode"] | undefined;
+  /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request, for merge tracking to tell. Undefined when lessons are not built for the company. */
+  humanEdit?: HumanEditSink | undefined;
 }
 
 export interface CoreRuntimeOptions {

@@ -16,7 +16,7 @@ import {
 import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
 import { readCodeOwnersFile } from "../code-owners-file.js";
-import { accountKindOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
+import { accountKindOf, commitIdentityOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
 import { entryAt, fileTrees, instructionList } from "./file-details.js";
 import { type GitHubCodeHostProvider } from "./provider.js";
 
@@ -146,7 +146,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
     ...(commitChangesOfProvider === undefined ? {} : {
       async commitChanges(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<CommitChanges> {
         const read = await commitChangesOfProvider(repository.url, revision, checkedScope(scope), budget === undefined ? undefined : () => budget.beforeRequest());
-        return { files: read.files.map(fileOf), complete: read.complete, parents: [...read.parents] };
+        return { files: read.files.map(fileOf), complete: read.complete, parents: [...read.parents], ...(read.identity === undefined ? {} : { identity: commitIdentityOf(read.identity) }) };
       },
     }),
     // DEC 213: a merge's changes against its second parent, in the same mapping. Only where the client can read them.
