@@ -180,6 +180,10 @@ describe("the /v1/app route table", () => {
     expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toMatchObject({ method: "GET", requires: "full" });
     expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toBeUndefined();
   });
+  it("pins the weekly lessons read as a full-access company route, outside the core app table", () => {
+    expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/weekly")).toMatchObject({ method: "GET", requires: "full" });
+    expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/weekly")).toBeUndefined();
+  });
 });
 
 // ---- Through the broker ----

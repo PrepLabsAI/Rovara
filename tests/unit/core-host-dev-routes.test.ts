@@ -73,7 +73,7 @@ describe("the core's handlers on the deployed API", () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
-    for (const path of ["/v1/dev/tasks", "/v1/dev/projects", "/v1/dev/projects/payments/lessons/replay", "/v1/local/pages/open", "/v1/local/playbook/payments", "/v1/admin/projects", "/healthz"]) expect(await routes.route(get(path), caller), path).toBeUndefined();
+    for (const path of ["/v1/dev/tasks", "/v1/dev/projects", "/v1/dev/projects/payments/lessons/replay", "/v1/dev/projects/payments/lessons/weekly", "/v1/local/pages/open", "/v1/local/playbook/payments", "/v1/admin/projects", "/healthz"]) expect(await routes.route(get(path), caller), path).toBeUndefined();
     expect(companyOf).not.toHaveBeenCalled();
   });
 
