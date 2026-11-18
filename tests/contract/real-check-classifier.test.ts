@@ -484,7 +484,8 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
   });
 
   it("organization- and folder-wide INFORMATION_SCHEMA views are refused", () => {
-    for (const sql of ["SELECT * FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION", "SELECT * FROM acme.INFORMATION_SCHEMA.jobs_by_folder", "SELECT * FROM x.INFORMATION_SCHEMA.TABLE_STORAGE_BY_ORGANIZATION"]) expect(query(sql).allow, sql).toBe(false);
+    expect(query("SELECT * FROM `acme-staging-4321`.`region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT").allow).toBe(true);
+    for (const sql of ["SELECT * FROM `acme-staging-4321`.`region-us`.INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION", "SELECT * FROM `acme-staging-4321`.`region-us`.INFORMATION_SCHEMA.jobs_by_folder", "SELECT * FROM `acme-staging-4321`.`region-us`.INFORMATION_SCHEMA./* c */JOBS_BY_ORGANIZATION", "SELECT * FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION", "SELECT * FROM acme.INFORMATION_SCHEMA.jobs_by_folder", "SELECT * FROM x.INFORMATION_SCHEMA.TABLE_STORAGE_BY_ORGANIZATION"]) expect(query(sql).allow, sql).toBe(false);
   });
 
   it("a call that reaches a Cloud KMS key is not a read: KEYS.* is no built-in namespace here and a key reference is refused", () => {
