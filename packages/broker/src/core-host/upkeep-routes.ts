@@ -18,6 +18,7 @@ import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { UPKEEP_WORDS, upkeepSwitchControl, upkeepView, type UpkeepSettingsDeps } from "../core/upkeep/settings.js";
 import type { UpkeepScope } from "../core/upkeep/keys.js";
+import { readSystemRunSpend } from "../core/system-runs/spend.js";
 import type { SetupRunBasis, SetupRunStanding } from "./setup-run-routes.js";
 
 export interface HostedUpkeepWiring {
@@ -96,6 +97,8 @@ export async function routeHostedUpkeep(input: HostedUpkeepInput): Promise<Broke
       requireStepUp: freshStepUp === undefined ? undefined : async () => { stepUpMethod = (await freshStepUp(SYSTEM_RUNS_CONSENT_WORDS.needsSignIn)).method; },
       store: flow.store, companyId, now: input.now, standing: live, schedule: wiring.schedule?.(companyId), available: wiring.available === undefined ? undefined : () => wiring.available!(companyId),
       cap: wiring.cap === undefined ? undefined : () => wiring.cap!(companyId, project),
+      // L4-SR1: this month's nightly spend of THIS project in THIS company, from the company's own rows.
+      spend: (name) => readSystemRunSpend({ store: flow.store, companyId, now: input.now }, { project: name }),
       // L4-P2: the company's consent changes only in the setup step, by a live owner or admin; its audit record names the person and why (the role), and is written before the change.
       recordConsent: async (details) => {
         const event: AuditEvent = {

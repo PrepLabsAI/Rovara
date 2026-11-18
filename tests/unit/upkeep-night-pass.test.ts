@@ -279,7 +279,7 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
   const URL_ = "https://examplehost.test/acme/app";
   const project = (name: string): ProjectDefinition => ({ ...definition, name, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }] });
 
-  async function hosted(flag: ReturnType<typeof parseCoreSwitch>["value"], company: OrgId = A, extra: { consent?: boolean; refresh?: Parameters<typeof createHostedSystemRuns>[0]["refresh"]; enforcesDollars?: boolean; paused?: Parameters<typeof createHostedSystemRuns>[0]["paused"] } = {}) {
+  async function hosted(flag: ReturnType<typeof parseCoreSwitch>["value"], company: OrgId = A, extra: { consent?: boolean; refresh?: Parameters<typeof createHostedSystemRuns>[0]["refresh"]; enforcesDollars?: boolean; paused?: Parameters<typeof createHostedSystemRuns>[0]["paused"]; cap?: Parameters<typeof createHostedSystemRuns>[0]["cap"] } = {}) {
     const h = createHarness({ companyId: company, audit: "recording", machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] } });
     const [name] = namesByHour(company, 1)[7]!;
     await h.registerProject(project(name!));
@@ -294,7 +294,7 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     // The company's consent (L4-P2), the second lock: given here (the ceiling is `flag`); the tests of the two locks are in system-runs-consent.test.ts.
     if (extra.consent !== false) await h.store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(h.clock.now).toISOString() } });
     h.clock.now = at(DAY, 8, 10);
-    const runs = createHostedSystemRuns({ flow: h.flow, companyId: company, flag, now: () => h.clock.now, ...(extra.refresh === undefined ? {} : { refresh: extra.refresh }), ...(extra.enforcesDollars === undefined ? {} : { enforcesDollars: extra.enforcesDollars }), ...(extra.paused === undefined ? {} : { paused: extra.paused }) });
+    const runs = createHostedSystemRuns({ flow: h.flow, companyId: company, flag, now: () => h.clock.now, ...(extra.refresh === undefined ? {} : { refresh: extra.refresh }), ...(extra.enforcesDollars === undefined ? {} : { enforcesDollars: extra.enforcesDollars }), ...(extra.paused === undefined ? {} : { paused: extra.paused }), ...(extra.cap === undefined ? {} : { cap: extra.cap }) });
     return { h, name: name!, model, runs, modelRoute, company };
   }
   const checks = async (w: Awaited<ReturnType<typeof hosted>>): Promise<number> => {
@@ -373,11 +373,20 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     }
   });
 
+  // MUTANT (L4-SR1): the night declares an enforced cap on the Admission alone, without the gateway's own signal.
+  it("an enforced Admission and a wired refresh but NO gateway cap signal: the night starts NO AI and calls nothing", async () => {
+    const calls: string[] = [];
+    const w = await hosted(parseCoreSwitch("on").value, A, { enforcesDollars: true, refresh: async (project) => { calls.push(project); return { outcome: "started" as const, taskId: "t", duplicate: false }; } });
+    await w.runs!.service.pass({ budgetMs: 10_000 });
+    expect(calls).toEqual([]);
+  });
+
   it("an enforced cap and a wired refresh: the night asks it once for the project and the day, and the pause hook is the night's own", async () => {
     const calls: Array<{ project: string; day: string }> = [];
     const paused: string[] = [];
     const w = await hosted(parseCoreSwitch("on").value, A, {
       enforcesDollars: true, refresh: async (project, day) => { calls.push({ project, day }); return { outcome: "started" as const, taskId: "t", duplicate: false }; }, paused: async (input) => { paused.push(input.project); },
+      cap: { read: async (project) => ({ version: 1, company: A, project, month: DAY.slice(0, 7), enforced: true, limitMicros: 25_000_000, spentMicros: 0 }) },
     });
     await w.runs!.service.pass({ budgetMs: 10_000 });
     expect(calls).toEqual([{ project: w.name, day: DAY }]);

@@ -7,10 +7,10 @@
 //     upkeep only: chains, triggers and custom agents stay hidden).
 //   - the PAUSE: `upkeepPauseHooks` writes the admins' notice (once per company, project, month and reason) when the limit read says paused before a start, and when the gateway pauses a started run.
 import { createHash } from "node:crypto";
-import { AGENTX_NAME_PATTERN, UPKEEP_TARGET_KIND, type DocumentStore, type DueSchedule, type OrgId, type ScheduleSubscription, type Scheduler, type UpkeepPauseReason } from "@agentx/contracts";
+import { AGENTX_NAME_PATTERN, UPKEEP_TARGET_KIND, change, when, type DocumentStore, type DueSchedule, type OrgId, type ScheduleSubscription, type Scheduler, type UpkeepPauseReason } from "@agentx/contracts";
 import type { AutomationSwitch } from "../automation/switch.js";
 import { queueUpkeepPaused } from "../notify/attention.js";
-import type { UpkeepScope } from "./keys.js";
+import { upkeepNightKey, type UpkeepScope } from "./keys.js";
 import { runUpkeepNight, type UpkeepNightDeps, type UpkeepNightResult } from "./night.js";
 import { upkeepIsOn } from "./settings.js";
 
@@ -77,6 +77,16 @@ export function upkeepPauseHooks(deps: UpkeepPauseHooksDeps): { paused(input: { 
   return {
     paused: async ({ orgId, project, reason }) => { if (orgId === deps.companyId) await write(project, reason); },
     // A run of another company is never written here: the hook is made for one company's store.
-    onRunPaused: async (scope, reason) => { if (scope.orgId === deps.companyId) await write(scope.project, reason); },
+    onRunPaused: async (scope, reason) => {
+      if (scope.orgId !== deps.companyId) return;
+      await write(scope.project, reason);
+      // L4-SR1: the night's own row says the run was paused and why (the reason the gateway named), so the setup page and the audit read one place. Only a night that RAN is rewritten (a night that ended some other way, or a later night, is never turned into a pause by a late callback). Best effort: the notice above is the voice, this is the record.
+      try {
+        const nowMs = deps.now();
+        await deps.store.update({ key: upkeepNightKey({ orgId: deps.companyId, project: scope.project }, new Date(nowMs).toISOString().slice(0, 10)), ops: [change.set(["outcome"], "paused"), change.set(["pauseReason"], reason)], condition: when.and(when.present(), when.eq("orgId", deps.companyId), when.eq("project", scope.project), when.eq("outcome", "ran")) });
+      } catch (error) {
+        deps.log?.({ event: "upkeep.pause_not_recorded", error: error instanceof Error ? error.name : "unknown" });
+      }
+    },
   };
 }
