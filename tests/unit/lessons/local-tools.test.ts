@@ -119,6 +119,22 @@ describe("what a local tool gets", () => {
     const answer = await answerOf(w, { task: "add a retry with backoff" });
     expect(answer.lessons).toHaveLength(5);
     expect(answer.lessons[0]!.id).toBe("les_many0005");
+    // There is no bulk mode: the old `all` flag is not an input of the read any more, so it changes nothing.
+    // @ts-expect-error `all` was removed from the inputs
+    const all = await answerOf(w, { all: true });
+    expect(all.lessons).toHaveLength(5);
+  });
+
+  it("an answer is never more than 10 units and 2 KB, whatever the project's own budget asks for", async () => {
+    const w = world({ learning: { loadBudget: { lessons: 10, bytes: 2048 } } });
+    await seed(w.store, ...Array.from({ length: 14 }, (_, i) => lesson(`les_cap${String(i).padStart(5, "0")}`, { title: `Advice ${String(i).padStart(2, "0")} ${"t".repeat(60)}`, description: "d".repeat(150), body: "b".repeat(20) })));
+    const answer = await answerOf(w);
+    expect(answer.lessons.length).toBeGreaterThan(0);
+    expect(answer.lessons.length).toBeLessThanOrEqual(10);
+    expect(Buffer.byteLength(answer.markdown, "utf8")).toBeLessThanOrEqual(2_048);
+    // The lessons listed are exactly the lessons in the text: nothing is returned that the cap cut from the block.
+    for (const found of answer.lessons) expect(answer.markdown).toContain(`[${found.id}]`);
+    expect((answer.markdown.match(/^> - \[/gmu) ?? []).length).toBe(answer.lessons.length);
   });
 });
 

@@ -25,15 +25,15 @@ export function plainHttpsLink(value: string | undefined): string | undefined {
   }
 }
 
-export type AttentionEmailKind = "attention" | "done" | "digest";
+export type AttentionEmailKind = "attention" | "done" | "digest" | "notice";
 
 export function attentionEmail(lines: readonly EmailLine[], more: number, kind: AttentionEmailKind, links: AttentionEmailLinks = {}): { subject: string; text: string; unsubscribeUrl?: string } {
   const count = lines.length + more;
   const upkeep = lines.filter((line) => line.kind === "upkeep_paused").length;
   const onlyUpkeep = upkeep > 0 && upkeep === lines.length && more === 0;
   const tasks = `${String(count)} ${upkeep > 0 ? (count === 1 ? "item" : "items") : count === 1 ? "task" : "tasks"}`;
-  const subject = kind === "digest" ? `Rovara digest: ${tasks}` : kind === "done" ? `Rovara: ${tasks} finished` : onlyUpkeep ? "Rovara: nightly upkeep needs your attention" : `Rovara: ${tasks} ${count === 1 ? "needs" : "need"} your attention`;
-  const heading = kind === "digest" ? "Your Rovara digest:" : kind === "done" ? (count === 1 ? "A task finished in Rovara:" : "These tasks finished in Rovara:") : onlyUpkeep ? "Nightly upkeep needs your attention in Rovara:" : upkeep > 0 ? "These items need your attention in Rovara:" : count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:";
+  const subject = kind === "notice" ? "Rovara: a notice for you" : kind === "digest" ? `Rovara digest: ${tasks}` : kind === "done" ? `Rovara: ${tasks} finished` : onlyUpkeep ? "Rovara: nightly upkeep needs your attention" : `Rovara: ${tasks} ${count === 1 ? "needs" : "need"} your attention`;
+  const heading = kind === "notice" ? "A notice from Rovara:" : kind === "digest" ? "Your Rovara digest:" : kind === "done" ? (count === 1 ? "A task finished in Rovara:" : "These tasks finished in Rovara:") : onlyUpkeep ? "Nightly upkeep needs your attention in Rovara:" : upkeep > 0 ? "These items need your attention in Rovara:" : count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:";
   const home = plainHttpsLink(links.home), settings = plainHttpsLink(links.settings), unsubscribe = plainHttpsLink(links.unsubscribe);
   const tail = [
     "",

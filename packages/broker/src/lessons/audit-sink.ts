@@ -26,6 +26,16 @@ export function auditProjectRef(companyId: string, project: string): string {
   return `p_${createHash("sha256").update(`lessons-audit-project\u0000${companyId}\u0000${project}`).digest("hex").slice(0, 24)}`;
 }
 
+/** The unit ids of a knowledge read as `u1`..`u10` (a fact holds one short value): only values shaped like a lesson id, at most ten. */
+const unitFacts = (e: LessonAuditEvent): Record<string, string> => {
+  const out: Record<string, string> = {};
+  for (let i = 1; i <= 10; i += 1) {
+    const value = e.facts[`u${String(i)}`];
+    if (typeof value === "string" && /^[A-Za-z0-9_-]{4,64}$/u.test(value)) out[`u${String(i)}`] = value;
+  }
+  return out;
+};
+
 const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.candidate_created": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: 1 }) },
   "lesson.pending": { action: "lesson.proposed", facts: (e) => ({ lessonType: "unknown", tier: num(e.facts["tier"]) }) },
@@ -71,6 +81,10 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.replay_started": { action: "lesson.replay_started", facts: (e) => ({ operator: modelWord(e.facts["operator"]), memory: word(e.facts["memory"], "off"), snapshotLessons: num(e.facts["snapshotLessons"]), maxCents: num(e.facts["maxCents"]), sourceTask: modelWord(e.facts["sourceTask"]) }) },
   "lesson.replay_read": { action: "lesson.replay_read", facts: (e) => ({ operator: modelWord(e.facts["operator"]), what: word(e.facts["what"], "subject"), maxCents: num(e.facts["maxCents"]), target: modelWord(e.facts["target"]) }) },
   "lesson.snapshot_created": { action: "lesson.snapshot_created", facts: (e) => ({ lessonSetVersion: num(e.facts["lessonSetVersion"]), lessonCount: num(e.facts["lessonCount"]) }) },
+  // Team knowledge read by a tool outside Rovara (the lessons route, `agentx mcp`): one event per call with the tool's fixed name, how it asked, the number of units and the unit IDS (u1..u10). Ids and numbers only, never text.
+  "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...unitFacts(e) }) },
+  // One person's tools were served more than the line of distinct units in a day: written once a day, numbers only.
+  "lesson.knowledge_read_alert": { action: "lesson.knowledge_read_alert", facts: (e) => ({ distinct: num(e.facts["distinct"]), line: num(e.facts["line"]) }) },
   // Stable is what lets a lesson leave Rovara (to a local coding tool), so it is on the ledger.
   "lesson.trial_stable": { action: "lesson.trial_stable", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
   "lesson.sole_owner_switch_proposed": { action: "lesson.sole_owner_switch_proposed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true }) },

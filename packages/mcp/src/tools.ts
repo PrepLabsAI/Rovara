@@ -12,6 +12,7 @@ import {
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
 import type { ControlPlaneClient, SessionMessageRead, SessionViewRead } from "./client.js";
+import { KNOWLEDGE_TOOLS } from "./knowledge-tools.js";
 import { isExpiredNotice } from "./admin-expiry.js";
 import { adminApiFits, type Compatibility } from "./compatibility.js";
 import { ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
@@ -44,6 +45,11 @@ export interface ToolContext {
    * client that declared form elicitation. Absent, no change can be confirmed.
    */
   confirmation?(): Promise<{ elicitation: boolean; slack: boolean }>;
+  /**
+   * The git remote of the checkout this server was started in (its `origin`), or undefined when there is none or it cannot be read. The team knowledge tools use it to find the repository (and so the project) when
+   * the AI tool does not say. Never throws.
+   */
+  checkoutRemote?(): Promise<string | undefined>;
 }
 export interface ToolCall {
   signal: AbortSignal;
@@ -1751,4 +1757,5 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   ...WIKI_TOOLS,
+  ...KNOWLEDGE_TOOLS,
 ];
