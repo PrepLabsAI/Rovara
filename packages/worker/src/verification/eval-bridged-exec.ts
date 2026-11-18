@@ -478,7 +478,7 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   if (sealed && flags.has("--add-host")) problems.push("a sealed sandbox pins no name with --add-host");
   // A pinned name points at the model helper, or is one of the run's own service names at that service's helper address (E1). Nothing else.
   // A service entry is checked again here (plain alias, an address in the run's helper range .16 to .47), not only where it was made.
-  for (const entry of expected.serviceHosts ?? []) if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u.test(entry.alias) || !new RegExp(`^${net.checkSandboxIp.replace(/\.\d+$/u, "").replace(/\./gu, "\\.")}\\.(?:1[6-9]|2\\d|3\\d|4[0-7])$`, "u").test(entry.address)) problems.push("a service name is not a plain name at one of the run's helper addresses");
+  for (const entry of expected.serviceHosts ?? []) if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u.test(entry.alias) || !new RegExp(`^${net.checkSandboxIp.replace(/\.\d+$/u, "").replace(/\./gu, "\\.")}\\.(?:1[6-9]|2\\d|3\\d|4[0-6])$`, "u").test(entry.address)) problems.push("a service name is not a plain name at one of the run's helper addresses");
   for (const host of flags.get("--add-host") ?? []) if (!serviceHosts.has(host) && (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp)) problems.push("a pinned name points somewhere other than the model helper or one of the run's own services");
   return problems;
 }
