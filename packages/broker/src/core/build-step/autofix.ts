@@ -28,8 +28,10 @@ import { iso, log } from "../task-flow/support.js";
 import { toDocument } from "../task-flow/records.js";
 import { startChecksRerun, startReview } from "./start.js";
 
-/** One more automatic round: a coding run, the checks and two reviews. A deliberately high figure; the cap is checked against spend plus this. */
+/** One more automatic round: a coding run, the checks and two reviews. A deliberately high figure; the cap is checked against spend plus this. It is the most a round is ever estimated at: see `fitRoundEstimateUsd`. */
 export const AUTOFIX_ROUND_ESTIMATE_USD = 3;
+/** L4-TA6b: the least room under the cap for which one more automatic round is tried at all (a round that cannot do a coding run, the checks and the reviews in less is asked about instead). */
+export const AUTOFIX_MIN_ROUND_USD = 0.25;
 
 /** The action name of the request to `Admission` for one of the company's re-runs after a merge of the base in a ten-minute window (Cloud's adapter holds five; the core asks and keeps no counter of its own). */
 export const BASE_MERGED_ADMISSION_ACTION = "autofix.base-merged";
@@ -105,6 +107,21 @@ async function autofixCapUsd(deps: TaskFlowDeps, task: TaskRecord, configured: n
   return configured === undefined ? live : Math.min(live, configured);
 }
 
+/**
+ * L4-TA6b (owner DEC 254zzz89): what one more round is estimated at, fitted to the room left under the cap: `min(estimate, what is left)`, rounded DOWN to a whole micro-dollar so `spent + estimate` never reads over the cap
+ * through floating-point error. With less than `AUTOFIX_MIN_ROUND_USD` left (or nothing), the estimate is kept at least that much, which is more than is left, so the policy refuses with its own words ("another automatic round
+ * would go over the per-task cap") and the owner is asked. A spend or cap that is not a finite non-negative number leaves the estimate as it is (the policy then asks `inputs-missing`: unknown is never fitted).
+ * What this is, plainly: the estimate is the GATE (the policy and the two transition guards read the same figure, so no send back or retry is made unless spent plus this fits the cap). It holds nothing itself:
+ * no hold or limit is taken from it (a coding run's admission, `run.start`, holds nothing). The round's real spend is bounded by the cap's own enforcement, which does not depend on this figure: the laptop's model proxy is
+ * given only what is left of the limit, and a hosted run is stopped by the per-run money stop (and Admission refuses a run at the cap).
+ */
+export function fitRoundEstimateUsd(estimateUsd: number, spentUsd: number, capUsd: number): number {
+  if (![estimateUsd, spentUsd, capUsd].every((value) => Number.isFinite(value) && value >= 0)) return estimateUsd;
+  const left = capUsd - spentUsd;
+  if (left < AUTOFIX_MIN_ROUND_USD) return Math.max(estimateUsd, AUTOFIX_MIN_ROUND_USD);
+  return left >= estimateUsd ? estimateUsd : Math.floor(left * 1_000_000) / 1_000_000;
+}
+
 /** Looks at one blocked VERIFY or REVIEW once, and acts or asks. Never throws for a task that moved on. */
 export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; workflowRevision: number }): Promise<StepStart> {
   const done = async (result: AutofixOutcome): Promise<StepStart> => {
@@ -122,7 +139,10 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
   // The whole task's spend, when it can be told; nothing priced counts as nothing spent, and the count limits alone then bound the rounds.
   let spent: number | undefined;
   try { spent = deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0; } catch { spent = undefined; }
-  const spend: WorkflowAutoSpend = { spentUsd: wholeTaskSpendUsd(spent ?? Number.NaN), roundEstimateUsd: config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, capUsd: await autofixCapUsd(deps, task, config.capUsd) };
+  const capUsd = await autofixCapUsd(deps, task, config.capUsd);
+  const spentUsd = wholeTaskSpendUsd(spent ?? Number.NaN);
+  // L4-TA6b: the round is estimated at what fits under the cap (at most the usual estimate), so a small cap still gets one bounded round instead of always asking.
+  const spend: WorkflowAutoSpend = { spentUsd, roundEstimateUsd: fitRoundEstimateUsd(config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, spentUsd, capUsd), capUsd };
   const nowMs = (deps.now?.() ?? new Date()).getTime();
   // How the block came about when no finished run wrote it (the row says so): a lost run is the infrastructure's, one automatic retry, never a send back to coding; a merged base is rechecked at once.
   const row_ = fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)));
