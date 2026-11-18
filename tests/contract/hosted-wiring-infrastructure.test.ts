@@ -240,7 +240,15 @@ describe("(i) the core dispatch queues", () => {
     });
     const [queueId, queue] = queues.find(([id]) => withoutHash(id) === "CoreEngineJobsQueue")!;
     expect(queue.Properties.QueueName).toBe("agentx-staging-core-dispatch");
-    const policies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobs"));
+    // L4-SQS: the lessons reflection queue and its dead letters are CoreEngineJobs queues too (pinned in tests/contract/core-lessons-reflect-queue.test.ts); this test is the core dispatch pair's.
+    const reflectPolicies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobsLessonsReflect"));
+    expect(reflectPolicies).toHaveLength(2);
+    for (const [, policy] of reflectPolicies) {
+      const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+      expect(statements.filter((statement) => statement.Effect === "Deny")).toHaveLength(1);
+      expect(statements.filter((statement) => statement.Sid === "BrokerUsesCoreDispatchQueue")).toHaveLength(0);
+    }
+    const policies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobs") && !JSON.stringify(policy.Properties.Queues).includes("LessonsReflect"));
     expect(policies).toHaveLength(2);
     for (const [, policy] of policies) {
       const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
