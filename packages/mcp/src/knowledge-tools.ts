@@ -142,7 +142,7 @@ export const KNOWLEDGE_TOOLS: readonly ToolDefinition[] = [
       stage: stageInput, project: projectInput, repo: repoInput,
     },
     outputSchema: AnswerOutput,
-    handler: (context, input) => orUnavailable(() => answerFor(context, input as { project?: string; repo?: string }, {
+    handler: (context, input) => orUnavailable(() => answerFor(context, input, {
       ...(input.task === undefined ? {} : { task: input.task as string }), ...(input.files === undefined ? {} : { files: input.files as string[] }), ...(input.stage === undefined ? {} : { stage: input.stage as "plan" | "code" | "review" }),
     })),
   },
@@ -158,7 +158,7 @@ export const KNOWLEDGE_TOOLS: readonly ToolDefinition[] = [
     outputSchema: AnswerOutput,
     handler: (context, input) => {
       if (input.path === undefined && input.query === undefined) throw new ToolError("INVALID_REQUEST", "give a path, some words, or both");
-      return orUnavailable(() => answerFor(context, input as { project?: string; repo?: string }, {
+      return orUnavailable(() => answerFor(context, input, {
         ...(input.query === undefined ? {} : { task: input.query as string }), ...(input.path === undefined ? {} : { files: [input.path as string] }), stage: "code",
       }));
     },

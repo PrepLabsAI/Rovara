@@ -54,7 +54,7 @@ function gitOriginOfCwd(): Promise<string | undefined> {
   return new Promise((resolve) => {
     execFile("git", ["remote", "get-url", "origin"], { cwd: process.cwd(), timeout: 2_000, maxBuffer: 4_096, env: { PATH: safeGitPath(process.env["PATH"]), HOME: process.env["HOME"] ?? "", GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
       const remote = error === null ? stdout.trim() : "";
-      resolve(remote === "" || remote.length > 400 || /[\u0000-\u001f]/u.test(remote) ? undefined : remote);
+      resolve(remote === "" || remote.length > 400 || /\p{Cc}/u.test(remote) ? undefined : remote);
     });
   });
 }
