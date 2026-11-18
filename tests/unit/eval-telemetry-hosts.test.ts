@@ -1,7 +1,7 @@
 // L4-EINT (owner DEC 254zzz71): the FIXED telemetry list. A call to one of its hosts gets a plain `OK` from the eval stand-in and is not a gap; the PR names the entries answered; a repository cannot extend the list; a list edit trips this
 // guard; and when most failing questions are still dropped the eval reads "Not run: outside calls were made up".
 import { request as httpRequest } from "node:http";
-import net from "node:net";
+import type net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   EVAL_NOT_RUN_SENTENCES, EVAL_TELEMETRY_HOSTS, evalStandInMostDropped, EvalAnswerBook, EvalStandInDescriptorSchema, evalStandInLines, evalStandInResultOf, evalTelemetryEntryOf, evalTelemetryLine, isEvalTelemetryId,

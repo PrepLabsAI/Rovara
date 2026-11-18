@@ -779,7 +779,7 @@ describe("L4-E12: the free dry run of the drafted eval goes through the same cal
   const tracked = new Map([["web", new Set(["package.json", ".github/workflows/ci.yml", "evals/demo/q1.txt", "evals/demo/score.txt"])]]);
   const scan = { repositories: [], setup: [], tests: [], checks: [], knowledge: [], sources: [], foundNotUsed: [], notes: [] };
   const LIST = { version: 1, modelCalls: 0, ended: "failed", databases: [{ port: 5432, engine: "postgres" }], hosts: [], envVars: [] };
-  const evalWorld = async (dry?: (report: unknown) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
+  const evalWorld = async (dry?: (report: unknown, signal: AbortSignal) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
     const t = await world({ final: options.final ?? block({ ...ANSWER, eval: EVAL }), ...(options.files === undefined ? {} : { files: options.files }) });
     t.input.ports.beforeStart = async () => ({ scan, tracked });
     t.input.evalImage = IMAGE;
@@ -837,7 +837,7 @@ describe("L4-E12: the free dry run of the drafted eval goes through the same cal
     let control: { abort(): Promise<void> } | undefined;
     let sawAborted = false;
     // A dry run that would go on for ten minutes: it ends only when its signal says Stop.
-    const t = await evalWorld((_report, signal) => new Promise((resolve) => { (signal as AbortSignal).addEventListener("abort", () => { sawAborted = true; resolve(LIST); }, { once: true }); setTimeout(() => { void control?.abort(); }, 20); }) as never);
+    const t = await evalWorld((_report, signal) => new Promise((resolve) => { signal.addEventListener("abort", () => { sawAborted = true; resolve(LIST); }, { once: true }); setTimeout(() => { void control?.abort(); }, 20); }));
     const ports = t.input.ports;
     t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); } };
     const started = Date.now();

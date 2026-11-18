@@ -3,7 +3,7 @@
 // SAME bytes from the real stand-in server -> the eval's verdict and the PR lines. Then two companies, a switch that is off (byte for byte), and the version (E4).
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import net from "node:net";
+import type net from "node:net";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -63,18 +63,17 @@ const materializeFrom = (root: string) => async (_dir: string, sha: string, dest
   const { cp } = await import("node:fs/promises");
   await cp(root, destination, { recursive: true });
 };
-const run = { company: A, project, taskId: "task-1" };
 
 describe("the dry run's dependency list reaches the worker as a descriptor, only with the switch on", () => {
   it("builds the descriptor from THIS company's list (telemetry host left out) and the writer's set, and nothing for another company", async () => {
     const store = new MemoryDocumentStore();
-    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: A, project, taskId: "task-1" } as never, LIST);
+    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: A, project, taskId: "task-1" }, LIST);
     const own = await readEvalStandInDescriptor({ store, companyId: A }, project);
     expect(own).toEqual({ version: 1, hosts: [{ name: "api.tiktok.com", port: 443 }] });
     expect(JSON.stringify(own)).not.toContain("sentry");
     // Two companies: B has no list and sees nothing of A's; the same project name is not a bridge.
     expect(await readEvalStandInDescriptor({ store, companyId: B }, project)).toBeUndefined();
-    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: B, project, taskId: "task-2" } as never, { ...LIST, hosts: [{ name: "api.other-company.example.test" }] });
+    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: B, project, taskId: "task-2" }, { ...LIST, hosts: [{ name: "api.other-company.example.test" }] });
     expect(await readEvalStandInDescriptor({ store, companyId: B }, project)).toEqual({ version: 1, hosts: [{ name: "api.other-company.example.test" }] });
     expect(await readEvalStandInDescriptor({ store, companyId: A }, project)).toEqual(own);
     // The source asked for another company's scope answers nothing.
@@ -135,7 +134,7 @@ describe("the worker plans ONE stand-in round from the base commit and both side
 
   it("dependency list -> descriptor -> round (writer's answers, the description, the cassette) -> old and new identical -> the verdict and the PR lines", async () => {
     const store = new MemoryDocumentStore();
-    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: A, project, taskId: "task-1" } as never, LIST);
+    await recordEvalDependencyList({ store, now: () => NOW }, { orgId: A, project, taskId: "task-1" }, LIST);
     const descriptor = { ...(await readEvalStandInDescriptor({ store, companyId: A }, project))!, writerSet: writerSetOf() };
     const root = await checkout({ "cassettes/creators.har": JSON.stringify({ log: { entries: [{ request: { method: "GET", url: "https://api.tiktok.com/v2/recorded" }, response: { status: 200, content: { mimeType: "application/json", text: "{\"recorded\":true}" } } }] } }) });
     asked.length = 0;

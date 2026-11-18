@@ -1,9 +1,10 @@
 // Final-check eval orchestration: saved three-run baseline, fresh re-asks, exact rule.
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  EVAL_STAND_IN_RAN_AGAINST_ENGINES} from "@agentx/contracts";
 import {
-  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation,
-  EVAL_STAND_IN_RAN_AGAINST_ENGINES, evalStandInMostDropped, evalStandInNotCompared, evalStandInResultOf, type EvalStandInCounts, type EvalStandInResult, type EvalStandInRunReport,
+  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation, evalStandInMostDropped, evalStandInNotCompared, evalStandInResultOf, type EvalStandInCounts, type EvalStandInResult, type EvalStandInRunReport,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
