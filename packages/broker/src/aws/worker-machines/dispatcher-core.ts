@@ -26,6 +26,7 @@ import type { GitHubCodeHostProvider } from "../../plugins/code-host/github/inde
 import type { GitHubActionsProvider } from "../../plugins/check-runner/github-actions/index.js";
 import { createCoreHostApp, type CoreHostApp } from "../../core-host/app.js";
 import { CORE_DISPATCH_QUEUE, codeAdapterModules, type CodeModuleDeps } from "../../core-host/code-modules.js";
+import { createCompanyArtifactReader } from "../../core-host/company-artifact-reader.js";
 import { coreEngineServes, readCoreEngineFlags, switchCovers } from "../../core-host/flags.js";
 import { readCoreLessonsSwitch } from "../../core-host/lessons.js";
 import type { CoreAdapterModule } from "../../core-host/registry.js";
@@ -293,6 +294,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
+        // L4-ART: the flow's reader of saved documents (the approved plan, a diff, the eval rounds), held to THIS company's own workspaces (an outside key or another company's workspace reads as "not there").
+        // The dispatcher's role reads only the admission objects today, so a read of the others fails closed here until the install grants it (the first eval round needs no read at all).
+        artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.artifact_read_refused", companyId, reason }) }),
         // DEC 254zm: a coding or verification step is told the plan of the test environment its task pinned (the company's own records; the owner starter list is the catalog while test services are switched on).
         testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
       };

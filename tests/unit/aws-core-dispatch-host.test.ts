@@ -405,6 +405,33 @@ describe("the core on the dispatcher", () => {
     expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_A })).toEqual({});
   });
 
+  it("L4-ART: each company's runtime on the dispatcher carries a company-bound artifacts reader: its own workspaces' documents read, another company's and a key outside the flow's shapes read as not there", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const logs: Array<Record<string, unknown>> = [];
+    const built = createDispatcherCoreHost({ ...made.inputs, log: (entry) => { logs.push(entry); }, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(typeof a.flow.deps.artifacts?.get).toBe("function");
+    expect(a.flow.deps.artifacts).not.toBe(b.flow.deps.artifacts);
+    const blobs = (await built.app.registry()).require("object-storage");
+    const put = (key: string, body: string) => blobs.put(key, new TextEncoder().encode(body), { contentType: "text/plain", metadata: {}, retention: "plan" });
+    const workspace = (companyId: typeof COMPANY_A, id: string, ownerKey: string) => a.flow.deps.store.put({ item: { ...workspaceKey(companyId, id), entityType: "WORKSPACE", id, companyId, orgId: companyId, ownerKey, projectName: "payments" } });
+    await workspace(COMPANY_A, "ws-a-art", "owner-a-art"); await workspace(COMPANY_B, "ws-b-art", "owner-b-art");
+    await put("workspaces/ws-a-art/operations/op-1/plan.md", "a's plan"); await put("workspaces/ws-b-art/operations/op-1/plan.md", "b's plan");
+    // the engine's own ARTIFACT record of each (services/callbacks.ts), which the reader requires for a callback-shaped key
+    for (const [companyId, id] of [[COMPANY_A, "ws-a-art"], [COMPANY_B, "ws-b-art"]] as const) await a.flow.deps.store.put({ item: { ...workspaceKey(companyId, id), sk: "ARTIFACT#op-1#plan.md", entityType: "ARTIFACT", objectKey: `workspaces/${id}/operations/op-1/plan.md` } });
+    const read = async (runtime: typeof a, key: string) => { const bytes = await runtime.flow.deps.artifacts!.get(key, 1000); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); };
+    expect(await read(a, "workspaces/ws-a-art/operations/op-1/plan.md")).toBe("a's plan");
+    expect(await read(b, "workspaces/ws-b-art/operations/op-1/plan.md")).toBe("b's plan");
+    expect(await read(a, "workspaces/ws-b-art/operations/op-1/plan.md")).toBeUndefined();
+    expect(await read(b, "workspaces/ws-a-art/operations/op-1/plan.md")).toBeUndefined();
+    expect(await read(a, "workflow-e2e-admissions/sha256/abc.json")).toBeUndefined();
+    // Refusals are logged in fixed words only
+    const refusals = logs.filter((entry) => entry["event"] === "dispatch.artifact_read_refused");
+    expect(refusals.map((entry) => entry["reason"])).toEqual(["workspace_not_company", "workspace_not_company", "key_not_task_document"]);
+    expect(JSON.stringify(refusals)).not.toContain("ws-b-art");
+  });
+
   it("L4-EVW: each company's runtime on the dispatcher carries the gateway's checked https origin for the eval request, only where the model gateway is configured", async () => {
     const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
     const extraModules = createFakeWorld().modules.filter((module) => owed.has(module.point));
