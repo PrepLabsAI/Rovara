@@ -7,8 +7,8 @@
 //   - The schedule follows the switch: ON puts the project's upkeep night on the scheduler, OFF removes it. A schedule that could not be changed is thrown AFTER the row is written (the switch is what is true; a retry of
 //     the same request puts it right).
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
-import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
-import { readSystemRunsConsentRow, systemRunsConsentKey } from "../system-runs/consent.js";
+import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
+import { readSystemRunsConsentRow, seenRowFence, systemRunsConsentKey } from "../system-runs/consent.js";
 import { requireFreshStepUp } from "../system-runs/consent-control.js";
 import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
 
@@ -88,7 +88,9 @@ export async function setUpkeepEnabled(deps: UpkeepSettingsDeps, input: { person
     try { await deps.record("upkeep_switched", input.project, { requestId: input.requestId, on: input.on, previous: typeof before?.["changedAt"] === "string" ? before["changedAt"] : "none" }); } catch { throw agentXError("AUDIT_UNAVAILABLE", UPKEEP_WORDS.auditUnavailable); }
   }
   const changedAt = new Date(deps.now()).toISOString();
-  await deps.store.put({ item: { ...key, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId } });
+  // The row changes only if it is still the one this act read (a concurrent switch loses and is told to try again; the schedule is then not touched).
+  const written = await deps.store.put({ item: { ...key, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId }, condition: seenRowFence(before) });
+  if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", UPKEEP_WORDS.unreadable);
   if (deps.schedule !== undefined) {
     if (input.on) await deps.schedule.put(scope); else await deps.schedule.remove(scope);
   }
@@ -176,11 +178,9 @@ export async function setSystemRunsAndUpkeep(deps: UpkeepSettingsDeps, input: { 
   } catch { throw agentXError("AUDIT_UNAVAILABLE", UPKEEP_WORDS.auditUnavailable); }
   const changedAt = new Date(deps.now()).toISOString();
   // Each row changes only if it is still the one this act read (a concurrent setup request, or a change between the read and the write, loses and is told to try again).
-  const fence = (row: Record<string, unknown> | undefined): { condition?: ReturnType<typeof when.absent> } =>
-    row === undefined ? { condition: when.absent() } : typeof row["changedAt"] === "string" ? { condition: when.eq("changedAt", row["changedAt"]) } : {};
   const written = await deps.store.transact([
-    { kind: "put", item: { ...consentKey, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: input.allow, changedAt, requestId: input.requestId }, ...fence(beforeConsent) },
-    { kind: "put", item: { ...settingsKey, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId }, ...fence(beforeSettings) },
+    { kind: "put", item: { ...consentKey, entityType: "SYSTEM_RUNS_CONSENT", orgId: deps.companyId, enabled: input.allow, changedAt, requestId: input.requestId }, condition: seenRowFence(beforeConsent) },
+    { kind: "put", item: { ...settingsKey, entityType: "UPKEEP_SETTINGS", orgId: deps.companyId, project: input.project, enabled: input.on, changedAt, requestId: input.requestId }, condition: seenRowFence(beforeSettings) },
   ]).catch(() => ({ applied: false as const }));
   if (!written.applied) throw agentXError("RUNTIME_UNAVAILABLE", UPKEEP_WORDS.unreadable);
   if (deps.schedule !== undefined) {
