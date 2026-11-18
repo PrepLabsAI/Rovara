@@ -24,9 +24,9 @@ export interface HostedApprovers {
   complete: boolean;
   /** Bumped by every change to who may approve (the approval's writes are fenced on it). */
   membershipVersion: number;
-  /** The company's owners. */
+  /** The company's owners (live now). NOT a recipient list: a notice to "the people who can decide" goes to `eligibleIds`, which also holds the company's non-owner admins and the project's maintainers. */
   ownerIds: string[];
-  /** Who may approve a lesson here (maintainers and company owners or admins). */
+  /** Who may approve a lesson here (maintainers and company owners or admins), live now. The one list notices to deciders are sent to. */
   eligibleIds: string[];
   /** When an eligible person last lost that right (ms), or null. */
   lastEligibleLossAtMs: number | null;
