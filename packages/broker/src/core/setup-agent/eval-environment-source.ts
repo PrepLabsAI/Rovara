@@ -60,7 +60,7 @@ export function evalSavedEnvDepsOf(input: { store: DocumentStore; /** Read only 
         registry: input.registry(),
         ...(input.hosted === true ? { registryAuthSchema: HostedSavedEnvRegistryAuthSchema } : {}),
         readApproved: async (orgId, project) => {
-          const found = await readApprovedTestEnvironment(test, orgId as OrgId, project);
+          const found = await readApprovedTestEnvironment(test, orgId, project);
           return found === undefined ? undefined : { revision: found.revision, digest: testEnvDigest(found.environment) };
         },
         proveHolds: async () => false,

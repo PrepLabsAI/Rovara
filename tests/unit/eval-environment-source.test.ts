@@ -55,7 +55,7 @@ async function putImage(db: MemoryDocumentStore, org: OrgId, project: string, ap
   const key = { pk: `ORG#${org}`, sk: `SAVED_ENV#${project}` };
   const written = documentSavedEnvStore({ store: db, now: () => NOW });
   expect(await written.commit({ ...state, orgId: org, projectId: project }, null, { action: "build_recorded", orgId: org, projectId: project, at: AT })).toBe(true);
-  if (over.rowOrg !== undefined || over.rowProject !== undefined) await db.put({ item: { ...(await db.get(key))!, orgId: state.orgId, projectId: state.projectId } as never });
+  if (over.rowOrg !== undefined || over.rowProject !== undefined) await db.put({ item: { ...(await db.get(key))!, orgId: state.orgId, projectId: state.projectId } });
 }
 
 function world(options: { env?: NodeJS.ProcessEnv; paths?: Map<string, string> | undefined; registry?: FakeImageRegistry; hosted?: boolean; company?: OrgId } = {}) {
@@ -299,7 +299,7 @@ describe("unreadable stores fail closed", () => {
   /** A store whose reads of rows whose sort key starts with `prefix` throw. */
   const breaking = (db: MemoryDocumentStore, prefix: string): MemoryDocumentStore => {
     const get = db.get.bind(db);
-    db.get = (async (key: { pk: string; sk: string }) => { if (key.sk.startsWith(prefix)) throw new Error("store down"); return get(key as never); }) as never;
+    db.get = (async (key: { pk: string; sk: string }) => { if (key.sk.startsWith(prefix)) throw new Error("store down"); return get(key); });
     return db;
   };
 
@@ -330,7 +330,7 @@ describe("unreadable stores fail closed", () => {
     const damaged = world();
     await damaged.withImage();
     const row = (await damaged.db.get({ pk: `ORG#${A}`, sk: `SAVED_ENV#${WEB}` }))!;
-    await damaged.db.put({ item: { ...row, enabled: "yes" } as never });
+    await damaged.db.put({ item: { ...row, enabled: "yes" } });
     expect(await damaged.source(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
     expect(damaged.registry.loginsGiven()).toEqual([]);
   });
