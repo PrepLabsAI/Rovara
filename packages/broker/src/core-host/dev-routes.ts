@@ -59,6 +59,7 @@ import { createLocalPlaybook } from "../local/app/playbook.js";
 import { developerTaskView } from "../local/app/task-view.js";
 import { proofIndexOf } from "../local/app/proof-index.js";
 import { loadEvidencePack } from "../core/proof/evidence-keep.js";
+import { hostedEvidenceBlobs } from "./hosted-evidence.js";
 import type { CoreHostApp } from "./app.js";
 import type { TestEnvDeps } from "../core/test-env/deps.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
@@ -494,7 +495,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
           // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
-          const pack = await loadEvidencePack(target.blobs, { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
+          // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
+          const pack = await loadEvidencePack(hostedEvidenceBlobs({ blobs: target.blobs, store: target.runtime.flow.deps.store, companyId: target.runtime.companyId }), { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
           return json(200, proofIndexOf(record.taskId, record.workflow, pack));
         }
         const cancel = TASK_CANCEL.exec(path);

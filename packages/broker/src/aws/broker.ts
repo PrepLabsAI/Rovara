@@ -384,6 +384,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
+import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
 import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
@@ -15623,7 +15624,8 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
     codeModules: (core) => brokerCoreModuleDeps(process.env, {
       dynamo: dynamoClient,
-      objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3 },
+      // L4-HW4: the evidence the core keeps (packs, output tails) is written with the bucket's own retention tags, so the lifecycle rules (ExpireEvidenceShort / ExpireEvidenceStd on `private/`) expire it; a class not named here stays untagged.
+      objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3, retentionTags: EVIDENCE_RETENTION_TAGS },
       secrets: { namePrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, clientFor: () => secretsManager },
       workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
       codeHost: () => brokerCoreCodeHost({
