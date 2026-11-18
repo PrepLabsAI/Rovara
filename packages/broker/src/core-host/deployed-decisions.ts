@@ -18,7 +18,7 @@ import {
   type AdapterRegistry, type OrgId, type OrgRole, type Principal, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SETUP_CHANGE_CARD_WORDS, WorkflowSnapshotSchema, setupChangeLines } from "@agentx/contracts";
-import { createDecisionService } from "../services/decisions.js";
+import { createDecisionService, type DecisionService } from "../services/decisions.js";
 import type { Credential, DecisionOutcome } from "../core/decisions/approval-gate.js";
 import { WORKFLOW_DOCUMENT_CARD_KINDS, createDecisionPerformer, workflowDocumentHandler, type KindHandler, type ProvingCaller } from "../core/decisions/performer.js";
 import type { DecisionItem } from "../core/decisions/project.js";
@@ -38,6 +38,7 @@ import { developerIdOf } from "../core/sessions/create.js";
 import { involvedTaskIds } from "../core/task-flow/involved.js";
 import { listTasks, readTask } from "../core/task-flow/reads.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
+import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
@@ -159,6 +160,22 @@ function waitingDocument(task: TaskRecord): { workflow: WorkflowSnapshot; artifa
   const type = currentDocumentType(workflow);
   const artifact = workflow.artifacts.filter((entry) => entry.type === type).at(-1);
   return artifact === undefined ? undefined : { workflow, artifact, type };
+}
+
+/**
+ * The approval gate of one company's deployed core: over the company's approvers point (with the policy hook's wrapper the registry was sealed with), where the task's own person is the only decider of its documents.
+ * One definition for the decision cards and for what only READS the gate (HW5: the plan card's `requirement`), so both ask the same gate, the same approvers and the same rule for who decides.
+ */
+export function hostedDecisionService(input: { deps: TaskFlowDeps; registry: AdapterRegistry; companyId: OrgId; now: () => Date }): DecisionService {
+  const { deps, registry, companyId } = input;
+  return createDecisionService({
+    flow: deps, blobs: registry.require("object-storage"), store: deps.store, approvers: registry.require("approvers"), audit: deps.audit, companyId, identity: registry.require("identity"),
+    now: input.now,
+    workflowSubject: {
+      actorFor: (approver, workflow) => (approver.companyId === companyId && typeof approver.personId === "string" && taskOwnerKey(approver.personId, workflow.taskId) === workflow.ownerId
+        ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined),
+    },
+  });
 }
 
 export interface DeployedDecisionCardsOptions {

@@ -15637,7 +15637,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
-      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }),
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),

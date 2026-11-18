@@ -23,6 +23,13 @@ export function sessionPageUrl(origin: string | undefined, sessionId: string | u
   return `${base}${sessionOpenPath(sessionId)}`;
 }
 
+/** HW5: a project's page, `<origin>/app/projects/<name>` (it holds the "Setup needs repair" card), for a message outside the app; undefined when the base is not a plain https origin or the name is not a project name. */
+export function projectPageUrl(origin: string | undefined, project: string | undefined): string | undefined {
+  const base = plainHttpsOrigin(origin);
+  if (base === undefined || project === undefined || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return undefined;
+  return `${base}/app/projects/${encodeURIComponent(project)}`;
+}
+
 /**
  * The page a card opens for a task: its session when it has one (a task record carries `sessionId`; a chain step's session is found by the caller and passed as `sessionId`),
  * otherwise its project's page, which is a real route and shows the project's running work. Never a path built from the task's own id.

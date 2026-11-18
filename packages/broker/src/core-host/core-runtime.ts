@@ -45,15 +45,19 @@ export interface CoreRuntime {
 
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
-  ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
+  ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks" | "registry" | "companyOf" | "link" | "thread" | "planCarded" | "setupPausedTold" | "doneToldInThread"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
   /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
   upkeep?: {
     administers(orgId: OrgId, developerId: string, project: string): Promise<boolean>;
     /** L4-U5: the project's open repair card now, for the admins' "Setup needs repair" notice (dropped when the setup is no longer broken). Absent: no setup row is delivered. */
     setupRead?(orgId: OrgId, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined>;
+    /** HW5: the project's page address (a plain https link) for the admins' "Setup needs repair" notice. Absent: the notice has no link. */
+    setupLink?(project: string): string | undefined;
   } | undefined;
   /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request, for merge tracking to tell. Undefined when lessons are not built for the company. */
   humanEdit?: HumanEditSink | undefined;
+  /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes. Needs the company's milestones; absent: none are written. */
+  threadMoments?: boolean | undefined;
 }
 
 export interface CoreRuntimeOptions {

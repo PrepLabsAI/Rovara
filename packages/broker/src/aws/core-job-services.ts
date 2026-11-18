@@ -18,7 +18,9 @@ import { fixedCodeSettings } from "../core/merge/defaults.js";
 import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
-import type { SummaryDependencies } from "../core/sessions/summary.js";
+import type { SessionChangeHook, SummaryDependencies } from "../core/sessions/summary.js";
+import { threadFollows } from "../core/channel/thread-notices.js";
+import { ticketMomentsOnChange } from "../core/ticket-updates/moments.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import { boundedCorePass } from "./core-job-pass.js";
 import { evalCheckEvidencePort } from "../core/ci-evidence/eval-check-setting.js";
@@ -91,7 +93,9 @@ export interface BrokerCoreServicesOptions {
   humanEdit?: HumanEditSink | undefined;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
   /** `adminNotice` (L4-AK1H): whether a person may be told an admin notice now (an owner or admin of the company, read at delivery). Absent: no one is, and a queued admin notice is dropped (fail closed). */
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice"> & Pick<NoticeServiceOptions, "remember">;
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice" | "planCarded" | "setupPausedTold" | "doneToldInThread"> & Pick<NoticeServiceOptions, "remember"> & { registry?: AttentionDeliveryDependencies["registry"] | undefined };
+  /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes, on the company's milestones. Needs `flow.deps.milestones` (lessons built); else none. */
+  threadMoments?: boolean;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -123,7 +127,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const sessionScan = { cursor: undefined as string | undefined };
   const notifyScan = { cursor: undefined as string | undefined };
   const mergeScan = { cursor: undefined as string | undefined, complete: false };
-  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification });
+  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification, registry: options.notification?.registry ?? registry });
   return {
     "session-sweep": pass(async (store, deadlineMs) => {
       const deps = depsFor(store);
@@ -133,13 +137,17 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         if (value === undefined) throw new Error("the session cost is unavailable");
         return value;
       } } };
-      const sessions = createSessionService({ store, ...summary, notices: noticesFor(store), now: clock, log });
+      // HW5: a session that follows a chat thread gets its `plan_ready` and `closed` moments (the thread's plan card and end line). Written in THIS pass's store; the items and the delivery are the company's milestones (handlers
+      // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are not written here (`ticketBindings: false`): only a thread's.
+      const moments: readonly SessionChangeHook[] = options.threadMoments === true && deps.milestones !== undefined
+        ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, log: () => log() })] : [];
+      const sessions = createSessionService({ store, ...summary, notices: noticesFor(store), onChange: moments, now: clock, log });
       return { ...await sessions.sweep({ companyId, scan: sessionScan, maxItems: 100, budgetMs: Math.max(0, deadlineMs - now()) }) };
     }),
     "notify-deliver": pass(async (store, deadlineMs) => {
       const notices = noticesFor(store);
       // A deployed chat needs its tenant/company mapping. Do not consume the queue using the laptop's one-company default.
-      if (registry.names("channel").length > 0 && options.notification?.companyOf === undefined) throw new Error("the notification company mapping is unavailable");
+      if ((options.notification?.registry ?? registry).names("channel").length > 0 && options.notification?.companyOf === undefined) throw new Error("the notification company mapping is unavailable");
       const report = await notices.deliver({ deadlineMs, companyId, scan: notifyScan, maxItems: 100 });
       return report === undefined ? { skipped: "no_notification_transport" } : { ...report };
     }),

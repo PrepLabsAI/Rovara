@@ -82,11 +82,12 @@ export interface HostedIntake {
 
 /**
  * The hosted flow's `startExtras` for intake: a start that carries a ticket (only intake sets one) writes the task's session and its ticket binding in the start's own transaction, exactly as
- * the laptop does (`createSessionStartExtras`), so the engine's one-session-per-ticket rule and the write-back find the ticket. A start without a ticket gets nothing added.
+ * the laptop does (`createSessionStartExtras`), so the engine's one-session-per-ticket rule and the write-back find the ticket. A start without a ticket gets nothing added, except (HW5) a start from a chat thread where chat threads are served.
  */
-export function ticketSessionStartExtras(companyId: OrgId): (input: StartExtrasInput) => StartExtras {
+export function ticketSessionStartExtras(companyId: OrgId, options: { chatThreads?: boolean } = {}): (input: StartExtrasInput) => StartExtras {
   const session = createSessionStartExtras(OrgIdSchema.parse(companyId));
-  return (input) => (input.ticket === undefined ? { items: [] } : session(input));
+  // HW5: where chat threads are served, a start from a chat thread (the Slack start's own client name) gets its session too: the task's plan card and what needs a person are told through its session, as on a laptop.
+  return (input) => (input.ticket === undefined && !(options.chatThreads === true && input.client === "slack") ? { items: [] } : session(input));
 }
 
 /** The ticket fence key of a hosted install: derived from its callback signing key under its own label, so it is the install's own and never the key itself. */
