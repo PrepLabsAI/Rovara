@@ -7,7 +7,7 @@ import { approversRequired, emitAudit, modeAllows, resolveLearning, type Learnin
 import type { CitationVerifier, CodeFacts } from "./ports.js";
 import { gatherMaterial } from "./material.js";
 import { mentionsRepoPlace } from "./project-repo-audience.js";
-import { attributableSources, clearSourcePause, coldSourcesOf, isHeldBySource, projectBrakeOn } from "./sources.js";
+import { attributableSources, clearSourcePause, coldSourcesOf, heldKeysOf, isHeldBySource, projectBrakeOn } from "./sources.js";
 import { lessonValue } from "./value.js";
 import { isCorroborated } from "./value.js";
 import { isMeaningfulAnchor } from "@agentx/contracts";
@@ -118,7 +118,7 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
 
     const flags = await deps.store.flags(key);
     // A lesson from a source that spiked is collected but held: it is not queued for people or applied until a maintainer resumes the source.
-    const held = isHeldBySource(flags, attributableSources(verified.provenance));
+    const held = isHeldBySource(flags, heldKeysOf(verified.provenance));
     const brakeOn = projectBrakeOn(flags, deps.now());
     // Approve by exception: a low-risk lesson from a member's own correction with verified citations goes live on trial with no approval and no corroboration. Anything the rules
     // send to a person (tier 2, a contradiction, a refinement, a held or braked source, the Regulated preset) is decided by the old rules below.
@@ -160,7 +160,7 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
       const brakedNow = projectBrakeOn(flagsNow, deps.now());
       if (brakedNow) deps.metrics?.count("learning_trial_held", { reason: "project_brake" });
       // The project's repositories are read AGAIN too: a repository removed from the project while this settle ran leaves the lesson restricted.
-      const recheck = trialBlockers(stored, stored.tier, trialContext(again, brakedNow, isHeldBySource(flagsNow, attributableSources(stored.provenance)), await projectReposFor(deps, key, stored)));
+      const recheck = trialBlockers(stored, stored.tier, trialContext(again, brakedNow, isHeldBySource(flagsNow, heldKeysOf(stored.provenance)), await projectReposFor(deps, key, stored)));
       if (recheck.length > 0) return toPerson("trial_recheck");
       try {
         const live = await activateLesson(deps, key, stored, [{ approvalId: `trial-${lessonId}`, by: TRIAL_APPROVER, at: deps.now(), mode: "trial" }], again.expiryDays, "lesson.trial_started", { version: stored.version, setVersion: result.setVersion });
@@ -218,7 +218,7 @@ export const RESUME_RESETTLE_LIMIT = 200;
 export async function resumeAndResettle(deps: ProcessDeps, key: ScopeKey, source: string, actor: string): Promise<{ resumed: boolean; settled: string[] }> {
   if (!(await clearSourcePause(deps, deps.store, key, source, actor))) return { resumed: false, settled: [] };
   const held = (await deps.store.list(key, { statuses: ["candidate"] }))
-    .filter((l) => attributableSources(l.provenance).some((s) => sameSource(s, source)))
+    .filter((l) => heldKeysOf(l.provenance).some((s) => sameSource(s, source)))
     .sort((a, b) => lessonValue(b) - lessonValue(a) || a.id.localeCompare(b.id))
     .slice(0, RESUME_RESETTLE_LIMIT);
   const settled: string[] = [];

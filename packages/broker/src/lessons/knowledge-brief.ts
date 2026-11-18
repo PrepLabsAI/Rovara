@@ -9,6 +9,7 @@ import {
   KNOWLEDGE_FACTS_MAX, KNOWLEDGE_MORE_AREAS_MAX, KNOWLEDGE_PULL_MAX_BYTES, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_SKILLS_MAX, KNOWLEDGE_STAGE_PARTS, KnowledgeContextSchema, cleanLessonText, knowledgeUnitId,
   type KnowledgeContext, type KnowledgeDeliveryRecord, type KnowledgeFact, type KnowledgeSkillName, type KnowledgeUnit, type LessonStage,
 } from "@agentx/contracts";
+import { needsALook } from "./area-index.js";
 import { STRICT_TOKEN, safeScopeLabel } from "./render.js";
 import { hasPersonApproval } from "./repo-eligibility.js";
 import type { Lesson } from "./types.js";
@@ -21,9 +22,9 @@ export interface KnowledgeSources { facts?: KnowledgeFactsPort | undefined; skil
 
 const oneLine = (text: string, max: number): string => cleanLessonText(text, max).replace(/\s*[\n\u2028\u2029]\s*/gu, " ");
 
-/** Only stable or person-approved lessons are in the look-up: its "team-approved" label must be true (a lesson live on trial with no person behind it stays in the push only, as today). */
-export const pullable = (lesson: Pick<Lesson, "trial" | "approvals" | "scope">): boolean =>
-  lesson.trial?.state !== "trial" && (lesson.trial?.state === "stable" || hasPersonApproval(lesson)) && isScoped(lesson);
+/** Only stable or person-approved lessons are in the look-up: its "team-approved" label must be true (a lesson live on trial with no person behind it stays in the push only, as today). A flagged lesson (`needsALook`: retire proposed, contradiction, possible duplicate, sent back to a person) is left out until a person settles it (lead 4 L4-LP3W). */
+export const pullable = (lesson: Pick<Lesson, "trial" | "approvals" | "scope" | "retireProposedAt" | "contradictsWith" | "possibleDuplicateOf" | "reviewRequired">): boolean =>
+  lesson.trial?.state !== "trial" && (lesson.trial?.state === "stable" || hasPersonApproval(lesson)) && isScoped(lesson) && !needsALook(lesson);
 /** Scoped by repository or path. A lesson with no scope competes for the push only (it must pass the fit floor there). */
 export const isScoped = (lesson: Pick<Lesson, "scope">): boolean => (lesson.scope.repos?.length ?? 0) > 0 || (lesson.scope.paths?.length ?? 0) > 0;
 
