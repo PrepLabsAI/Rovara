@@ -486,11 +486,9 @@ describe("install qualification CLI", () => {
     expect(webApiProbeRunnerConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64")).toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-probes" });
     expect(WEB_API_BUILD_IMAGE).toBe("public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5");
     expect(() => webApiProbeRunnerConfig({ EXECUTOR_IMAGE: image }, "win32", "x64")).toThrow(/runtime directory/);
-    // L4-NETG2: on a gateway-mode worker the qualification's builds run on the gateway's network; a gateway-mode worker that lost the values refuses; any other worker has none.
+    // L4-NETG2: a gateway-mode worker's qualification builds (trusted fixtures) keep their bridge and take the host resolvers as --dns (read from the worker container's resolv.conf: tests/unit/e2e-model-check.test.ts); any other worker has none.
     const gateway = { EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
-    expect(webApiProbeRunnerConfig(gateway, "linux", "arm64").buildEgress).toEqual({ network: "rovara-snet", dns: "172.28.250.2" });
-    expect(webApiProbeRunnerConfig({ ...gateway, AGENTX_SANDBOX_EGRESS: "" }, "linux", "arm64")).not.toHaveProperty("buildEgress");
-    expect(() => webApiProbeRunnerConfig({ ...gateway, AGENTX_SANDBOX_NETWORK: "--privileged" }, "linux", "arm64")).toThrow(/egress gateway/);
+    expect(webApiProbeRunnerConfig({ ...gateway, AGENTX_SANDBOX_EGRESS: "" }, "linux", "arm64")).not.toHaveProperty("buildDns");
   });
 
   it("leaves the agent probes' model socket under the worker's run root a path a unix socket can bind (103 bytes)", () => {

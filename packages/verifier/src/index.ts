@@ -74,7 +74,7 @@ export type { E2EApiRuntimePorts, E2EApiRuntimeResponse } from "./api-runtime.js
 export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "./application-services.js";
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
-  e2eRunNetworks, buildEgressFromEnvironment, e2eModelSocketPath, MODEL_SOCKET_PATH_MAX_BYTES, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
+  e2eRunNetworks, buildDnsFromEnvironment, e2eModelSocketPath, MODEL_SOCKET_PATH_MAX_BYTES, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
 export { E2EModelChannelClosedSchema, agentTraceGroupOf, buildE2EAgentModelEvidence, type E2EModelChannelClosed } from "./host/agent-model-evidence.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationModelChannel, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";

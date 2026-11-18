@@ -101,8 +101,8 @@ export interface DrivingNavigatorDependencies {
   docker: DockerCli;
   executorImage: string;
   buildImage: string;
-  /** Lane L4-NETG2: on a gateway-mode worker, the gateway network and name server the build commands run on. */
-  buildEgress?: Readonly<{ network: string; dns: string }>;
+  /** Lane L4-NETG2: on a gateway-mode worker, the host resolvers the (trusted fixture) build commands are given as `--dns` (see `buildDnsFromEnvironment`). */
+  buildDns?: readonly string[];
   /** A directory on the Docker host at the same path inside this process. */
   runRoot: string;
   /** The model channel of the run: the worker's, on the chosen route, under the test's budget. */
@@ -138,7 +138,7 @@ export function createDrivingNavigator(deps: DrivingNavigatorDependencies): (inp
       const plan = webApiDrivingTestPlan(definition, { appRoot: staged, runId });
       const host = createDockerApplicationHost({ docker: deps.docker, executorImage: deps.executorImage, buildImage: deps.buildImage, runRoot: deps.runRoot, now,
         admission: plan.plan.admission, groupId: plan.plan.groupId, candidateSourceDir: staged,
-        ...(deps.buildEgress === undefined ? {} : { buildEgress: deps.buildEgress }),
+        ...(deps.buildDns === undefined ? {} : { buildDns: deps.buildDns }),
         modelChannel: deps.modelChannelFor({ runId, goal: WEB_API_AGENT_PROBE_GOAL, modelRoute: { routeId: definition.routeId, routeRevision: e2eModelRouteRevision(definition) }, allowedSteps: e2eApplicationGroupAgentSteps(plan.compiled) }) });
       const run = await runIsolatedE2EApplication({ input: webApiProbeRunInput(plan) as never, compiled: plan.compiled, ports: host, signal });
       if (run.unavailableReason !== null || run.actualRun === null) return unavailable(reasonCodeOf(run.unavailableReason ?? undefined));

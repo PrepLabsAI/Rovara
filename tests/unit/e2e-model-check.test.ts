@@ -4,6 +4,7 @@ import { createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2
 import type { E2EInvoke, E2EInvokeInput, E2EInvokeOutput } from "../../packages/model-runtime/src/e2e-route.js";
 import { deriveE2EAgentRouteForModel, e2eAgentRouteDefinitionDigest } from "../../packages/model-runtime/src/e2e-route-derive.js";
 import { validateModelCheckResult } from "../../packages/broker/src/e2e/model-checks.js";
+import { buildDnsFromEnvironment } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createDrivingTestLedger, drivingTestHostConfig, requestIdOf, runE2EModelCheck, withOutputCap } from "../../packages/worker/src/e2e-model-check.js";
 import { CANARY_REQUEST_KEY, CANARY_RESULT_KEY, parseCanaryCliArgs, runRequest, s3CanaryTransport, serveModelChecks, type CanaryTransport } from "../../packages/worker/src/e2e-model-canary-cli.js";
 import { cleanRedirectingEnvironment } from "../support/e2e-clean-environment.js";
@@ -199,9 +200,12 @@ describe("the check the runner makes", () => {
   it("finds the driving test's host from the worker's own configuration, and fails closed without it", () => {
     // L4-NETG2: a gateway-mode worker's driving-test builds are given the gateway's network and name server; a gateway-mode worker that lost them refuses.
     const gatewayEnvironment = { EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64), AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
-    expect(drivingTestHostConfig(gatewayEnvironment, "linux", "arm64").buildEgress).toEqual({ network: "rovara-snet", dns: "172.28.250.2" });
-    expect(drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, "linux", "arm64")).not.toHaveProperty("buildEgress");
-    expect(() => drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_DNS: "" }, "linux", "arm64")).toThrow(/egress gateway/);
+        const resolvers = () => "search ec2.internal\nnameserver 127.0.0.53\nnameserver 10.42.0.2\nnameserver 169.254.169.253\n";
+    expect(buildDnsFromEnvironment(gatewayEnvironment, resolvers)).toEqual(["10.42.0.2", "169.254.169.253"]);
+    expect(buildDnsFromEnvironment({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, resolvers)).toBeUndefined();
+    expect(() => buildDnsFromEnvironment(gatewayEnvironment, () => "nameserver 127.0.0.53\n")).toThrow(/name servers/);
+    expect(() => buildDnsFromEnvironment(gatewayEnvironment, () => { throw new Error("no file"); })).toThrow(/name servers/);
+    expect(drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, "linux", "arm64")).not.toHaveProperty("buildDns");
     expect(() => drivingTestHostConfig({}, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
     expect(() => drivingTestHostConfig({ EXECUTOR_IMAGE: "-bad" }, "linux", "arm64")).toThrow();
     expect(drivingTestHostConfig({ EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64) }, "linux", "arm64")).toMatchObject({ runRoot: expect.stringContaining("web-api-probes") as string });

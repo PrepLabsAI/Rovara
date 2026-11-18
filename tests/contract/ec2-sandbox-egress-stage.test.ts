@@ -32,6 +32,7 @@ function host(options: Options = {}): Host {
   mkdirSync(bin);
   const h: Host = { dir, daemon: join(dir, "daemon.json"), firewall: join(dir, "firewall.sh"), envFile: join(dir, "worker.env"), calls: join(dir, "calls.log"), rules: join(dir, "rules"), rules6: join(dir, "rules6"), units: join(dir, "systemd"), restore: join(dir, "restore.sh"), resolv: join(dir, "resolv.conf"), state: join(dir, "state"), failure: join(dir, "failure") };
   mkdirSync(h.units);
+  mkdirSync(join(dir, "agentx"));
   mkdirSync(join(h.state, "nets"), { recursive: true });
   writeFileSync(h.envFile, "AWS_REGION=us-west-2\nAGENTX_SANDBOX_IMAGE=x\n");
   writeFileSync(h.rules, options.noMetadataBlock === true ? "" : "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
@@ -55,7 +56,7 @@ esac`;
   fake("iptables", table(h.rules, options.failRuleInsert === true));
   fake("ip6tables", table(h.rules6, false));
   fake("timeout", 'while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"');
-  fake("install", 'for last; do :; done; [[ "$*" == *-d* ]] && mkdir -p "$last"; exit 0');
+  fake("install", 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0');
   // A restart of Docker on the new file (the one with the gateway as name server) fails; on the old file it works.
   fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q '"dns"' "${h.daemon}" && exit 1\nexit 0` : "exit 0");
   fake("sleep", "exit 0");
@@ -112,8 +113,10 @@ BOOT_STEP=start; WORKER_ENV_FILE=${h.envFile}; WORKER_UNIT=agentx-worker.service
 ${stageFor(h)}
 ${body}`;
 }
-function runStage(h: Host): { status: number | null; stderr: string; failure: string } {
-  const ran = spawnSync("bash", ["-c", harness(h, "sandbox_egress_main")], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}`, AGENTX_WORKER_IMAGE: WORKER_IMAGE } });
+function runStage(h: Host, withTestServices = false): { status: number | null; stderr: string; failure: string } {
+  // The test-services stage's functions, as boot.sh leaves them defined (it sources the stage inside a function): the rvi wall is missing after the Docker restart unless the stage puts it back.
+  const functions = withTestServices ? `ts_run_walls_present() { return 1; }\nts_wall_run_networks() { echo "ts-wall-run-networks" >>"${h.calls}"; }\nts_wall_ipv6() { echo "ts-wall-ipv6" >>"${h.calls}"; }\n` : "";
+  const ran = spawnSync("bash", ["-c", harness(h, `${functions}sandbox_egress_main`)], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}`, AGENTX_WORKER_IMAGE: WORKER_IMAGE } });
   return { status: ran.status, stderr: ran.stderr, failure: existsSync(h.failure) ? readFileSync(h.failure, "utf8").trim() : "" };
 }
 const envLines = (h: Host): string[] => readFileSync(h.envFile, "utf8").split("\n").filter((line) => line !== "");
@@ -268,6 +271,17 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     const run = (path: string) => spawnSync("bash", ["-c", `args=(run --network host)\n${line.split("/etc/agentx/worker-dns").join(path)}\nprintf '%s\\n' "\${args[@]}"`], { encoding: "utf8" }).stdout.trim().split("\n");
     expect(run(file)).toEqual(["run", "--network", "host", "--dns", "10.42.0.2", "--dns", "169.254.169.253"]);
     expect(run(join(dir, "absent"))).toEqual(["run", "--network", "host"]);
+  });
+
+  it("after the Docker restart it puts the test-services stage's rvi walls back when that stage ran (its functions are defined), and does nothing about them when it did not", () => {
+    const withStage = host();
+    expect(runStage(withStage, true).status).toBe(0);
+    const log = calls(withStage);
+    expect(log).toContain("ts-wall-run-networks");
+    expect(log.indexOf("ts-wall-run-networks")).toBeGreaterThan(log.indexOf("systemctl restart docker.service"));
+    const without = host();
+    expect(runStage(without).status).toBe(0);
+    expect(calls(without)).not.toContain("ts-wall-run-networks");
   });
 
   it("an empty daemon.json object gets the key without a trailing comma", () => {

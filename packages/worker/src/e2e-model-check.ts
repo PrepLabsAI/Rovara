@@ -11,7 +11,7 @@ import {
   type E2EDayBudget, type E2EInvoke, type E2EInvokeInput,
 } from "@agentx/model-runtime";
 import { discoverModels, type DiscoveryDependencies, type ModelDiscoveryReport } from "@agentx/model-runtime/model-discovery";
-import { WEB_API_BUILD_IMAGE, buildEgressFromEnvironment, containedRuntimeProfileForHost, createDrivingNavigator, createProcessDockerCli, runModelDrivingTest, type DockerApplicationModelChannel, type DrivingChannelRequest, type DrivingShape, type NavigationOutcome } from "@agentx/verifier";
+import { WEB_API_BUILD_IMAGE, buildDnsFromEnvironment, containedRuntimeProfileForHost, createDrivingNavigator, createProcessDockerCli, runModelDrivingTest, type DockerApplicationModelChannel, type DrivingChannelRequest, type DrivingShape, type NavigationOutcome } from "@agentx/verifier";
 import { awsBedrockDiscoveryClient, awsQuotaClient } from "./e2e-model-discovery-aws.js";
 import { createE2ECredentialGuard } from "./e2e-model-credential-guard.js";
 import { createE2EModelEvidenceCollector, openE2EModelChannelSession } from "./e2e-model-channel-session.js";
@@ -201,16 +201,16 @@ async function drive(request: E2EModelCheckRequest, environment: NodeJS.ProcessE
 // ---------------------------------------------------------------------------------------------------------------------
 
 /** The executor image, the build image and the run root, read from the worker's own configuration exactly as the qualification reads them. */
-export function drivingTestHostConfig(environment: NodeJS.ProcessEnv, platform: string = process.platform, arch: string = process.arch): { executorImage: string; buildImage: string; runRoot: string; buildEgress?: { network: string; dns: string } } {
+export function drivingTestHostConfig(environment: NodeJS.ProcessEnv, platform: string = process.platform, arch: string = process.arch): { executorImage: string; buildImage: string; runRoot: string; buildDns?: readonly string[] } {
   const executorImage = environment["EXECUTOR_IMAGE"]?.trim() ?? "";
   if (executorImage === "" || executorImage.length > 512 || /\s/.test(executorImage) || executorImage.startsWith("-") || [...executorImage].some((character) => character.charCodeAt(0) < 0x20)) {
     throw new Error("EXECUTOR_IMAGE is not set to an image reference on this worker");
   }
   const scratch = containedRuntimeProfileForHost(platform, arch)?.candidateScratchRoot;
   if (scratch === undefined) throw new Error("this host has no shared runtime directory for driving test runs");
-  // L4-NETG2: on a gateway-mode worker the driving test's build commands run on the gateway's network.
-  const buildEgress = buildEgressFromEnvironment(environment);
-  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-probes"), ...(buildEgress === undefined ? {} : { buildEgress }) };
+  // L4-NETG2: on a gateway-mode worker the driving test's (trusted fixture) builds are given the host resolvers as --dns; the daemon's default name server is the egress gateway there.
+  const buildDns = buildDnsFromEnvironment(environment);
+  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-probes"), ...(buildDns === undefined ? {} : { buildDns }) };
 }
 
 /**

@@ -32,7 +32,7 @@ type Setup = Awaited<ReturnType<typeof setup>>;
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
   recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean; mockReadyMs?: number;
   onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]>; fixture?: OrdersExecutorFixture; ownedFiles?: Record<string, string>;
-  modelChannel?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["modelChannel"]>; buildEgress?: { network: string; dns: string } }) {
+  modelChannel?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["modelChannel"]>; buildEgress?: { network: string; dns: string }; buildDns?: string[] }) {
   const fixture: OrdersExecutorFixture = options.fixture ?? createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
@@ -41,7 +41,7 @@ async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; 
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
     admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, ...(options.mockReadyMs ? { mockReadyMs: options.mockReadyMs } : {}), assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
-    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}), ...(options.modelChannel ? { modelChannel: options.modelChannel } : {}), ...(options.buildEgress ? { buildEgress: options.buildEgress } : {}) });
+    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}), ...(options.ownedFiles ? { ownedFiles: options.ownedFiles } : {}), ...(options.modelChannel ? { modelChannel: options.modelChannel } : {}), ...(options.buildEgress ? { buildEgress: options.buildEgress } : {}), ...(options.buildDns ? { buildDns: options.buildDns } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
   const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
@@ -240,6 +240,17 @@ describe("docker application host", () => {
       // Only the run's internal network exists: no build bridge was created.
       expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1))).toEqual([e2eRunNetworks(s.runId).internal]);
       expect(fake.calls.some((args) => args.some((value) => /^com\.docker\.network\.bridge\.name=rvb/u.test(value)))).toBe(false);
+    });
+    it("buildDns (trusted fixture builds on a gateway-mode worker) keeps the run's own build bridge and adds only --dns for each resolver; invalid values are refused", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep, buildDns: ["10.42.0.2", "169.254.169.253"] }); fake.onExecutor = okOutput(s);
+      await runWith(s);
+      const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") && !args[args.indexOf("--name") + 1]!.endsWith("-0"));
+      expect(builds.length).toBeGreaterThan(0);
+      for (const args of builds) {
+        expect(args[args.indexOf("--network") + 1]).toBe(`rovara-e2e-build-${s.runId}`);
+        expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual(["10.42.0.2", "169.254.169.253"]);
+      }
+      for (const bad of [["--privileged"], ["10.0.0.1 --privileged"], ["a", "b", "c", "d"].map(() => "10.0.0.1")]) await expect(setup({ fake: new FakeDockerCli(), buildDns: bad })).rejects.toThrow(/name servers/u);
     });
     it("without it (a laptop, qualification, a bridge-mode worker) the build commands keep the run's own build bridge and no --dns", async () => {
       const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);

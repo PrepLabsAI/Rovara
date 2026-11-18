@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, cp, lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -60,16 +61,17 @@ export function createProcessDockerCli(binary = "docker"): DockerCli {
 }
 
 /**
- * Lane L4-NETG2: the gateway network and name server of a worker whose boot said `AGENTX_SANDBOX_EGRESS=gateway` (the worker's environment file), or undefined on every other worker (a laptop, a bridge-mode worker). A gateway-mode
- * worker that lost either value throws: nothing then builds on a bridge with a way out. The worker package reads the same variables for its own sandboxes (task-sandbox.ts `gatewayEgressFor`); this one is for the code that runs in the verifier package
- * (the install qualification, the driving test), which cannot import the worker.
+ * Lane L4-NETG2: the host resolvers a TRUSTED build (the install qualification's probes and the model driving test: Rovara's own pinned fixtures, run by the worker container) is given as `--dns` on a gateway-mode worker, whose Docker daemon's default
+ * name server is the egress gateway, which a build on the run's own `rvb*` bridge cannot reach. Read from the worker container's resolv.conf (the launcher gave that container the host's resolvers). Undefined on every other worker.
+ * Candidate code never builds this way: it builds on the gateway's network (`buildEgress`). Throws when a gateway-mode worker has no usable resolver.
  */
-export function buildEgressFromEnvironment(environment: NodeJS.ProcessEnv): { network: string; dns: string } | undefined {
+export function buildDnsFromEnvironment(environment: NodeJS.ProcessEnv, resolvConf: () => string = () => readFileSync("/etc/resolv.conf", "utf8")): readonly string[] | undefined {
   if (environment["AGENTX_RUNTIME"] !== "ec2" || environment["AGENTX_SANDBOX_EGRESS"] !== "gateway") return undefined;
-  const network = environment["AGENTX_SANDBOX_NETWORK"] ?? "";
-  const dns = environment["AGENTX_SANDBOX_DNS"] ?? "";
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(network) || !IPV4.test(dns)) throw new Error("this worker's builds must go through the egress gateway, but the network or name server it set up is missing or not valid");
-  return { network, dns };
+  let text = "";
+  try { text = resolvConf(); } catch { /* none */ }
+  const found = [...new Set(text.split("\n").map((line) => /^nameserver\s+(\S+)\s*$/u.exec(line)?.[1]).filter((address): address is string => address !== undefined && IPV4.test(address) && !address.startsWith("127.")))].slice(0, 3);
+  if (found.length === 0) throw new Error("this worker's trusted builds need the host's name servers, but its resolv.conf has none");
+  return found;
 }
 export const ROVARA_RUN_LABEL = "rovara.run";
 export const ROVARA_CREATED_LABEL = "rovara.created";
@@ -187,6 +189,11 @@ export type DockerApplicationHostDeps = Readonly<{
    * never a raw address. The run's `rvb*` network is not made. Both values are checked here (a plain network name and an IPv4 address), so neither can become a docker option. Unset (every laptop, qualification, a bridge-mode worker): as before.
    */
   buildEgress?: Readonly<{ network: string; dns: string }>;
+  /**
+   * Lane L4-NETG2: for TRUSTED builds on a gateway-mode worker (the install qualification, the driving test): the build commands stay on the run's own `rvb*` bridge and are given these host resolvers as `--dns`, because the daemon's default name server is
+   * the gateway (`buildDnsFromEnvironment`). Ignored when `buildEgress` is set. Each value is checked to be an IPv4 address.
+   */
+  buildDns?: readonly string[];
   /**
    * The model channel of a group that has an `agent` step, and only of such a group: building a host for a group with an agent step without it, or for a group without one with it,
    * throws. It is the real gate between a pinned route and a running proxy (Ruling DB-1); the worker supplies it per group and only after it re-derived the route.
@@ -316,7 +323,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const buildEgress = deps.buildEgress;
   if (buildEgress !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(buildEgress.network) || !IPV4.test(buildEgress.dns))) throw new Error("the build egress network or name server is not valid");
   /** What the recipe's build commands are put on: the gateway's network with the gateway as name server, or the run's own build bridge. */
-  const buildNetworkArgs = buildEgress === undefined ? ["--network", buildNetwork] : ["--network", buildEgress.network, "--dns", buildEgress.dns];
+  const buildDns = deps.buildDns ?? [];
+  if (buildDns.length > 3 || !buildDns.every((address) => IPV4.test(address))) throw new Error("the build name servers are not valid");
+  const buildNetworkArgs = buildEgress === undefined ? ["--network", buildNetwork, ...buildDns.flatMap((address) => ["--dns", address])] : ["--network", buildEgress.network, "--dns", buildEgress.dns];
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
   const seedName = `rovara-seed-${runId}`;

@@ -47,7 +47,8 @@ se_host_resolvers() { awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print 
 se_worker_dns() {
   local resolvers
   resolvers=$(se_host_resolvers) && [[ -n "$resolvers" ]] || return 1
-  install -d -m 0755 /etc/agentx && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE" && chmod 0644 "$SE_WORKER_DNS_FILE"
+  # (/etc/agentx exists: boot.sh made it for the launcher; only the file is made here, so the directory keeps its mode.)
+  install -m 0644 /dev/null "$SE_WORKER_DNS_FILE" && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE"
 }
 # The gateway is the Docker DAEMON's default name server. A container with its own `--dns` is not affected; a container that has none (a `docker build` step, which has no such option) asks the gateway, which is reachable only from rovara-snet: on any other
 # network (docker0, a stale bridge) a name lookup now fails, which is the point. Idempotent. Docker is restarted only when the file changes, then the container firewall is put back (a restart rebuilds Docker's chains).
@@ -62,11 +63,17 @@ se_daemon_dns() {
   if [[ "${content//[[:space:]]/}" == "{}" ]]; then printf '{"dns": ["%s"]}\n' "$SE_INNER_IP" >"$SE_DAEMON_JSON"
   elif [[ "$content" == \{* ]]; then printf '%s\n' "{\"dns\": [\"$SE_INNER_IP\"], ${content:1}" >"$SE_DAEMON_JSON"
   else mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"; return 1; fi
-  if se_daemon_dns_is && systemctl restart docker.service && bash "$SE_FIREWALL" && se_docker_ready; then rm -f "$SE_DAEMON_JSON.before-sandbox-egress"; return 0; fi
+  if se_daemon_dns_is && systemctl restart docker.service && bash "$SE_FIREWALL" && se_after_restart_walls && se_docker_ready; then rm -f "$SE_DAEMON_JSON.before-sandbox-egress"; return 0; fi
   mv -f "$SE_DAEMON_JSON.before-sandbox-egress" "$SE_DAEMON_JSON"
   systemctl reset-failed docker.service 2>/dev/null || true
   systemctl restart docker.service
   return 1
+}
+# A Docker restart may rebuild Docker's chains. The test-services stage (boot.sh sources it, so its functions are defined here when it ran) walls the rvi bridges from each other and closes them on IPv6; put those back.
+se_after_restart_walls() {
+  declare -F ts_wall_run_networks >/dev/null || return 0
+  ts_run_walls_present || ts_wall_run_networks || return 1
+  ! declare -F ts_wall_ipv6 >/dev/null || ts_wall_ipv6 || true
 }
 se_docker_ready() { local i; for i in 1 2 3 4 5 6 7 8 9 10; do docker info >/dev/null 2>&1 && return 0; sleep 2; done; return 1; }
 
