@@ -35,14 +35,16 @@ function harness(task: DeveloperTaskRecord, developer?: DeveloperRecord, proof?:
   db.set(task as unknown as Record<string, unknown>);
   const access = vi.fn(async () => undefined);
   const uuids = [PERSON_1, PERSON_2];
+  const slackProof = vi.fn(proof ?? (async (request: TaskPersonProofRequest) => ({ ok: true as const, user: { id: request.slackUserId, teamId: TEAM, name: "Octo Cat" }, memberOf: ["C0PAY0001"] })));
+  const channels = vi.fn(async () => ["C0PAY0001"]);
   const deps: TaskPersonIdentityDependencies = {
     documentClient: db, tableName: "state", slackTeamId: TEAM, now: () => T0, uuid: () => uuids.shift() ?? PERSON_2,
-    taskPersonProof: vi.fn(proof ?? (async (request: TaskPersonProofRequest) => ({ ok: true as const, user: { id: request.slackUserId, teamId: TEAM, name: "Octo Cat" }, memberOf: ["C0PAY0001"] }))),
+    taskPersonProof: slackProof,
     developerRecord: vi.fn(async (id: string) => (id === developer?.developerId ? developer : undefined)),
-    projectChannelIds: vi.fn(async () => ["C0PAY0001"]),
+    projectChannelIds: channels,
     targetProjectAccess: access,
   };
-  return { db, deps, access };
+  return { db, deps, access, slackProof, channels };
 }
 const row = (method: Method, extra: Record<string, unknown> = {}) => ({
   pk: `DEVTASK#${TASK_ID}`, sk: `PERSON#${PERSON_1}`, schemaVersion: 1, personId: PERSON_1, developerId: person(method), slackUserId: SLACK, name: "Octo",
@@ -90,6 +92,21 @@ describe("GitHub task people (DEC 254n)", () => {
       h.db.set(row(method)); h.db.set(reverse(method));
       await expect(resolveTaskPersonId(h.deps, TASK_ID, PERSON_1)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
     }
+  });
+
+  it("a GitHub creator whose task stored no Slack id stays a web identity when the sign-in record links Slack later, exactly as an OIDC creator (no Slack call)", async () => {
+    const run = async (method: Method) => {
+      const h = harness(taskBy(method, false), record(method));
+      const answer = await outcome(() => checkTaskPersonIdentity(h.deps, taskBy(method, false), person(method)));
+      // A web identity: Slack is never asked (no proof, no channel list), whatever the sign-in record's later link says.
+      expect(h.slackProof).not.toHaveBeenCalled();
+      expect(h.channels).not.toHaveBeenCalled();
+      return generic({ answer, rows: h.db.find((item) => String(item.sk).startsWith("PERSON")) }, method);
+    };
+    const github = await run("github");
+    expect(github).toEqual(await run("oidc"));
+    // Not the old refusal (a linked record on an unlinked task was refused before C2): this harness has no web readers, so the web proof is unavailable.
+    expect(github).toEqual({ answer: { code: "SLACK_UNAVAILABLE" }, rows: [] });
   });
 
   it("a GitHub creator's task never takes a creator record of another method, and unknown methods are refused everywhere", async () => {
