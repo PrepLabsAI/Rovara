@@ -486,3 +486,9 @@ export * from "./upkeep.js";
 export * from "./prompt-locations.js";
 export * from "./ai-markers.js";
 export * from "./company-egress-addresses.js";
+
+// Real check on the customer's staging, RC1 + RC2 (L4-RC12): the connection contract, the read-only operation tables and the operation classifier. Additive: new files and these lines, no callers yet.
+export * from "./real-check-read-tables.js";
+export * from "./real-check-graphql.js";
+export * from "./real-check-classifier.js";
+export * from "./real-check-connection.js";

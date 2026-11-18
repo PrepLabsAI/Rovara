@@ -1,0 +1,483 @@
+// Real check on the customer's staging, RC2 (design real-check-security-design.md, 4.3): the OPERATION CLASSIFIER. One pure function, `classifyRealCheckRequest`, says whether one outgoing request is a read the
+// real check may make, and why not when it is not. It is the second of the three walls (the customer's IAM, this table, the method rules); RealCheckEgress (Cloud, a later lane) calls it on every request before
+// it adds a credential, and the helper on the run network may call it first to fail fast. No credential, no network and no clock here.
+//
+// Fail closed, in this order:
+//   1. the URL is read strictly (https, a plain host, no userinfo, no fragment, no odd characters, a path with no `.`/`..`, no `;`, no double or slash encoding); anything else is `unreadable`;
+//   2. the host is never an AI model service (`model_host`), never production (`prod`: the company's list, a prod/live label, a vendor's production host, an empty list), and must be one of the connection's exact hosts
+//      (`host_not_allowed`);
+//   3. nothing that changes a method (a header, a `_method` or `$httpMethod` query) survives;
+//   4. by host: a Google API host is read ONLY through the Google table (exact method + path shape + query names + body members; BigQuery is a SELECT with a forced bytes cap); any other host is plain HTTP:
+//      GET/HEAD with no body, no action word in the path, no action value in an `?action=` style query, and (when the connection lists operations) a listed operation; or a POST to a declared GraphQL path whose
+//      parsed document has only `query` operations. Every other method is refused: `write` for POST, PUT, PATCH and DELETE, `not_allowed` for the rest.
+// The verdict carries a cleaned `operation` label for the ledger: the method, the host and a path in which every segment that is not a plain lower-case word is `{id}`. Never a query value, a body or a header.
+import { z } from "zod";
+import { hostProblem } from "./test-services-shared.js";
+import { isTestAccountModelHost, normalizeModelHostCandidate } from "./test-account-model-hosts.js";
+import { testAccountHostProblems } from "./test-account.js";
+import { prodDenyIsEmpty, prodDenyMatchesHost, type TestEnvProdDeny } from "./test-environment-prod-deny.js";
+import { parseGraphqlDocument, parseStrictJson } from "./real-check-graphql.js";
+import {
+  REAL_CHECK_ACTION_QUERY_NAMES,
+  REAL_CHECK_ACTION_WORDS,
+  REAL_CHECK_BIGQUERY_WRITE_WORDS,
+  REAL_CHECK_GOOGLE_HOSTS,
+  REAL_CHECK_GOOGLE_ROWS,
+  REAL_CHECK_LIMIT_DEFAULTS,
+  REAL_CHECK_METHOD_OVERRIDE_HEADERS,
+  REAL_CHECK_METHOD_OVERRIDE_QUERY_NAMES,
+  isGoogleApiHost,
+  type RealCheckGoogleRow,
+  type RealCheckLimits,
+} from "./real-check-read-tables.js";
+
+/** The company's production list for real checks: the shared list (hosts, AWS accounts, ARN prefixes) plus GCP project ids and numbers (owner decision R3-8). */
+export type RealCheckProdDeny = TestEnvProdDeny & { gcpProjects?: readonly string[] };
+
+export const REAL_CHECK_REFUSALS = ["write", "not_allowed", "host_not_allowed", "prod", "model_host", "unreadable"] as const;
+export type RealCheckRefusal = (typeof REAL_CHECK_REFUSALS)[number];
+
+export interface RealCheckRequest {
+  /** The method exactly as sent (`GET`); anything not an upper-case token is unreadable. */
+  method: string;
+  /** The absolute URL the box asked for. */
+  url: string;
+  /** Request header NAMES with values (only the names are read here, to find a method override and a content type). */
+  headers?: Readonly<Record<string, string>> | undefined;
+  /** The request body as text (a JSON body); absent for a body-less request. */
+  body?: string | undefined;
+}
+
+export interface RealCheckPolicy {
+  /** The connection's exact hosts. */
+  hosts: readonly string[];
+  /** The connection's GCP project, by id and (when known) number: a Google request names one of these and no other. Absent for a connection that is not GCP. */
+  gcpProjects?: readonly string[] | undefined;
+  /** Exact paths of the connection's GraphQL endpoints (`/graphql`); a POST anywhere else is a write. */
+  graphqlPaths?: readonly string[] | undefined;
+  /** Approved plain-HTTP operations (`GET /v2/user/videos/{id}`); empty or absent means any GET on the allowed hosts. */
+  operations?: readonly string[] | undefined;
+  limits?: Pick<RealCheckLimits, "requestBytes" | "bigQueryBytesBilled"> | undefined;
+  /** The company's production list. Required: an empty or missing list refuses every request (`prod`). */
+  prodDeny: RealCheckProdDeny | undefined;
+  /** The company's own model gateway hosts (also never a real-check host). */
+  modelGatewayHosts?: readonly string[] | undefined;
+}
+
+export type RealCheckProtocol = "http" | "graphql" | "google";
+
+export type RealCheckVerdict =
+  | {
+      allow: true;
+      protocol: RealCheckProtocol;
+      method: "GET" | "HEAD" | "POST";
+      host: string;
+      /** The cleaned label for the ledger. */
+      operation: string;
+      /** BigQuery: the bytes cap this query MUST carry (the request's own, lowered to the cap) and whether it is a dry run. */
+      bigQuery?: { maximumBytesBilled: string; dryRun: boolean };
+      /** The body to forward when the check rewrote it (BigQuery's forced cap). Otherwise the request's own body is forwarded unchanged. */
+      forwardBody?: string;
+    }
+  | { allow: false; reason: RealCheckRefusal; operation: string };
+
+const refuse = (reason: RealCheckRefusal, operation: string): RealCheckVerdict => ({ allow: false, reason, operation });
+
+// ---- the URL, read strictly
+
+interface ParsedUrl {
+  host: string;
+  /** Path segments, as sent (still percent-encoded) and decoded once. */
+  segments: Array<{ raw: string; decoded: string }>;
+  trailingSlash: boolean;
+  query: Array<{ name: string; value: string }>;
+  hasQuery: boolean;
+}
+
+const URL_SHAPE = /^https:\/\/([A-Za-z0-9.-]{1,253})(?::443)?(\/[^?#\s]*)?(?:\?([^#\s]*))?$/u;
+const PATH_CHARS = /^\/[A-Za-z0-9._~!$&'()*+,=:@%/-]*$/u;
+const MAX_QUERY_PAIRS = 40;
+
+function decodeOnce(text: string): string | undefined {
+  if (/%(?![0-9A-Fa-f]{2})/u.test(text)) return undefined;
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The URL's parts, or undefined when it is not a plain https URL. `allowEncodedSlash`: an encoded slash is kept in a segment (Storage object names); otherwise it is a refusal. */
+function parseUrl(url: unknown): ParsedUrl | undefined {
+  if (typeof url !== "string" || url.length > 4_096) return undefined;
+  const match = URL_SHAPE.exec(url);
+  if (match === null) return undefined;
+  const host = (match[1] as string).toLowerCase();
+  const rawPath = match[2] ?? "/";
+  if (!PATH_CHARS.test(rawPath)) return undefined;
+  const parts = rawPath.split("/").slice(1);
+  const trailingSlash = parts.length > 1 && parts[parts.length - 1] === "";
+  const named = trailingSlash ? parts.slice(0, -1) : parts;
+  const segments: Array<{ raw: string; decoded: string }> = [];
+  for (const raw of named) {
+    if (raw === "" && !(named.length === 1 && !trailingSlash)) return undefined;
+    // `%25` (a literal percent) is refused: a double-encoded name is read one way here and another by the server.
+    if (/%25/iu.test(raw)) return undefined;
+    const decoded = decodeOnce(raw);
+    if (decoded === undefined || decoded === "." || decoded === ".." || /[\p{Cc}\\]/u.test(decoded)) return undefined;
+    segments.push({ raw, decoded });
+  }
+  const query: Array<{ name: string; value: string }> = [];
+  const rawQuery = match[3];
+  if (rawQuery !== undefined && rawQuery !== "") {
+    const pairs = rawQuery.split("&");
+    if (pairs.length > MAX_QUERY_PAIRS) return undefined;
+    for (const pair of pairs) {
+      if (pair === "") continue;
+      const eq = pair.indexOf("=");
+      const name = decodeOnce((eq === -1 ? pair : pair.slice(0, eq)).replace(/\+/gu, " "));
+      const value = decodeOnce((eq === -1 ? "" : pair.slice(eq + 1)).replace(/\+/gu, " "));
+      if (name === undefined || value === undefined || /\p{Cc}/u.test(name + value)) return undefined;
+      query.push({ name, value });
+    }
+  }
+  return { host, segments, trailingSlash, query, hasQuery: rawQuery !== undefined };
+}
+
+// ---- the ledger label
+
+const WORD_SEGMENT = /^[a-z][a-z_-]{0,23}$/u;
+const VERSION_SEGMENT = /^v\d{1,2}(?:alpha\d*|beta\d*)?$/u;
+const METHOD_TOKEN = /^[A-Z]{3,10}$/u;
+
+/** A path as the ledger shows it: a plain lower-case word or a version is kept, every other segment (an id, a name, a number) is `{id}`; at most 8 segments. */
+export function realCheckPathLabel(segments: readonly string[]): string {
+  const kept = segments.slice(0, 8).map((segment) => (WORD_SEGMENT.test(segment) || VERSION_SEGMENT.test(segment) ? segment : "{id}"));
+  return `/${kept.join("/")}${segments.length > 8 ? "/…" : ""}`;
+}
+
+const labelOf = (method: string, host: string | undefined, path: string): string => `${METHOD_TOKEN.test(method) ? method : "?"} ${host ?? "?"} ${path}`;
+
+// ---- plain HTTP
+
+function actionWordIn(text: string): boolean {
+  const words = text.replace(/([a-z0-9])([A-Z])/gu, "$1 $2").split(/[^A-Za-z0-9]+/u);
+  return words.some((word) => word !== "" && REAL_CHECK_ACTION_WORDS.has(word.toLowerCase()));
+}
+
+/** A template is `GET /v2/user/videos/{id}`: the method, then literal segments and `{name}` for any one segment. */
+const OPERATION_TEMPLATE = /^(GET|HEAD) (\/(?:[A-Za-z0-9._~-]+|\{[a-z][a-z0-9_]{0,23}\})(?:\/(?:[A-Za-z0-9._~-]+|\{[a-z][a-z0-9_]{0,23}\}))*)$/u;
+
+/** Whether the text is a valid operation template of the connection. */
+export function isRealCheckOperationTemplate(text: unknown): boolean {
+  return typeof text === "string" && text.length <= 200 && OPERATION_TEMPLATE.test(text);
+}
+
+function operationAllowed(method: string, segments: readonly string[], operations: readonly string[]): boolean {
+  return operations.some((template) => {
+    const match = OPERATION_TEMPLATE.exec(template);
+    if (match === null) return false;
+    if (match[1] !== method && !(method === "HEAD" && match[1] === "GET")) return false;
+    const parts = (match[2] as string).split("/").slice(1);
+    return parts.length === segments.length && parts.every((part, index) => (part.startsWith("{") ? (segments[index] as string) !== "" : part === segments[index]));
+  });
+}
+
+function queryProblem(url: ParsedUrl): "write" | undefined {
+  for (const { name, value } of url.query) {
+    const lower = name.toLowerCase();
+    if (REAL_CHECK_METHOD_OVERRIDE_QUERY_NAMES.has(lower)) return "write";
+    if (REAL_CHECK_ACTION_QUERY_NAMES.has(lower) && actionWordIn(value)) return "write";
+    // A GraphQL document in a GET's query string: a mutation or a subscription is not a read, wherever the server routes it.
+    if ((lower === "query" || lower === "mutation") && value.length > 0) {
+      const verdict = parseGraphqlDocument(value);
+      if (!verdict.ok && (verdict.code === "mutation" || verdict.code === "subscription")) return "write";
+    }
+  }
+  return undefined;
+}
+
+const JSON_TYPE = /^application\/(?:json|graphql-response\+json)\s*(?:;\s*charset=utf-8\s*)?$/iu;
+const GRAPHQL_TYPE = /^application\/graphql\s*(?:;\s*charset=utf-8\s*)?$/iu;
+
+function header(headers: RealCheckRequest["headers"], name: string): string | undefined {
+  if (headers === undefined) return undefined;
+  const key = Object.keys(headers).find((each) => each.toLowerCase() === name);
+  return key === undefined ? undefined : headers[key];
+}
+
+function classifyGraphql(request: RealCheckRequest, url: ParsedUrl, host: string, operation: string, requestBytes: number): RealCheckVerdict {
+  const allowed: RealCheckVerdict = { allow: true, protocol: "graphql", method: request.method as "GET" | "HEAD" | "POST", host, operation: `${request.method} ${host} ${realCheckPathLabel(url.segments.map((s) => s.decoded))} (query)` };
+  let document: unknown;
+  if (request.method === "POST") {
+    // A query string on a POST is merged with the body by some servers: refused outright.
+    if (url.hasQuery) return refuse("not_allowed", operation);
+    const body = request.body ?? "";
+    if (body.length === 0 || new TextEncoder().encode(body).length > requestBytes) return refuse("not_allowed", operation);
+    const type = header(request.headers, "content-type");
+    if (type !== undefined && GRAPHQL_TYPE.test(type)) document = body;
+    else {
+      if (type !== undefined && !JSON_TYPE.test(type)) return refuse("not_allowed", operation);
+      const parsed = parseStrictJson(body);
+      if (!parsed.ok || typeof parsed.value !== "object" || parsed.value === null || Array.isArray(parsed.value)) return refuse("unreadable", operation);
+      const members = parsed.value as Record<string, unknown>;
+      // A persisted query (an id or `extensions` with no text), a batch and any other member are not read: only the text of the query can be checked.
+      if (Object.keys(members).some((key) => key !== "query" && key !== "operationName" && key !== "variables")) return refuse("not_allowed", operation);
+      if (members.operationName !== undefined && members.operationName !== null && typeof members.operationName !== "string") return refuse("unreadable", operation);
+      if (members.variables !== undefined && members.variables !== null && (typeof members.variables !== "object" || Array.isArray(members.variables))) return refuse("unreadable", operation);
+      document = members.query;
+    }
+  } else {
+    if (request.body !== undefined && request.body !== "") return refuse("not_allowed", operation);
+    if (url.query.some((pair) => pair.name !== "query" && pair.name !== "operationName" && pair.name !== "variables")) return refuse("not_allowed", operation);
+    const queries = url.query.filter((pair) => pair.name === "query");
+    if (queries.length !== 1) return refuse("unreadable", operation);
+    document = (queries[0] as { value: string }).value;
+  }
+  const verdict = parseGraphqlDocument(document);
+  if (verdict.ok) return allowed;
+  return refuse(verdict.code === "mutation" ? "write" : verdict.code === "unreadable" ? "unreadable" : "not_allowed", operation);
+}
+
+function classifyHttp(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy): RealCheckVerdict {
+  const decoded = url.segments.map((segment) => segment.decoded);
+  const operation = labelOf(request.method, host, realCheckPathLabel(decoded));
+  const requestBytes = policy.limits?.requestBytes ?? REAL_CHECK_LIMIT_DEFAULTS.requestBytes;
+  // An encoded slash is another path to the server: refused here.
+  if (decoded.some((segment) => segment.includes("/"))) return refuse("unreadable", operation);
+  const path = `/${decoded.join("/")}`;
+  const isGraphql = (policy.graphqlPaths ?? []).includes(path);
+  const { method } = request;
+  if (method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE") {
+    // The only POST that can be a read is a GraphQL query to a declared GraphQL endpoint.
+    if (method === "POST" && isGraphql) return classifyGraphql(request, url, host, operation, requestBytes);
+    return refuse("write", operation);
+  }
+  if (method !== "GET" && method !== "HEAD") return refuse("not_allowed", operation);
+  // A request that carries a body cannot be read: a GET with one is refused whatever the body says.
+  if (request.body !== undefined && request.body !== "") return refuse("not_allowed", operation);
+  if (url.segments.some((segment) => actionWordIn(segment.decoded))) return refuse("write", operation);
+  const problem = queryProblem(url);
+  if (problem !== undefined) return refuse(problem, operation);
+  if (isGraphql) return classifyGraphql(request, url, host, operation, requestBytes);
+  const operations = policy.operations ?? [];
+  if (operations.length > 0 && !operationAllowed(method, decoded, operations)) return refuse("not_allowed", operation);
+  return { allow: true, protocol: "http", method, host, operation };
+}
+
+// ---- Google APIs
+
+interface GoogleMatch {
+  row: RealCheckGoogleRow;
+  vars: Record<string, string>;
+}
+
+const TEMPLATE_CACHE = new Map<string, RegExp>();
+
+function templateRegExp(path: string): RegExp {
+  const cached = TEMPLATE_CACHE.get(path);
+  if (cached !== undefined) return cached;
+  let source = "";
+  let rest = path;
+  while (rest.length > 0) {
+    const open = rest.indexOf("{");
+    if (open === -1) {
+      source += rest.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      break;
+    }
+    source += rest.slice(0, open).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const close = rest.indexOf("}", open);
+    const name = rest.slice(open + 1, close);
+    source += name.endsWith("*") ? `(?<${name.slice(0, -1)}>[^/:]+(?:/[^/:]+)*)` : `(?<${name}>[^/:]+)`;
+    rest = rest.slice(close + 1);
+  }
+  const compiled = new RegExp(`^${source}$`, "u");
+  TEMPLATE_CACHE.set(path, compiled);
+  return compiled;
+}
+
+function matchGoogle(method: "GET" | "POST", rawPath: string): GoogleMatch[] {
+  const found: GoogleMatch[] = [];
+  for (const row of REAL_CHECK_GOOGLE_ROWS) {
+    if (row.method !== method) continue;
+    const match = templateRegExp(row.path).exec(rawPath);
+    if (match !== null) found.push({ row, vars: { ...(match.groups ?? {}) } });
+  }
+  return found;
+}
+
+const ALT_VALUES = new Set(["json", "media"]);
+const PERMISSION = /^[a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+){1,4}$/u;
+const BYTES_VALUE = /^(?:0|[1-9][0-9]{0,17})$/u;
+
+/** Words of a BigQuery statement, outside strings, comments and quoted names; a `;` is the word ";". Undefined when a string, comment or quoted name is left open. */
+function bigQueryWords(sql: string): string[] | undefined {
+  const words: string[] = [];
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i] as string;
+    if (ch === "-" && sql[i + 1] === "-") {
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+    } else if (ch === "#") {
+      while (i < n && sql[i] !== "\n" && sql[i] !== "\r") i += 1;
+    } else if (ch === "/" && sql[i + 1] === "*") {
+      const end = sql.indexOf("*/", i + 2);
+      if (end === -1) return undefined;
+      i = end + 2;
+    } else if (ch === "'" || ch === '"' || ch === "`") {
+      const triple = ch !== "`" && sql.startsWith(ch.repeat(3), i);
+      const close = triple ? ch.repeat(3) : ch;
+      let j = i + close.length;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === "\\" && ch !== "`") j += 2;
+        else if (sql.startsWith(close, j)) {
+          closed = true;
+          j += close.length;
+          break;
+        } else if (!triple && ch !== "`" && (sql[j] === "\n" || sql[j] === "\r")) return undefined;
+        else j += 1;
+      }
+      if (!closed) return undefined;
+      // A string or a quoted name stands as one opaque word, so `SELECT 'a' 'b'` cannot hide a keyword next to it.
+      words.push("?");
+      i = j;
+    } else if (/[A-Za-z0-9_]/u.test(ch)) {
+      let j = i + 1;
+      while (j < n && /[A-Za-z0-9_]/u.test(sql[j] as string)) j += 1;
+      words.push(sql.slice(i, j).toUpperCase());
+      i = j;
+    } else {
+      if (ch === ";") words.push(";");
+      i += 1;
+    }
+  }
+  return words;
+}
+
+/** Whether a BigQuery statement is one plain read: it starts with SELECT or WITH, is not a script, and holds no write, DDL, script or transaction word. */
+export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unreadable" {
+  if (typeof sql !== "string" || sql.length === 0 || sql.length > 65_536) return "unreadable";
+  const words = bigQueryWords(sql);
+  if (words === undefined) return "unreadable";
+  while (words.length > 0 && words[words.length - 1] === ";") words.pop();
+  const first = words[0];
+  if (first !== "SELECT" && first !== "WITH") return "write";
+  if (words.includes(";")) return "write";
+  const write = new Set<string>(REAL_CHECK_BIGQUERY_WRITE_WORDS);
+  return words.some((word) => write.has(word)) ? "write" : "read";
+}
+
+function classifyGoogle(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy): RealCheckVerdict {
+  const decoded = url.segments.map((segment) => segment.decoded);
+  const operation = labelOf(request.method, host, realCheckPathLabel(decoded));
+  const requestBytes = policy.limits?.requestBytes ?? REAL_CHECK_LIMIT_DEFAULTS.requestBytes;
+  const { method } = request;
+  if (method === "PUT" || method === "PATCH" || method === "DELETE") return refuse("write", operation);
+  if (method !== "GET" && method !== "HEAD" && method !== "POST") return refuse("not_allowed", operation);
+  const rowMethod = method === "POST" ? "POST" : "GET";
+  // The raw (still encoded) path decides which row matches; a Storage object name may carry an encoded slash, so no segment is decoded here.
+  const rawPath = `/${url.segments.map((segment) => segment.raw).join("/")}${url.trailingSlash ? "/" : ""}`;
+  const candidates = matchGoogle(rowMethod, rawPath);
+  const hit = candidates.find((candidate) => REAL_CHECK_GOOGLE_HOSTS[candidate.row.api] === host);
+  if (hit === undefined) return refuse(method === "POST" ? "write" : "not_allowed", operation);
+  const { row, vars } = hit;
+  const label = `${method} ${host} ${row.path}`;
+  // The row's own variables: a project must be the connection's own, whatever else the path says.
+  const project = vars.p;
+  if (project !== undefined) {
+    const deny = policy.prodDeny;
+    if (deny?.gcpProjects?.some((entry) => entry.toLowerCase() === project.toLowerCase()) === true) return refuse("prod", label);
+    if (!(policy.gcpProjects ?? []).includes(project)) return refuse("not_allowed", label);
+  }
+  // An encoded slash is accepted only in a Storage object name (the row's own `{o}`); an encoded colon is never accepted (it could read as a custom-method suffix).
+  for (const segment of url.segments) {
+    if (/%3a/iu.test(segment.raw)) return refuse("unreadable", label);
+    if (segment.decoded.includes("/") && !(row.api === "storage" && vars.o === segment.raw)) return refuse("unreadable", label);
+  }
+  for (const { name, value } of url.query) {
+    if (REAL_CHECK_METHOD_OVERRIDE_QUERY_NAMES.has(name.toLowerCase())) return refuse("write", label);
+    if (!row.query.includes(name)) return refuse("not_allowed", label);
+    if (name === "alt" && !ALT_VALUES.has(value)) return refuse("not_allowed", label);
+    if (value.length > 1_024) return refuse("not_allowed", label);
+  }
+  if (url.query.length > 20) return refuse("not_allowed", label);
+  if (row.method === "GET") {
+    if (request.body !== undefined && request.body !== "") return refuse("not_allowed", label);
+    return { allow: true, protocol: "google", method: method as "GET" | "HEAD", host, operation: label };
+  }
+  // A POST row: the body is a JSON object whose members are all the row's own.
+  const body = request.body ?? "";
+  if (new TextEncoder().encode(body).length > requestBytes) return refuse("not_allowed", label);
+  const parsed = body === "" ? { ok: true as const, value: {} } : parseStrictJson(body);
+  if (!parsed.ok || typeof parsed.value !== "object" || parsed.value === null || Array.isArray(parsed.value)) return refuse("unreadable", label);
+  const members = parsed.value as Record<string, unknown>;
+  const allowedMembers = row.body ?? [];
+  if (Object.keys(members).some((key) => !allowedMembers.includes(key))) return refuse("not_allowed", label);
+  if (row.kind === "test_iam") {
+    const permissions = members.permissions;
+    if (!Array.isArray(permissions) || permissions.length === 0 || permissions.length > 100 || !permissions.every((each) => typeof each === "string" && PERMISSION.test(each))) return refuse("unreadable", label);
+    return { allow: true, protocol: "google", method: "POST", host, operation: label };
+  }
+  if (row.kind === "dry_run_query") return classifyBigQueryQuery(members, label, host, policy);
+  return { allow: true, protocol: "google", method: "POST", host, operation: label };
+}
+
+function classifyBigQueryQuery(members: Record<string, unknown>, label: string, host: string, policy: RealCheckPolicy): RealCheckVerdict {
+  const cap = policy.limits?.bigQueryBytesBilled ?? REAL_CHECK_LIMIT_DEFAULTS.bigQueryBytesBilled;
+  const statement = bigQueryStatementIsRead(members.query);
+  if (statement !== "read") return refuse(statement === "write" ? "write" : "unreadable", label);
+  if (members.dryRun !== undefined && typeof members.dryRun !== "boolean") return refuse("unreadable", label);
+  for (const flag of ["useLegacySql", "useQueryCache"]) if (members[flag] !== undefined && typeof members[flag] !== "boolean") return refuse("unreadable", label);
+  const dataset = members.defaultDataset;
+  if (dataset !== undefined) {
+    if (typeof dataset !== "object" || dataset === null || Array.isArray(dataset)) return refuse("unreadable", label);
+    const projectId = (dataset as Record<string, unknown>).projectId;
+    if (projectId !== undefined && (typeof projectId !== "string" || !(policy.gcpProjects ?? []).includes(projectId))) return refuse("not_allowed", label);
+  }
+  // The forced cap: the request's own figure when it has one and it is lower, else the connection's cap. A figure that is not a plain whole number is not read.
+  let requested = cap;
+  const given = members.maximumBytesBilled;
+  if (given !== undefined) {
+    const text = typeof given === "number" && Number.isSafeInteger(given) && given >= 0 ? String(given) : given;
+    if (typeof text !== "string" || !BYTES_VALUE.test(text)) return refuse("unreadable", label);
+    requested = Math.min(Number(text), cap);
+  }
+  const maximumBytesBilled = String(requested);
+  const forwarded = JSON.stringify({ ...members, maximumBytesBilled });
+  return { allow: true, protocol: "google", method: "POST", host, operation: label, bigQuery: { maximumBytesBilled, dryRun: members.dryRun === true }, forwardBody: forwarded };
+}
+
+// ---- the entry point
+
+/** The headers that change a request's method, found by name in any case. */
+function hasMethodOverrideHeader(headers: RealCheckRequest["headers"]): boolean {
+  return headers !== undefined && Object.keys(headers).some((name) => REAL_CHECK_METHOD_OVERRIDE_HEADERS.has(name.toLowerCase()));
+}
+
+const RequestShape = z.object({ method: z.string(), url: z.string(), headers: z.record(z.string(), z.string()).optional(), body: z.string().optional() });
+
+/**
+ * Whether one outgoing request is a read the real check may make. See the header for the order. Never throws: input that is not a request, or not readable, is `unreadable`. The verdict never holds a query value,
+ * a body (except BigQuery's rewritten one, which is the caller's own query) or a header.
+ */
+export function classifyRealCheckRequest(request: RealCheckRequest, policy: RealCheckPolicy): RealCheckVerdict {
+  const shape = RequestShape.safeParse(request);
+  if (!shape.success) return refuse("unreadable", "? ? /");
+  const method = request.method;
+  const url = parseUrl(request.url);
+  if (url === undefined) return refuse("unreadable", `${METHOD_TOKEN.test(method) ? method : "?"} ? /`);
+  const host = url.host;
+  const label = labelOf(method, host, realCheckPathLabel(url.segments.map((segment) => segment.decoded)));
+  if (!METHOD_TOKEN.test(method)) return refuse("unreadable", label);
+  // The host: never a model service, never production, and exactly one of the connection's.
+  if (isTestAccountModelHost(host, { gatewayHosts: policy.modelGatewayHosts ?? [] }) || (policy.modelGatewayHosts ?? []).some((gateway) => normalizeModelHostCandidate(gateway) === host)) return refuse("model_host", label);
+  const deny = policy.prodDeny;
+  if (deny === undefined || (prodDenyIsEmpty(deny) && (deny.gcpProjects ?? []).length === 0)) return refuse("prod", label);
+  if (prodDenyMatchesHost(deny, host) || testAccountHostProblems([host]).length > 0) return refuse("prod", label);
+  if (hostProblem(host) !== undefined || !policy.hosts.some((allowed) => allowed === host)) return refuse("host_not_allowed", label);
+  if (hasMethodOverrideHeader(request.headers)) return refuse("write", label);
+  if (isGoogleApiHost(host)) return classifyGoogle(request, url, host, policy);
+  return classifyHttp(request, url, host, policy);
+}
