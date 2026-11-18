@@ -17,6 +17,7 @@ import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutChatGptKeyDeny } from "../support/chatgpt-key-deny-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
@@ -678,6 +679,8 @@ describe("task-token key and membership IAM", () => {
     withoutBrokerSlackPoster(remainder, "staging");
     // L4-SE6: the saved environment images' roles, creation template, outputs and the broker's four variables are asserted exactly (tests/support/saved-env-images-template.ts) and taken out too.
     withoutSavedEnvImages(remainder, "staging");
+    // L4-HARD (c): the ChatGPT key's Deny (UseOnlyAsBroker) is asserted in full by chatgpt-key-deny-infrastructure.test.ts and taken out so the digest still pins everything else (rule D).
+    withoutChatGptKeyDeny(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -1769,7 +1772,9 @@ const dispatcherHookSignerTuples: AccessTuple[] = [
   ["role:DispatcherServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
   ["role:DispatcherServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"StringEquals\":{\"kms:MessageType\":[\"RAW\"],\"kms:SigningAlgorithm\":[\"RSASSA_PKCS1_V1_5_SHA_256\"]}}"],
 ];
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
+// L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
+const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,

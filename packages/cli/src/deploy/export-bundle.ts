@@ -24,6 +24,8 @@ import {
   serviceRoleStatements,
   type PolicyScope,
   type PolicyStatementJson,
+  OPERATOR_EXTERNAL_ID_PATTERN,
+  OPERATOR_PRINCIPAL_PATTERN,
 } from "@agentx/contracts";
 import type { InitAnswers } from "../init/install-state.js";
 import { ACCOUNT_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
@@ -44,7 +46,7 @@ export interface ExportBundleInput {
 /** The answers an export knows, written to `init-answers.json` so the AgentX operator's
  * `agentx init --resume --from-bundle` asks only the rest (alerts, budget, GitHub, Slack). Answers
  * only, never a secret: the same fields `InitAnswers` holds, which never holds one either. */
-export type BundleAnswers = Pick<InitAnswers, "schemaVersion" | "env" | "region" | "account" | "engine" | "releaseVersion" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+export type BundleAnswers = Pick<InitAnswers, "schemaVersion" | "env" | "region" | "account" | "engine" | "releaseVersion" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
 
 /** A bundle is always the templates engine: the platform team deploys published templates. The
  * boundary and principal patterns are `InitAnswersSchema`'s, so a bundle answer the resume accepts
@@ -59,7 +61,8 @@ export const BundleAnswersSchema: z.ZodType<BundleAnswers> = z.object({
   identity: IdentityAnswersSchema,
   models: ModelsAnswersSchema,
   permissionsBoundaryArn: z.string().regex(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/).optional(),
-  operatorPrincipalArn: z.string().regex(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/).optional(),
+  operatorPrincipalArn: z.string().regex(OPERATOR_PRINCIPAL_PATTERN).optional(),
+  operatorExternalId: z.string().regex(OPERATOR_EXTERNAL_ID_PATTERN).optional(),
 }).strict();
 
 export const BUNDLE_ANSWERS_FILE = "init-answers.json";
@@ -83,6 +86,7 @@ function bundleAnswersFor(answers: DeployAnswers, release: LoadedRelease): Bundl
     models: answers.models,
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
+    ...(answers.operatorExternalId === undefined ? {} : { operatorExternalId: answers.operatorExternalId }),
   });
   if (!parsed.success) throw invalidBundleAnswers(`the export's ${BUNDLE_ANSWERS_FILE}`, parsed.error.issues);
   return parsed.data;
@@ -359,8 +363,8 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
  * `delete-change-set`/`delete-stack` cleanup commands, and exit 1, distinct from the generic
  * `on_failure` message (nothing here actually failed).
  *
- * The access stack takes no secret parameters (its only parameters are `PermissionsBoundaryArn`
- * and `OperatorPrincipalArn`), so this script never reads or prints one. Every variable is quoted.
+ * The access stack takes no secret parameters (its only parameters are `PermissionsBoundaryArn`,
+ * `OperatorPrincipalArn` and `OperatorExternalId`, an id that is not a secret), so this script never reads or prints one. Every variable is quoted.
  */
 /** The command the AgentX operator runs once the access stack exists: it deploys every later part,
  * never access itself (the operator role is denied change sets on the access stack). */

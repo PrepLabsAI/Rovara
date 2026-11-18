@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorTrustProblem } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -41,6 +41,8 @@ export interface InstallAnswers {
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
   operatorPrincipalArn?: string;
+  /** The sts:ExternalId the operator principal must present: required when that principal belongs to another account (contracts operatorTrustProblem). */
+  operatorExternalId?: string;
   /** Testing only, until the first published release exists: a private-ECR image digest used as-is
    * instead of mapping the release's public image through the pull-through cache. */
   images?: { worker?: string; slack?: string };
@@ -318,7 +320,12 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
   const routing = openRouter?.providers ? { OpenRouterProviders: openRouter.providers.join(",") } : {};
   switch (part) {
     case "access":
-      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "" };
+      // Backstop for every caller (init, upgrade, export, resume): a whole-account or cross-account principal without its external id never reaches the template.
+      {
+        const problem = operatorTrustProblem({ principal: answers.operatorPrincipalArn, externalId: answers.operatorExternalId, account: answers.account });
+        if (problem !== undefined) throw new Error(problem);
+      }
+      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "", ...(answers.operatorExternalId === undefined ? {} : { OperatorExternalId: answers.operatorExternalId }) };
 
     case "foundation":
       return base;

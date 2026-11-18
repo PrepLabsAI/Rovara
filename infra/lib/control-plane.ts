@@ -1070,6 +1070,18 @@ export class ControlPlaneStack extends Stack {
           principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
           actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
         }));
+        // L4-HARD (owner 2026-11-18): the Deny the other keys have. The default key policy lets the account's root delegate to IAM, so without this any account admin with
+        // kms:Decrypt in their own IAM policy could open developers' ChatGPT tokens. Now only the broker uses the key (like the invoke signing key and the sign-in token keys).
+        // The broker's sealer and the Linear token wrapper always pass an encryption context; requiring one in the policy is deferred (it would change the headroom pins' evaluator
+        // contexts). Named environments only, like the Allow above.
+        chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+          sid: "UseOnlyAsBroker",
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*"],
+          resources: ["*"],
+          conditions: { ArnNotEquals: { "aws:PrincipalArn": broker.role!.roleArn } },
+        }));
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
