@@ -300,8 +300,10 @@ async function finishRecording(services: ConfigServices, entry: ConfigKey, recor
   }
 }
 
-export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean }): Promise<{ changed: boolean }> {
+export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean; company?: string }): Promise<{ changed: boolean }> {
   const entry = configKey(input.key);
+  // P0-14: --company names whose offered models a model other than Claude is checked against; it means nothing for any other key.
+  if (input.company !== undefined && entry.gatewayOffered !== true) throw agentXError("CONFIG_INVALID", `--company is only for a key checked against the model gateway's offered models, not ${entry.key}; nothing changed`);
   const { target } = entry;
   if (target.kind === "control-plane-setting") {
     if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
@@ -322,7 +324,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   if (entry.e2eAgentModel === true) checkE2eAgentChoice(env, settings, value);
   // DEC 254g: a non-Claude core agent model must be one the model gateway offers now (live, fail closed); a Claude id keeps its catalog rule.
   if (entry.gatewayOffered === true && value !== "" && !isClaudeAgentModel(value)) {
-    await requireGatewayOffers({ key: entry.key, env, value, session: await services.adminSession?.(env), fetch: services.fetch ?? fetch });
+    await requireGatewayOffers({ key: entry.key, env, value, session: await services.adminSession?.(env), fetch: services.fetch ?? fetch, ...(input.company === undefined ? {} : { company: input.company }) });
   }
   if (entry.corePairedWith !== undefined) await notePairedCoreSetting(services, env, entry, entry.corePairedWith, value);
   const targets = [{ part: target.part, parameter: target.parameter }, ...(target.also ?? [])];

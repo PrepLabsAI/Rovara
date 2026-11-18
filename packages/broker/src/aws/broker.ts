@@ -1,4 +1,4 @@
-import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
+import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveAdminCompany, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
@@ -296,7 +296,7 @@ import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepositor
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js"; import { OFFERED_MODELS_COMPANY_PARAMETER, offeredModelsCompany } from "./admin-offered-models.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -1699,7 +1699,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         // Spec 064: the legacy deployment's linking-only sign-in keeps the same registry.
         const registry = (dependencies.developer ?? dependencies.linking)?.signInClients;
         if (registry === undefined) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json({ clients: await registry.list(await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
+        return json({ clients: await registry.list(await resolveAdminCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey)) }, request.requestId);
       }
       // DEC 254a: the install's invite codes (ids, status and times only) and the self-serve switch, for an install administrator.
       if (request.method === "GET" && url.pathname === "/v1/admin/company-invites") {
@@ -1729,8 +1729,8 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (request.method === "GET" && url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
         if (dependencies.coreOfferedModels === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
-        const company = await resolveCompany((dependencies.developer ?? dependencies.linking)?.companies, identity.ownerKey);
-        if (company === undefined) throw agentXError("NOT_FOUND", CORE_OFFERED_MODELS_NOT_SET_UP);
+        const signIn = dependencies.developer ?? dependencies.linking; // P0-14: the company the operator names (or its own membership), never AUTH_REQUIRED for one in no company (admin-offered-models.ts).
+        const company = await offeredModelsCompany({ named: url.searchParams.getAll(OFFERED_MODELS_COMPANY_PARAMETER), companies: signIn?.companies, ownerKey: identity.ownerKey, signIn: signIn === undefined ? undefined : { documentClient: dependencies.documentClient, signInTableName: signIn.signInTableName } });
         let offered: OfferedAgentModels;
         try { offered = await dependencies.coreOfferedModels(company); } catch { throw agentXError("RUNTIME_UNAVAILABLE", OFFERED_MODELS_READ_FAILED); }
         return json(offered, request.requestId);
