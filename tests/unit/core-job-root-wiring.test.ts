@@ -91,7 +91,7 @@ it("the real hosted source on the root: a project's stored choice is its merge t
   const row = (companyId: string, overrides: unknown) => db.set({ pk: companyScoped(companyId, "PROJECT_SETTINGS#web"), sk: "META", entityType: "PROJECT_SETTINGS", companyId, projectName: "web", overrides, revision: 1, updatedAt: "2026-11-18T10:00:00.000Z", updatedBy: "d".repeat(64) });
   row(A, { real_check: "sandbox_only" });
   row(B, { real_check: "private-canary" });
-  createBrokerCoreRoot(inputs({ documentClient: db as never, stateTableName: "state", hostedPolicySource: (hook) => hostedPolicySource({ documentClient: db, tableName: "state", now: Date.now }, hook) }));
+  createBrokerCoreRoot(inputs({ documentClient: db, stateTableName: "state", hostedPolicySource: (hook) => hostedPolicySource({ documentClient: db, tableName: "state", now: Date.now }, hook) }));
   const runtime = runtimeOptions();
   expect(await runtime.ciReporting!.ciMode(task(A))).toBe("sandbox_only");
   await expect(runtime.ciReporting!.ciMode(task(B))).rejects.toThrow("the project's CI mode could not be read");
