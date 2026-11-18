@@ -109,4 +109,6 @@ describe("the knowledge routes at the developer router", () => {
 });
 
 /** The digest of every DEV_ROUTES row except the two knowledge rows, as of the base this lane stacked on (code/next with #976): a changed, removed or loosened existing row changes it. */
-const OTHER_ROWS_DIGEST = "5c60bc5ab4cb16fa1e80e0f4287984608e730774f797a1e78a122c3466d67bb2";
+// Batch 17 (rule D): re-pinned on batch 16's table plus the batch's other 13 new /v1/dev rows (#992 lessons areas/learning-sources x3, #1003's 9 phase-4 rows, #994's company/egress-addresses). All added, none
+// changed: removing exactly those 13 rows gives 24c5e84b..., the digest of batch 16's whole DEV_ROUTES table.
+const OTHER_ROWS_DIGEST = "bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599";

@@ -2,12 +2,13 @@ diff --git a/deskbot/vertex_client.py b/deskbot/vertex_client.py
 index 3fa9904..c406792 100644
 --- a/deskbot/vertex_client.py
 +++ b/deskbot/vertex_client.py
-@@ -63,7 +63,7 @@ class VertexClient:
+@@ -82,8 +82,8 @@ class VertexClient:
      """Vertex AI: project and location in the path, a Google access token as a bearer."""
  
      def __init__(self, project: str, location: str, model: str, api_endpoint: Optional[str] = None,
--                 token_provider: Callable[[], str] = _env_token, timeout: float = 30.0) -> None:
-+                 token_provider: Callable[[], str] = _env_token, timeout: float = 20.0) -> None:
+-                 token_provider: Callable[[], str] = _env_token, timeout: float = 30.0, api_version: str = "v1") -> None:
++                 token_provider: Callable[[], str] = _env_token, timeout: float = 20.0, api_version: str = "v1") -> None:
          self.project, self.location, self.model, self.timeout = project, location, model, timeout
+         self.api_version = api_version
          host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
          self.api_endpoint = (api_endpoint or f"https://{host}").rstrip("/")

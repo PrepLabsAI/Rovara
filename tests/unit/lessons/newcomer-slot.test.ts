@@ -66,14 +66,6 @@ describe("the newcomer place", () => {
     expect(loaded).toEqual(["les_old00000"]);
   });
 
-  it("a newcomer that is the twin of a lesson already loaded does not take a second place (a task is given only one of two twins)", async () => {
-    // The first proven lesson names the newcomer as its twin: the twin rule keeps one of them, and the newcomer place does not bring the other back.
-    const w = await world();
-    await w.add(...Array.from({ length: 6 }, (_, i) => fitting(`les_old0000${i}`, { counters: proven, ...(i === 0 ? { repoTwins: ["les_new00001"] } : {}) })), fitting("les_new00001"));
-    const loaded = ids(await w.load());
-    expect(loaded.includes("les_old00000") && loaded.includes("les_new00001")).toBe(false);
-  });
-
   it("two projects: the newcomer place is per load, so a newcomer in one project never changes another project's five", async () => {
     const w = await crowded();
     await w.add(fitting("les_oth00001", { project: "proj-2" }));

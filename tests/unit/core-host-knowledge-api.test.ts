@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, companyScoped, orgProjectCatalogKey, projectRevisionKey,
+  AgentXError, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, companyScoped, orgProjectCatalogKey, projectRevisionKey, scriptTokenKey,
   type AuditSink, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -24,6 +24,7 @@ import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.
 import { DEV_ROUTES, devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createScriptToken, revokeScriptToken } from "../../packages/broker/src/core/script-tokens/store.js";
+import { LOCAL_ALL_REFUSED } from "../../packages/broker/src/lessons/knowledge-serve.js";
 import { PENDING_PK } from "../../packages/broker/src/core/notify/attention.js";
 import { KNOWLEDGE_TOOLS, ToolError, httpControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld } from "../support/core-host-fakes.js";
@@ -156,8 +157,11 @@ async function makeToken(w: World, personId: string, over: { permissions?: Array
   const principal = (await identityOf(w).getPrincipal(companyId, personId))!;
   const made = await createScriptToken(
     { store: w.world.store, audit: w.audits.get(companyId)!, now: () => w.world.clock.now },
-    { developerId: developerIdOf(principal), personId, orgId: companyId, orgRole: ROLE[personId]!.role },
+    // Batch 17 (rule F): since #956 (batch 14) only an owner or admin creates a token. A member's token here is one made before that rule (or while they were an admin): created as an admin, then stored
+    // with the person's own role, so every live check below (the creator's role read now must equal it) is the same as on #995's branch.
+    { developerId: developerIdOf(principal), personId, orgId: companyId, orgRole: "admin" },
     { requestId: randomUUID(), name: "tool", projects: over.projects ?? ["payments"], permissions: over.permissions ?? ["lessons"] }, async () => undefined);
+  await w.world.store.update({ key: scriptTokenKey(companyId, made.token.tokenId), ops: [{ op: "set", path: ["createdRole"], value: ROLE[personId]!.role }] });
   return made.secret;
 }
 const knowledgeAudit = (w: World) => w.world.audit.filter((event) => event.action === "lesson.knowledge_read");
@@ -397,9 +401,9 @@ describe("limits", () => {
     expect(answer.body!.lessons.length).toBeGreaterThan(0);
     expect(Buffer.byteLength(answer.body!.markdown, "utf8")).toBeLessThanOrEqual(LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX);
     const before = knowledgeAudit(w).length;
-    expect(await asPerson(b, "a-contrib", lessonsPath(), { all: true })).toMatchObject({ ok: false, code: "CONFIG_INVALID", message: `all: ${LOCAL_KNOWLEDGE_NO_BULK_MESSAGE}` });
+    // Batch 16's rule (#974, owner DEC 254zzz14): any `all` key, true or false, gets the one fixed sentence and reads nothing.
+    for (const all of [true, false]) expect(await asPerson(b, "a-contrib", lessonsPath(), { all })).toMatchObject({ ok: false, code: "CONFIG_INVALID", message: LOCAL_ALL_REFUSED });
     expect(knowledgeAudit(w).length).toBe(before);
-    expect((await asPerson(b, "a-contrib", lessonsPath(), { all: false })).ok).toBe(true);
     // A body with a field this route does not take, or that is not JSON, is refused with field names only.
     expect(await asPerson(b, "a-contrib", lessonsPath(), { who: "someone-else-SECRET" })).toMatchObject({ ok: false, code: "CONFIG_INVALID", message: "body: has a field this route does not take" });
     expect(await asPerson(b, "a-contrib", lessonsPath(), "not json SECRET")).toMatchObject({ ok: false, code: "CONFIG_INVALID", message: "body: is not JSON" });
