@@ -69,14 +69,14 @@ export async function liveMemberRole(people: DeployedPeople, companyId: OrgId, p
  * HW5b: the chat the approvers point lets a person approve a low or medium risk plan in, from the deployment's chat seam (`ChatThreads`) and the company's own records of its people. ONE chat that can name a person
  * (`personOf`), else none (the install takes the step-up alone). Everything is read at each use: the workspace's company, the account's link or sign-in, the person's live membership in THAT company and their project grant.
  */
-export function hostedChatApproval(threads: Pick<ChatThreads, "channels" | "companyOf" | "personOf"> | undefined, people: DeployedPeople): HostedChatApproval | undefined {
+export function hostedChatApproval(threads: Pick<ChatThreads, "channels" | "companyOf" | "personOf"> | undefined, people: DeployedPeople, key: Buffer | undefined): HostedChatApproval | undefined {
   const personOf = threads?.personOf;
   // A seam of a test double may carry no `channels` at all: then it names no chat.
   const channels: readonly string[] | undefined = threads?.channels;
   const channel = channels !== undefined && channels.length === 1 ? channels[0] : undefined;
-  if (threads === undefined || personOf === undefined || channel === undefined) return undefined;
+  if (threads === undefined || personOf === undefined || channel === undefined || key === undefined) return undefined;
   return {
-    channel, companyOf: threads.companyOf,
+    channel, key, companyOf: threads.companyOf,
     personOf: async (companyId, account) => (await personOf.call(threads, companyId, { channel: account.provider, tenant: account.tenant, userId: account.accountId }))?.personId,
     holdsProjectGrant: async (companyId, personId, project) => (await liveMemberRole(people, companyId, personId)) !== undefined && (await liveGrant(people, personId, project)) !== undefined,
   };
