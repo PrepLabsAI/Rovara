@@ -18,8 +18,8 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
-  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunSummary, type SetupVerification, type StoredDocument, type TransactItem,
+  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
+  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
@@ -44,7 +44,14 @@ export const SETUP_AGENT_FAILURES = {
   infrastructure: "The setup run could not go on. Try again.",
   machine: "Rovara couldn't set up a machine to run the setup. Try again.",
   unreadable: "Rovara ran the setup but couldn't read its answer. Try again.",
-  stale: "The setup run didn't finish. Try again.",
+  // L4-T5: the run stopped reporting. Nothing says it is still going, so it reads as stopped, and starting it again is the way on.
+  stale: "The setup run stopped before it finished. Start it again.",
+  // L4-T5: the causes where trying again changes nothing. Each says what to fix, then to run setup again.
+  noModelPrice: "Rovara can't run the setup with this model yet: it has no price on file. Pick another model in AI and spending, then run the setup again.",
+  noSandboxImage: "This Rovara install has no sandbox to run the setup in. Ask whoever runs this Rovara install to set it up, then run the setup again.",
+  noModelProxy: "This Rovara install can't count the AI spending of a setup run. Ask whoever runs this Rovara install to connect it, then run the setup again.",
+  isolationUnavailable: "This Rovara install's machines can't run a setup safely yet. Ask whoever runs this Rovara install, then run the setup again.",
+  company_off: "A company admin turned setup runs off, so this one was stopped. Ask a company admin to turn them back on, then run the setup again.",
 } as const;
 
 /** The sentence the run is asked: the project's own name and nothing from a repository, the same for every run of a project. */
@@ -124,6 +131,14 @@ function staleAfterMs(limits: SetupAgentLimits): number {
   return (limits.wallClockMin + SETUP_HOST_WAIT_MAX_HOURS * 60 + 60) * 60_000;
 }
 
+/**
+ * L4-T5: a live worker talks to the broker every 3 seconds (every 15 while it waits on a website ask), and the broker notes the time on the task at most once a minute (`noteSetupRunSeen`). A run whose
+ * worker has been silent this long is dead, so it reads as stopped and not "running": the 26-hour bound above only holds a run that never reports at all from being cut off early.
+ */
+export const SETUP_RUN_SILENT_MS = 10 * 60_000;
+/** The longest a run may take from its start to the worker's first word: the machine is made, the repositories cloned and the sandbox started before it talks. */
+export const SETUP_RUN_FIRST_WORD_MS = 60 * 60_000;
+
 export interface SetupAgentReadDeps {
   store: Pick<DocumentStore, "get">;
   companyId: OrgId;
@@ -171,7 +186,11 @@ export async function readState(deps: SetupAgentReadDeps, project: string, lates
   const taskPointer = await deps.store.get(location.taskPointerKey());
   if (taskPointer?.["cancelledAt"] !== undefined) return failed(cancelledWord.stop, cancelledWord.failure);
   const started = Date.parse(pointer.startedAt);
-  if (Number.isFinite(started) && deps.now() - started > staleAfterMs(limits)) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
+  const now = deps.now();
+  if (Number.isFinite(started) && now - started > staleAfterMs(limits)) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
+  // L4-T5: a worker that has said nothing for 10 minutes is gone. Before its first word the machine is still being made, so the run gets an hour from its start.
+  const seen = typeof task.setupAgentSeenAt === "string" ? Date.parse(task.setupAgentSeenAt) : Number.NaN;
+  if (Number.isFinite(seen) ? now - seen > SETUP_RUN_SILENT_MS : Number.isFinite(started) && now - started > SETUP_RUN_FIRST_WORD_MS) return failed("infrastructure", SETUP_AGENT_FAILURES.stale);
   return { view: { status: "running", ...base }, pointer };
 }
 
@@ -225,6 +244,12 @@ function personStopped(
   return failed("stopped_by_person", SETUP_AGENT_FAILURES.stopped_by_person, { ...(learned.proposal === undefined ? {} : { proposal: learned.proposal }), ...(summary === undefined ? {} : { summary }) });
 }
 
+/** L4-T5: which refusal a worker's error is, when it is exactly one of the fixed sentences a worker refuses a setup run with (never a match on part of a text). */
+function refusalOf(error: string | undefined): SetupRunRefusal | undefined {
+  // What the worker reports is the error's own text: the code, then the fixed sentence.
+  return error === undefined ? undefined : (Object.keys(SETUP_RUN_REFUSED_MESSAGES) as SetupRunRefusal[]).find((name) => agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES[name]).message === error);
+}
+
 /** The result for an outcome: which stop word, which fixed sentence, and what the run learned. Pure. */
 export function resultOf(task: Pick<TaskRecord, "startingRevision" | "preparedBase" | "setupAgentStop">, operation: { kind: string }, outcome: SetupAgentEndOutcome): StoredResult {
   const failed = (stop: SetupRunEndWord, failure: string, learned: { proposal?: SetupProposal; summary?: SetupRunSummary } = {}): StoredResult => ({
@@ -240,12 +265,15 @@ export function resultOf(task: Pick<TaskRecord, "startingRevision" | "preparedBa
   // is `infrastructure`) or says nothing readable is the person's stop; an answer that finished by itself (a proposal, a limit, a code change needed, changed files) stands as the worker said it.
   if (task.setupAgentStop !== undefined && outcome.status === "SUCCEEDED" && (learned.summary === undefined || learned.summary.stop === "infrastructure")) return personStopped(failed, learned);
   if (outcome.status !== "SUCCEEDED") {
+    // L4-T5: a worker that refused to start for a reason trying again cannot change says so in its own fixed sentence; the broker answers with what to fix.
+    const refused = outcome.status === "FAILED" ? refusalOf(outcome.error) : undefined;
+    if (refused !== undefined) return failed("infrastructure", SETUP_AGENT_FAILURES[refused], kept);
     const stop = outcome.status !== "CANCELLED" && outcome.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE ? "budget_used" : "infrastructure";
     return failed(stop, SETUP_AGENT_FAILURES[stop], kept);
   }
   const { proposal, summary } = learned;
   // The worker ended the run itself without a person's stop (a fault): what it learned is kept, with the fixed sentence for a run that could not go on.
-  if (summary?.stop === "infrastructure") return failed("infrastructure", SETUP_AGENT_FAILURES.infrastructure, kept);
+  if (summary?.stop === "infrastructure") return failed("infrastructure", summary.cannot === "company_off" ? SETUP_AGENT_FAILURES.company_off : SETUP_AGENT_FAILURES.infrastructure, kept);
   if (summary === undefined || !WORKER_STOPS.has(summary.stop)) return failed("infrastructure", SETUP_AGENT_FAILURES.unreadable);
   // Two stops mean there is nothing to confirm: setup needs a code change, or it changed tracked files (which are never kept).
   if (summary.stop === "needs_code_change") return failed("needs_code_change", SETUP_AGENT_FAILURES.needs_code_change, { summary });

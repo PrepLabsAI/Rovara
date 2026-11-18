@@ -12,7 +12,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
-import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
+import { agentXError, change, when, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import { SETUP_AGENT_WORKFLOW_MODE } from "./agent.js";
 import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./command.js";
@@ -61,14 +61,24 @@ export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema
 const RUNNING_STATUSES: ReadonlySet<string> = new Set(["DISPATCHING", "RUNNING"]);
 
 /** The run an operation belongs to: its task, which must be a setup-run task of this company. Undefined for anything else. */
-export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "store" | "companyId">, operation: SetupAgentOperation): Promise<{ orgId: OrgId; project: string; taskId: string } | undefined> {
+export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "store" | "companyId">, operation: SetupAgentOperation): Promise<{ orgId: OrgId; project: string; taskId: string; seenAt?: string } | undefined> {
   if (operation.kind !== "task" || operation.workflowMode !== SETUP_AGENT_WORKFLOW_MODE || !RUNNING_STATUSES.has(operation.status)) return undefined;
   const pointer = await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey());
   if (typeof pointer?.["taskId"] !== "string") return undefined;
   const task = await deps.store.get(taskKey(pointer["taskId"]));
   if (task === undefined || task["purpose"] !== "setup_agent" || task["companyId"] !== deps.companyId || task["workspaceId"] !== operation.workspaceId || task["closedAt"] !== undefined || typeof task["project"] !== "string") return undefined;
   if (operation.companyId !== undefined && operation.companyId !== task["companyId"]) return undefined;
-  return { orgId: deps.companyId, project: task["project"], taskId: pointer["taskId"] };
+  return { orgId: deps.companyId, project: task["project"], taskId: pointer["taskId"], ...(typeof task["setupAgentSeenAt"] === "string" ? { seenAt: task["setupAgentSeenAt"] } : {}) };
+}
+
+/** L4-T5: how often the run's task is stamped with the worker's last word (the worker polls every 3 seconds; one write a minute is all a 10-minute silence rule needs). */
+export const SETUP_RUN_SEEN_EVERY_MS = 60_000;
+
+/** Notes that the worker just talked, on the run's own task and only while the task is still there. Best effort: a write that fails changes nothing (the next poll tries again). */
+async function noteSetupRunSeen(deps: Pick<SetupAgentCallbackDeps, "store" | "now">, run: { taskId: string; seenAt?: string }): Promise<void> {
+  const last = run.seenAt === undefined ? Number.NaN : Date.parse(run.seenAt);
+  if (Number.isFinite(last) && deps.now() - last < SETUP_RUN_SEEN_EVERY_MS) return;
+  await deps.store.update({ key: taskKey(run.taskId), ops: [change.set("setupAgentSeenAt", new Date(deps.now()).toISOString())], condition: when.present() }).catch(() => undefined);
 }
 
 /** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of the five shapes. */
@@ -93,6 +103,7 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
       return { outcome: outcome.outcome, ...(outcome.outcome === "refused" ? { reason: outcome.reason } : {}) };
     }
     case "poll": {
+      await noteSetupRunSeen(deps, run);
       const command = await takeSetupCommand(table, run, deps.mayStillRun);
       const asks = (await listHostAsks(table, run.orgId, run.project, ["open", "approved", "refused"])).filter((ask) => ask.taskId === run.taskId).slice(0, 20);
       return { ...(command === undefined ? {} : { command: { seq: command.seq, command: command.command } }), hosts: asks.map((ask) => ({ host: ask.host, state: ask.state })) };
