@@ -62,6 +62,8 @@ import {
   type SlackUserByEmailResponse,
   type ListPasskeysRequest,
   type ListPasskeysResponse,
+  type ListSignInFactorsRequest,
+  type ListSignInFactorsResponse,
   type RemovePasskeyRequest,
   type RemovePasskeyResponse,
   type RemovePersonPasskeysRequest,
@@ -993,10 +995,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke
+      | ListPasskeysRequest | ListSignInFactorsRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke
       | SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue
+    | ListPasskeysResponse | ListSignInFactorsResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue
     | SignInLinkStartResponse | SignInLinkFinishResponse | SignInLinksListResponse | SignInUnlinkResponse | Record<string, unknown>> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
@@ -1005,6 +1007,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
       // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
       if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);
+      if (event.kind === "list-sign-in-factors") return factorAdmin.listSignInFactors(event);
       if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
       if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
       if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
