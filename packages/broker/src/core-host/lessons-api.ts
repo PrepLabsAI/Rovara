@@ -223,6 +223,7 @@ export function skillRefusalOf(code: string): AgentXError {
     case "not_proven": return agentXError("FORBIDDEN", "That lesson has not proved itself yet, so it cannot become a skill.");
     case "not_eligible": return agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can decide skills.");
     case "eligibility_unavailable": return agentXError("RUNTIME_UNAVAILABLE", "Rovara could not tell who may decide this. Try again.");
+    case "other_target": return agentXError("IDEMPOTENCY_CONFLICT", "That lesson is already becoming something else (a rule or a check).");
     case "already_a_skill": return agentXError("IDEMPOTENCY_CONFLICT", "A skill was already made from this lesson.");
     case "not_project_wide": return agentXError("FORBIDDEN", "That lesson came from a place only some people can read, so it cannot become the project's skill.");
     case "bad_name": return agentXError("CONFIG_INVALID", "That skill name cannot be used. Use lowercase letters, digits and hyphens, and a name no other skill has.");

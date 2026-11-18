@@ -11,7 +11,7 @@ import { documentEvidenceSink } from "../../../packages/broker/src/lessons/evide
 import { questionPk } from "../../../packages/broker/src/lessons/revert-question.js";
 import { provenSignalsOf, type ProvenSignal } from "../../../packages/broker/src/lessons/proven.js";
 import { skillDepsOf, skillGraduationOf } from "../../../packages/broker/src/lessons/skill-graduation.js";
-import { approveSkill, draftSkillFromLesson, provenProcedure } from "../../../packages/broker/src/lessons/skills.js";
+import { approveSkill, draftSkillFromLesson, listSkills, provenProcedure } from "../../../packages/broker/src/lessons/skills.js";
 import { PROVEN_DAYS, PROVEN_TASKS } from "../../../packages/broker/src/lessons/scoring-settings.js";
 import { ROVARA_SKILL_PROVEN } from "@agentx/contracts";
 import type { SignalsReader } from "../../../packages/broker/src/lessons/signals.js";
@@ -730,6 +730,14 @@ describe("the proven band is lessons phase 2's computed band (L4-INT)", () => {
     expect([at({ againstW: 0.01, underQuestion: false }), at({ againstW: 0, underQuestion: true }), at("unreadable"), at({ againstW: Number.NaN, underQuestion: false })]).toEqual([false, false, false, false]);
   });
 
+  it("a read of the question rows that stopped at its row cap proves nothing: no lesson is proven then (a mark may be in the rows not reached)", async () => {
+    const w = world();
+    await prove(w, provenLessonRecord(w.clock, "les_inband01"));
+    expect(await candidates(w)).toEqual(["les_inband01"]);
+    for (let i = 0; i < 2_100; i += 1) await w.documents.put({ item: { pk: questionPk(A, PROJECT), sk: `Q#les_other${String(i).padStart(5, "0")}#task-1#${"b".repeat(40)}`, entityType: "LESSON_QUESTION", kind: "revert_overlap", project: PROJECT, lessonId: `les_other${String(i).padStart(5, "0")}`, taskId: "task-1", via: "b".repeat(40), at: w.clock.now(), keepUntil: w.clock.now() + 30 * DAY_MS } });
+    expect(await candidates(w)).toEqual([]);
+  });
+
   it("the signals of one lesson come from its own company's rows only: another company's reader reads nothing for this project", async () => {
     const w = world();
     await prove(w, provenLessonRecord(w.clock, "les_inband01"));
@@ -804,6 +812,35 @@ describe("a skill from a lesson: graduation drafts through AK3, two people appro
     expect(await draftSkillFromLesson(foreign, KEY, { lessonId: "les_proc0004", by: "ann" })).toEqual({ ok: false, code: "not_proven" });
     expect(provenProcedure({ lesson: procedureRecord(w.clock, "les_x0000001"), tasks: 12, now: w.clock.now() })).toBe(true);
     expect(provenProcedure({ lesson: provenLessonRecord(w.clock, "les_x0000002"), tasks: 12, now: w.clock.now() })).toBe(false);
+  });
+
+  it("a skill goes live only while its lessons are STILL proven: evidence that came after the draft, or another target, stops the second approval", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0007"), procedureRecord(w.clock, "les_proc0008"));
+    const { skillDeps, deps } = withSkills(w);
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0007", approverId: "ann", target: "skill", skillName: "first-skill" })).toMatchObject({ state: "drafted" });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0008", approverId: "ann", target: "skill", skillName: "second-skill" })).toMatchObject({ state: "drafted" });
+    expect(await approveSkill(skillDeps, KEY, { name: "first-skill", version: 1, by: "ann" })).toMatchObject({ live: false });
+    expect(await approveSkill(skillDeps, KEY, { name: "second-skill", version: 1, by: "ann" })).toMatchObject({ live: false });
+    await documentEvidenceSink(w.documents, A).note({ workspaceId: A, project: PROJECT, lessonId: "les_proc0007", kind: "against", weight: 1, at: w.clock.now(), id: "late-mark" });
+    expect(await approveSkill(skillDeps, KEY, { name: "first-skill", version: 1, by: "bob" })).toEqual({ ok: false, code: "not_proven" });
+    expect(await w.store.get(KEY, "les_proc0007")).toMatchObject({ status: "active" });
+    expect((await w.store.get(KEY, "les_proc0007"))?.became).toBeUndefined();
+    expect((await listSkills(skillDeps, KEY)).find((skill) => skill.name === "first-skill")).toMatchObject({ approvals: 1 });
+    // The other lesson, still proven, goes live as before.
+    expect(await approveSkill(skillDeps, KEY, { name: "second-skill", version: 1, by: "bob" })).toMatchObject({ ok: true, live: true });
+  });
+
+  it("one target per lesson on the skill's own door too: a lesson being drafted as a skill cannot be made a rule, and a rule's lesson cannot be drafted as a skill", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0009"), procedureRecord(w.clock, "les_proc0010"));
+    const { skillDeps, deps } = withSkills(w);
+    expect(await draftSkillFromLesson(skillDeps, KEY, { lessonId: "les_proc0009", by: "ann" })).toMatchObject({ ok: true });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0009", approverId: "bob", target: "rule" })).toEqual({ ok: false, code: "already_approved" });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0010", approverId: "bob", target: "rule" })).toMatchObject({ ok: true, state: "done" });
+    expect(await draftSkillFromLesson(skillDeps, KEY, { lessonId: "les_proc0010", by: "ann" })).toEqual({ ok: false, code: "not_proven" });
+    // (the rule retired its lesson, so it is not proven any more: the claim answers for a lesson still active)
+    expect(await claimGraduation(w.documents, A, PROJECT, "les_proc0010", "skill", w.clock.now())).toBe("other_target");
   });
 
   it("a lesson that already became something else keeps its first link when a skill of it goes live", async () => {

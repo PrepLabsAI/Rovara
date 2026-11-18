@@ -18,6 +18,7 @@ import {
   ROVARA_SKILLS_PER_STEP_MAX, change, cleanLessonText, companyScoped, queryAll, when, type DocumentStore, type JsonValue, type RovaraSkillFile, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { recordBecame, type BecameDeps } from "./became.js";
+import { GraduationUnreadable, claimGraduation, releaseClaim } from "./graduation-store.js";
 import { emitAudit, requireAudit } from "./policy.js";
 import { provenLesson, provenSignalsOf, type ProvenSignal } from "./proven.js";
 import type { SignalsReader } from "./signals.js";
@@ -205,7 +206,7 @@ const eligible = async (deps: SkillDeps, key: ScopeKey, person: string): Promise
 
 export type DraftResult =
   | { ok: true; name: string; version: 1; note?: typeof ROVARA_SKILL_LONG_NOTE }
-  | Fail<"not_found" | "not_proven" | "not_eligible" | "eligibility_unavailable" | "already_a_skill" | "audit_unavailable" | "unreadable" | "not_project_wide" | "bad_name" | SkillTextFailure>;
+  | Fail<"not_found" | "not_proven" | "not_eligible" | "eligibility_unavailable" | "already_a_skill" | "other_target" | "audit_unavailable" | "unreadable" | "not_project_wide" | "bad_name" | SkillTextFailure>;
 type SkillTextFailure = Extract<SkillTextCheck, { ok: false }>["code"] | "too_many_steps";
 
 /**
@@ -243,7 +244,11 @@ export async function draftSkillFromLesson(deps: SkillDeps, key: ScopeKey, input
   if (name === undefined) return { ok: false, code: "bad_name" };
   const { when: lead, steps } = stepsOfBody(lesson.body);
   const form: SkillForm = { name, description: lesson.description === "" ? lesson.title : `${lesson.title}. ${lesson.description}`, when: lead === "" ? "the change this lesson is about" : lead, steps, why: lesson.description === "" ? undefined : lesson.description };
-  return createSkill(deps, key, { name, form, fromLessons: [lesson.id], by: input.by });
+  // One target per lesson (graduation's own claim): a lesson already being made a rule or a check is not also drafted as a skill, and the other way round. The same target again goes on.
+  try { if (await claimGraduation(deps.documents, key.workspaceId, key.project, lesson.id, "skill", deps.now()) === "other_target") return { ok: false, code: "other_target" }; } catch (error) { if (error instanceof GraduationUnreadable) return { ok: false, code: "unreadable" }; throw error; }
+  const made = await createSkill(deps, key, { name, form, fromLessons: [lesson.id], by: input.by });
+  if (!made.ok) await releaseClaim(deps.documents, key.workspaceId, key.project, lesson.id).catch(() => undefined);
+  return made;
 }
 
 async function createSkill(deps: SkillDeps, key: ScopeKey, input: { name: string; form: SkillForm; fromLessons: string[]; by: string }): Promise<DraftResult> {
@@ -297,7 +302,7 @@ export async function editSkill(deps: SkillDeps, key: ScopeKey, input: { name: s
   return { ok: true, version: next, ...(checked.note === undefined ? {} : { note: checked.note }) };
 }
 
-export type ApproveSkillResult = { ok: true; approvals: number; live: boolean } | Fail<"not_found" | "not_eligible" | "eligibility_unavailable" | "not_newest" | "already_live" | "already_approved" | "audit_unavailable" | "conflict" | "unreadable" | "retired">;
+export type ApproveSkillResult = { ok: true; approvals: number; live: boolean } | Fail<"not_found" | "not_eligible" | "eligibility_unavailable" | "not_newest" | "already_live" | "already_approved" | "audit_unavailable" | "conflict" | "unreadable" | "retired" | "not_proven">;
 /**
  * One person's approval of one version of a skill. The version must be the newest (a person approves the text they read) and the person must be eligible NOW. A second approval by the same person changes nothing
  * (`already_approved`). The approval that makes `ROVARA_SKILL_APPROVERS_REQUIRED` different people takes the version live in the same transaction (the skill's live pointer and the `set` row), and the lessons it came
@@ -324,6 +329,8 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
   if (group === undefined || !group.complete) return { ok: false, code: "eligibility_unavailable" };
   const approvals = [...version.approvals.filter((entry) => idIn(group.eligibleIds, entry.by)), { by: input.by, at: deps.now() }];
   const live = approvals.length >= ROVARA_SKILL_APPROVERS_REQUIRED;
+  // The proof was read when the draft was made and may be old: a skill goes live for the FIRST time only (a later version of a live skill no longer depends on its lessons, which became it) while every lesson it came from is STILL proven (read now, signals fresh) and has not become something else.
+  if (live && head.activeVersion === undefined && !(await sourcesStillProven(deps, key, head.fromLessons))) return { ok: false, code: "not_proven" };
   if (!await requireAudit(deps.audit, { action: "lesson.skill_approved", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   if (live && !await requireAudit(deps.audit, { action: "lesson.skill_activated", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   const now = deps.now();
@@ -350,6 +357,18 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
     }
   }
   return { ok: true, approvals: approvals.length, live };
+}
+
+/** Whether every lesson a skill came from is still in the proven band now (a lesson that is gone is not counted: it cannot be read, and nothing is retired for it). Unreadable is a no. */
+async function sourcesStillProven(deps: SkillDeps, key: ScopeKey, fromLessons: readonly string[]): Promise<boolean> {
+  if (fromLessons.length === 0) return true;
+  try {
+    const lessons = (await Promise.all(fromLessons.map((id) => deps.lessons.get(key, id)))).filter((lesson): lesson is Lesson => lesson !== undefined);
+    if (lessons.length === 0) return true;
+    const counted = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: lessons.map((lesson) => lesson.id), now: deps.now() });
+    const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
+    return lessons.every((lesson) => provenProcedure({ lesson, tasks: counted.counts.get(lesson.id)?.tasks, now: deps.now(), signal: signalOf?.(lesson.id) }));
+  } catch { return false; }
 }
 
 export type RetireSkillResult = { ok: true } | Fail<"not_found" | "not_eligible" | "eligibility_unavailable" | "audit_unavailable" | "unreadable" | "conflict">;
