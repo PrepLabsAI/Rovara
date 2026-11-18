@@ -3,14 +3,14 @@
 import { describe, expect, it } from "vitest";
 import { KnowledgeUnitSchema, TEAM_LESSONS_NOTE, TeamLessonRowSchema, TeamLessonsAnswerSchema, knowledgeUnitId, type KnowledgeUnit } from "../../../packages/contracts/src/index.js";
 import { modulePageId } from "../../../packages/broker/src/core/wiki-build/plan.js";
-import { buildAreaIndex, lessonAppliesToArea } from "../../../packages/broker/src/lessons/area-index.js";
+import { buildAreaIndex } from "../../../packages/broker/src/lessons/area-index.js";
 import { buildKnowledgeContext, pullable, unitOfLesson } from "../../../packages/broker/src/lessons/knowledge-brief.js";
 import { loadPullForStage, type LoadDeps } from "../../../packages/broker/src/lessons/load.js";
 import { TEAM_LESSONS_PAGE_MAX, teamLessonRowOf, teamLessonsForArea } from "../../../packages/broker/src/lessons/team-lessons.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { answerKnowledgeFor, renderKnowledgeBlock, unitMatchesPath, validateKnowledgeContext } from "../../../packages/worker/src/knowledge-context.js";
-import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, codeCite, embedder, lessonRecord, seed, settings, allowAllAccess } from "../lessons/lesson-helpers.js";
+import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, autoSettings, codeCite, embedder, lessonRecord, seed, settings, allowAllAccess } from "../lessons/lesson-helpers.js";
 
 const OTHER_WS = "org_bbbbbbbbbbbbbbbbbbbb";
 const restricted = { kind: "restricted" as const, acl: { source: "slack" as const, scope: "slack:T/C9", principals: ["U-member"], capturedAt: "x", liveCheck: "none" as const } };
@@ -55,6 +55,16 @@ describe("what is listed", () => {
     expect(idsOf(await teamLessonsForArea(deps, { key: KEY, target: area() }))).toEqual(["les_ok000001"]);
   });
 
+  it("a lesson that is live with no person behind it (the automatic path, or on trial) is not listed even where the project would load it, and a stable one is", async () => {
+    const auto = setup({ settings: autoSettings() });
+    await auto.add(conv("les_autolive1", { tier: 0, approvals: [{ approvalId: "a", by: "system:auto", at: 1, mode: "auto" }] }), conv("les_persona01", { tier: 0 }));
+    expect(idsOf(await teamLessonsForArea(auto.deps, { key: KEY, target: area() }))).toEqual(["les_persona01"]);
+    const trial = setup({ settings: settings({ preset: "standard", mode: "On" }) });
+    const onTrial = { approvals: [{ approvalId: "t", by: "system:trial", at: 1, mode: "trial" as const }], tier: 0 as const };
+    await trial.add(conv("les_ontrial01", { ...onTrial, trial: { state: "trial", startedAt: 1 } }), conv("les_stable001", { ...onTrial, trial: { state: "stable", startedAt: 1, stableAt: 2 } }));
+    expect(idsOf(await teamLessonsForArea(trial.deps, { key: KEY, target: area() }))).toEqual(["les_stable001"]);
+  });
+
   it("lists nothing when learning does not load for the project (mode Off), and nothing for a folder no lesson applies to", async () => {
     const { deps, add } = setup();
     await add(conv("les_ok000001"));
@@ -64,7 +74,7 @@ describe("what is listed", () => {
   });
 
   it("a source task not open to the whole project keeps a lesson out of the page (the page never promises more than an agent is told)", async () => {
-    const { deps, add } = setup({ access: { ...allowAllAccess, taskVisibility: { read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "private" as const, ownerId: "ann" }])) } as never } });
+    const { deps, add } = setup({ access: { ...allowAllAccess, taskVisibility: { read: async (_org: string, ids: readonly string[]) => new Map(ids.map((id) => [id, { kind: "private" as const, ownerId: "ann" }])) } as never } });
     await add(conv("les_fromtask", { provenance: { ...lessonRecord().provenance, supportTasks: ["t1"], sourceEvents: ["ev-1"] } }));
     expect(idsOf(await teamLessonsForArea(deps, { key: KEY, target: area() }))).toEqual([]);
   });
@@ -82,7 +92,7 @@ describe("what is listed", () => {
   it("fails closed: a store that cannot be read, or an access port that is missing, is no answer (never a partial list)", async () => {
     const { deps, add } = setup();
     await add(conv("les_ok000001"));
-    expect(await teamLessonsForArea({ ...deps, store: { ...deps.store, list: async () => { throw new Error("down"); } } as never }, { key: KEY, target: area() })).toBeUndefined();
+    expect(await teamLessonsForArea({ ...deps, store: { list: async () => { throw new Error("down"); } } as never }, { key: KEY, target: area() })).toBeUndefined();
     expect(await teamLessonsForArea({ ...deps, access: undefined as never }, { key: KEY, target: area() })).toBeUndefined();
     expect(await teamLessonsForArea({ ...deps, access: { ...allowAllAccess, mayRead: async () => { throw new Error("records down"); } } }, { key: KEY, target: { area: { repo: "api", folder: "src/billing" } } })).toBeDefined();
   });

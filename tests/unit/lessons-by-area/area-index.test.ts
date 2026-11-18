@@ -68,8 +68,9 @@ describe("the tree", () => {
     expect(index.repos.find((r) => r.repo === null)!.lessons).toBe(1);
   });
   it("a lesson named twice is counted once, and the order is most lessons first then by name", () => {
-    const again = buildAreaIndex([...lessons, lessons[0]!]);
+    const again = buildAreaIndex([...lessons, lessons[0]!, lessons[5]!, lessons[5]!]);
     expect(again.total).toBe(8);
+    expect(again.wholeProject).toBe(1);
     expect(index.repos.map((r) => r.repo)).toEqual(["api", "web", null]);
   });
   it("is bounded: many folders, many files and a deep path are cut, never unbounded", () => {

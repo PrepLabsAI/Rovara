@@ -7,7 +7,7 @@
 // Everything counted or named passes `readVisibleRanked` for THIS reader first: a lesson from a place the reader cannot see is not counted and is never the example (a count must not reveal what it hides).
 // PAUSE holds, it does not stop reading: a paused kind is recorded in the project's paused sources as `kind:<span kind>`; a lesson resting on that kind of evidence is held (collected, not queued for people, not applied)
 // until a person resumes it, and resuming re-settles what was held (nothing goes live from there). It deletes nothing. The same mechanism the flood guard uses for a spiking source (`sources.ts`).
-import { LEARNING_SOURCE_KEYS, LEARNING_SOURCE_WORDS, type LearningSourceKey, type LearningSourcesAnswer } from "@agentx/contracts";
+import { LEARNING_SOURCE_KEYS, LEARNING_SOURCE_WORDS, cleanLessonText, type LearningSourceKey, type LearningSourcesAnswer } from "@agentx/contracts";
 import { requireAudit } from "./policy.js";
 import type { LessonAuditSink } from "./ports.js";
 import { resumeAndResettle, type ProcessDeps } from "./process.js";
@@ -16,7 +16,7 @@ import type { AccessCheckPort } from "./access-port.js";
 import type { ApproverDirectory } from "./ports.js";
 import { pausedKey } from "./sources.js";
 import type { LessonStore, ScopeKey } from "./store.js";
-import type { Lesson, SpanKind } from "./types.js";
+import { idIn, type Lesson, type SpanKind } from "./types.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
 
 /** The kinds of evidence each row stands for. A kind in no row (the task's own description, Rovara's plan, a loaded lesson, a fact row) is not a source people can pause. */
@@ -41,8 +41,10 @@ export interface LearningSourcesDeps { store: LessonStore; directory: ApproverDi
 export async function buildLearningSources(deps: LearningSourcesDeps, caller: { orgId: string; developerId: string }, project: string, input: { canPause: boolean }): Promise<LearningSourcesAnswer> {
   const key: ScopeKey = { workspaceId: caller.orgId, project };
   const now = deps.now();
-  const viewer = await deps.directory.identity(key.workspaceId, caller.developerId);
-  const all = (await deps.store.listAllHeads(key)).filter((lesson) => lesson.status !== "withdrawn" && lesson.createdAt >= now - SOURCES_WINDOW_MS).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
+  const [viewer, group] = await Promise.all([deps.directory.identity(key.workspaceId, caller.developerId), deps.directory.eligibility(key.workspaceId, key.project).catch(() => undefined)]);
+  // Held candidates, proposed, dropped and retired lessons are for the people who decide (the lists refuse them to anyone else); everyone else counts and sees an example only among lessons in use.
+  const canDecide = group !== undefined && group.complete && idIn(group.eligibleIds, caller.developerId);
+  const all = (await deps.store.listAllHeads(key)).filter((lesson) => (canDecide ? lesson.status !== "withdrawn" : KEPT.has(lesson.status)) && lesson.createdAt >= now - SOURCES_WINDOW_MS).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
   const ranked = all.slice(0, SOURCES_HEADS_MAX);
   const deadlineAt = Date.now() + SOURCES_DEADLINE_MS;
   const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "view", log: deps.log, timeoutMs: () => Math.max(1, Math.min(LESSON_LIVE_TIMEOUT_MS, deadlineAt - Date.now())) });
@@ -59,7 +61,7 @@ export async function buildLearningSources(deps: LearningSourcesDeps, caller: { 
     return {
       key: sourceKey, label: words.label, detail: words.detail, seen: mine.length, suggested: suggested.length, kept: kept.length,
       paused: SOURCE_KINDS[sourceKey].every((kind) => pausedKey(flags, pauseKeyOf(kind)) !== undefined),
-      ...(example === undefined ? {} : { example: { lessonId: example.id, title: example.title.slice(0, 80) } }),
+      ...(example === undefined ? {} : { example: { lessonId: example.id, title: cleanLessonText(example.title, 80).replace(/\s*[\n\u2028\u2029]\s*/gu, " ") } }),
     };
   });
   const partial = all.length > ranked.length || !read.complete;

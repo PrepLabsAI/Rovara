@@ -43,7 +43,7 @@ async function setup(standings: Record<string, SetupRunStanding["access"]> = { [
     return { status: answer.statusCode, body: JSON.parse(answer.body ?? "{}") as Record<string, unknown>, raw: answer.body ?? "" };
   };
   const wiki = (companyId: OrgId) => createWikiStore({ store, companyId, now: () => T0 });
-  const lessons = async (...rows: Lesson[]) => { for (const row of rows) await seed(lessonStores.get(row.workspaceId as OrgId)!, row); };
+  const lessons = async (...rows: Lesson[]) => { for (const row of rows) await seed(lessonStores.get(row.workspaceId)!, row); };
   return { get, wiki, lessons };
 }
 

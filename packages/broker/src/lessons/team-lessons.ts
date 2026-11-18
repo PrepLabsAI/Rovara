@@ -45,13 +45,13 @@ export async function teamLessonsForArea(deps: LoadDeps, input: TeamLessonsInput
     if (!modeAllows(resolved.mode, "load")) return { lessons: [], more: 0 };
     const now = deps.now();
     const live = (await deps.store.list(key, { statuses: ["active"] })).filter((lesson) => lesson.expiresAt > now && !hasStaleCitation(lesson));
-    const area = "area" in input.target ? input.target.area : wikiPageArea({ ...input.target.page, lessonScopes: live.map((lesson) => lesson.scope) });
+    const area = "area" in input.target ? input.target.area : wikiPageArea({ ...input.target.page, lessonScopes: live.filter((lesson) => pullable(lesson)).map((lesson) => lesson.scope) });
     if (area === undefined) return { lessons: [], more: 0 };
     const active = live.filter((lesson) => lessonAppliesToArea(lesson.scope, area));
     if (active.length === 0) return { area, lessons: [], more: 0 };
     const union = new Map<string, Lesson>();
     for (const stage of LOOKUP_STAGES) {
-      const selected = await selectLessons(deps, {
+      const selected = await selectLessons({ ...deps, embedder: undefined }, {
         key, stage, resolved, active, intent: "", repos: [area.repo], files: [], languages: [], reader: {}, where: "wiki",
         budget: { lessons: READ_MAX, bytes: 1_048_576 }, prefilter: async (eligible) => eligible.filter((lesson) => pullable(lesson) && !needsALook(lesson)),
       });

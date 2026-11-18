@@ -31,7 +31,7 @@
 //     the write for the mode and a retire request (no record, no change).
 //   - A person's erased words never come back: reasons are fixed words, people are named live (an erased person is "a former member"), and an erased person's retire request is never listed.
 //   - Refusals are fixed words; nothing a caller sent is echoed.
-import { AgentXError, AgentXNameSchema, LEARNING_SOURCE_KEYS, LearningSourcePauseBodySchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type LearningSourceKey, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, AgentXNameSchema, LEARNING_SOURCE_KEYS, LearningSourcePauseBodySchema, OrgIdSchema, OrgRoleSchema, agentXError, companyScoped, type OrgId, type OrgRole, type ProjectRole } from "@agentx/contracts";
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
 import { recordFeedback } from "../lessons/counters.js";
@@ -313,7 +313,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
       let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
-      try { outcome = await setLearningSourcePause({ process: runtime.process, store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data as LearningSourceKey, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+      try { outcome = await setLearningSourcePause({ process: runtime.process, store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
       if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
       log("learning_source_set", { companyId, paused: outcome.paused });
       return { project, key: sourceKey.data, paused: outcome.paused };
