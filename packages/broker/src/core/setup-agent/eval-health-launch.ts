@@ -4,15 +4,17 @@
 //   - the workspace belongs to the person who asked (their id is only the owner key; it gives them no access to the run);
 //   - every repository of the project has a head in the claim, and the claim names no other: the pins are the project's, whole;
 //   - one start per claim: the workspace and the operation are written together or not at all, and the ids are the broker's own.
+// When the preparation ends, the flow closes the workspace and its machine (the same rule as a project's setup check: a workspace with no task).
 // A worker that does not list `PREPARE_EVAL_HEALTH_FEATURE` is never sent the run (the dispatch says `requires`). Fails closed: a project that cannot be read or is archived, heads that do not match the project's
 // repositories, or a store that refuses start nothing and answer false (the claim then ends as "could not be started": nothing was spent).
 import { randomUUID } from "node:crypto";
-import { EVAL_HEALTH_RESULT_PATH, EVAL_PLAN_DELIVERY_ACTION, PREPARE_EVAL_HEALTH_FEATURE, when, workerProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { EVAL_HEALTH_RESULT_PATH, EVAL_PLAN_DELIVERY_ACTION, INDEX_EXPIRY_ATTRIBUTE, PREPARE_EVAL_HEALTH_FEATURE, when, workerProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { buildOperation } from "../task-flow/accept.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { workspaceKey } from "../task-flow/keys.js";
 import { legacyWorkspaceKey } from "../task-flow/legacy-keys.js";
+import { setupCheckRecordKey } from "./check.js";
 
 const documentOf = <T extends object>(value: T): StoredDocument => JSON.parse(JSON.stringify(value)) as StoredDocument;
 
@@ -49,6 +51,8 @@ export async function launchEvalHealthRun(flow: TaskFlowDeps, job: EvalHealthLau
       { kind: "put", item: workspace, condition: when.absent() },
       { kind: "put", item: { ...legacyWorkspaceKey(workspaceId), entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: workspace["companyId"]! }, condition: when.absent() },
       ...prepare.items,
+      // A workspace with no task is closed, with its machine, when its preparation ends (`closeSetupCheck`, read from this record): a finished health run keeps nothing running.
+      { kind: "put", item: { ...setupCheckRecordKey(flow.companyId, workspaceId), entityType: "SETUP_CHECK", companyId: flow.companyId, project: job.project, workspaceId, revision: project.definition.revision, candidate: false, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + 31 * 86_400 } as unknown as StoredDocument, condition: when.absent() },
     ]);
     if (!written.applied) return false;
     // The message is handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the start.
