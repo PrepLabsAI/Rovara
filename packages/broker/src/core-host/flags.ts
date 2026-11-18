@@ -57,6 +57,18 @@ export function switchCovers(value: CoreSwitch, companyId: string): boolean {
   }
 }
 
+/**
+ * Whether a switch NAMES this company (`on:<company id>[:...]`). `on` (every company) names nobody: it cannot tell a pilot company from any other. Used where a default is on only for the companies an install
+ * lists by name (the weekly lessons summary).
+ */
+export function switchNames(value: CoreSwitch, companyId: string): boolean {
+  return value.mode === "on-for" && value.companies.includes(companyId);
+}
+
+/** The weekly summary's pilot list of this install: the host's own, else the companies the lessons switch names. */
+export const digestPilotOf = (options: { lessonsSwitch: CoreSwitch; digestPilot?: ((companyId: OrgId) => boolean) | undefined }): ((companyId: OrgId) => boolean) =>
+  options.digestPilot ?? ((companyId) => switchNames(options.lessonsSwitch, companyId));
+
 export interface CoreEngineFlags {
   /** The combined switch. */
   combined: CoreSwitch;

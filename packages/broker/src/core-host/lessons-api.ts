@@ -13,9 +13,10 @@
 //   POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful   {}                       a person on the project marks a lesson the task was given as not helpful (thumbs-down)
 //   GET  /v1/dev/projects/{project}/lessons/mode                                                             the project's learning mode
 //   GET  /v1/dev/projects/{project}/lessons/measure                                                          phase 0 numbers (fit of what loaded and what was left out, clean-merge rate; counts only): a project admin or a company owner or admin
+//   GET  /v1/dev/projects/{project}/lessons/tuning                                                           SUGGESTED starting values for the phase 1 and 2 settings, from the measured rows (`lessons/tuning.ts`; read only, nothing is applied); same readers as measure
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
 //   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
-//   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; off by default)
+//   GET  /v1/dev/projects/{project}/lessons/weekly-summary                                                   whether the weekly lessons summary goes to the chats (`lessons/digest-notice.ts`; the project's own choice, else on for a pilot company and off for any other; `source` says which)
 //   PUT  /v1/dev/projects/{project}/lessons/weekly-summary              { on: boolean }                      who may set the mode sets it; audited before the write
 //
 // Rules:
@@ -38,17 +39,18 @@ import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
 import { readLessonMeasure } from "../lessons/measure.js";
+import { readTuningReport } from "../lessons/tuning.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
 import { countLessonUses } from "../lessons/use-count.js";
 import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed, trialWouldStart, type TrialOfferTally } from "../lessons/earned-trust.js";
-import { readDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
+import { resolveDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
-import { switchCovers, type CoreSwitch } from "./flags.js";
+import { digestPilotOf, switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|tuning)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -59,6 +61,7 @@ export const NO_SUCH_TASK = "No such task.";
 export const NO_SUCH_LESSON = "That lesson is no longer there.";
 export const MODE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change its learning mode.";
 export const SUMMARY_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change the weekly summary.";
+export const TUNING_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can see the suggested lessons settings.";
 export const MEASURE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can see how lessons are loaded.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 const SIGN_IN_AGAIN = "Sign in again.";
@@ -126,6 +129,8 @@ export type LessonsApiCompany = Pick<CoreLessons, "companyId" | "runtime" | "rea
 export interface LessonsApiOptions {
   /** The install's lessons switch (`readCoreLessonsSwitch`). */
   lessonsSwitch: CoreSwitch;
+  /** The pilot list for the weekly summary's default (see `CoreLessonsOptions.digestPilot`); absent: the companies `lessonsSwitch` names. Pass the same list the lessons were built with. */
+  digestPilot?: ((companyId: OrgId) => boolean) | undefined;
   /** The caller's company and their live role in it, from membership. Undefined, malformed or a throw: sign in again. */
   companyOf(caller: LessonsApiCaller): Promise<{ companyId: string; role: OrgRole } | undefined>;
   /** The lessons of a company the switch covers (built once per company by the deployment). Undefined: lessons are off for it. */
@@ -210,7 +215,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
     const method = request.method;
     const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
     if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -295,11 +300,19 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       try { return await readLessonMeasure(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
     }
 
+    if (route === "tuning") {
+      // The tuning report (`lessons/tuning.ts`): suggested values for the settings phases 1 and 2 introduce, from the project's own measured rows; "not enough data yet (N of M loads)" until there are enough.
+      // Read only: an operator or admin applies a value; nothing here changes by itself. For the people who run the project's learning, never a script token.
+      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+      if (!(await mayChange())) throw agentXError("FORBIDDEN", TUNING_NEEDS_ADMIN);
+      try { return await readTuningReport(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    }
+
     if (route === "weekly-summary") {
       if (method === "GET") {
-        let on: boolean;
-        try { on = await readDigestSettingStrict(runtime.documents, companyId, project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-        return { project, on, canChange: await mayChange() };
+        let setting: Awaited<ReturnType<typeof resolveDigestSettingStrict>>;
+        try { setting = await resolveDigestSettingStrict(runtime.documents, companyId, project, digestPilotOf(options)); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+        return { project, on: setting.on, source: setting.source, canChange: await mayChange() };
       }
       const body = bodyOf(WeeklySummaryBody, request.body, "the weekly summary takes on: true or false");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", SUMMARY_NEEDS_ADMIN);
@@ -307,7 +320,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       if (!(await requireAudit(runtime.audit, { action: "lesson.digest_switched", workspaceId: companyId, project, actor: personId, facts: { enabled: body.on } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
       try { await writeDigestSetting(runtime.documents, companyId, project, body.on, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
       log("weekly_summary_set", { companyId, on: body.on });
-      return { project, on: body.on, canChange: true };
+      return { project, on: body.on, source: "chosen", canChange: true };
     }
 
     if (route === "mode" || route === "mode/trial-offer") {

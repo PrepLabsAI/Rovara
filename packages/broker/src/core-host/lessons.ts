@@ -39,7 +39,7 @@ import type { RepositoryVisibility } from "../lessons/used-in-pr.js";
 import { createLessonRepositories } from "../local/app/lessons-repos.js";
 import { createLocalLessonSources } from "../local/app/lessons-sources.js";
 import type { CoreService } from "./core-runtime.js";
-import { parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
+import { digestPilotOf, parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
 
 export const CORE_LESSONS_VARIABLE = "ROVARA_CORE_LESSONS";
 
@@ -68,6 +68,12 @@ export interface CoreLessonsOptions {
   companyId: OrgId;
   /** The switch (`readCoreLessonsSwitch`). Lessons are built only where it covers `companyId`. */
   lessonsSwitch: CoreSwitch;
+  /**
+   * The pilot list: companies whose projects have the weekly lessons summary ON until a project says otherwise. Absent: the companies `lessonsSwitch` names (`ROVARA_CORE_LESSONS=on:<ids>`), which is how an install
+   * lists its pilot companies today; `on` for every company names nobody, so no company is then a pilot. Cloud's own exempt list (`GATEWAY_ROVARA_AI_EXEMPT`) lives in the model gateway and is not visible here: a host that
+   * has a list passes it.
+   */
+  digestPilot?: ((companyId: OrgId) => boolean) | undefined;
   people: HostedLessonPeople;
   /** The person a code host account is linked to, for the review comments a task's pull requests got. Absent: the account's own name. */
   personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined>;
@@ -230,9 +236,9 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
           try { await host.nightly(await projectNames()); } catch (error) { log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }); await releaseNightly(day); nightly = false; }
         }
       }
-      // The weekly lessons summary in the chats, for the projects that turned it on (off by default), in at most a quarter of the pass's time.
+      // The weekly lessons summary in the chats, for the projects that have it on (their own choice; else on for a pilot company, off for any other), in at most a quarter of the pass's time.
       const digests = await sendLessonDigests({
-        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, companyOf: options.channelCompanyOf, now,
+        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, pilot: digestPilotOf(options), companyOf: options.channelCompanyOf, now,
         log: (event, fields) => log(event, fields),
       }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.max(0, Math.min(Math.floor(budgetMs / 4), deadlineAt - now())) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
       const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {
