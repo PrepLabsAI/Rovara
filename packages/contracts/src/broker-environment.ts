@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -253,6 +253,9 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
+  // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, fixed names too (core-engine-infra.ts): derived, so the broker's 4 KB grows by nothing.
+  { variable: CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectQueueName },
+  { variable: CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectDeadLetterName },
   // Web task channel C8 (option b): the attention email's sender function has a fixed name, so the broker builds it; nothing is passed (the function exists only while the email is on).
   { variable: ATTENTION_EMAIL_FUNCTION_VARIABLE, kind: "text", value: coreAttentionEmailFunctionName },
 ];

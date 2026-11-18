@@ -19,9 +19,9 @@
 // refuses by name and every core record comes back (the intended fail-closed state; the named switch is wired through CORE_ENGINE_BROKER_WIRED).
 import { createHmac } from "node:crypto";
 import {
-  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId,
+  CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type DocumentStore, type OrgId, type QueueService,
 } from "@agentx/contracts";
-import type { TaskAccess } from "../../core/task-flow/deps.js";
+import type { TaskAccess, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import type { GitHubCodeHostProvider } from "../../plugins/code-host/github/index.js";
 import type { GitHubActionsProvider } from "../../plugins/check-runner/github-actions/index.js";
 import { createCoreHostApp, type CoreHostApp } from "../../core-host/app.js";
@@ -238,6 +238,17 @@ export interface DispatcherCoreInputs {
 
 const required = (value: string | undefined): string | undefined => (value === undefined || value.trim() === "" ? undefined : value);
 
+/**
+ * L4-SQS (journey audit B18): the flow dependencies of one dispatcher batch. `queues` serves the batch (core-dispatch-host.ts). The OUTBOX stays over the registry's SQS service, which the
+ * dispatcher's role cannot use (it may receive from, delete from and change the visibility of the core dispatch queue, and nothing else: infra/lib/core-engine.ts CORE_DISPATCHER_QUEUE_ACTIONS): a
+ * relay from here would read the dead-letter queue's attributes (AccessDenied), and then send (not granted), burning one of the row's attempts each time. So the dispatcher stages and never relays:
+ * a message its flow stages (a step started after the dispatcher ended an operation) stays PENDING and the broker, which holds the send grant, relays it (the State stream, else the one-minute
+ * backstop). No grant is widened; the dispatcher still cannot send to any queue.
+ */
+export function dispatcherFlowDeps(flowDeps: TaskFlowDeps, queues: QueueService): TaskFlowDeps {
+  return { ...flowDeps, queues, outbox: { ...flowDeps.outbox, relay: async () => ({ delivered: 0, failed: 0, dead: 0 }) } };
+}
+
 /** The core on the dispatcher (the deployed root) and the dispatch host over it. Throws `DISPATCHER_CORE_NOT_CONFIGURED` (as the error) when the function lacks what the core needs. */
 export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: CoreHostApp; host: CoreDispatchHost } {
   const { env } = inputs;
@@ -328,7 +339,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     enabled: () => coreEngineServes(readCoreEngineFlags(env)),
     companyOfWorkspace,
     depsFor: async (companyId: OrgId, queues) => {
-      const deps = { ...(await app.runtimeFor(companyId)).flow.deps, queues };
+      const deps = dispatcherFlowDeps((await app.runtimeFor(companyId)).flow.deps, queues);
       // L4-P2: the dispatcher's setup gate before a build can RETRY a re-check (core/setup-agent/recheck.ts). An ABSENT gate means ON, so the dispatcher carries the same effective gate as the broker (the operator's
       // ceiling, read from this function's own environment, AND the company's consent): a re-check never retries after the flag or the consent went off. A flag the dispatcher cannot read is off.
       hostedSystemRunsFor(deps, companyId, readSystemRunsSwitch(env).value);

@@ -31,6 +31,8 @@ export function withoutCoreEngine(template: unknown): unknown {
   expect(added.map(([, resource]) => resource.Type).sort()).toEqual([
     "AWS::CloudWatch::Alarm", "AWS::IAM::Policy", "AWS::IAM::Role", ...Array<string>(CORE_JOB_SCHEDULES.length).fill("AWS::Scheduler::Schedule"), "AWS::Scheduler::ScheduleGroup",
     "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
+    // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, and their two queue policies (checked in tests/contract/core-lessons-reflect-queue.test.ts).
+    "AWS::SQS::Queue", "AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::SQS::QueuePolicy",
     // R2 step 4: the dispatcher's core queue mapping and its policy under the condition.
     "AWS::Lambda::EventSourceMapping", "AWS::IAM::Policy",
     // Web task channel C8 (option b): the attention email's sender function, its log group, role, policy and the broker's invoke permission, all under AttentionEmailIsOn.
