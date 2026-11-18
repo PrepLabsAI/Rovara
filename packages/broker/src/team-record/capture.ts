@@ -8,7 +8,9 @@
 // repositories). A review comment is restricted to its repository's readers at the source; it is treated as project-wide here exactly as lessons treat words from the project's OWN repositories
 // (`lessons/project-repo-audience.ts`): the subject source reads comments only from the repositories of the task's project. The caller frames the hits as data (`context-sources/routes.ts`).
 import type { OrgId } from "@agentx/contracts";
-import type { TaskSubjectSource } from "../lessons/task-end.js";
+import type { TaskLifetime } from "../lessons/paused-kinds.js";
+import { withoutPausedEvidence, type TaskSubjectSource } from "../lessons/task-end.js";
+import type { SpanKind } from "../lessons/types.js";
 import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
 import type { TeamRecordHit, TeamRecordSearch } from "../context-sources/team-record.js";
 import { RECORD_SNIPPET_MAX, TeamRecordCompanyError, type TeamRecord, type TeamRecordDraft } from "./record.js";
@@ -34,10 +36,20 @@ export async function recordEndedTask(input: {
   record: TeamRecord; source: TaskSubjectSource; rows: OutcomeRowReader; companyId: OrgId; taskId: string; now: () => number;
   /** How the task started (the task record's `origin`); only a request its own person typed is recorded as theirs (`TYPED_REQUEST_ORIGINS`). */
   origin: string | undefined;
+  /**
+   * Lead 4 L4-LP3Wc: the kinds of evidence a person stopped on "Where Rovara learns from", for the task's project (read live, failing closed; `lessons/paused-kinds.ts`). The record is a place those same words would be kept, so a stopped kind
+   * is not read for it either: the source skips it, and its spans and send-back rows are left out. `life` is the task's own life, to leave out a kind stopped at any time during it. Absent: nothing is stopped (a record with no lessons).
+   */
+  paused?: (project: string, life: TaskLifetime | "unknown") => Promise<ReadonlySet<SpanKind>>;
+  /** The task's project, from the task record alone, so a stopped kind is known before the source reads anything. */
+  projectOf?: (taskId: string) => Promise<string | undefined>;
 }): Promise<{ written: number }> {
   if (input.record.companyId !== input.companyId) throw new TeamRecordCompanyError();
-  const subject = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId });
-  if (subject === undefined) return { written: 0 };
+  const early = input.paused === undefined || input.projectOf === undefined ? undefined : await (async () => { const known = await input.projectOf!(input.taskId); return known === undefined ? undefined : input.paused!(known, "unknown"); })();
+  const given = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+  if (given === undefined) return { written: 0 };
+  const stopped = input.paused === undefined ? undefined : await input.paused(given.facts.project, given.lifetime ?? "unknown");
+  const subject = stopped === undefined ? given : withoutPausedEvidence(given, stopped);
   const { facts } = subject;
   const project = facts.project;
   const occurredAt = new Date(input.now()).toISOString();

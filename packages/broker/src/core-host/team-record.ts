@@ -6,6 +6,7 @@
 import { OrgIdSchema, type AuditSink, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { TeamRecordSearch } from "../context-sources/team-record.js";
 import { readTask } from "../core/task-flow/reads.js";
+import { pausedKindsFor } from "../lessons/paused-kinds.js";
 import { recordEndedTask, teamRecordSearchOver } from "../team-record/capture.js";
 import { createTeamRecord, type TeamRecord } from "../team-record/record.js";
 import { companyProjects, erasePersonLessons, type CoreLessons, type ErasePersonLessonsReport } from "./lessons.js";
@@ -26,7 +27,9 @@ export function attachCoreTeamRecord(lessons: CoreLessons, input: { store: Docum
       if (await lessons.readTask(event.taskId) === undefined) return;
       try {
         const task = await readTask({ store: input.store }, event.taskId);
-        await recordEndedTask({ record, source: lessons.sources.source, rows: lessons.sources.rows, companyId: lessons.companyId, taskId: event.taskId, now: input.now, origin: task?.companyId === lessons.companyId ? task.origin : undefined });
+        await recordEndedTask({ record, source: lessons.sources.source, rows: lessons.sources.rows, companyId: lessons.companyId, taskId: event.taskId, now: input.now,
+          // A kind of evidence a person stopped on "Where Rovara learns from" is not read for the record either.
+          paused: (project, life) => pausedKindsFor(lessons.runtime.store, { workspaceId: lessons.companyId, project }, life), projectOf: async (taskId) => (await lessons.readTask(taskId))?.project, origin: task?.companyId === lessons.companyId ? task.origin : undefined });
       } catch (error) {
         input.log?.({ component: "core-team-record", companyId: lessons.companyId, event: "capture_failed", error: error instanceof Error ? error.name : "unknown" });
         throw error;

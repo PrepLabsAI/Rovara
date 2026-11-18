@@ -34,6 +34,7 @@ import type { ProcessDeps } from "./process.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { PipelineModel } from "./ports.js";
 import { buildReflectorInput, type EvidenceSpan, type ReflectSubject } from "./reflect-input.js";
+import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
 import { repoVisibilityOf } from "./repo-eligibility.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import type { Audience } from "./types.js";
@@ -183,9 +184,12 @@ export async function reflectRepoOnly(deps: RepoReflectDeps, main: ReflectSubjec
   const result: RepoReflectResult = { calls: 0, drafts: 0 };
   if (main.outcome !== "merged" || main.evalRun === true) return result;
   const kind = options.kind ?? "comments";
-  const wanted = changes.filter((change) => hasRepoCorrection(change, kind)).slice(0, MAX_REPO_CHANGES);
-  if (wanted.length === 0) return result;
   const store = deps.process.store;
+  // Lead 4 L4-LP3Wc: a paused kind (the pull request's comments, or its edits) is a stop: those spans are removed here, before anything is judged, built or sent, and a change request left with no correction makes no call.
+  const paused = await pausedKindsFor(store, { workspaceId: main.workspaceId, project: main.project });
+  const unpaused = paused.size === 0 ? changes : changes.map((change) => ({ ...change, comments: withoutPausedSpans(change.comments, paused), edits: withoutPausedSpans(change.edits, paused) }));
+  const wanted = unpaused.filter((change) => hasRepoCorrection(change, kind)).slice(0, MAX_REPO_CHANGES);
+  if (wanted.length === 0) return result;
   const cap = learningCaps(deps.reflect.edition, deps.reflect.capsOverride).perTaskUsd;
   try {
     // The switch first: Off, Collect and a lessons switch that is off or unreadable read nothing and call nothing.

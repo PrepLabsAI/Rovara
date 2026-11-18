@@ -38,6 +38,7 @@ import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "./refl
 import { learnFromEndedTaskTyped, learningTaskEndHandler, type TaskEndOutcome, type TaskLearningDeps } from "./task-end.js";
 import { lessonsUsedReaderOver, lessonsUsedSection, type LessonsUsedSummary, type RepositoryVisibility } from "./used-in-pr.js";
 import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob } from "./repo-file-job.js";
+import { pausedKindsFor } from "./paused-kinds.js";
 import { planLoadFacts } from "./plan-facts.js";
 import { LESSON_USE_KEEP_SECONDS } from "./use-count.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
@@ -256,7 +257,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   const claims = documentReflectClaims({ store: flow.store, keysOutcome: async () => "clear" });
   const learning: TaskLearningDeps = {
     source: input.sources.source, rows: input.sources.rows, settings: runtime.settings,
-    reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause },
+    reflect: { model: runtime.judgeModel, spend: runtime.spend, audit: runtime.audit, settings: runtime.settings, edition: runtime.edition, now, pause: runtime.pause, pausedKinds: (key) => pausedKindsFor(runtime.store, key) },
     process: runtime.process, counters: runtime.counters, log: (event, fields) => log(event, fields),
     // The "same mistake twice" measure's log (no text): only this company's tasks, in this company's partition.
     correctionLog: async (entry) => {
@@ -314,7 +315,10 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
 
   async function noteReverted(taskId: string): Promise<void> {
     if (!enabled()) return;
-    if (await ownTask(taskId).catch(() => undefined) === undefined) return;
+    const task = await ownTask(taskId).catch(() => undefined);
+    if (task === undefined) return;
+    // Lead 4 L4-LP3Wc: "After merge" paused: nothing is queued about the revert (a stop: it is not read, and nothing of it is kept).
+    if ((await pausedKindsFor(runtime.store, { workspaceId: companyId, project: task.project })).has("outcome")) return;
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }
 
@@ -325,6 +329,8 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       // The task is read now and must be this company's: the message's company is the task's own, never a caller's claim.
       const task = await ownTask(taskId);
       if (task === undefined || task.workflow === undefined || task.closedAt !== undefined) return;
+      // Lead 4 L4-LP3Wc: "Decisions in tasks" paused: the send-back is not read and no reflection is queued for it (a stop, not a hold).
+      if ((await pausedKindsFor(runtime.store, { workspaceId: companyId, project: task.project })).has("send_back")) return;
       const sentBack = task.workflow.decisions.filter(isHumanSendBack);
       const round = sentBack.length;
       const latest = sentBack.at(-1);
