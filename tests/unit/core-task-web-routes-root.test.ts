@@ -60,7 +60,7 @@ describe("the core root wires the core task web routes", () => {
   it("item 1: a web start by a member writes the task's session in its own start", async () => {
     const { root: built } = root();
     const extras = (await built.app.runtimeFor(A)).flow.deps.startExtras!;
-    const added = extras({ taskId: "11111111-1111-4111-8111-111111111111", project: "payments", title: "t", principal: { companyId: A, personId: MAYA, displayName: "Maya", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web", receivedAt: "2026-11-17T00:00:00.000Z" });
+    const added = extras({ taskId: "11111111-1111-4111-8111-111111111111", workspaceId: "ws-1", project: "payments", title: "t", principal: { companyId: A, personId: MAYA, displayName: "Maya", roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web", receivedAt: "2026-11-17T00:00:00.000Z" });
     expect(added.sessionId).toMatch(/^ses_/u);
   });
 
