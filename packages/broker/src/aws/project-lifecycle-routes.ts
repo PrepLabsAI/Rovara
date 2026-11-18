@@ -105,6 +105,12 @@ async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawPr
   if (row === undefined || (named === undefined && !recordInCompany(row, company.data))) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
   const revision = (row["definition"] as { revision?: unknown } | undefined)?.revision;
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
+  // R2-F1 review L2: a named company's catalog pointer that names another revision than the one read (its row unusable: drift) is not a project a change can be fenced
+  // on (the change would be stale forever): it answers "not found", the same as any project the caller may not change.
+  if (named !== undefined) {
+    const catalog = (await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: orgProjectCatalogKey(named, project), ConsistentRead: true })) as { Item?: Record<string, unknown> }).Item;
+    if (catalog !== undefined && catalog["latestRevision"] !== revision) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);
+  }
   const grant = await ctx.grantRole(personId, project);
   const access = lifecycleAccess(membership.role, grant);
   if (access === "none") throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);

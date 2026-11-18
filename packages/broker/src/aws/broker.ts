@@ -299,7 +299,7 @@ import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusa
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
-import { namedCompany, revisionKeyFor } from "./company-layout.js";
+import { namedCompany, projectNameHolder, projectNameReservationWrite, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -2257,6 +2257,9 @@ async function registerProject(
   if (ownCompany !== undefined && (definition.e2e !== undefined || setupApproval !== undefined)) throw agentXError("FORBIDDEN", NAMED_COMPANY_SETUP_APPROVAL_REFUSED);
   /** A stored revision is this registration's company's: by its own partition for a named company (a row there may leave its company out), else by its stored company. */
   const inCompany = (row: unknown) => ownCompany !== undefined ? row !== null && typeof row === "object" && ownPartitionRow(row as Record<string, unknown>, ownCompany) : recordInCompany(row, companyId);
+  // R2-F1 review H1: a name a named company holds install-wide (its reservation) is no other company's to register, nor the legacy namespace's; an unreadable holder refuses.
+  const holder = await projectNameHolder(companyBudget.client, dependencies.tableName, definition.name);
+  if (holder !== undefined && holder !== ownCompany) throw agentXError("NOT_FOUND", "registered project not found");
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
@@ -2439,6 +2442,8 @@ async function registerProject(
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
       ...corePlan.writes, ...nameClaimWrites,
+      // R2-F1 review H1: a named company's registration claims (or keeps) its project's name install-wide, in the same transaction.
+      ...(ownCompany === undefined ? [] : [projectNameReservationWrite(dependencies.tableName, ownCompany, definition.name, now)]),
       ] }));
       if (authority === "takeover") {
         ownershipTakenOver = true;
@@ -2498,6 +2503,9 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
   return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
 }
 
+/** R2-F1 review M1: a named company's project with a setup change waiting for approval takes no other revision until that change is decided. */
+export const NAMED_COMPANY_CANDIDATE_WAITING = "a setup change for this project is waiting for approval; approve or decline it before registering another revision";
+
 /** Why a named company's registration may not carry the admin setup approval (DEC 254zzz80). */
 export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's project takes its setup through the project's setup flow, not a setup approval sent with registration";
 
@@ -2505,7 +2513,7 @@ export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's project takes i
  * DEC 254zzz80: registerProject's snapshot for a named company, from its own partition: the catalog row (`orgProjectCatalogKey`; a row written by the core may leave its name and
  * company out, but one that names another project or company is refused) and the newest stored revision of any kind (a candidate occupies its revision number too).
  */
-async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
+async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string, options: { waitingCandidate?: "allow" } = {}): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number; newest?: RegisteredProjectRecord }> {
   const catalogKey = orgProjectCatalogKey(company, projectName);
   const catalog = await getItem<{ pk?: unknown; sk?: unknown; entityType?: string; name?: string; latestRevision?: number }>(dependencies, catalogKey);
   if (catalog !== undefined && (catalog.pk !== catalogKey.pk || catalog.sk !== catalogKey.sk || catalog.entityType !== "PROJECT_CATALOG" || (catalog.name !== undefined && catalog.name !== projectName)
@@ -2515,13 +2523,22 @@ async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependenci
   const pk = revisionKeyFor(company, projectName, 1).pk;
   const response = await dependencies.documentClient.send(new QueryCommand({ TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
     ExpressionAttributeValues: { ":pk": pk, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: Array<Record<string, unknown>> };
-  const newest = response.Items?.[0] as RegisteredProjectRecord | undefined;
-  const newestRevision = newest?.definition?.revision ?? 0;
-  if (newest !== undefined && (newest.pk !== pk || !ownPartitionRow(newest as unknown as Record<string, unknown>, company) || newest.definition.name !== projectName || !Number.isSafeInteger(newestRevision) || newestRevision < 1)) {
+  const raw = response.Items?.[0];
+  // L1: the newest row is parsed, never assumed: a row with no readable definition is refused in fixed words (no TypeError, no 500).
+  const definition = raw?.definition as { name?: unknown; revision?: unknown } | null | undefined;
+  if (raw !== undefined && (raw.pk !== pk || !ownPartitionRow(raw, company) || typeof definition !== "object" || definition === null || definition.name !== projectName
+    || typeof definition.revision !== "number" || !Number.isSafeInteger(definition.revision) || definition.revision < 1)) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
   }
+  const newest = raw as RegisteredProjectRecord | undefined;
+  const newestRevision = newest?.definition.revision ?? 0;
+  // M1: a setup change waiting for approval (a candidate revision the catalog does not point at) holds the project: no other revision is registered meanwhile, as the
+  // core's own setup flow refuses (core/setup-agent/apply.ts), so the catalog pointer is never moved onto or past an unapproved candidate.
+  const waiting = raw !== undefined && raw.candidate === true && (catalog?.latestRevision ?? 0) < newestRevision;
+  if (waiting && options.waitingCandidate !== "allow") throw agentXError("PROJECT_REVISION_MISMATCH", NAMED_COMPANY_CANDIDATE_WAITING);
   if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
-  return { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
+  // A waiting candidate (allowed only for the duplicate path's pointer repair) is never the newest the pointer may move to.
+  return waiting ? { catalog, newestRevision: catalog?.latestRevision ?? 0 } : { catalog, newestRevision, ...(newest === undefined ? {} : { newest }) };
 }
 
 /**
@@ -2531,7 +2548,7 @@ async function readNamedCompanyCatalogSnapshot(dependencies: AwsBrokerDependenci
 async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependencies, company: OrgId, projectName: string, revision: number): Promise<void> {
   const stored = await getItem<Record<string, unknown>>(dependencies, revisionKeyFor(company, projectName, revision));
   if (stored === undefined || stored.candidate === true) return;
-  const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName);
+  const snapshot = await readNamedCompanyCatalogSnapshot(dependencies, company, projectName, { waitingCandidate: "allow" });
   if ((snapshot.catalog?.latestRevision ?? 0) >= revision) return;
   try {
     await dependencies.documentClient.send(new UpdateCommand({
@@ -14652,7 +14669,10 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     ExpressionAttributeValues: { ":pk": pk, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
   })) as { Items?: unknown[] }).Items ?? []).length > 0;
   // DEC 254zzz80: a named company's fresh id must be free in its own partition (any revision, a candidate too) as well as globally.
-  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`) || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+  // R2-F1 review H1: and a name any named company holds install-wide (its reservation; an unreadable one counts as held) is in use too, until grants carry their company.
+  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`)
+    || await projectNameHolder(dependencies.documentClient, dependencies.tableName, name) !== undefined
+    || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
   // DEC 254zzz80: today's global names (id == name) created for a named company are registered in its own partition, so a name it already holds there is taken too.
   const nameTaken_ = async (owner: string | undefined, companyId: string | undefined, name: string) => await names.taken(owner, name) || (owner === undefined && namedCompany(companyId) !== undefined && await projectExists(name, companyId));
   /**
@@ -15894,6 +15914,20 @@ async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, i
   let companyId: string | undefined;
   try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
+}
+
+/** R2-F1 review M3: the admin change plan's handlers (its revision check reads the registering company's key), for tests. */
+export function adminChangeHandlersForTests(input: AwsBrokerInput): AdminChangeHandlers {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return adminChangeHandlers(brokerDependencies(brokerInput));
+}
+
+/** R2-F1 review M3: registerProject itself, so tests drive a named company's registration (second revision, duplicate, pending candidate) directly. */
+export function registerProjectForTests(input: AwsBrokerInput, identity: AuthenticatedIdentity, value: unknown, companyId: string | undefined): ReturnType<typeof registerProject> {
+  const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
+  delete (brokerInput as AwsBrokerInput).core;
+  return registerProject(brokerDependencies(brokerInput), identity, value, { githubCompany: { companyId, budget: boundedCompanyReads(input.documentClient) } });
 }
 
 /** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */

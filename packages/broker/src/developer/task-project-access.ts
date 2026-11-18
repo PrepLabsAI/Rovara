@@ -7,6 +7,7 @@ import {
   SLACK_CHANNEL, isChannelBindingKeyOf,
 } from "@agentx/contracts";
 import type { TaskAuthorityAdmission } from "../aws/task-authority-admission.js";
+import { revisionPkFor } from "../aws/company-layout.js";
 
 export interface ProjectAuthorityRevision {
   pk?: string;
@@ -40,7 +41,8 @@ export type BoundedProjectReadAdmission = Pick<TaskAuthorityAdmission, "assertOp
 
 export interface ProjectAuthorityReader {
   /** Use the supplied signal for page one; count each later Query page before issue. */
-  latestRevision(project: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal): Promise<{ revision?: ProjectAuthorityRevision; complete: boolean }>;
+  /** `companyId`: DEC 254zzz80, a NAMED company's project is read from its own partition (company-layout.ts); absent or the built-in company, the legacy row. */
+  latestRevision(project: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal, companyId?: string): Promise<{ revision?: ProjectAuthorityRevision; complete: boolean }>;
   memberships(developerId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal): Promise<{ items: readonly ProjectDeveloperMembership[]; complete: boolean }>;
   bindings(teamId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal): Promise<{ items: readonly ProjectChannelBinding[]; complete: boolean }>;
 }
@@ -55,11 +57,13 @@ export function evaluateProjectAuthority(input: {
   bindings: readonly ProjectChannelBinding[];
   freshMemberOf?: readonly string[];
   slackUserId?: string;
+  /** DEC 254zzz80: the company whose partition the revision was read from (a named company's own `ORG#<company>#PROJECT#<name>`); absent: the legacy row. */
+  companyId?: string;
 }): ProjectAuthorityResult {
   if (!AgentXNameSchema.safeParse(input.project).success || input.revision === undefined) return { kind: "not-found" };
   const revisionKey = `REV#${String(input.revision.revision).padStart(12, "0")}`;
   if (!Number.isSafeInteger(input.revision.revision) || input.revision.revision < 0) return { kind: "unavailable" };
-  if (input.developerId !== undefined && input.teamId !== undefined && (input.revision.pk !== `PROJECT#${input.project}` || input.revision.sk !== revisionKey)) return { kind: "unavailable" };
+  if (input.developerId !== undefined && input.teamId !== undefined && (input.revision.pk !== revisionPkFor(input.companyId, input.project) || input.revision.sk !== revisionKey)) return { kind: "unavailable" };
   if (input.developerId !== undefined && input.memberships.some((row) => row.projectName === input.project
     && (row.pk !== `MEMBER#${input.developerId}` || row.sk !== `PROJECT#${input.project}`))) return { kind: "unavailable" };
   const teamId = input.teamId;

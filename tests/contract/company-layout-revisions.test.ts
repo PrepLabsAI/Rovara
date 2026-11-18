@@ -234,6 +234,34 @@ describe("R2-F1 lane 1: a named company's revisions come from its own partition"
     expect((await members(OWNER, "legacy-only")).status).toBe(404);
   });
 
+  it("H1 probe: A's owner adds a member to A's project; B's owner (no such project in B: the name is A's install-wide) never lists them, and a member moved to B sees nothing", async () => {
+    const w = world();
+    w.join(BOB, B, "owner");
+    w.project(A, "demo-tasklog", 1);
+    w.db.set({ pk: "PROJECT_NAME_RESERVATION#demo-tasklog", sk: "RESERVATION", entityType: "PROJECT_NAME_RESERVATION", companyId: A, name: "demo-tasklog" });
+    expect((await w.call(OWNER, "PUT", `/v1/dev/client/projects/demo-tasklog/members/${MEMBER}`)).status).toBe(200);
+    const listed = await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/members");
+    expect(listed.status).toBe(200);
+    const bob = await w.call(BOB, "GET", "/v1/dev/client/projects/demo-tasklog/members");
+    expect(bob.status).not.toBe(200);
+    expect(JSON.stringify(bob.body)).not.toContain(MEMBER);
+    // The member, granted on A's project, moves to company B: B has no demo-tasklog, so nothing is listed or readable for them.
+    expect(names((await w.projects(MEMBER)).body)).toEqual(["demo-tasklog"]);
+    w.join(MEMBER, B, "member");
+    expect((await w.projects(MEMBER)).body.projects).toEqual([]);
+    expect((await w.access(MEMBER)).body.projects).toEqual([]);
+    expect((await w.read(MEMBER, "demo-tasklog")).status).toBe(404);
+  });
+
+  it("L2: a catalog pointer that names an unusable row is not a project a change can be fenced on: not found, never stale forever", async () => {
+    const w = world();
+    w.project(A, "demo-tasklog", 2);
+    expect((await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/archive-preview")).status).toBe(200);
+    // The catalog names revision 5, which has no usable row: the read falls back to revision 2, which the catalog does not name.
+    w.db.set({ ...orgProjectCatalogKey(A, "demo-tasklog"), entityType: "PROJECT_CATALOG", latestRevision: 5 });
+    expect((await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/archive-preview")).status).toBe(404);
+  });
+
   it("archive and restore: a named company's own-partition project; a waiting candidate does not block the archive, a moved catalog makes it stale", async () => {
     const w = world();
     w.project(A, "demo-tasklog", 2);

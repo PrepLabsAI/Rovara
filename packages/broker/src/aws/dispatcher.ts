@@ -19,13 +19,14 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
+import { namedCompany } from "./company-layout.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -410,7 +411,11 @@ function taskPersonRuntimePorts(input: {
       return (response as unknown as { Item?: TaskPersonDeveloperRecordProjection }).Item;
     },
     projectAuthorityReader: {
-      async latestRevision(project, admission, abortSignal) {
+      async latestRevision(project, admission, abortSignal, companyId) {
+        // DEC 254zzz80: a named company's project, read from its own partition in the core's order (company-layout.ts: catalog pointer, else the newest non-candidate;
+        // a row naming another company is absent). The first read uses the admitted signal; each later read is admitted before it is issued.
+        const named = namedCompany(companyId);
+        if (named !== undefined) return taskPersonNamedLatestRevision(taskAuthorityDocumentClient, input.stateTableName, named, project, admission, abortSignal);
         const response = await taskAuthorityDocumentClient.send(new QueryCommand(taskPersonLatestRevisionQuery(input.stateTableName, project)), { abortSignal });
         admission.assertOpen();
         return taskPersonRevisionFromResponse(response);

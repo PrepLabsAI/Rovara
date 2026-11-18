@@ -20,7 +20,11 @@ const ownerOf = (url: string) => /^https:\/\/github\.com\/([^/]+)\//.exec(url)![
 const PER_COMPANY = { perCompany: true } as const;
 const ID = /^[a-z][a-z0-9-]*-[a-z0-9]{6}$/;
 
-type Module = { clientProjectDependenciesForTests: (input: unknown) => {
+type Module = {
+  NAMED_COMPANY_CANDIDATE_WAITING: string; NAMED_COMPANY_SETUP_APPROVAL_REFUSED: string;
+  registerProjectForTests: (input: unknown, identity: unknown, value: unknown, companyId: string | undefined) => Promise<{ duplicate: boolean }>;
+  adminChangeHandlersForTests: (input: unknown) => { checkRevision: (identity: unknown, definition: unknown, runtimeBinding: unknown, options?: unknown) => Promise<unknown> };
+  clientProjectDependenciesForTests: (input: unknown) => {
   createClientProject: (developerId: string, input: unknown, naming?: unknown) => Promise<{ name: string; latestRevision: number }>;
   createClientProjects: (developerId: string, input: unknown, naming?: unknown) => Promise<{ name: string; latestRevision: number }>;
   createClientProjectsBulk: (developerId: string, input: unknown, naming?: unknown) => Promise<{ results: Array<Record<string, unknown>> }>;
@@ -56,7 +60,7 @@ async function world(options: { bindings?: false } = {}) {
   // DEC 254zzz80: a project's first revision, wherever it is: a named company's own partition (`ORG#<company>#PROJECT#<id>`), else the legacy row.
   const revision = (id: string) => h.db.find((item) => item.sk === "REV#000000000001" && typeof item.pk === "string" && (item.pk === `PROJECT#${id}` || /^ORG#[^#]+#PROJECT#/.test(item.pk) && item.pk.endsWith(`#PROJECT#${id}`)))[0];
   const projectRows = () => h.db.find((item) => typeof item.pk === "string" && (item.pk.startsWith("PROJECT#") || item.pk.includes("#PROJECT_CATALOG") || item.pk.includes("#PROJECT_NAME") || item.pk.startsWith("MEMBER#") || item.pk.includes("#PROJECT#")));
-  return { ...h, deps, clientProjects, companyOf, sent, revision, projectRows, as: (next: string) => { company = next; } };
+  return { ...h, deps, clientProjects, companyOf, sent, revision, projectRows, brokerInput: broker.brokerInput, as: (next: string) => { company = next; } };
 }
 const reason = async (work: Promise<unknown>) => { try { await work; return "created"; } catch (error) { return error instanceof ClientProjectRefused ? error.reason : (error as { code?: string }).code; } };
 
@@ -202,19 +206,15 @@ describe("the Rovara administrator's create is unchanged", () => {
     expect(await h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] })).toEqual({ name: "web", latestRevision: 1, companyId: A });
     expect(await h.deps.createClientProject(PERSON, { repository: "acme-a/api" })).toEqual({ name: "api", latestRevision: 1, companyId: A });
     expect(h.db.find((item) => typeof item.pk === "string" && item.pk.includes("#PROJECT_NAME"))).toEqual([]);
-    // The same company's second web or api: taken, in today's words (its own partition holds them).
-    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-a/web"] }))).toBe("name_taken");
-    await expect(h.deps.createClientProject(PERSON, { repository: "acme-a/api" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: a project named api already exists; choose another name" });
-    expect((await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-a/api"] })).results).toEqual([{ repository: "acme-a/api", outcome: "refused", reason: "name_taken" }]);
-    // A name in the install's legacy rows (the shared namespace) is still taken for every company.
-    h.db.set({ pk: "PROJECT#docs", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "docs", revision: 1 } });
+    // R2-F1 review H1: A's projects live in A's own partition and their names are reserved install-wide for A.
+    expect(h.db.get("PROJECT_NAME_RESERVATION#web", "RESERVATION")).toMatchObject({ companyId: A, name: "web" });
     h.as(B);
-    expect(await reason(h.deps.createClientProject(PERSON, { repository: "acme-b/web", name: "docs" }))).toBe("CONFIG_INVALID");
-    // DEC 254zzz80: a named company's projects live in its own partition, so B's administrator creates B's own web and api (two companies, one name).
-    expect(await h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] })).toEqual({ name: "web", latestRevision: 1, companyId: B });
-    expect((await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-b/api"] })).results).toEqual([{ repository: "acme-b/api", outcome: "created", project: "api" }]);
-    expect(h.db.get(`ORG#${A}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(A);
-    expect(h.db.get(`ORG#${B}#PROJECT#web`, "REV#000000000001")?.companyId).toBe(B);
+    // Today's shared namespace, for the administrator only: B's administrator is refused A's web.
+    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }))).toBe("name_taken");
+    await expect(h.deps.createClientProject(PERSON, { repository: "acme-b/api" })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: a project named api already exists; choose another name" });
+    const bulk = await h.deps.createClientProjectsBulk(PERSON, { repositories: ["acme-b/api"] });
+    expect(bulk.results).toEqual([{ repository: "acme-b/api", outcome: "refused", reason: "name_taken" }]);
+    expect(h.db.find((item) => typeof item.pk === "string" && item.pk.startsWith(`ORG#${B}#PROJECT#`))).toEqual([]);
   });
 });
 
@@ -323,5 +323,108 @@ describe("review fixes (L2-1 Opus review)", () => {
     expect(await companyProjectIdByName(h.db, "state", A, "web")).toBeUndefined();
     h.db.set({ ...orgProjectCatalogKey(A, "old"), entityType: "PROJECT_CATALOG", companyId: A, name: "other", latestRevision: 1 });
     expect(await companyProjectIdByName(h.db, "state", A, "old")).toBeUndefined();
+  });
+});
+
+describe("R2-F1 review: a named company's registration in its own partition", () => {
+  const BINDING = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" }], volumeSizeGiB: 20, volumeType: "gp3" };
+  const identity = { issuer: "sign-in-client", subject: PERSON, ownerKey: PERSON, isAdministrator: true, claims: {}, developer: { developerId: PERSON, provider: "oidc", name: "Person" } };
+  const definition = (revision: number, owner = "acme-a", extra: Record<string, unknown> = {}) => ({
+    name: "web", revision, orchestratorInstructions: "Delegate.", setup: [], readiness: [],
+    repositories: [{ name: "web", url: `https://github.com/${owner}/web.git`, path: "repo/web", defaultBranch: `b${revision}`, credentialRef: "github-app" }], ...extra,
+  });
+  /** `companyId` null: no company (the legacy namespace). */
+  const register = (h: Awaited<ReturnType<typeof world>>, revision: number, companyId: string | null = A, extra: Record<string, unknown> = {}, owner = "acme-a") =>
+    module.registerProjectForTests(h.brokerInput, identity, { definition: definition(revision, owner), runtimeBinding: BINDING, ...extra }, companyId ?? undefined);
+  const catalog = (h: Awaited<ReturnType<typeof world>>) => h.db.get(orgProjectCatalogKey(A, "web").pk, orgProjectCatalogKey(A, "web").sk)?.latestRevision;
+  const rev = (n: number) => `REV#${String(n).padStart(12, "0")}`;
+
+  it("a second revision and a repeat: the own partition and its catalog pointer move, never the legacy rows", async () => {
+    const h = await world();
+    expect((await register(h, 1)).duplicate).toBe(false);
+    expect((await register(h, 2)).duplicate).toBe(false);
+    expect(catalog(h)).toBe(2);
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, rev(2))).toMatchObject({ companyId: A, definition: { revision: 2 } });
+    expect((await register(h, 2)).duplicate).toBe(true);
+    expect(catalog(h)).toBe(2);
+    expect(h.db.find((item) => item.pk === "PROJECT#web" || item.pk === "PROJECT_CATALOG")).toEqual([]);
+    expect(h.db.get("PROJECT_NAME_RESERVATION#web", "RESERVATION")).toMatchObject({ companyId: A });
+  });
+
+  it("M1: a setup change waiting for approval (a candidate the catalog does not point at) refuses another revision; the pointer never moves onto it", async () => {
+    const h = await world();
+    await register(h, 1); await register(h, 2);
+    h.db.set({ pk: `ORG#${A}#PROJECT#web`, sk: rev(3), entityType: "PROJECT", candidate: true, definition: definition(3) });
+    await expect(register(h, 4)).rejects.toMatchObject({ code: "PROJECT_REVISION_MISMATCH", message: `PROJECT_REVISION_MISMATCH: ${module.NAMED_COMPANY_CANDIDATE_WAITING}` });
+    expect(catalog(h)).toBe(2);
+    expect(h.db.get(`ORG#${A}#PROJECT#web`, rev(4))).toBeUndefined();
+    // Approved (the catalog moved onto 3): the next revision registers.
+    h.db.set({ ...h.db.get(orgProjectCatalogKey(A, "web").pk, orgProjectCatalogKey(A, "web").sk)!, latestRevision: 3 });
+    expect((await register(h, 4)).duplicate).toBe(false);
+    expect(catalog(h)).toBe(4);
+  });
+
+  it("the duplicate path's pointer repair never moves the catalog onto a candidate row", async () => {
+    const h = await world();
+    await register(h, 1); await register(h, 2);
+    // A candidate row identical to what is registered again: the duplicate answer, and the pointer stays on 2.
+    h.db.set({ pk: `ORG#${A}#PROJECT#web`, sk: rev(3), entityType: "PROJECT", candidate: true, companyId: A, definition: definition(3), runtimeBinding: BINDING });
+    expect((await register(h, 3)).duplicate).toBe(true);
+    expect(catalog(h)).toBe(2);
+    // A behind pointer with a plain stored row: the repeat repairs it forward.
+    h.db.set({ ...h.db.get(orgProjectCatalogKey(A, "web").pk, orgProjectCatalogKey(A, "web").sk)!, latestRevision: 1 });
+    h.db.delete(`ORG#${A}#PROJECT#web`, rev(3));
+    expect((await register(h, 2)).duplicate).toBe(true);
+    expect(catalog(h)).toBe(2);
+  });
+
+  it("L1: a newest own row with no readable definition is refused in fixed words, never a 500", async () => {
+    const h = await world();
+    await register(h, 1);
+    h.db.set({ pk: `ORG#${A}#PROJECT#web`, sk: rev(2), entityType: "PROJECT", companyId: A });
+    await expect(register(h, 3)).rejects.toMatchObject({ code: "PROJECT_REVISION_MISMATCH", message: "PROJECT_REVISION_MISMATCH: registered project revision history is invalid" });
+  });
+
+  it("the admin setup-approval run is refused for a named company, before anything is read or written", async () => {
+    const h = await world();
+    const setupApproval = { proposalRef: `project-setup-proposals/${PERSON}/${"a".repeat(64)}.json`, proposalSha256: "a".repeat(64), decision: "approve" };
+    await expect(register(h, 1, A, { setupApproval })).rejects.toMatchObject({ code: "FORBIDDEN", message: `FORBIDDEN: ${module.NAMED_COMPANY_SETUP_APPROVAL_REFUSED}` });
+    expect(h.projectRows()).toEqual([]);
+  });
+
+  it("H1: a name another company holds is refused (two companies, one name), and so is a moved administrator's registration of it in the new company", async () => {
+    const h = await world();
+    await register(h, 1);
+    // PERSON administers A's web (the registration's grant); moved to B, B's registration of web is refused: the name is A's install-wide.
+    await expect(register(h, 1, B, {}, "acme-b")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(register(h, 2, B, {}, "acme-b")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(h.db.find((item) => typeof item.pk === "string" && item.pk.startsWith(`ORG#${B}#PROJECT`))).toEqual([]);
+    // Nor may the legacy namespace (no company) register it.
+    await expect(register(h, 1, null)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(h.db.get("PROJECT#web", rev(1))).toBeUndefined();
+    // A reservation naming no valid company holds the name too (fail closed).
+    h.db.set({ pk: "PROJECT_NAME_RESERVATION#api", sk: "RESERVATION", companyId: "not-a-company" });
+    h.as(B);
+    expect(await reason(h.deps.createClientProject(PERSON, { repository: "acme-b/api" }))).toBe("CONFIG_INVALID");
+  });
+
+  it("H1: an older own-partition project with no reservation (made by the switch-over move or the core) is found through the core's company list", async () => {
+    const h = await world();
+    // Company A ran a task on the core (its in-use mark) and holds "web" in its own catalog, with no reservation row.
+    h.db.set({ pk: "CORE_ENGINE_IN_USE", sk: `ORG#${A}`, entityType: "CORE_ENGINE_IN_USE", orgId: A });
+    h.db.set({ ...orgProjectCatalogKey(A, "web"), entityType: "PROJECT_CATALOG", latestRevision: 1 });
+    await expect(register(h, 1, B, {}, "acme-b")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    h.as(B);
+    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/web"] }))).toBe("name_taken");
+    // A list row that names no valid company: every name reads as held (fail closed).
+    h.db.set({ pk: "CORE_ENGINE_IN_USE", sk: "ORG#bad", entityType: "CORE_ENGINE_IN_USE", orgId: "bad" });
+    expect(await reason(h.deps.createClientProjects(PERSON, { repositories: ["acme-b/api"] }))).toBe("name_taken");
+  });
+
+  it("the admin change plan's duplicate check reads the registering company's own revision", async () => {
+    const h = await world();
+    await register(h, 1);
+    const handlers = module.adminChangeHandlersForTests(h.brokerInput);
+    await expect(handlers.checkRevision(identity, definition(1), BINDING, { preflight: false })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("revision 1 of web is already registered") as unknown });
   });
 });
