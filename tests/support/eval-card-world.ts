@@ -95,7 +95,7 @@ function makeCompany(companyId: string, roles: Record<string, Role> = { ...ROLES
     await store.put({ item: { ...setupAgentKey(companyId, project), entityType: "SETUP_AGENT", taskId } });
     const operation = { kind: "task", workflowMode: "SETUP_AGENT", status: "RUNNING", workspaceId, companyId };
     await handleSetupAgentCallback({ store, companyId, now: () => NOW, log: () => undefined }, operation, { kind: "eval_discovery", report });
-    const deps = (over: Partial<EvalDiscoveryConfirmDeps> = {}): EvalDiscoveryConfirmDeps => ({ store, companyId, now: () => NOW, members, ...(state.cap === undefined ? {} : { monthlyCap: async () => state.cap }),
+    const deps = (over: Partial<EvalDiscoveryConfirmDeps> = {}): EvalDiscoveryConfirmDeps => ({ store, companyId, now: () => NOW, members, ...(state.cap === undefined ? {} : { monthlyCap: async () => state.cap, healthRuns: true }),
       latest: async (p) => (p === project ? { revision: 7, definition: { repositories: [{ name: "web", url: "https://github.com/acme/web" }] } } : undefined), readFile: gitReader(repo.dir), approve: decide, ...over });
     const digest = async () => (await readEvalDiscovery({ store, companyId }, project))!.reportDigest;
     const card = (as: Principal = person(companyId, "admin")) => readEvalCard({ store, companyId, members, monthlyCap: async () => state.cap }, project, as);

@@ -4,9 +4,11 @@
 import type { DocumentStore, OrgId, Principal } from "@agentx/contracts";
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
-import { dollarRangeOf, dollarsUpOf, evalApprovalSentence } from "./eval-cost.js";
-import { evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
-import { readEvalSpendItem, roleFor } from "./eval-spend.js";
+import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
+import { evalCommandFingerprintOf } from "@agentx/contracts";
+import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
+import { evalHealthState } from "./eval-health-request.js";
+import { readEvalSpendItem, readEvalSpendRecord, roleFor } from "./eval-spend.js";
 
 export interface EvalCardDeps {
   store: DocumentStore;
@@ -14,6 +16,8 @@ export interface EvalCardDeps {
   members?: SessionMembers | undefined;
   /** The host's monthly cap source (the bound reservation adapter's). Absent or no answer: no card can be offered for an unconfirmed eval. */
   monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
+  /** D5: whether this install has a health runner that reads the person's yes. False or absent: the card offers no health button (a button nothing answers would be a lie). */
+  healthRuns?: boolean | undefined;
 }
 
 export interface EvalCardSuiteView {
@@ -26,6 +30,8 @@ export interface EvalCardSuiteView {
   monthly: string;
   /** What the person's yes echoes back (`seen`): the dollars as whole numbers, held against the broker's own at the confirm. */
   seen: { perCheckHighMicros: number; monthlyCapMicros: number };
+  /** D6, a best-effort preview by dollars alone (the confirm decides with the model, judge and command too): an approved eval stands and this set stays inside it, or grew past it. */
+  versusApproved?: { within: boolean; words: string };
 }
 
 export interface EvalCardView {
@@ -37,6 +43,8 @@ export interface EvalCardView {
   report?: { taskId: string; reportDigest: string };
   suites: EvalCardSuiteView[];
   spend?: { state: "waiting" | "approved" | "rejected" | "approval needs renewing"; perPr?: string; monthly?: string; needsApproval?: string; carried?: boolean; setupRevision?: number; approval?: { requestId: string; revision: number; artifactDigest: string } };
+  /** D5: the opt-in health run, offered only once the spend is approved. `seenCostMicros` is what a yes echoes. */
+  health?: { state: "none" | "requested" | "finished"; label: string; cost: string; seenCostMicros: number };
   /** Why no card can be offered (the install has no eval budget). */
   unavailable?: string;
 }
@@ -48,25 +56,38 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   let monthlyCap: number | undefined;
   try { const cap = deps.monthlyCap === undefined ? undefined : await deps.monthlyCap({ company: deps.companyId, project }); monthlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? cap : undefined; } catch { monthlyCap = undefined; }
   const table = { store: deps.store, companyId: deps.companyId, ...members, ...(monthlyCap === undefined ? {} : { monthlyCapMicros: monthlyCap }) };
-  const [item, found] = await Promise.all([readEvalSpendItem(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project)]);
+  const [item, record, found] = await Promise.all([readEvalSpendItem(table, project), readEvalSpendRecord(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project)]);
+  // An approval counts for the preview only while its approver still may approve (the item's own live reading) and it carries the dollars the person saw.
+  const standing = item?.state === "approved" && record?.state === "approved" && record.plan.dollars !== undefined ? record.plan : undefined;
   const suites: EvalCardSuiteView[] = [];
   if (found?.state === "reported" && monthlyCap !== undefined) {
     for (const suite of found.report.suites) {
       const dollars = evalProposalDollars(suite.questions.length, suite, monthlyCap);
       if (dollars === undefined) continue;
+      const { estimate } = evalEstimateOf(suite.questions.length, suite);
+      // "Inside" is said only for the approved suite itself, with the same model, version, row and command (what a card can see without reading files); a different suite or envelope reads as changed. The judge is
+      // checked at the confirm, so the words say the cost is inside and that a changed model, judge or command asks again.
+      const sameSuite = standing !== undefined && suite.selection === standing.selection && suite.model === standing.inputs.model && suite.modelVersion === standing.inputs.modelVersion
+        && suite.catalogRowId === standing.inputs.catalogRowId && evalCommandFingerprintOf(suite.command, suite.report) === standing.inputs.commandFingerprint;
+      const within = sameSuite && standing?.dollars !== undefined && dollars.perCheckHighMicros <= standing.dollars.perCheckHighMicros && estimate.calls <= standing.budget.maximum.calls && estimate.costMicros <= standing.budget.maximum.costMicros;
       suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
-        seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros } });
+        seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros },
+        ...(standing?.dollars === undefined ? {} : { versusApproved: within ? { within: true, words: "Inside the approved cost. A change to the model, judge or command asks again." } : { within: false, words: evalAsksAgainWords({ reason: sameSuite ? "grew" : "changed", approvedHighMicros: standing.dollars.perCheckHighMicros }) } }) });
     }
   }
   const state: EvalCardView["state"] = found?.state === "reported" ? "propose"
     : item === undefined ? (found === undefined ? "none" : "waiting")
       : item.state === "waiting" ? "waiting" : item.state === "approved" ? "approved" : item.state === "rejected" ? "rejected" : "renew";
   const card = item?.card;
+  const health = deps.healthRuns === true && role !== undefined && item?.state === "approved" && card !== undefined && record !== undefined
+    ? { state: await evalHealthState(table, project), label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros }
+    : undefined;
   return {
     state, canApprove: role !== undefined, ...(found === undefined ? {} : { report: { taskId: found.taskId, reportDigest: found.reportDigest } }), suites,
     ...(item === undefined ? {} : { spend: { state: item.state,
       ...(card === undefined ? {} : { perPr: card.perPr, monthly: card.monthly, ...(card.needsApproval === undefined ? {} : { needsApproval: card.needsApproval }), ...(card.carried === true ? { carried: true } : {}), ...(card.setupRevision === undefined ? {} : { setupRevision: card.setupRevision }) }),
       ...(item.approval === undefined ? {} : { approval: { requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest } }) } }),
+    ...(health === undefined ? {} : { health }),
     ...(monthlyCap === undefined && state !== "approved" ? { unavailable: "This install has no eval budget, so an eval can't be approved here yet." } : {}),
   };
 }
