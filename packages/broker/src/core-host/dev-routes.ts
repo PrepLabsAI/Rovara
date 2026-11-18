@@ -12,6 +12,7 @@
 //     old workflow routes' request and answer (`{ task }`), so Cloud's Send back and Accept findings work for a task of either engine. Served only when the deployment wires the money
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
 //     (the install's owner role), which a hosted company never uses for who owns a task;
+//   - the company's agent directory (`GET /v1/app/agents`, lead 4 L4-MF3): read only, for a LIVE company owner or administrator only (agent-directory-routes.ts);
 //   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project;
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
@@ -60,6 +61,7 @@ import type { AgentModelChoice } from "./gateway-model-selection.js";
 import { isSetupRunPath, routeHostedSetupRun, type HostedSetupRunWiring } from "./setup-run-routes.js";
 import { isWikiMapPath, routeHostedWikiMap, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 import { isWikiPath, routeHostedWiki, type HostedWikiWiring } from "./wiki-routes.js";
+import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -185,7 +187,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
-  if (isWikiPath(path, method)) return true;
+  if (isWikiPath(path, method) || isAgentDirectoryPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -427,6 +429,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           // Lead 4 W2: the member company's own store; the caller's live standing on the project is read inside (any project role reads).
           if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target) });
+        }
+        if (isAgentDirectoryPath(path, request.method)) {
+          // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.
+          return await routeHostedAgentDirectory({
+            request, path, companyId: target.runtime.companyId, role: membership.role, developerId: developerIdOf(caller.principal),
+            store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
+          });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
