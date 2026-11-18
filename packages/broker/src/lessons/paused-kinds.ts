@@ -14,6 +14,30 @@ export function pausedKindsOfFlags(flags: ProjectFlags): ReadonlySet<SpanKind> {
   return new Set(Object.keys(flags.stoppedKinds ?? {}).filter((kind): kind is SpanKind => KNOWN.has(kind)));
 }
 
+// Lead 4 L4-LP3Wd: a person's stop that could not be written (the flags row kept changing for every try, `flags-fence.ts`) is held HERE, in this process, and read as stopped until a later write of that kind settles
+// (a successful stop or resume). It is a bridge, not the record: the person was told "that could not be saved" and presses again. Bounded by what can be stopped: a project holds at most the pausable kinds, and an entry exists only after five lost writes in a row. It is per process and does not expire (a stop that was never pressed again keeps reading as stopped until a stop or a resume lands, or the process restarts): the safe side.
+const failedStops = new Map<string, Set<SpanKind>>();
+const failedKey = (key: ScopeKey): string => `${key.workspaceId}\u0001${key.project}`;
+/** Remembers kinds a person stopped whose stop could not be saved: they read as stopped from now on. */
+export function noteFailedStop(key: ScopeKey, kinds: readonly SpanKind[]): void {
+  const id = failedKey(key);
+  const set = failedStops.get(id) ?? new Set<SpanKind>();
+  for (const kind of kinds) set.add(kind);
+  failedStops.set(id, set);
+}
+/** Forgets kinds whose stop or resume has now been written (the record decides again). */
+export function settleFailedStop(key: ScopeKey, kinds: readonly SpanKind[]): void {
+  const id = failedKey(key);
+  const set = failedStops.get(id);
+  if (set === undefined) return;
+  for (const kind of kinds) set.delete(kind);
+  if (set.size === 0) failedStops.delete(id);
+}
+const withFailedStops = (key: ScopeKey, kinds: ReadonlySet<SpanKind>): ReadonlySet<SpanKind> => {
+  const failed = failedStops.get(failedKey(key));
+  return failed === undefined || failed.size === 0 ? kinds : new Set([...kinds, ...failed]);
+};
+
 /** When a task was alive: from its creation to its close (open until it closes). */
 export interface TaskLifetime { from: number; to?: number }
 
@@ -33,7 +57,7 @@ export function kindsStoppedDuringTask(flags: ProjectFlags, life: TaskLifetime |
 }
 
 /** What a read of the project's stopped kinds answers when the store cannot be read: every kind that a person can stop (read nothing). */
-export const ALL_PAUSABLE_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["send_back", "close_reason", "pr_comment", "review_finding", "human_edit", "remembered", "outcome", "ci_failure"]);
+export const ALL_PAUSABLE_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["send_back", "close_reason", "pr_comment", "review_finding", "human_edit", "remembered", "outcome", "ci_failure", "ticket_comment"]);
 
 /**
  * The kinds not to read for the project now, read live: those stopped now and, when `life` is given, those stopped at any time during the task's life. Never throws: an unreadable store answers "all of them" (fail closed).
@@ -42,7 +66,7 @@ export const ALL_PAUSABLE_KINDS: ReadonlySet<SpanKind> = new Set<SpanKind>(["sen
 export async function pausedKindsFor(store: Pick<LessonStore, "flags">, key: ScopeKey, life?: TaskLifetime | "unknown"): Promise<ReadonlySet<SpanKind>> {
   try {
     const flags = await store.flags(key);
-    const now = pausedKindsOfFlags(flags);
+    const now = withFailedStops(key, pausedKindsOfFlags(flags));
     if (life === undefined) return now;
     const during = kindsStoppedDuringTask(flags, life === "unknown" ? undefined : life);
     return during.size === 0 ? now : new Set([...now, ...during]);

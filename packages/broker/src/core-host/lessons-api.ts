@@ -313,7 +313,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
       if (!(await mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
       let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
-      try { outcome = await setLearningSourcePause({ store: runtime.store, audit: runtime.audit, now: options.now }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+      try { outcome = await setLearningSourcePause({ store: runtime.store, audit: runtime.audit, now: options.now, log: (event, fields) => log(event, fields) }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
       if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
       log("learning_source_set", { companyId, paused: outcome.paused });
       return { project, key: sourceKey.data, paused: outcome.paused };

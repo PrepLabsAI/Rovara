@@ -4,6 +4,7 @@
 // maintainer resumes the source. Other sources, and other people, carry on. Because the unit is the source and not the author, a flood from text that has no
 // author (CI output, a ticket feed) is caught too.
 import { AUTO_APPLY_GUARDS, SPIKE, emitAudit } from "./policy.js";
+import { FlagsConflictError, updateFlags } from "./flags-fence.js";
 import type { AlertSink, LessonDeps } from "./ports.js";
 import type { LessonStore, ProjectFlags, ScopeKey } from "./store.js";
 import { memberOfSource, normSource, sameSource } from "./types.js";
@@ -41,9 +42,10 @@ export async function noteCandidateSources(deps: LessonDeps, store: LessonStore,
     const today = days[0] ?? 0;
     const baseline = baselineOf(days.slice(1));
     if (today < Math.max(SPIKE.multiple * baseline, SPIKE.minimum)) continue;
-    const flags = await store.flags(key);
-    if (pausedKey(flags, source) !== undefined) continue;
-    await store.setFlags(key, { ...flags, pausedSources: { ...(flags.pausedSources ?? {}), [source]: { at: now, reason: "spike" } } });
+    // Lead 4 L4-LP3Wd: a conditional read-modify-write (`flags-fence.ts`): a stop a person set at the same moment is kept. If it cannot settle this throws, and the candidate is not stored (fail closed: the flood is not let through).
+    const held = await updateFlags(store, key, (flags) => (pausedKey(flags, source) !== undefined ? undefined : { ...flags, pausedSources: { ...(flags.pausedSources ?? {}), [source]: { at: now, reason: "spike" } } }), { writer: "flood_hold", metrics: deps.metrics });
+    // Another writer held it first: nothing to do (and nothing to announce twice).
+    if (!held.changed) continue;
     paused.push(source);
     await emitAudit(deps.audit, { action: "lesson.source_paused", workspaceId: key.workspaceId, project: key.project, facts: { source, today, baseline: Math.round(baseline * 10) / 10 } });
     try { await alerts?.alert(key.workspaceId, key.project, "source_spike_paused"); } catch { /* the pause already holds */ }
@@ -66,9 +68,10 @@ async function noteProjectVolume(deps: LessonDeps, store: LessonStore, key: Scop
   const today = days[0] ?? 0;
   const baseline = baselineOf(days.slice(1));
   if (today < Math.max(SPIKE.multiple * baseline, SPIKE.projectMinimum)) return;
-  const flags = await store.flags(key);
-  if (flags.volumeAlertedAt !== undefined && now - flags.volumeAlertedAt < DAY) return;
-  await store.setFlags(key, { ...flags, volumeAlertedAt: now });
+  // The marker only stops a repeat of the alert within a day. If it cannot be written the alert still goes out (a repeat is better than none).
+  let marked: boolean;
+  try { marked = (await updateFlags(store, key, (flags) => (flags.volumeAlertedAt !== undefined && now - flags.volumeAlertedAt < DAY ? undefined : { ...flags, volumeAlertedAt: now }), { writer: "volume_alert", metrics: deps.metrics })).changed; } catch (error) { if (!(error instanceof FlagsConflictError)) throw error; marked = true; }
+  if (!marked) return;
   await emitAudit(deps.audit, { action: "lesson.volume_spike", workspaceId: key.workspaceId, project: key.project, facts: { today, baseline: Math.round(baseline * 10) / 10 } });
   try { await alerts?.alert(key.workspaceId, key.project, "project_volume_spike"); } catch { /* the audit record holds */ }
 }
@@ -97,12 +100,14 @@ export const pausedKey = (flags: ProjectFlags, source: string): string | undefin
 
 /** Clears one source's pause and nothing else. A spiking source's resume goes through `resumeAndResettle` (which also re-settles the lessons held for it); a learning source's resume (`learning-sources.ts`) re-settles nothing. */
 export async function clearSourcePause(deps: LessonDeps, store: LessonStore, key: ScopeKey, source: string, actor: string): Promise<boolean> {
-  const flags = await store.flags(key);
-  const stored = pausedKey(flags, source);
-  if (stored === undefined) return false;
-  const rest = { ...flags.pausedSources };
-  delete rest[stored];
-  await store.setFlags(key, { ...flags, pausedSources: rest });
+  const cleared = await updateFlags(store, key, (flags) => {
+    const stored = pausedKey(flags, source);
+    if (stored === undefined) return undefined;
+    const rest = { ...flags.pausedSources };
+    delete rest[stored];
+    return { ...flags, pausedSources: rest };
+  }, { writer: "flood_resume", metrics: deps.metrics });
+  if (!cleared.changed) return false;
   await emitAudit(deps.audit, { action: "lesson.source_resumed", workspaceId: key.workspaceId, project: key.project, actor, facts: { source } });
   return true;
 }

@@ -30,9 +30,9 @@
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   AgentXError, DOCUMENT_STORE_LIMITS, DocumentStoreError, INDEX_EXPIRY_ATTRIBUTE, agentXError, change, lessonKey, lessonSetKey, lessonVersionKey, loadManifestKey, when,
-  type Condition, type DocumentKey, type DocumentStore, type OrgId, type StoredDocument, type TransactItem,
+  type Condition, type DocumentKey, type DocumentStore, type JsonValue, type OrgId, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
-import type { CommitResult, DeletionIntent, LessonStore, LoadManifest, PendingOutcome, ProjectFlags, ScopeKey, SetSnapshot } from "./store.js";
+import type { CommitResult, DeletionIntent, LessonStore, LoadManifest, PendingOutcome, ProjectFlags, ScopeKey, SetSnapshot } from "./store.js"; import { updateFlags } from "./flags-fence.js";
 import { applyWriteFence, planRollback, withUsageOf, type FenceView } from "./store-rules.js";
 import { LessonSchema, normId, normSource, peopleOf, recordIdsOf, type Lesson, type LessonStatus, type VOLATILE_FIELDS } from "./types.js";
 
@@ -594,11 +594,12 @@ export class DocumentLessonStore implements LessonStore {
     const wanted = normSource(source);
     for (const item of await this.queryPrefix(key, `LESSONSET#SRC#${sha(wanted)}#`)) await this.del({ pk: String(item.pk), sk: String(item.sk) });
     // Every spelling of the key goes: a pause stored as `member:Mallory` is forgotten when `mallory` is erased.
-    const flags = await this.flags(key);
-    const paused = flags.pausedSources;
-    if (paused !== undefined && Object.keys(paused).some((name) => normSource(name) === wanted)) {
-      await this.setFlags(key, { ...flags, pausedSources: Object.fromEntries(Object.entries(paused).filter(([name]) => normSource(name) !== wanted)) });
-    }
+    // Lead 4 L4-LP3Wd: a conditional read-modify-write, so a stop or a hold written at the same moment is not dropped; when it cannot settle it throws (the erasure is retried), never skips.
+    await updateFlags(this, key, (flags) => {
+      const paused = flags.pausedSources;
+      if (paused === undefined || !Object.keys(paused).some((name) => normSource(name) === wanted)) return undefined;
+      return { ...flags, pausedSources: Object.fromEntries(Object.entries(paused).filter(([name]) => normSource(name) !== wanted)) };
+    }, { writer: "erasure", log: this.log });
   }
 
   async recordSourceEvent(key: ScopeKey, event: { at: number; source: string }): Promise<void> {
@@ -625,7 +626,19 @@ export class DocumentLessonStore implements LessonStore {
     const item = await this.getItem(this.k(key, "LESSONSET#FLAGS"));
     return item === undefined ? {} : clone((item.flags ?? {}) as ProjectFlags);
   }
-  async setFlags(key: ScopeKey, flags: ProjectFlags): Promise<void> { await this.put({ ...this.k(key, "LESSONSET#FLAGS"), entityType: "LESSON_FLAGS", flags }); }
+  async flagsRev(key: ScopeKey): Promise<{ flags: ProjectFlags; rev: number }> {
+    const item = await this.getItem(this.k(key, "LESSONSET#FLAGS"));
+    return item === undefined ? { flags: {}, rev: 0 } : { flags: clone((item.flags ?? {}) as ProjectFlags), rev: typeof item.rev === "number" ? item.rev : 0 };
+  }
+  /** Lead 4 L4-LP3Wd: the flags row carries a `rev`. A write applies only if the row is still at the `rev` the writer read (a row from before revisions, or none, is rev 0) and raises it. */
+  async setFlagsIf(key: ScopeKey, flags: ProjectFlags, expectedRev: number): Promise<boolean> {
+    const condition = expectedRev === 0 ? when.or(when.absent(), when.notExists("rev")) : when.eq("rev", expectedRev);
+    return this.put({ ...this.k(key, "LESSONSET#FLAGS"), entityType: "LESSON_FLAGS", flags, rev: expectedRev + 1 }, condition);
+  }
+  /** Replaces the flags whatever they hold and raises the rev in one atomic update (seeding and tests; see `LessonStore.setFlags`). */
+  async setFlags(key: ScopeKey, flags: ProjectFlags): Promise<void> {
+    await this.store.update({ key: this.k(key, "LESSONSET#FLAGS"), ops: [change.set("entityType", "LESSON_FLAGS"), change.set("flags", plain(flags) as unknown as JsonValue), change.add("rev", 1)] });
+  }
 
   // ---- the fence
   async fence(key: ScopeKey, fence: { people?: readonly string[]; ids?: readonly string[]; sourceIds?: readonly string[] }): Promise<void> {
