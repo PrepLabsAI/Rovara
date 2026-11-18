@@ -340,6 +340,40 @@ describe("agentx config set", () => {
       }
     });
 
+    // P0-14: an install operator is usually in no company, so `--company` names whose offered models to check; the broker answers 400 for an unnamed or unknown company.
+    it("with --company, asks the broker's admin read for that company, then changes only CoreAgentModel", async () => {
+      const gateway = withGateway(offering(GATEWAY_OFFERED_MODELS));
+      const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL } });
+      const configured = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }), fetch: gateway.fetch });
+      expect((await runConfigSet(configured, ENV, { key: MODEL_KEY, value: GLM, yes: true, company: "org_aaaaaaaaaaaaaaaaaaaa" })).changed).toBe(true);
+      expect(gateway.asked).toEqual([{ url: `${ADMIN_SESSION.controlPlaneUrl}${CORE_OFFERED_MODELS_ADMIN_PATH}?companyId=org_aaaaaaaaaaaaaaaaaaaa`, authorization: `Bearer ${ADMIN_SESSION.accessToken}`, method: "GET" }]);
+      expect(changed(cloudFormation).values).toEqual([{ ParameterKey: "CoreAgentModel", ParameterValue: GLM }]);
+    });
+
+    it("turns the broker's 400 into a clear way out (name the company, or a known one), never login --admin, before any AWS call", async () => {
+      const refusal = () => Response.json({ error: { code: "CONFIG_INVALID" } }, { status: 400 });
+      const unnamed = await run(GLM, withGateway(refusal));
+      await expect(unnamed.result).rejects.toThrow(`${MODEL_KEY} was not changed: this computer's admin sign-in for staging is not a member of a company, so name the company whose offered models to check: agentx --env staging config set ${MODEL_KEY} ${GLM} --company <company id>; nothing changed`);
+      expect(unnamed.cloudFormation.calls).toEqual([]);
+      const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL } });
+      const configured = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }), fetch: withGateway(refusal).fetch });
+      await expect(runConfigSet(configured, ENV, { key: MODEL_KEY, value: GLM, yes: true, company: "org_bbbbbbbbbbbbbbbbbbbb" }))
+        .rejects.toThrow(`${MODEL_KEY} was not changed: org_bbbbbbbbbbbbbbbbbbbb is not one of the companies on staging, so ${GLM} cannot be checked for it; give a company id from Code's company records; nothing changed`);
+      expect(cloudFormation.calls).toEqual([]);
+    });
+
+    it("refuses a malformed --company, or --company on a key it means nothing for, before asking anything", async () => {
+      const gateway = withGateway(() => { throw new Error("must not be asked"); });
+      for (const [key, value, company, message] of [[MODEL_KEY, GLM, "org_../../x", "--company must be a company id"], [MODEL_KEY, GLM, "ORG_AAAAAAAAAAAAAAAAAAAA", "--company must be a company id"],
+        [URL_KEY, GATEWAY, "org_aaaaaaaaaaaaaaaaaaaa", `--company is only for a key checked against the model gateway's offered models, not ${URL_KEY}`]] as const) {
+        const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL } });
+        const configured = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }), fetch: gateway.fetch });
+        await expect(runConfigSet(configured, ENV, { key, value, yes: true, company }), company).rejects.toThrow(message);
+        expect(cloudFormation.calls, company).toEqual([]);
+      }
+      expect(gateway.asked).toEqual([]);
+    });
+
     it("keeps a Claude id on its catalog rule: no live read", async () => {
       const gateway = withGateway(() => { throw new Error("must not be asked"); });
       const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: "" } });

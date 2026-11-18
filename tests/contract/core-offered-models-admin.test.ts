@@ -7,6 +7,8 @@ import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERE
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../../packages/broker/src/core-host/offered-models-http.js";
 import { requireGatewayOffers } from "../../packages/cli/src/config/gateway-offered.js";
+import { OFFERED_MODELS_NAME_A_COMPANY, OFFERED_MODELS_UNKNOWN_COMPANY } from "../../packages/broker/src/aws/admin-offered-models.js";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { adminCall, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { GATEWAY_OFFERED_MODELS, offeredAnswer } from "../support/offered-models-fake.js";
 
@@ -95,8 +97,9 @@ describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH}`, () => {
   it("says the gateway is not set up where the deployment has none (404), so config set can say to set it first", async () => {
     const { handler } = await createAdminBroker({ linking: companies(ORG_A).linking as never });
     expect(await adminCall(handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH })).toMatchObject({ status: 404, body: { error: { message: CORE_OFFERED_MODELS_NOT_SET_UP } } });
+    // P0-14: a deployment with no company layer has no membership to fall back on, so the operator is told to name the company (400), not that the gateway is missing.
     const noCompanies = await createAdminBroker({ coreOfferedModels: reads().read });
-    expect(await adminCall(noCompanies.handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH })).toMatchObject({ status: 404 });
+    expect(await adminCall(noCompanies.handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH })).toMatchObject({ status: 400, body: { error: { message: OFFERED_MODELS_NAME_A_COMPANY } } });
   });
 
   it("a failed read is the fixed words only (fail closed), never the cause", async () => {
@@ -150,5 +153,143 @@ describe("config set's live check, end to end through the broker's admin read an
   it("says to set the gateway first where the broker has none", async () => {
     const { handler } = await createAdminBroker({ linking: { companies: { companyOf: async () => ORG_A } } as never });
     await expect(check(handler, "zai.glm-5")).rejects.toThrow("set coreEngine.modelGatewayUrl first");
+  });
+});
+
+// P0-14 (live test 0.5.28): the install's operator signs in with no Code company membership. The route used to resolve only the operator's OWN company, which threw AUTH_REQUIRED
+// ("your AgentX sign-in has ended") although the same sign-in read /v1/admin/company-invites, and config set looped on "login --admin". Now the operator names the company.
+describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH} for an operator in no company (P0-14)`, () => {
+  const SIGN_IN_TABLE = "signin";
+  const lists = new Map<string, OfferedAgentModels>([[ORG_A, offeredAnswer(["claude-sonnet-5-5", "zai.glm-5"]) as OfferedAgentModels], [ORG_B, offeredAnswer(["claude-sonnet-5-5"]) as OfferedAgentModels],
+    [IMPLICIT_COMPANY_ID, offeredAnswer(["claude-sonnet-5-5", "zai.glm-4.7"]) as OfferedAgentModels]]);
+  /** Code's company records for ORG_A and ORG_B, an operator with no membership (`member` undefined) and the gateway's per-company lists. */
+  const world = async (member: string | undefined = undefined, options: { companyLayer?: boolean } = {}) => {
+    const asked: string[] = [];
+    const membershipAsked: string[] = [];
+    const companies = { companyOf: async (person: string) => { membershipAsked.push(person); return member; } };
+    const broker = await createAdminBroker({
+      linking: { ...(options.companyLayer === false ? {} : { companies }), signInTableName: SIGN_IN_TABLE } as never,
+      coreOfferedModels: async (company: string) => { asked.push(company); const list = lists.get(company); if (list === undefined) throw new Error("no list for secret-company"); return list; },
+    });
+    for (const companyId of [ORG_A, ORG_B]) {
+      broker.db.set({ pk: `ORG#${companyId}#COMPANY`, sk: "META", entityType: "COMPANY", companyId, name: `Company ${companyId.slice(-1)}`, status: "active", createdAt: "2026-11-01T00:00:00.000Z", createdBy: "operator" });
+    }
+    return { ...broker, asked, membershipAsked };
+  };
+  const named = (company: string) => `${CORE_OFFERED_MODELS_ADMIN_PATH}?companyId=${encodeURIComponent(company)}`;
+
+  it("answers 200 with the named company's list, and only that company's, without reading the operator's membership", async () => {
+    for (const [company, expected] of [[ORG_A, ["claude-sonnet-5-5", "zai.glm-5"]], [ORG_B, ["claude-sonnet-5-5"]], [IMPLICIT_COMPANY_ID, ["claude-sonnet-5-5", "zai.glm-4.7"]]] as const) {
+      const w = await world();
+      const answer = await adminCall(w.handler, { method: "GET", path: named(company) });
+      expect(answer.status, company).toBe(200);
+      expect(answer.body, company).toMatchObject(offeredAnswer(expected));
+      expect(w.asked, company).toEqual([company]);
+      expect(w.membershipAsked, company).toEqual([]);
+    }
+  });
+
+  it("an operator who IS a member of A may still name B (the agent model is the install's), and gets B's list, not A's", async () => {
+    const w = await world(ORG_A);
+    const answer = await adminCall(w.handler, { method: "GET", path: named(ORG_B) });
+    expect(answer).toMatchObject({ status: 200, body: offeredAnswer(["claude-sonnet-5-5"]) });
+    expect(w.asked).toEqual([ORG_B]);
+  });
+
+  it("without a named company, an operator in no company is told to name one (400), never AUTH_REQUIRED, and nothing is read from the gateway", async () => {
+    for (const member of [undefined, "not-a-company", ""]) {
+      const w = await world(member);
+      const answer = await adminCall(w.handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH });
+      expect(answer, String(member)).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: OFFERED_MODELS_NAME_A_COMPANY } } });
+      expect(w.asked, String(member)).toEqual([]);
+    }
+  });
+
+  it("without a named company, a member operator still gets its own company's list", async () => {
+    const w = await world(ORG_B);
+    expect(await adminCall(w.handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH })).toMatchObject({ status: 200, body: offeredAnswer(["claude-sonnet-5-5"]) });
+    expect(w.asked).toEqual([ORG_B]);
+  });
+
+  it("refuses an unknown, malformed or repeated company with one clear fixed 400, never echoing it, and reads nothing from the gateway", async () => {
+    const unknown = "org_unknowncompany000000";
+    for (const query of [`companyId=${unknown}`, "companyId=org_..%2F..%2Fx", "companyId=", "companyId=ORG_ADMINOFFERED0000000A", `companyId=${ORG_A}&companyId=${ORG_B}`, `companyId=${ORG_A}%20`]) {
+      const w = await world();
+      const answer = await adminCall(w.handler, { method: "GET", path: `${CORE_OFFERED_MODELS_ADMIN_PATH}?${query}` });
+      expect(answer, query).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: OFFERED_MODELS_UNKNOWN_COMPANY } } });
+      expect(JSON.stringify(answer.body), query).not.toContain("unknowncompany");
+      expect(w.asked, query).toEqual([]);
+    }
+  });
+
+  it("a stored row under the company's key that is not that company's record is not a company", async () => {
+    const w = await world();
+    w.db.set({ pk: `ORG#${ORG_A}#COMPANY`, sk: "META", entityType: "COMPANY", companyId: ORG_B, name: "Drift", status: "active", createdAt: "2026-11-01T00:00:00.000Z", createdBy: "operator" });
+    expect(await adminCall(w.handler, { method: "GET", path: named(ORG_A) })).toMatchObject({ status: 400 });
+    expect(w.asked).toEqual([]);
+  });
+
+  it("only the built-in company is known where developer sign-in (Code's company records) is not set up", async () => {
+    const { handler } = await createAdminBroker({ coreOfferedModels: async (company: string) => lists.get(company)! });
+    expect(await adminCall(handler, { method: "GET", path: named(IMPLICIT_COMPANY_ID) })).toMatchObject({ status: 200 });
+    expect(await adminCall(handler, { method: "GET", path: named(ORG_A) })).toMatchObject({ status: 400 });
+  });
+
+  it("a named company works with the company layer off, too", async () => {
+    const w = await world(undefined, { companyLayer: false });
+    expect(await adminCall(w.handler, { method: "GET", path: named(ORG_A) })).toMatchObject({ status: 200 });
+  });
+
+  it("a failed company-record read is the fixed read failure (503), never the cause", async () => {
+    const w = await world();
+    w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk?: string } | undefined)?.pk === `ORG#${ORG_A}#COMPANY`, error: { name: "InternalServerError", message: "secret-table broke" } });
+    const answer = await adminCall(w.handler, { method: "GET", path: named(ORG_A) });
+    expect(answer.status).toBe(503);
+    expect(JSON.stringify(answer.body)).toContain(OFFERED_MODELS_READ_FAILED);
+    expect(JSON.stringify(answer.body)).not.toContain("secret");
+    expect(w.asked).toEqual([]);
+  });
+
+  it("a membership read that fails keeps the fixed sign-in refusal (fail closed)", async () => {
+    const { handler } = await createAdminBroker({ linking: { companies: { companyOf: async () => { throw new Error("secret-table"); } }, signInTableName: SIGN_IN_TABLE } as never, coreOfferedModels: async () => { throw new Error("must not be read"); } });
+    const answer = await adminCall(handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH });
+    expect(answer.status).toBe(401);
+    expect(JSON.stringify(answer.body)).not.toContain("secret");
+  });
+
+  it("is never looser for a non-administrator: refused (403) for a named company or none, and nothing is read", async () => {
+    for (const path of [named(ORG_A), named(IMPLICIT_COMPANY_ID), CORE_OFFERED_MODELS_ADMIN_PATH]) {
+      const w = await world(ORG_A);
+      expect(await adminCall(w.handler, { method: "GET", path, admin: false }), path).toMatchObject({ status: 403 });
+      expect(w.asked, path).toEqual([]);
+      expect(w.membershipAsked, path).toEqual([]);
+    }
+  });
+
+  it("config set, end to end through the broker as an operator in no company: --company is checked against that company's list; without it, a clear way out", async () => {
+    const SESSION = { controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-token-for-tests" };
+    const g = gateway((url) => Response.json(offeredAnswer(url.includes(ORG_A) ? ["claude-sonnet-5-5", "zai.glm-5"] : ["claude-sonnet-5-5", "zai.glm-4.7"])));
+    const read = adminOfferedModelsFromEnvironment({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY }, tokens, g.fetchImpl)!;
+    const broker = await createAdminBroker({ linking: { companies: { companyOf: async () => undefined }, signInTableName: SIGN_IN_TABLE } as never, coreOfferedModels: read });
+    broker.db.set({ pk: `ORG#${ORG_A}#COMPANY`, sk: "META", entityType: "COMPANY", companyId: ORG_A, name: "A", status: "active", createdAt: "2026-11-01T00:00:00.000Z", createdBy: "operator" });
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input);
+      const answer = await adminCall(broker.handler, { method: init?.method ?? "GET", path: `${url.pathname}${url.search}` });
+      return Response.json(answer.body, { status: answer.status });
+    }) as typeof fetch;
+    const check = (value: string, company?: string) => requireGatewayOffers({ key: "coreEngine.agentModel", env: "staging", value, session: SESSION, fetch: fetchImpl, ...(company === undefined ? {} : { company }) });
+    await expect(check("zai.glm-5", ORG_A)).resolves.toBeUndefined();
+    expect(g.urls).toEqual([`${GATEWAY}/v1/service/companies/${ORG_A}/offered-models`]);
+    await expect(check("zai.glm-5", IMPLICIT_COMPANY_ID)).rejects.toThrow("the model gateway does not offer zai.glm-5 to this company; it offers zai.glm-4.7, claude-sonnet-5-5; nothing changed");
+    await expect(check("zai.glm-5")).rejects.toThrow("coreEngine.agentModel was not changed: this computer's admin sign-in for staging is not a member of a company, so name the company whose offered models to check: agentx --env staging config set coreEngine.agentModel zai.glm-5 --company <company id>; nothing changed");
+    await expect(check("zai.glm-5", "org_unknowncompany000000")).rejects.toThrow("coreEngine.agentModel was not changed: org_unknowncompany000000 is not one of the companies on staging, so zai.glm-5 cannot be checked for it");
+    const before = g.urls.length;
+    await expect(check("zai.glm-5", "org_../x")).rejects.toThrow("--company must be a company id (org_ and 20 lowercase letters or digits); nothing changed");
+    expect(g.urls).toHaveLength(before);
+    // Never the old loop: none of these says to log in again.
+    for (const company of [undefined, "org_unknowncompany000000"]) {
+      const error = await check("zai.glm-5", company).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error?.message, String(company)).not.toContain("login --admin");
+    }
   });
 });

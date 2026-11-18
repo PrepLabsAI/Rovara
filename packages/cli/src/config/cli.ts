@@ -100,15 +100,16 @@ export function registerConfigCommands(program: Command, context: ConfigCommandC
     .option("--value-file <path>", "file holding the value (for a webhook alert address, which is a secret)")
     .option("--value-env <NAME>", "environment variable holding the value (for a webhook alert address)")
     .option("--yes", "apply without asking; the change is still printed", false)
+    .option("--company <company id>", "for coreEngine.agentModel: the company whose model gateway offers are checked (needed when your admin sign-in is in no company)")
     .option(...regionOption)
-    .action(async (key: string, value: string | undefined, options: { valueFile?: string; valueEnv?: string; yes: boolean; region?: string }, command: Command) => {
+    .action(async (key: string, value: string | undefined, options: { valueFile?: string; valueEnv?: string; yes: boolean; region?: string; company?: string }, command: Command) => {
       if (value !== undefined && (options.valueFile !== undefined || options.valueEnv !== undefined)) {
         throw agentXError("CONFIG_INVALID", "give the value once: on the command line, or with --value-file or --value-env");
       }
       const source = secretSource(options.valueFile, options.valueEnv);
       const change = limitsChange(key, options.yes);
       const result = await runConfigSet(services(options.region, options.yes, change), globals(command).env, {
-        key, yes: options.yes, ...(value === undefined ? {} : { value }), ...(source === undefined ? {} : { valueSource: source }),
+        key, yes: options.yes, ...(value === undefined ? {} : { value }), ...(source === undefined ? {} : { valueSource: source }), ...(options.company === undefined ? {} : { company: options.company }),
       });
       context.stdout.write(globals(command).json ? formatSuccess(result, true) : result.changed ? `${key} changed.\n` : change === undefined ? "Nothing to change.\n" : "Nothing changed.\n");
     });

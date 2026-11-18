@@ -4,7 +4,7 @@
 //
 // Fail closed: no admin sign-in, a gateway that is not set up, an answer that is not the contract (OfferedAgentModels), a time-out or any other failure refuses the change, in fixed
 // words. Nothing of the broker's or gateway's answer is echoed except the offered model names themselves (each already held to the contract's model-name characters).
-import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, agentXError, isCoreAgentModelId } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, OrgIdSchema, agentXError, isCoreAgentModelId } from "@agentx/contracts";
 
 /** The longest the read may take. */
 export const GATEWAY_OFFERED_TIMEOUT_MS = 15_000;
@@ -20,6 +20,11 @@ export interface GatewayOfferedInputs {
   value: string;
   session: { controlPlaneUrl: string; accessToken: string } | undefined;
   fetch: typeof fetch;
+  /**
+   * P0-14: the company whose offered list to check against (`--company`), read by the install's administrator. Absent: the administrator's own company membership (an install
+   * operator is usually in none, and is then told to name one).
+   */
+  company?: string;
 }
 
 async function boundedJson(response: Response): Promise<unknown> {
@@ -47,11 +52,15 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
   if (input.session === undefined) {
     throw agentXError("AUTH_REQUIRED", `${notChanged}: a model other than Claude is checked against the models the model gateway offers, which needs this computer's admin sign-in for ${env}; run agentx --env ${env} login --admin, then try again; nothing changed`);
   }
+  if (input.company !== undefined && !OrgIdSchema.safeParse(input.company).success) {
+    throw agentXError("CONFIG_INVALID", `${notChanged}: --company must be a company id (org_ and 20 lowercase letters or digits); nothing changed`);
+  }
+  const query = input.company === undefined ? "" : `?${new URLSearchParams({ companyId: input.company }).toString()}`;
   const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${notChanged}: the models the model gateway offers could not be read just now, so ${value} could not be checked; nothing changed, try again`);
   let status: number;
   let body: unknown;
   try {
-    const response = await input.fetch(`${input.session.controlPlaneUrl.replace(/\/+$/u, "")}${CORE_OFFERED_MODELS_ADMIN_PATH}`, {
+    const response = await input.fetch(`${input.session.controlPlaneUrl.replace(/\/+$/u, "")}${CORE_OFFERED_MODELS_ADMIN_PATH}${query}`, {
       method: "GET", redirect: "error", headers: { accept: "application/json", authorization: `Bearer ${input.session.accessToken}` }, signal: AbortSignal.timeout(GATEWAY_OFFERED_TIMEOUT_MS),
     });
     status = response.status;
@@ -63,6 +72,13 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
   }
   if (status === 404) {
     throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway is not set up on ${env} yet, so ${value} cannot be checked; set coreEngine.modelGatewayUrl first (agentx --env ${env} config set coreEngine.modelGatewayUrl <https origin>), then try again; nothing changed`);
+  }
+  // P0-14: 400 is the broker's refusal of the company: a named one that is not one of the install's companies, or none named for an administrator in no company.
+  if (status === 400 && input.company !== undefined) {
+    throw agentXError("CONFIG_INVALID", `${notChanged}: ${input.company} is not one of the companies on ${env}, so ${value} cannot be checked for it; give a company id from Code's company records; nothing changed`);
+  }
+  if (status === 400) {
+    throw agentXError("CONFIG_INVALID", `${notChanged}: this computer's admin sign-in for ${env} is not a member of a company, so name the company whose offered models to check: agentx --env ${env} config set ${key} ${value} --company <company id>; nothing changed`);
   }
   if (status !== 200) throw unreadable();
   // The broker's answer is the contract plus its own requestId; only the contract's two fields are judged (the schema is strict).
