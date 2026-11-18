@@ -246,6 +246,15 @@ describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)",
     }
   });
 
+  it("a lesson with no scope is pushed when it fits but is not in the look-up", async () => {
+    const w = await scopedWorld();
+    const key = lessonKey(A, "payments", "les_aaaa1111");
+    await w.store.put({ item: { ...(await w.store.get(key))!, scope: {} } });
+    const answer = await w.learned(BOTH);
+    expect(answer.learnedContext?.lessons.map((l) => l.id)).toEqual(["les_aaaa1111"]);
+    expect(answer.knowledgeContext?.pull).toBeUndefined();
+  });
+
   it("a worker without the feature is sent exactly the lessons it always was", async () => {
     const w = await scopedWorld();
     const answer = await w.learned(request);

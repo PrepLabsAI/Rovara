@@ -218,8 +218,8 @@ describe("the fit floor", () => {
     const { deps: full, add } = setup();
     const deps = keywordOnly(full);
     await add(conv("les_path0001", { scope: { repos: ["api"], paths: ["src/billing/**"] }, citations: [], title: "Prefer tabs in Go files", description: "", body: "Use tabs when editing Go source." }));
-    expect(await loadedIds(deps, { fitFloor: PUSH_FIT_FLOOR })).toEqual(["les_path0001"]);
-    expect(await loadedIds(deps, { fitFloor: PUSH_FIT_FLOOR, files: ["docs/readme.md"] })).toEqual([]);
+    expect(await loadedIds(deps, { fitFloor: 0.99 })).toEqual(["les_path0001"]);
+    expect(await loadedIds(deps, { fitFloor: 0.99, files: ["docs/readme.md"] })).toEqual([]);
   });
 
   it("a frozen replay snapshot is never cut by the floor", async () => {

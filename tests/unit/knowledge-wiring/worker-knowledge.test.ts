@@ -218,6 +218,13 @@ describe("knowledge_for", () => {
     expect(step.useReport().units.find((u) => u.id === "L-7Kq2mA")!.used).toBe(false);
   });
 
+  it("lists at most 10 units even when many small ones fit the bytes", () => {
+    const tiny = Array.from({ length: 30 }, (_, i) => unit(`tiny${String(i).padStart(4, "0")}`, { statement: `Tiny ${i}`, why: "", detail: undefined, scopeLabel: "", paths: ["src/**"], repos: [] }));
+    const text = stepWith({ pull: { units: tiny, leftOut: 0 } }).knowledgeFor({ path: "src/a.ts" });
+    expect(text.match(/^\[L-/gmu)).toHaveLength(KNOWLEDGE_FOR_MAX_UNITS);
+    expect(text).toContain("20 more not shown.");
+  });
+
   it("gives the limit line from the 13th call on, whatever is asked", () => {
     const step = stepWith({ pull: { units: [unit("tiny0001", { statement: "Tiny alpha", why: "", detail: undefined, paths: ["src/**"], repos: [] })], leftOut: 0 } });
     for (let i = 0; i < KNOWLEDGE_FOR_MAX_CALLS; i += 1) expect(step.knowledgeFor({ query: `alpha${i} alpha` })).not.toBe("Limit reached. Continue with what you have.");
@@ -403,12 +410,14 @@ describe("the use report", () => {
   });
 
   it("the report is capped at 60 units, pushed first", () => {
-    const units = Array.from({ length: 100 }, (_, i) => unit(`many${String(i).padStart(5, "0")}`, { statement: `Many ${i}`, paths: ["src/**"], repos: [] }));
+    const units = Array.from({ length: 150 }, (_, i) => unit(`many${String(i).padStart(5, "0")}`, { statement: `Many ${i}`, why: "", detail: undefined, scopeLabel: "", paths: ["src/**"], repos: [] }));
     const context = validateKnowledgeContext(maximal("IMPLEMENT", { pull: { units, leftOut: 0 } }), "IMPLEMENT")!;
     const step = new KnowledgeStep({ stage: "IMPLEMENT", context, locate });
     step.arm(learned("IMPLEMENT"));
     for (let i = 0; i < 12; i += 1) step.knowledgeFor({ query: `many ${i}` });
-    expect(step.useReport().units.length).toBeLessThanOrEqual(60);
-    expect(step.useReport().units[0]!.given).toBe("push");
+    const report = step.useReport();
+    expect(report.units.filter((u) => u.given === "pull").length).toBeGreaterThan(0);
+    expect(report.units.length).toBe(60);
+    expect(report.units[0]!.given).toBe("push");
   });
 });
