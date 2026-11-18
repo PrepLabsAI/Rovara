@@ -190,7 +190,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     now, log,
   });
 
-  const milestones = createDocumentMilestones({ store: deps.store, now, log: (event, fields) => log(`milestones.${event}`, fields) });
+  const milestones = createDocumentMilestones({ store: deps.store, now, companyId, log: (event, fields) => log(`milestones.${event}`, fields) });
   milestones.register(host.milestone);
 
   async function projectNames(): Promise<string[]> {
