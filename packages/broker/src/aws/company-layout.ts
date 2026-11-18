@@ -9,8 +9,8 @@
 // The company always comes from the caller's LIVE membership (or, for a stored record, the company the record itself names), never from a request.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectPk, projectRevisionKey,
-  type OrgId,
+  ChannelSpaceRefSchema, IMPLICIT_COMPANY_ID, channelBindingKey, channelBindingPartition, slackBindingPk, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, SLACK_CHANNEL, SlackChannelBindingSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectPk,
+  projectRevisionKey, readChannelBindingItem, slackBindingKey, slackBindingOf, type OrgId, type SlackChannelBinding,
 } from "@agentx/contracts";
 import { ownPartitionRow } from "./company-check.js";
 
@@ -94,4 +94,36 @@ export async function latestRevisionRowFor(client: Client, tableName: string, co
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
   })) as { Items?: Array<Record<string, unknown>> } | undefined;
   return response?.Items?.[0];
+}
+
+/** The partition of a Slack team's channel bindings for this company: a NAMED company's own (`ORG#<c>#SLACK_BINDING#<team>`), else the legacy `SLACK_BINDING#<team>`. */
+export function slackChannelBindingPkFor(companyId: string | undefined, teamId: string): string {
+  const company = namedCompany(companyId);
+  return company === undefined ? channelBindingPartition(SLACK_CHANNEL, teamId) : slackBindingPk(company, teamId);
+}
+
+/** One Slack channel's binding key for this company (the ref is checked as the legacy key checks it). */
+export function slackChannelBindingKeyFor(companyId: string | undefined, teamId: string, channelId: string): Key {
+  const legacy = channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
+  const company = namedCompany(companyId);
+  return company === undefined ? legacy : slackBindingKey(company, teamId, channelId);
+}
+
+/**
+ * A Slack channel's binding for a NAMED company, from the company's own partition only: `ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>` (slackBindingKey). Absent when
+ * there is no row. A row whose key is not exactly that key, that names another team or channel, that names another company, or that does not parse, is absent too (never a guess,
+ * never another company's row). The result names the company it was read for, so a caller can tell a company-scoped binding from a legacy one.
+ */
+export async function namedCompanySlackBinding(client: Client, tableName: string, company: OrgId, teamId: string, channelId: string): Promise<(SlackChannelBinding & { companyId: OrgId }) | undefined> {
+  if (namedCompany(company) !== company) return undefined;
+  const ref = { channel: SLACK_CHANNEL, tenant: teamId, space: channelId };
+  if (!ChannelSpaceRefSchema.safeParse(ref).success) return undefined;
+  const key: Key = slackChannelBindingKeyFor(company, teamId, channelId);
+  const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined;
+  const row = response?.Item;
+  if (row === undefined || row.pk !== key.pk || row.sk !== key.sk || !ownPartitionRow(row, company)) return undefined;
+  try {
+    const binding = slackBindingOf(readChannelBindingItem(ref, row)!);
+    return SlackChannelBindingSchema.safeParse(binding).success ? { ...binding, companyId: company } : undefined;
+  } catch { return undefined; }
 }

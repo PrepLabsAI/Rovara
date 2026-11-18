@@ -12,6 +12,12 @@ export const SLACK_COMPANY_WORKSPACES_VARIABLE = "SLACK_COMPANY_WORKSPACES";
 /** The State-table rows a company-mode reader needs to find a team's company (slack-workspace-binding.ts requireCompany: the team's binding and the backfill marker). */
 export const SLACK_BINDING_READ_KEYS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING"] as const;
 
+/**
+ * DEC 254zzz80 (R2-F1, owner-approved IAM): a NAMED company's Slack channel bindings, `ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>` (company id: org_ + exactly 20
+ * characters). The Slack Lambda reads one by key (company-layout.ts namedCompanySlackBinding) for the team's company; nothing else under ORG#.
+ */
+export const COMPANY_SLACK_CHANNEL_BINDING_KEYS = ["ORG#org_????????????????????#SLACK_BINDING#*"] as const;
+
 export interface SlackCompanyWorkspacesProps {
   readonly naming: AgentXNaming;
   /** DEC 254zg (a), 254zk: the company sign-in condition; the switch is on only while this holds too. */

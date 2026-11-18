@@ -481,7 +481,8 @@ describe("disconnect", () => {
     const w = world();
     await w.connect("acme-code"); await w.connect("beta-code", w.b);
     for (const [team, channel, project] of [["T0ACME", "C1", "web"], ["T0ACME", "C2", "api"], ["T0ACME", "C3", "web"], ["T0BETA", "C9", "beta-app"]] as const) {
-      w.db.set({ pk: `SLACK_BINDING#${team}`, sk: `CHANNEL#${channel}`, teamId: team, channelId: channel, projectName: project, updatedAt: TIME });
+      // DEC 254zzz80 (R2-F1): a NAMED company's channel links live in its own partition (Acme is A's, Beta is B's).
+      w.db.set({ pk: `ORG#${team === "T0BETA" ? B : A}#SLACK_BINDING#${team}`, sk: `CHANNEL#${channel}`, teamId: team, channelId: channel, projectName: project, updatedAt: TIME });
     }
     w.as(PERSON, A, "owner", "session", fresh());
     const answer = await w.disconnect();
@@ -492,8 +493,8 @@ describe("disconnect", () => {
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeUndefined();
     expect(w.db.get(`ORG#${A}#SLACK_WORKSPACES`, "TEAM#T0ACME")).toBeUndefined();
     expect(w.db.get(companyInstallKey(A).pk, "WORKSPACE")).toBeUndefined();
-    expect(w.db.get("SLACK_BINDING#T0ACME", "CHANNEL#C1")).toBeUndefined();
-    expect(w.db.get("SLACK_BINDING#T0BETA", "CHANNEL#C9")).toBeDefined();
+    expect(w.db.find((row) => row.pk === `ORG#${A}#SLACK_BINDING#T0ACME`)).toEqual([]);
+    expect(w.db.get(`ORG#${B}#SLACK_BINDING#T0BETA`, "CHANNEL#C9")).toBeDefined();
     expect(w.db.get("SLACK_TEAM#T0BETA", "BINDING")).toMatchObject({ companyId: B });
     expect(await w.tokens.tokenForCompany(B, "T0BETA")).toBe(tokenOf("beta-code"));
     expect([...w.db.items.values()].filter((row) => row.entityType === "SLACK_WORKSPACE_AUDIT" && row.action === "disconnect")).toEqual([expect.objectContaining({ companyId: A, actor: PERSON })]);
@@ -586,13 +587,13 @@ describe("review round 1", () => {
     const w = world();
     await w.connect("acme-code");
     w.db.set({ pk: "SLACK_TEAM#T0ACME", sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId: "T0ACME", companyId: B, boundAt: TIME, boundBy: "operator" });
-    w.db.set({ pk: "SLACK_BINDING#T0ACME", sk: "CHANNEL#C7", teamId: "T0ACME", channelId: "C7", projectName: "b-app", updatedAt: TIME });
+    w.db.set({ pk: `ORG#${B}#SLACK_BINDING#T0ACME`, sk: "CHANNEL#C7", teamId: "T0ACME", channelId: "C7", projectName: "b-app", updatedAt: TIME });
     expect((await w.read()).body.workspace).toBeNull();
     w.as(PERSON, A, "owner", "session", fresh());
     const answer = await w.disconnect();
     expect(answer.body).toMatchObject({ status: "disconnected", projectsLosingChannel: [] });
     expect(w.slack.revoked).toEqual([]);
-    expect(w.db.get("SLACK_BINDING#T0ACME", "CHANNEL#C7")).toBeDefined();
+    expect(w.db.get(`ORG#${B}#SLACK_BINDING#T0ACME`, "CHANNEL#C7")).toBeDefined();
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toMatchObject({ companyId: B });
     expect(w.db.get(companyInstallKey(A).pk, "WORKSPACE")).toBeUndefined();
   });
