@@ -2,10 +2,12 @@ import "./broker-environment-init.js"; import { companyMembershipFromDynamo, res
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackCompanyDependencies, type SlackWorkspaceAccess } from "./slack-person.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
+import { askSlackModelAccessForIdentity } from "./slack-model-access.js";
+import type { TokenSigner } from "../developer/tokens.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
@@ -384,7 +386,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts"; import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, SLACK_MODEL_ACCESS_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts"; import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -592,6 +594,8 @@ interface CodeBuildRecord {
 }
 
 interface AwsBrokerDependencies {
+  /** DEC 254zzz79 (3): the gateway's settings and the task-token signer, for the Slack service's model access (slack-model-access.ts). Absent: every company thread's model access is `unavailable`. */
+  slackModelAccess?: { env: NodeJS.ProcessEnv; taskTokens: () => { signer: TokenSigner; issuer: string } | undefined };
   workspaces?: SlackWorkspaceAccess;
   companies?: CompanyMembershipReader;
   /** L2-2 PR 18c: the membership reader Slack company mode brings (slack-company-wiring.ts); given only to the company handler, never to the install team's legacy handler. */
@@ -1415,6 +1419,14 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
           return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
         }
         // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
+        // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
+        if (request.method === "POST" && serviceUrl.pathname === SLACK_MODEL_ACCESS_SERVICE_PATH) {
+          const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
+          return json(await askSlackModelAccessForIdentity({
+            companyMode: dependencies.workspaces !== undefined || (dependencies as SlackCompanyDependencies).slackInstallTeamOnly !== undefined, companyOf: (team) => bindings.companyOf(team),
+            env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
+          }, identity), request.requestId);
+        }
         if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
           return json(await askSlackAnswerForIdentity({ company: dependencies, core: dependencies.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
         }
@@ -15676,6 +15688,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
     ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, ...(slackCompany.companies === undefined ? {} : { slackCompanies: slackCompany.companies }) }),
     ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
+    slackModelAccess: { env: process.env, taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)) },
     ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
     ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
     ...(process.env.ROVARA_SIGNIN_URL === undefined ? {} : { slackSignInUrl: process.env.ROVARA_SIGNIN_URL }),
