@@ -147,7 +147,7 @@ describe("the broker hands the notice delivery the same re-check", () => {
 
   it("queues and delivers through one function: the knowledge API's adminsOf and the delivery check are the same list, asked company-wide", () => {
     expect(rootSource).toMatch(/const adminsOf = async \(companyId: OrgId\): Promise<string\[\]> => await adminNoticeIdsOf\(lessonsPeople\(companyId\)/u);
-    expect(rootSource).toMatch(/adminNotice = async \(orgId, developerId\) => \(await adminsOf\(orgId as OrgId\)\)\.includes\(developerId\);/u);
+    expect(rootSource).toMatch(/adminNotice = async \(orgId, developerId\) => \(await adminsOf\(orgId\)\)\.includes\(developerId\);/u);
     expect(rootSource).toMatch(/^\s+adminsOf,$/mu);
     expect(rootSource).toMatch(/people\.approvers\(companyId, undefined\)/u);
     expect(rootSource).toMatch(/listed\.eligibleIds\.slice\(0, ADMIN_NOTICE_PEOPLE_MAX\)/u);
