@@ -24,6 +24,8 @@ class FakeGitHub {
   readonly written = { blobs: [] as unknown[], trees: [] as Array<Record<string, unknown>>, commits: [] as Array<Record<string, unknown>>, refs: [] as Array<Record<string, unknown>>, pulls: [] as Array<Record<string, unknown>> };
   failPulls = false;
   refAlreadyExists = false;
+  /** The ref is created, then the request fails (a timeout after GitHub applied it). */
+  refThenThrow = false;
   /** Runs when the pull request is asked for (a person pushes to the branch in between). */
   onPull: (() => void) | undefined;
   private counter = 0;
@@ -76,6 +78,7 @@ class FakeGitHub {
       this.written.refs.push(body);
       if (this.refAlreadyExists || this.branches.has(String(body.ref).replace("refs/heads/", ""))) return this.json(422, { message: "Reference already exists" });
       this.branches.set(String(body.ref).replace("refs/heads/", ""), String(body.sha));
+      if (this.refThenThrow) throw new Error("timed out");
       return this.json(201, { object: { sha: body.sha } });
     }
     if (method === "POST" && path === "/pulls") {
@@ -206,6 +209,22 @@ describe("the GitHub eval wrapper pull request: a failure leaves nothing of Rova
     await refusal(() => openEvalWrapperPullRequestOn(contextOf(github), requestOf(github)));
     expect(github.writes.some((write) => write.startsWith("DELETE"))).toBe(false);
     expect(github.branches.get(BRANCH)).toBe("f".repeat(40));
+  });
+});
+
+describe("the GitHub eval wrapper pull request: lost answers and odd names", () => {
+  it("a branch create that GitHub applied but whose answer was lost is removed (only while it is Rovara's own commit)", async () => {
+    const github = new FakeGitHub();
+    github.refThenThrow = true;
+    expect(await refusal(() => openEvalWrapperPullRequestOn(contextOf(github), requestOf(github)))).toBe("timed out");
+    expect(github.writes).not.toContain("POST /pulls");
+    expect([...github.branches.keys()]).toEqual(["main"]);
+  });
+
+  it("a default branch name with a dot segment is refused before any request", async () => {
+    const github = new FakeGitHub();
+    for (const baseBranch of ["..", "a/../b", "./x", "a//b"]) expect(await refusal(() => openEvalWrapperPullRequestOn(contextOf(github), requestOf(github, { baseBranch }))), baseBranch).not.toBe("");
+    expect(github.requests).toEqual([]);
   });
 });
 

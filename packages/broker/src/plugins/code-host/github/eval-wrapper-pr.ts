@@ -87,6 +87,7 @@ export async function openEvalWrapperPullRequestOn(context: EvalWrapperWriteCont
   if (!EVAL_WRAPPER_BRANCH_PATTERN.test(input.branch) || input.branch === input.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
   if (!EVAL_WRAPPER_WRITE_PATHS.includes(input.path)) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes an eval wrapper to");
   if (!SHA.test(input.baseRevision)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+  if (input.baseBranch.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw agentXError("CONFIG_INVALID", "branch name is invalid");
   // The default branch is where the caller read it, and the new branch does not exist.
   const baseHead = await headOf(context, input.baseBranch);
   if (baseHead === undefined) throw agentXError("CONFIG_INVALID", "the base branch does not exist");
@@ -104,7 +105,12 @@ export async function openEvalWrapperPullRequestOn(context: EvalWrapperWriteCont
   const commit = sha40((await post(context, "/git/commits", { message: `Add Rovara's eval wrapper (${input.path})`, tree, parents: [baseHead] }, "file write")).sha, "commit");
 
   // The branch is created pointing at that commit in one step. 422 "Reference already exists": the name was taken between the check and the create, a conflict (nothing is moved or adopted).
-  const created = await send(context, "/git/refs", { method: "POST", body: { ref: `refs/heads/${input.branch}`, sha: commit } });
+  let created: Response;
+  try { created = await send(context, "/git/refs", { method: "POST", body: { ref: `refs/heads/${input.branch}`, sha: commit } }); } catch (error) {
+    // The request may have reached GitHub (a timeout after it applied it): a branch at Rovara's own commit is removed, so nothing of Rovara's is left without its pull request.
+    await removeOwnBranch(context, input.branch, commit);
+    throw error;
+  }
   if (created.status === 422 && await isExistsMessage(created)) { drop(created); throw agentXError("CONFIG_INVALID", EVAL_WRAPPER_CONFLICT_MESSAGE); }
   if (!created.ok) return failed("branch creation", created);
   await created.body?.cancel();
