@@ -36,6 +36,7 @@ import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
 import { runSetupProveJob } from "./setup-prove.js";
+import { runEvalHealthRider } from "./eval-health-run.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -161,6 +162,12 @@ const state = createWorkerServerState(
               otherOperations: async () => (anotherOperationActive(state, invocation.operationId) ? [{ id: "another-operation", rootPath }] : []),
             });
           } finally { unregister(); }
+        }
+        // L4-EVH: an opt-in eval health run measures the project's evals on this read-only, pinned preparation of main and posts the one result to the broker (eval-health-run.ts).
+        if (invocation.payload.evalHealth !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try { await runEvalHealthRider({ rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal }); } finally { unregister(); }
         }
         return {
           manifestPath: ".agentx/preparation-manifest.json",

@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { PREPARE_EVAL_HEALTH_FEATURE, DESIGN_REVIEW_WORKER_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -10,6 +10,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.evalRound.v1",
   // The model gateway's address delivered with an eval request (`evalGatewayUrl`), used when the host sets no `ROVARA_EVAL_GATEWAY_URL` of its own (verification/eval-wiring.ts `evalEnvironmentWithGateway`).
   "task.evalGateway.v1",
+  // L4-EVH: the opt-in eval health run on a read-only, pinned preparation of main (eval-health-run.ts).
+  PREPARE_EVAL_HEALTH_FEATURE,
   "task.modelPolicy",
   "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview",
   "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode",
