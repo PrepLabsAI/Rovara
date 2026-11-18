@@ -8,7 +8,9 @@
 // removes before any model call. A comment's place is the repository's, and its readers are that repository's readers (a restricted audience with no names, which the project's own repositories turn into "the project").
 // - A host that cannot list the comments, or whose standing cannot be read, gives no comment span. Nothing here guesses.
 import { OrgIdSchema, type ChangeRequestRef, type CodeHost, type HostAccount, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
-import { isRovareReplyComment } from "@agentx/contracts";
+import { WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON, isRovareReplyComment } from "@agentx/contracts";
+import { PAGE_CHANGES_DEFAULT_REASON } from "../../developer/gate-default-reasons.js";
+import { taskOwnerKey } from "../../developer/task-records.js";
 import { providerOf } from "../../plugins/routing.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { changeRequestRef } from "../../core/merge/host-port.js";
@@ -16,6 +18,7 @@ import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readOwnerFindingNotes } from "../../core/task-flow/owner-note.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
+import { looksLikeCorrection } from "../../lessons/correction-filter.js";
 import { isEvalRunMark } from "../../lessons/eval-run.js";
 import { isHumanSendBack } from "../../lessons/human-send-backs.js";
 import { cleanForLearning } from "../../lessons/guards.js";
@@ -33,6 +36,13 @@ const PLAN_MAX_BYTES = 70_000;
 const MAX_FINDINGS = 20;
 const MAX_CI_PROBLEMS = 10;
 const MAX_SEND_BACK_IDS = 50;
+/** At most this many plan or design comments are read from one task (the newest). One total limit; each is already at most 500 characters. */
+const MAX_PLAN_COMMENTS = 10;
+/**
+ * The reasons code itself writes on a gate's REQUEST_CHANGES decision when no person typed words (a default for an empty box, a plan revised for a live change or a redirect, a re-plan for an edited spec): code's
+ * sentences, never a person's correction, and they carry no `source`, so they are recognised by their words. A person who typed exactly one of them teaches nothing either (fail closed).
+ */
+const CODE_GATE_REASONS: ReadonlySet<string> = new Set(["Changes requested.", PAGE_CHANGES_DEFAULT_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON]);
 const MAX_PULL_REQUESTS = 5;
 const MAX_PULL_REQUEST_COMMENTS = 40;
 const COMMENT_PATH_MAX = 200;
@@ -108,6 +118,38 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
   };
   /** Who a decision of the workflow was made by: its actor on a hosted install, the owner on a laptop. */
   const deciderOf = (decision: { actorId?: string | undefined }): string | undefined => (hosted === undefined ? ownerId : decision.actorId);
+
+  /** What kind of document a gate decision was about, from the artifact its digest binds: the plan, or a design (the requirements step is the design side of the pipeline). Undefined when the digest binds nothing known here. */
+  const gateKindOf = (workflow: WorkflowSnapshot, digest: string | undefined): "plan_comment" | "design_comment" | undefined => {
+    if (digest === undefined) return undefined;
+    const type = workflow.artifacts.find((artifact) => artifact.sha256 === digest)?.type;
+    if (type === "plan") return "plan_comment";
+    return type === "design" || type === "requirements" ? "design_comment" : undefined;
+  };
+
+  /** The plan and design comments of a task, as spans (see the call). Only a person's own typed reason that reads as a correction (`correction-filter.ts`: praise, nits and bare questions are not). */
+  async function planComments(task: TaskRecord, workflow: WorkflowSnapshot | undefined): Promise<EvidenceSpan[]> {
+    if (workflow === undefined) return [];
+    const spans: EvidenceSpan[] = [];
+    const standings = new Map<string, TrustClass | undefined>();
+    for (const decision of workflow.decisions) {
+      if (decision.decision !== "REQUEST_CHANGES" || decision.actorRole === "AGENTX") continue;
+      if (decision.source !== undefined && decision.source !== "GATE") continue;
+      const reason = decision.reason.trim();
+      if (reason === "" || CODE_GATE_REASONS.has(reason) || !looksLikeCorrection(reason)) continue;
+      const kind = gateKindOf(workflow, decision.artifactDigest);
+      // Only the TASK'S OWNER's own typed words. On a laptop the owner is the one person, but a repository collaborator's `/rovara changes` comment is recorded as a PROJECT_ADMIN decision, so it is never the owner's.
+      // On a hosted install the owner's decision carries the owner key of the task (a hash of the task's person and the task), which names the task's person; any other decider's id cannot be resolved to a person: skipped.
+      if (decision.actorRole !== "TASK_OWNER") continue;
+      const person = hosted === undefined ? ownerId : decision.actorId === taskOwnerKey(task.developerId, task.taskId) ? task.developerId : undefined;
+      if (kind === undefined || person === undefined) continue;
+      if (!standings.has(person)) standings.set(person, await standingOf(person, task.project));
+      // Erased (undefined) or off the roster (outsider): nothing of theirs is carried.
+      if (standings.get(person) !== "member") continue;
+      spans.push({ kind, text: reason, trust: "member", authorId: person, eventId: `task:${task.taskId}:plancomment:${decision.requestId}` });
+    }
+    return spans.slice(-MAX_PLAN_COMMENTS);
+  }
 
   /** The comments of one merged pull request, as spans, and the change request they make up. */
   async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<{ spans: EvidenceSpan[]; change?: RepoChangeRequest }> {
@@ -214,6 +256,11 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const closerId = closer === undefined ? undefined : deciderOf(closer);
       const closerTrust = closerId === undefined ? undefined : await standingOf(closerId, project);
       if (closer !== undefined && closerId !== undefined && closerTrust !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: closerTrust, authorId: closerId });
+
+      // A person's own words when they asked for changes at a plan or design approval step (the gate's REQUEST_CHANGES decision and its `reason`): a learning subject beside the send-backs, of its own span kind so a send-back's
+      // credit (a send-back is counted once, and measured) and the repeat metric are not changed by it. The decider's standing is read NOW, as for a send-back: an erased person's words are skipped, and a person off the project's
+      // roster is not a member (their words are not carried at all). Rovara's own decisions (the AGENTX actor, an automatic source) and a send-back or findings answer (read as send-backs) are not these.
+      spans.push(...(await planComments(task, workflow)));
 
       const repoChanges: RepoChangeRequest[] = [];
       if (input.context !== "human_edit") {

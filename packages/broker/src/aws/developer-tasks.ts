@@ -210,7 +210,7 @@ import {
   type TaskShare,
   type TurnParty,
   type WorkspaceCharge,
-} from "../developer/task-records.js";
+} from "../developer/task-records.js"; import { PAGE_CHANGES_DEFAULT_REASON } from "../developer/gate-default-reasons.js";
 import { recoverStrandedPlanning, stoppedStepReason, strandedPlanningRun } from "./workflow-cancel-reconcile.js";
 import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
@@ -3928,7 +3928,7 @@ export async function decideOnPage(deps: DeveloperTaskRouteDependencies, caller:
   if (!can(access.role, "decide")) throw Object.assign(agentXError("FORBIDDEN", "Only owners decide."), { pageReason: "owners_only" });
   await decideTaskWorkflow(deps, caller, taskId, {
     requestId: input.requestId, expectedRevision: input.expectedRevision, decision: input.decision, artifactDigest: input.artifactDigest,
-    reason: input.note ?? (input.decision === "APPROVE" ? "Approved on the task page." : "See the included comments."),
+    reason: input.note ?? (input.decision === "APPROVE" ? "Approved on the task page." : PAGE_CHANGES_DEFAULT_REASON),
     answers: input.answers, includedCommentIds: input.includedCommentIds,
     ...(input.selectedOptionalCheckIds === undefined ? {} : { selectedOptionalCheckIds: input.selectedOptionalCheckIds }),
   }, { via: "PAGE", ...(input.note === undefined ? {} : { note: input.note }) });
