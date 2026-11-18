@@ -629,3 +629,18 @@ it("shows and approves eval spend on its own form before any health run, without
   expect(stalePage.body).not.toContain("Spend approval: approved");
   expect((await h.store.get(orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments")))?.["latestRevision"]).toBe(1);
 });
+
+it("L4-EVW3: the laptop's setup run, reporting an eval that writes rows, opens one wrapper pull request on the project's repository, and a repeat opens nothing more", async () => {
+  const { reportOf } = await import("../support/eval-card-world.js");
+  const { listEvalWrappers } = await import("../../packages/broker/src/core/setup-agent/eval-wrapper.js");
+  const h = await launch();
+  const run = await startRun(h);
+  const report = reportOf(2, { repository: "demo", output: { kind: "rows", format: "jsonl", language: "python", idField: "case_id", pass: { field: "passed", equals: true } } });
+  const sent = await h.callback(run.job, "setup-agent", { kind: "eval_discovery", report });
+  expect(sent.status, JSON.stringify(sent.body)).toBe(200);
+  expect(h.host.model.changeRequests).toHaveLength(1);
+  expect(h.host.model.changeRequests[0]!.sourceBranch).toMatch(/^rovara\/eval-wrapper-[0-9a-f]{12}$/u);
+  expect(await listEvalWrappers({ store: h.store, companyId: IMPLICIT_COMPANY_ID }, "payments")).toMatchObject([{ state: "open", repository: "demo", number: "1" }]);
+  expect((await h.callback(run.job, "setup-agent", { kind: "eval_discovery", report })).status).toBe(200);
+  expect(h.host.model.changeRequests).toHaveLength(1);
+});

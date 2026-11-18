@@ -50,6 +50,8 @@ import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
+import { setupRunEvalWrapper } from "../core/setup-agent/eval-wrapper-wiring.js";
+import { createLessonRepositories, type LessonRepositories } from "../local/app/lessons-repos.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -611,6 +613,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return { gate, administers, pauses };
   };
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // L4-EVW3: the project's repositories as the lessons file pass reads them (`createLessonRepositories`), for the eval wrapper proposal. One per company, over that company's own flow, registry view and scope: the pinned
+  // address, the host that serves it and `{ orgId: company }`. No lessons switch is needed (the proposal is not a lesson).
+  const wrapperRepositoriesByCompany = new Map<string, LessonRepositories>();
+  const wrapperRepositories = (companyId: OrgId, flow: Parameters<typeof createLessonRepositories>[0]["flow"], registry: Parameters<typeof createLessonRepositories>[0]["registry"]): LessonRepositories => {
+    let found = wrapperRepositoriesByCompany.get(companyId);
+    if (found === undefined) { found = createLessonRepositories({ flow, registry, companyId, now: () => now().getTime() }); wrapperRepositoriesByCompany.set(companyId, found); }
+    return found;
+  };
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
@@ -788,6 +798,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+              // L4-EVW3 (DEC 254zzz20 D2): the project's repositories, for "Try again" and the card's read of the wrapper pull request. The same builder the lessons file pass uses, in this company's scope.
+              wrapperTargets: (project) => wrapperRepositories(runtime.companyId, runtime.flow.deps, registry).targets(project),
             },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
             approval: createHostedSetupApproval({
@@ -967,7 +979,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
-          setupAgent: { mayStillRun: async () => false },
+          // L4-EVW3: the eval report may open the wrapper pull request on the company's own repository; the audit actor is the setup run (`setup-run:<taskId>`), no person.
+          setupAgent: {
+            mayStillRun: async () => false,
+            evalWrapper: setupRunEvalWrapper({ store: registry.require("storage"), companyId, now: () => now().getTime(), targets: (project) => wrapperRepositories(companyId, runtime.flow.deps, registry).targets(project), audit: registry.require("audit-sink") }),
+          },
           // Lead 4 W4: a hosted wiki build's callback: the requester's live standing, the project's own code host read for the citation re-read, and THIS company's wiki store as the page sink.
           wikiBuild: wikiBuildCallbackWiring({
             store: registry.require("storage"), companyId, now: () => now().getTime(),

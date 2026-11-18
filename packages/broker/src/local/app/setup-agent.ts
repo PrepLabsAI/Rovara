@@ -17,6 +17,8 @@ import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
 import { EVAL_NO_CAP_MESSAGE, confirmEvalDiscovery, readEvalDiscovery, setupEvalDiscoveryView, type EvalDiscoveryConfirmDeps } from "../../core/setup-agent/eval-discovery.js";
 import { boundEvalMonthlyCap } from "../../core/setup-agent/eval-reservation.js";
+import { setupRunEvalWrapper } from "../../core/setup-agent/eval-wrapper-wiring.js";
+import { createLessonRepositories } from "./lessons-repos.js";
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
 import { setupStateOf, startProjectSetupCheck } from "../../core/setup-agent/check.js";
 import { SETUP_COMMAND_WORDS, checkPersonCommand, queueSetupCommand } from "../../core/setup-agent/command.js";
@@ -289,6 +291,8 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     }
   };
 
+  // L4-EVW3: the setup run's eval report may open the wrapper pull request on the project's own repository (the same repository builder the lessons file pass uses, the install's own code host); the audit actor is the run.
+  const wrapperRepositories = createLessonRepositories({ flow, registry: options.registry, companyId, now: options.now });
   return {
     enabled: options.enabled,
     callback: {
@@ -296,6 +300,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       sandboxDenied: options.sandboxDenied,
       // The owner is the only person who may type a command (read live at hand-over).
       mayStillRun: async (by) => by === ownerDeveloperId,
+      evalWrapper: setupRunEvalWrapper({ store, companyId, now: options.now, targets: (project) => wrapperRepositories.targets(project), audit: options.registry.require("audit-sink"), log: (event, fields) => flow.log?.({ component: "setup-agent", event, ...fields }) }),
     },
     routes, page,
     async browserEvidenceSuggestion(project) {
