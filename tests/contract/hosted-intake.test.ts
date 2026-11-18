@@ -100,7 +100,7 @@ async function world(options: { onCore?: readonly string[] } = {}) {
       const taskId = randomUUID();
       startedByRequest.set(request.requestId, taskId);
       starts.push({ companyId, personId: caller.principal.personId, project: request.project, requestId: request.requestId });
-      const extras = ticketSessionStartExtras(companyId)({ taskId, project: request.project, title: request.title ?? "t", principal: caller.principal, client: "tracker", receivedAt: TIME, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
+      const extras = ticketSessionStartExtras(companyId)({ taskId, workspaceId: randomUUID(), project: request.project, title: request.title ?? "t", principal: caller.principal, client: "tracker", receivedAt: TIME, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
       await store.transact([...extras.items]);
       return { task: { taskId } };
     }) as never },

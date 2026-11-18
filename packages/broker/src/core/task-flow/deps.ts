@@ -147,6 +147,8 @@ export interface StartExtras {
 
 export interface StartExtrasInput {
   taskId: string;
+  /** The task's workspace (made with the task): a row written in the start's own transaction that has to name it. */
+  workspaceId: string;
   project: string;
   title: string;
   principal: Principal;

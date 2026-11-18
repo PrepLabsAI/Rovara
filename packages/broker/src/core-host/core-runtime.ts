@@ -117,7 +117,7 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const stamped = stampForNewTask(options.flags, companyId, options.now());
     if (stamped.engine !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
     const own = given?.(input);
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped)] };
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(input), stampItem(companyId, input.taskId, stamped)] };
   };
   const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,
