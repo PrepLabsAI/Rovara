@@ -27,7 +27,7 @@ import { readTaskThread } from "../core/channel/threads.js";
 import { developerIdOf, taskSessionId } from "../core/sessions/create.js";
 import { neutralizeSlackMentions } from "../core/sessions/slack-mentions.js";
 import { noteKey } from "../core/sessions/notes.js";
-import { routeOfTask, waitingForAnswers } from "../core/sessions/steer.js";
+import { waitingForAnswers } from "../core/sessions/steer.js";
 import { answerRequestTaken, answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import type { TaskCaller, TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
@@ -183,8 +183,7 @@ export async function addChatThreadInput(deps: ChatThreadInputDeps, deployed: De
   const standing = await acting(flow, deployed, task);
   if (standing === undefined) return NOT_ALLOWED;
   if (text === "") return NOT_SAVED;
-  const route = routeOfTask({ sessionId: typeof task.sessionId === "string" ? task.sessionId : taskSessionId(task.taskId) }, task);
-  if (route.kind !== "note") return NOT_SAVED;
+  // The web's own check of where a message goes (an ended task, a task with no workflow) is `planMessage`'s: it answers `not_delivered` and nothing is written.
   const host = createSessionControlHost(flow);
   const author = { developerId: developerIdOf(deployed.principal), name: deployed.principal.displayName.trim().slice(0, 200) || "Rovara member" };
   const planReview = workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING";

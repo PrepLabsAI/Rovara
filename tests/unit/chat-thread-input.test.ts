@@ -307,7 +307,15 @@ describe("the reply goes by what the task waits for", () => {
       await closed.w.store.update({ key: taskKey(closed.task.taskId), ops: [change.set("closedAt", new Date(closed.w.clock.now).toISOString())] });
       const before = await closed.rows();
       expect(await closed.send(closed.owner, { text: "late" })).toEqual({ outcome: "refused", notice: "not_saved" });
+      // A person who is not the owner is told nothing about the task's state: the same words as for an open task.
+      expect(await closed.send(closed.person("person-stranger-0000000001"), { text: "late" })).toEqual({ outcome: "refused", notice: "not_allowed" });
       expect(await closed.rows()).toBe(before);
+      const merged = await world({ state: "running" });
+      const record = (await readTask(merged.deps, merged.task.taskId))!;
+      expect(await commitWorkflow(merged.deps, record, { ...record.workflow!, revision: record.workflow!.revision + 1, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED", updatedAt: new Date(merged.w.clock.now).toISOString() } as never)).toBe(true);
+      const rowsBefore = await merged.rows();
+      expect(await merged.send(merged.owner, { text: "after the end" })).toEqual({ outcome: "refused", notice: "not_saved" });
+      expect(await merged.rows()).toBe(rowsBefore);
     });
   });
 });
@@ -471,6 +479,7 @@ describe("what a reply is read as", () => {
   it("is no answer when a question is missing, repeated, or text comes before the first number", () => {
     expect(answersFromReply("1. a", questions)).toBeUndefined();
     expect(answersFromReply("1. a\n1. b", questions)).toBeUndefined();
+    expect(answersFromReply("1. a\n2. b\n3. c", questions)).toBeUndefined();
     expect(answersFromReply("hello\n1. a\n2. b", questions)).toBeUndefined();
     expect(answersFromReply("1. a\n2.", questions)).toBeUndefined();
     expect(answersFromReply("", ONE_QUESTION)).toBeUndefined();
