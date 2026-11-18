@@ -4,7 +4,7 @@
 //
 //   - Who: start, continue, stop, refresh, switch and delete need `manage` (a company owner or admin, or the project's administrator); the state is read by any role on the project.
 //   - Money: Build, Continue and Refresh now are the build run's own (run.ts): the project pays, the build has its own cap, no AI key means "Connect an AI key" and nothing is written.
-//   - Refresh now is the same entry as Build (`startWikiBuild`), with a filter on its plan: the pages whose cited files changed, the pages people marked wrong, and planned pages with no page yet.
+//   - Refresh now is the same entry as Build (`startWikiBuild`), with a filter on its plan: the pages whose cited files changed, the pages people marked wrong (as a whole or one claim), and planned pages with no page yet.
 //   - Delete wiki removes EVERYTHING the project's wiki has: W2's `deleteWiki` (pages, notes, flags, build records, answers), A1's `deleteWikiUse` (the agents switch and the per-task reports, so a
 //     project made again under the same name never inherits the switch) and the build run's own rows (pointer, notes, done pages, cached verdicts). The pointer goes FIRST, so a worker that is
 //     still running cannot write a page into a wiki that was just deleted (its next callback is refused). A running build must be stopped first.
@@ -74,7 +74,25 @@ function bodyOf<T>(schema: { safeParse(value: unknown): { success: true; data: T
   return parsed.data;
 }
 
-const isStale = (entry: WikiIndexEntry): boolean => entry.flagged || entry.claims.changed > 0;
+/**
+ * A page is out of date when someone marked it wrong as a whole, a cited claim changed, or someone marked one of its CLAIMS wrong since the page was last written. A claim mark older than the page
+ * (a refresh already rewrote the page and kept the claim: "disputed") does not pick it up again, so Refresh now never rewrites the same page over and over for a mark it already looked at.
+ * `marks` is the store's bounded read of open claim marks; when it could not read them all (`complete` false), every page counts, never a partial answer.
+ */
+interface ClaimMarks { complete: boolean; latest: Map<string, number> }
+const isStale = (entry: WikiIndexEntry, marks: ClaimMarks): boolean => {
+  if (entry.flagged || entry.claims.changed > 0 || !marks.complete) return true;
+  const marked = marks.latest.get(entry.pageId);
+  // `>=` on purpose: a mark made in the same millisecond as the write counts (one extra rewrite at most; the rewrite moves writtenAt forward).
+  return marked !== undefined && marked >= Date.parse(entry.writtenAt);
+};
+
+async function claimMarksOf(deps: WikiControlsDeps, project: string): Promise<ClaimMarks> {
+  try {
+    const read = await deps.wiki.openClaimFlagPages(project);
+    return { complete: read.complete, latest: new Map(read.pages.map((entry) => [entry.pageId, Date.parse(entry.latestAt)])) };
+  } catch { throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unreadable); }
+}
 
 /** The task id of the project's current or last build run, or "none": the state a start, continue, stop or refresh found. */
 async function runToken(deps: WikiControlsDeps, project: string): Promise<string> {
@@ -95,10 +113,10 @@ async function aiKeyOf(deps: WikiControlsDeps): Promise<WikiAiKeyState> {
 export async function wikiControlsView(deps: WikiControlsDeps, personId: string, project: string): Promise<WikiControlsView> {
   const access = await accessOf(deps, personId, project);
   if (access === "none") throw agentXError("PROJECT_NOT_FOUND", WIKI_CONTROLS_WORDS.projectNotFound);
-  const [build, index, key, on] = await Promise.all([wikiBuildState(deps.build, project), indexOf(deps, project), aiKeyOf(deps), wikiAgentSwitchIsOn(deps.agents, project)]);
+  const [build, index, marks, key, on] = await Promise.all([wikiBuildState(deps.build, project), indexOf(deps, project), claimMarksOf(deps, project), aiKeyOf(deps), wikiAgentSwitchIsOn(deps.agents, project)]);
   return {
     ...build, canManage: access === "manage", aiKey: key, ...(key === "missing" ? { connectKey: WIKI_BUILD_WORDS.connectKey } : {}),
-    agents: { on }, wiki: { pages: index.length, refreshPages: index.filter(isStale).length },
+    agents: { on }, wiki: { pages: index.length, refreshPages: index.filter((entry) => isStale(entry, marks)).length },
   };
 }
 
@@ -133,15 +151,16 @@ export async function stopWikiControl(deps: WikiControlsDeps, personId: string, 
 
 /**
  * Refresh now: a new build run over what is out of date. It needs a wiki (pages) to refresh, reads the default branches again (a fresh map, so the commits it pins are today's), and writes
- * only the planned pages that are flagged, have changed claims, or have no page yet. Every other page is left as it is. Nothing to refresh is a fixed refusal and starts nothing.
+ * only the planned pages that are flagged (the page or one of its claims), have changed claims, or have no page yet. Every other page is left as it is. Nothing to refresh is a fixed refusal and starts nothing.
  */
 export async function refreshWikiControl(deps: WikiControlsDeps, personId: string, project: string, rawBody: unknown): Promise<Answer> {
   const body = bodyOf(WikiRefreshBodySchema, rawBody);
   await requireManage(deps, personId, project);
   const index = await indexOf(deps, project);
   if (index.length === 0) throw agentXError("CONFIG_INVALID", WIKI_CONTROLS_WORDS.buildFirst);
+  const marks = await claimMarksOf(deps, project);
   const have = new Set(index.map((entry) => entry.pageId));
-  const stale = new Set(index.filter(isStale).map((entry) => entry.pageId));
+  const stale = new Set(index.filter((entry) => isStale(entry, marks)).map((entry) => entry.pageId));
   await recorded(deps, "refresh_requested", project, { requestId: body.requestId, token: await runToken(deps, project) });
   const done = await startWikiBuild(deps.build, personId, project, { requestId: body.requestId }, { refresh: { include: (page) => !have.has(page.id) || stale.has(page.id) } });
   return withView(deps, personId, project, done.status);
