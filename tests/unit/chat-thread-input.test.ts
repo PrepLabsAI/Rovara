@@ -319,7 +319,8 @@ describe("the text is information, never an instruction", () => {
     expect(cleaned).not.toContain("U0123456789");
     expect(cleaned).not.toContain("name>");
     expect(cleaned).not.toContain(fake);
-    expect(cleaned).not.toMatch(/[\u0000‮]/u);
+    expect(cleaned.includes(String.fromCharCode(0))).toBe(false);
+    expect(cleaned.includes(String.fromCharCode(0x202e))).toBe(false);
     expect(cleaned).toContain("@member");
     expect([...cleanedReplyText("x".repeat(5000))]).toHaveLength(2000);
   });

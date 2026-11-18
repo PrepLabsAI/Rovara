@@ -9,8 +9,8 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
-import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
-import type { ChatThreadInputResult } from "../../packages/broker/src/core-host/chat-thread-input.js";
+import type { CoreEntryCaller, CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
+import type { ChatThreadInput, ChatThreadInputResult } from "../../packages/broker/src/core-host/chat-thread-input.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
@@ -40,8 +40,8 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   const entry: CoreTaskEntry = {
     route: vi.fn(async () => undefined),
     ...(options.entry === "no-thread-input" ? {} : {
-      threadInput: vi.fn(async (caller, input) => {
-        calls.push({ caller, input: input as unknown as Record<string, unknown> });
+      threadInput: vi.fn(async (caller: CoreEntryCaller, input: ChatThreadInput) => {
+        calls.push({ caller, input: { ...input } });
         if (answerWith.value instanceof Error) throw answerWith.value;
         return answerWith.value;
       }),
@@ -109,7 +109,7 @@ describe("a reply in the thread of a task the core owns", () => {
     w.answerWith.value = new Error("store unavailable");
     const result = await w.note();
     expect(result.statusCode).toBe(503);
-    expect(JSON.parse(result.body).error.code).toBe("RUNTIME_UNAVAILABLE");
+    expect((JSON.parse(result.body) as { error: { code: string } }).error.code).toBe("RUNTIME_UNAVAILABLE");
   });
 });
 
