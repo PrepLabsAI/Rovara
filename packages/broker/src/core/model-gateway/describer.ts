@@ -30,6 +30,7 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
           try {
             if (deps.systemRuns === undefined || (await deps.systemRuns.enabled()) !== true || !(await upkeepIsOn({ store: deps.store, companyId: deps.companyId }, workspace.projectName))) return false;
             // L4-SR2b: and the project's upkeep cap has room NOW, as the gateway says (read at every mint). An absent reader, no answer, an invalid one, zero or less: no token (a manual "Fix setup" is another path).
+            // "Room above zero" is a stop for an exhausted cap, not a promise of room for the next step: the draft's start needed the whole run's budget, and the gateway holds the real cap on every call.
             const room = deps.upkeepRoomCents === undefined ? undefined : await deps.upkeepRoomCents(workspace.projectName);
             return typeof room === "number" && Number.isSafeInteger(room) && room > 0;
           } catch { return false; }

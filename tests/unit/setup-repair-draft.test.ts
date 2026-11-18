@@ -1091,7 +1091,7 @@ describe("L4-SR2: only a starter that declares it starts a repair draft (closes 
 
 // ---- L4-SR2 hosted: the real access rule, the real starter, the real gate (ceiling AND consent), the real upkeep switch row, the progress pass
 
-interface Hosted { gate: { enabled(): Promise<boolean> }; w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean }; reader: UpkeepCapReader | undefined }
+interface Hosted { gate: { enabled(): Promise<boolean> }; w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean }; reader: ReturnType<typeof capReader> }
 
 async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce?: boolean; room?: number | undefined; reader?: boolean; world?: World; cap?: CapKind; capWith?: UpkeepCapReader } = {}): Promise<Hosted> {
   const w = options.world ?? await world();
@@ -1104,8 +1104,9 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
   if (options.upkeep !== false) await w.h.store.put({ item: { ...upkeepSettingsKey({ orgId, project: "payments" }), entityType: "UPKEEP_SETTINGS", orgId, project: "payments", enabled: true, changedAt: "2026-11-17T08:00:00.000Z" } });
   const gate = effectiveSystemRunsGate({ ceiling: () => ceiling.on, store: w.h.store, companyId: orgId });
   // L4-SR2b: with `cap`, the room is the gateway's own answer through the production reader function (the SAME reader as the night's), never a number the test hands over.
-  const reader = options.capWith ?? (options.cap === undefined ? undefined : capReader(options.cap, () => w.h.clock.now, orgId));
-  const capRoom = options.cap === undefined && options.capWith === undefined ? undefined : (project: string): Promise<number | undefined> => upkeepRoomCentsOf(reader, project, w.h.clock.now, orgId);
+  const reader = options.cap === undefined ? undefined : capReader(options.cap, () => w.h.clock.now, orgId);
+  const capSource: UpkeepCapReader | undefined = options.capWith ?? reader;
+  const capRoom = capSource === undefined ? undefined : (project: string): Promise<number | undefined> => upkeepRoomCentsOf(capSource, project, w.h.clock.now, orgId);
   // The REAL hosted access rule over the same store: the system owner is accepted for a setup run only with its marks.
   w.h.deps.access = hostedTaskAccess({
     companyId: orgId, storage: async () => w.h.store, systemRunsOn: () => gate.enabled(), upkeepOn: (project) => upkeepIsOn({ store: w.h.store, companyId: orgId }, project),
@@ -1490,7 +1491,7 @@ describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read
     await breakSetup(h.w);
     const [row] = await repairsOf(h.w.h.store, orgOf(h), "payments");
     expect(row).toMatchObject({ state: "drafting", budgetCents: 400 });
-    expect((h.reader as { calls: string[] }).calls).toEqual(["payments"]);
+    expect(h.reader!.calls).toEqual(["payments"]);
   });
 
   // MUTANT: `>=` becomes `>` in the start's room test, or the floor becomes a round (399 cents, 399.99 cents).
@@ -1532,7 +1533,7 @@ describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read
   // MUTANT: the answer is kept (a cache): a later, better answer is never seen, or a later worse one is ignored.
   it("every start reads the gateway again (no cache): no room now, room later starts the draft; room then gone again starts nothing more", async () => {
     const h = await hostedRig({ cap: "used_up" });
-    const reader = h.reader as ReturnType<typeof capReader> & object;
+    const reader = h.reader!;
     const { recheck } = await breakSetup(h.w);
     expect(await repairsOf(h.w.h.store, orgOf(h), "payments")).toEqual([]);
     const asked = reader.calls.length;
@@ -1564,7 +1565,7 @@ describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read
   // MUTANT: the mint skips the room read, reads it only once per draft, or treats zero, negative, an unreadable answer or an absent reader as room.
   it("before each AI step: the repair draft's model token is minted only while the gateway still says there is room (read at EVERY mint: zero, negative, unreadable, stale, foreign or absent = no token)", async () => {
     const h = await hostedRig({ cap: "enforced" });
-    const reader = h.reader as ReturnType<typeof capReader> & object;
+    const reader = h.reader!;
     await breakSetup(h.w);
     const row = (await repairsOf(h.w.h.store, orgOf(h), "payments"))[0]!;
     h.w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
