@@ -38,6 +38,7 @@ import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { isWholeLimit, MAX_PER_PERSON, MAX_PER_ORGANIZATION, readWorkspaceLimits } from "../developer/limits.js";
 import { costUsdOf } from "../core/cost/ledger.js";
+import { estimatePathOf, recordRunCost, runCostInputOf } from "../core/cost/estimate.js";
 import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.js";
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
@@ -92,6 +93,8 @@ import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.j
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
+import { sessionBindingsOf } from "../core/sessions/bindings.js";
+import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -752,6 +755,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
       ...(inputs.linearIntake === undefined && inputs.chatThreads === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }) }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
+      onTaskClosed: async (task, closedAt) => {
+        const store = registry.require("storage");
+        const ledger = createHostedLedger({ store, metering: registry.require("metering"), now });
+        const outcome = await recordRunCost({ store }, {
+          orgId: companyId, project: task.project, taskId: task.taskId, path: estimatePathOf(task), endedAt: closedAt,
+          ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
+        });
+        log({ component: "cost", event: "cost.run_recorded", outcome });
+      },
+      // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
+      sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
       artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
@@ -864,6 +879,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input), cap: upkeepCapFor(companyId),
           refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
+        const afterMerge = createLocalAfterMerge({ flow: flow.deps, registry, companyId, now: () => now().getTime(), log });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
           ...(inputs.services?.(companyId, flow, registry, { ...wiring,
@@ -874,6 +890,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             } }),
             ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined }),
             ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          // L6a: the project setting is off by default; the service is bound to this runtime's company.
+          "after-merge": afterMerge,
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
           ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log, repairs: repair }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
