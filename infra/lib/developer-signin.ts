@@ -431,7 +431,9 @@ export class DeveloperSignIn extends Construct {
           actions: ["dynamodb:GetItem"],
           resources: [table.tableArn],
           conditions: {
-            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY"] },
+            // DEC 254zzz29: and the company's own sign-in issuer row (ORG#<id>#SIGNIN_ISSUER / OIDC), which the broker's company session check reads on every
+            // request of a session in a company that is not the built-in one (developer-routes.ts companyOidcSession); without it that check was AccessDenied (401).
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#SIGNIN_ISSUER"] },
             Null: { "dynamodb:LeadingKeys": "false" },
           },
         }),

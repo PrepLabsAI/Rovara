@@ -1,4 +1,4 @@
-// DEC 254zzz(2): the install company import's two sign-in table reads, added to the named control-plane template as the broker's own role policy (BrokerCompanyImportReads).
+// DEC 254zzz(2): the install company import's two sign-in table reads (DEC 254zzz29: the GetItem also takes the company's sign-in issuer row), added to the named control-plane template as the broker's own role policy (BrokerCompanyImportReads).
 // Each digest or snapshot test that pins the rest of the template asserts those two statements exactly, then takes the policy out (in place), so the pins it holds stay the
 // ones recorded before this change: removing exactly this policy gives back the old template. The statements are also asserted in full, with the sign-in function's reads,
 // in tests/contract/developer-signin-infrastructure.test.ts. A template with no such policy (the legacy deployment, production) is returned as it is.
@@ -27,7 +27,7 @@ export function withoutCompanyImportReads<T>(input: T): T {
   expect(policy.Properties.PolicyDocument).toEqual({
     Version: "2012-10-17",
     Statement: [
-      { Action: "dynamodb:GetItem", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY"] }, Null: { "dynamodb:LeadingKeys": "false" } }, Effect: "Allow", Resource: resource },
+      { Action: "dynamodb:GetItem", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#SIGNIN_ISSUER"] }, Null: { "dynamodb:LeadingKeys": "false" } }, Effect: "Allow", Resource: resource },
       { Action: "dynamodb:Query", Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS"] }, Null: { "dynamodb:LeadingKeys": "false" } }, Effect: "Allow", Resource: resource },
     ],
   });
