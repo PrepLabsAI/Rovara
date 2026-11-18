@@ -2,10 +2,10 @@
 //
 //   The setting  `ORG#<company>#SETTINGS` / `LEARNING_MODEL`   { entityType: COMPANY_LEARNING_MODEL, orgId, version: 1, model, updatedAt, updatedBy }
 //                written only by the company route (aws/company-learning-model-routes.ts) after the gateway's live list for THAT company offered the model.
-//   The model    `learningModelFor`: the company's own model when it chose one, else the install's (ROVARA_CORE_LEARNING_MODEL, else CORE_LEARNING_MODEL_DEFAULT).
+//   The model    `readCompanyLearningModel` (the company's own, per call) else `installLearningModel` (ROVARA_CORE_LEARNING_MODEL, else CORE_LEARNING_MODEL_DEFAULT); hosted-learning.ts combines them.
 //
 // A row that is there but is not exactly this company's well-formed setting is unreadable: learning fails closed for that call (never the install default in its place).
-import { CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_DEFAULT, CORE_LEARNING_MODEL_VARIABLE, OrgIdSchema, isCoreLearningModelId, orgSettingsKey, type OfferedAgentModels, type OrgId, type OrgKey } from "@agentx/contracts";
+import { CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_DEFAULT, CORE_LEARNING_MODEL_VARIABLE, OrgIdSchema, isCoreLearningModelId, orgSettingsKey, type OrgId, type OrgKey } from "@agentx/contracts";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import type { EngineModelRowReader } from "./company-engine-model.js";
 
@@ -47,9 +47,4 @@ export function installLearningModel(env: NodeJS.ProcessEnv): string | undefined
   const chosen = env[CORE_LEARNING_MODEL_VARIABLE]?.trim() ?? "";
   if (chosen === "") return CORE_LEARNING_MODEL_DEFAULT;
   return isCoreLearningModelId(chosen) && CORE_CLAUDE_AGENT_MODEL.test(chosen) ? chosen : undefined;
-}
-
-/** The Claude models of a company's offered list that lessons can learn with, in the gateway's order. */
-export function offeredLearningModels(offered: OfferedAgentModels): string[] {
-  return offered.models.map((entry) => entry.model).filter(isLearnableModel);
 }
