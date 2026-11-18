@@ -143,6 +143,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
+  // L4-LP12b: the answer to the weekly list's "Keep it?" card (a lesson no task had needed for a long time); the people who decide lessons, read live; full access only like the rows around it.
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/keep", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
   // Lessons phase 4 (core-host/lessons-graduation.ts): this week's cards, making a proven lesson permanent, "Not now", the third conflict answer, the Tidy card, and the draft check tasks. Full access only; live membership,
   // the project's roster and the approver directory still decide, and a script token is refused.

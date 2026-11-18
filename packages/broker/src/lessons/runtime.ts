@@ -39,6 +39,7 @@ import { localLessonAudiencePort, withLessonAudiences } from "./task-audience.js
 import { createHostedLessonParts, type HostedLessonPeople, type HostedTaskReader } from "./hosted-people.js";
 import type { TaskVisibilityPort } from "./access-port.js";
 import type { LessonViewDeps } from "./view.js";
+import type { TaskScope } from "./weekly-order.js";
 
 export interface LessonsRuntimeInput {
   store: DocumentStore;
@@ -71,6 +72,11 @@ export interface LessonsRuntimeInput {
    * the name of the system actor. Absent: the laptop's one person (`owner`) is every role.
    */
   hosted?: { people: HostedLessonPeople; readTask: HostedTaskReader };
+  /**
+   * The tasks of the last 30 days as the loader would have seen them (`recent-tasks.ts`), for the weekly list's tie-break "would have applied to N tasks last month". Undefined from the port (or no port): not known, and the tie-break
+   * is left out. A throw is not known.
+   */
+  recentTasks?: (key: { workspaceId: string; project: string }) => Promise<readonly TaskScope[] | undefined>;
 }
 
 /** The route-side lesson dependencies: everything the pages, commands and routes need to read and decide lessons. */
@@ -169,7 +175,11 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   };
   const presetStore = new DocumentPresetStore(input.store);
   const soleOwner = new DocumentSoleOwnerSwitch(input.store);
-  const view = { documents: input.store, signals, store, directory, settings, access, names, now: input.now, weeklyExtras: (key: { workspaceId: string; project: string }) => weeklyExtrasOf(signals, key), ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
+  const view = { documents: input.store, signals, store, directory, settings, access, names, now: input.now, weeklyExtras: async (key: { workspaceId: string; project: string }) => {
+      const base = await weeklyExtrasOf(signals, key);
+      const recentTasks = input.recentTasks === undefined ? undefined : await input.recentTasks(key).catch(() => undefined);
+      return recentTasks === undefined ? base : { ...(base ?? {}), recentTasks };
+    }, ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
   const routes: LessonRouteDeps = {
     ...base, ...view, store, directory, settings, access, vectors, embedder, judgeModel, spend, edition, pause, verifier, facts, projectRepos: process.projectRepos,
     judge: outcomeJudge,

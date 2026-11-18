@@ -283,6 +283,7 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.skill_drafted", "lesson.skill_edited", "lesson.skill_approved", "lesson.skill_activated", "lesson.skill_retired",
   "lesson.learning_source_switched",
   "lesson.graduated",
+  "lesson.kept",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];
 

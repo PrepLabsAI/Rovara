@@ -13,7 +13,7 @@ import { PAGE_CHANGES_DEFAULT_REASON } from "../../developer/gate-default-reason
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { providerOf } from "../../plugins/routing.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { changeRequestRef } from "../../core/merge/host-port.js";
+import { changeRequestRef, readChangeRequestFiles } from "../../core/merge/host-port.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readOwnerFindingNotes } from "../../core/task-flow/owner-note.js";
 import { readTask } from "../../core/task-flow/reads.js";
@@ -43,6 +43,10 @@ const MAX_PLAN_COMMENTS = 10;
  */
 const CODE_GATE_REASONS: ReadonlySet<string> = new Set(["Changes requested.", PAGE_CHANGES_DEFAULT_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON]);
 const MAX_PULL_REQUESTS = 5;
+/** ONE total limit on the changed file names a merged task's credit reads (every pull request together, a renamed file under both names); a bigger change leaves the list "not known". */
+export const TOUCHED_PATHS_MAX = 2_000;
+/** ONE total time for reading every merged pull request's file list. */
+export const TOUCHED_READ_MS = 15_000;
 const MAX_PULL_REQUEST_COMMENTS = 40;
 const COMMENT_PATH_MAX = 200;
 /** A findings answer's notes, joined, are read up to this many characters (one total limit; each note is already the person's, redacted at write). */
@@ -205,6 +209,43 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     return spans;
   }
 
+  /**
+   * The files the task's merged pull requests changed, as the code host lists them (a renamed file under both names), and the project's names of the repositories they are in: for the area overlap of a clean merge's credit
+   * (`lessons/credit.ts`). Only a LIST THAT IS WHOLE is given: every pull request of the task must be merged or closed (one still open, or whose state is not known, may be part of the change), at most `MAX_PULL_REQUESTS`
+   * of them, each listed to its last page, within `TOUCHED_PATHS_MAX` names and `TOUCHED_READ_MS`. Anything else (a host that cannot list, a rate limit, a repository that cannot be placed, a cut list) is undefined, which
+   * credits exactly as before this read existed. The repositories are this company's own (`options.repos` is built for it) and the host is called in the company's own scope.
+   */
+  async function touchedByMerge(task: TaskRecord, workflow: WorkflowSnapshot | undefined): Promise<{ paths: string[]; repos: string[] } | undefined> {
+    const pullRequests = workflow?.pullRequests ?? [];
+    const merged = pullRequests.filter((pullRequest) => pullRequest.state === "MERGED");
+    if (merged.length === 0 || merged.length > MAX_PULL_REQUESTS || merged.length !== pullRequests.filter((pullRequest) => pullRequest.state !== "CLOSED").length) return undefined;
+    const stopAt = Date.now() + TOUCHED_READ_MS;
+    const beforeRequest = (): void => { if (Date.now() >= stopAt) throw new Error("touched paths: out of time"); };
+    const paths = new Set<string>();
+    const repos = new Set<string>();
+    try {
+      for (const pullRequest of merged) {
+        const repo = await options.repos.ofTask(task.project, task.startingRevision, pullRequest.repositoryId);
+        if (repo === undefined) return undefined;
+        const read = await readChangeRequestFiles(repo.codeHost, changeRequestRef(repo.url, pullRequest.number), repo.scope, beforeRequest);
+        if (!read.complete) return undefined;
+        for (const file of read.files) {
+          for (const path of [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])]) paths.add(path.replace(/^(?:\.\/|\/)+/u, ""));
+          if (paths.size > TOUCHED_PATHS_MAX) return undefined;
+        }
+        repos.add(pullRequest.repositoryId);
+      }
+    } catch { return undefined; }
+    return { paths: [...paths], repos: [...repos] };
+  }
+
+  /** The answer of `work`, or undefined when it fails or `ms` pass (a host that hangs is not waited for: the file list is then "not known"). */
+  const within = <T>(work: Promise<T | undefined>, ms: number): Promise<T | undefined> => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    timer.unref?.();
+    work.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(undefined); });
+  });
+
   const source: TaskSubjectSource = {
     async projectOf(input) {
       const task = await readTask(flow, input.taskId);
@@ -277,6 +318,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         const merged = (workflow?.pullRequests ?? []).find((pullRequest) => pullRequest.repositoryId === base.repository && pullRequest.state === "MERGED");
         mergedCommit = merged?.headSha;
       }
+      // The merged change's own file list, for the credit of a clean merge (not for a human edit's read, and not for a task that did not merge).
+      const touched = outcome === "merged" && input.context !== "human_edit" ? await within(touchedByMerge(task, workflow), TOUCHED_READ_MS) : undefined;
       return {
         facts: {
           workspaceId, project, taskId: task.taskId, repositories,
@@ -289,7 +332,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
             audience: { kind: "project" }, sharedTask: true, spans,
           },
         },
-        sendBackRequestIds,
+        sendBackRequestIds, ...(touched === undefined ? {} : { touchedPaths: touched.paths, touchedRepos: touched.repos }),
         // When the task was alive: a kind stopped at any time during it is not read after a resume (`lessons/paused-kinds.ts`).
         ...(lifetimeOf(task) === undefined ? {} : { lifetime: lifetimeOf(task)! }),
       };
