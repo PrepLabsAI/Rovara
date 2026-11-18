@@ -116,7 +116,7 @@ export interface AgentDnsFirewallProps {
   /** Allowed in addition to the base list. */
   extraAllowDomains?: readonly string[];
   /**
-   * L4-E8I (owner DEC 254zzz62): the registries a worker host pulls the GCP pack's source-pulled image from (contracts GCP_PACK_PULL_REGISTRY_HOSTS: exactly `gcr.io` and `us-docker.pkg.dev`, no wildcard). They join the base allow
+   * L4-E8I (owner DEC 254zzz62): the registries the GCP pack's source-pulled image is pulled from (VPC-wide, like every entry of this list: see the KNOWN RESIDUAL on GCP_PACK_PULL_REGISTRY_HOSTS) (contracts GCP_PACK_PULL_REGISTRY_HOSTS: exactly `gcr.io` and `us-docker.pkg.dev`, no wildcard). They join the base allow
    * list ONLY while `condition` holds (the install's TestServicesGcpPack setting names the `pulled` group): the allow list's Domains is an Fn::If of the same list with and without them. No new list, rule or priority; with the setting
    * off (the default) the resolved list is exactly what it was.
    */
@@ -148,7 +148,7 @@ export class AgentDnsFirewall extends Construct {
     const allowList = new resolver.CfnFirewallDomainList(this, "AllowList", {
       name: `agentx-${props.env}-allow`,
       domains: props.pullFromSource === undefined ? [...this.allowDomains]
-        : Token.asList(Fn.conditionIf(props.pullFromSource.condition.logicalId, [...this.allowDomains, ...props.pullFromSource.hosts], [...this.allowDomains])),
+        : Token.asList(Fn.conditionIf(props.pullFromSource.condition.logicalId, [...this.allowDomains, ...props.pullFromSource.hosts.filter((host) => !this.allowDomains.some((domain) => typeof domain === "string" && domain.toLowerCase() === host))], [...this.allowDomains])),
     });
     const projectAllowList = new resolver.CfnFirewallDomainList(this, "ProjectAllowList", {
       name: `agentx-${props.env}-project-allow`,

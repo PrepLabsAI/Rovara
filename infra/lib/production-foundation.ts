@@ -223,8 +223,8 @@ export class ProductionFoundationStack extends Stack {
     // Named environments: the machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. The legacy production template stays as it is.
     if (naming.env !== undefined) {
       const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
-      // L4-E8I (owner DEC 254zzz62): the GCP pack setting, the same parameter and values as the control plane's (`agentx config set testServices.gcpPack` sets both). Here it decides one thing: whether the worker hosts may resolve and
-      // reach Google's two image registries to pull the pack's source-pulled image. Off (the default): nothing is added to the DNS firewall.
+      // L4-E8I (owner DEC 254zzz62): the GCP pack setting, the same parameter and values as the control plane's (`agentx config set testServices.gcpPack` sets both). Here it decides one thing: whether the VPC may resolve and
+      // reach Google's two image registries (the DNS firewall is one VPC-wide list: agent machines and in-VPC functions too, see GCP_PACK_PULL_REGISTRY_HOSTS) to pull the pack's source-pulled image. Off (the default): nothing is added to the DNS firewall.
       const gcpPack = new CfnParameter(this, "TestServicesGcpPack", { type: "String", default: GCP_PACK_PARAMETER_DEFAULT, allowedValues: [...GCP_PACK_PARAMETER_VALUES], description: "GCP test services pack: off (the default), or the groups on (mirrored, pulled, bigquery), colon-separated" });
       const pullsFromSource = new CfnCondition(this, "GcpPackPullsFromSource", {
         expression: Fn.conditionOr(...GCP_PACK_PARAMETER_VALUES.filter((value) => gcpPackPullsFromSource(value)).map((value) => Fn.conditionEquals(gcpPack.valueAsString, value))),

@@ -115,6 +115,9 @@ describe("EC2 worker user data", () => {
       executorImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/${lower(120)}@sha256:${"e".repeat(64)}`,
       // Test 43 (MODEL3): the new variable at its longest, with every other value at its maximum too.
       modelFallback: noise(80),
+      // L4-E8I: the test services flag and the longest GCP pack setting value.
+      testServices: true,
+      testServicesGcpPack: "mirrored:pulled:bigquery",
     });
     expect(worstCase.modelFallback).toHaveLength(80);
     expect(worstCase.controlPlaneUrl).toHaveLength(512);

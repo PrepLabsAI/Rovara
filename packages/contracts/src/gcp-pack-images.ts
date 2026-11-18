@@ -102,7 +102,10 @@ export const GCP_PACK_PARAMETER_VALUES: readonly string[] = [
 ];
 
 /**
- * The only hosts a worker host may pull the pack's source-pulled image from (the DNS firewall's allow entries, and nothing else: HTTPS only, from the worker host's own Docker, never from the sealed box). Measured 2026-11-18, anonymous
+ * The only hosts the pack's source-pulled image may be pulled from (the DNS firewall's allow entries, and nothing else: HTTPS only, pulled by the worker host's own Docker, never by the sealed box).
+ * KNOWN RESIDUAL: the DNS firewall is ONE allow list for the whole VPC, so while the `pulled` group is on, agent task machines, ECS tasks and in-VPC functions can resolve and reach these two hosts too, and both accept a `docker push` to any
+ * Google project that holds a token (with oauth2.googleapis.com already allowed): an exit of the same kind as docker.io and ghcr.io, accepted by the owner for this pack. Setting the `pulled` group off removes both names and closes it. The sealed run networks are not affected.
+ * Measured 2026-11-18, anonymous
  * and read only: the manifest, the token and the blob redirect of the pinned SDK image are all on gcr.io (the blob's redirect is a path on gcr.io itself), so no storage host is needed. `us-docker.pkg.dev` is the registry gcr.io
  * repositories move to; the owner allowed both.
  */
