@@ -59,7 +59,7 @@ export function createLocalEvalCheck(options: LocalEvalCheckOptions): LocalEvalC
           project, canManage: true, repositories,
           async record(details) {
             await options.audit.record({
-              eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(`${auditChoice(details.check)}\u0001${auditChoice(details.previous)}`, "utf8").digest("hex").slice(0, 16)}`,
+              eventId: `ci_eval_check.set:${companyId}:${project}:${personId}:${details.requestId}:${createHash("sha256").update(`${auditChoice(details.check)}\u0001${auditChoice(details.previous)}\u0001${details.previousRequestId ?? ""}`, "utf8").digest("hex").slice(0, 16)}`,
               companyId, at: new Date(options.now()).toISOString(), actor: { type: "person", id: personId }, action: "ci_eval_check.set", subject: { type: "project", id: project },
               details: { project, basis: "install-owner", requestId: details.requestId, check: details.check?.name ?? "none", ...(details.check?.source === undefined ? {} : { source: details.check.source }), previous: details.previous?.name ?? "none" },
             });

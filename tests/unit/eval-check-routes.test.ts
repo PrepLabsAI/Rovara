@@ -252,6 +252,24 @@ describe("the act", () => {
     expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(3);
   });
 
+  it("replaying X after X, None, is still a new act: the id names the request that made the row too", async () => {
+    const w = hosted();
+    const first = choose("evals");
+    await put(w, OWNER, "beacon", first);
+    await put(w, OWNER, "beacon", { requestId: randomUUID(), check: null });
+    await put(w, OWNER, "beacon", first);
+    expect(w.audited).toHaveLength(3);
+    expect(new Set(w.audited.map((event) => event.eventId)).size).toBe(3);
+    expect((await w.call(OWNER, "GET", "beacon")).body["confirmed"]).toMatchObject({ name: "evals" });
+  });
+
+  it("a job whose name carries a zero-width or direction character is never proposed", async () => {
+    const hidden = WORKFLOW.replace("  evals:", "  eval\u200bs:").replace("npx promptfoo eval", "npx promptfoo eval").replace("    runs-on: ubuntu-latest\n    steps:\n      - run: npx promptfoo eval", "    name: \"eval\u202es\"\n    runs-on: ubuntu-latest\n    steps:\n      - run: npx promptfoo eval");
+    const w = hosted({ reader: readerOf({ "ci.yml": hidden }) });
+    const names = ((await w.call(OWNER, "GET", "beacon")).body["proposals"] as { items: Array<{ name: string }> }).items.map((item) => item.name);
+    expect(names.every((name) => !/[\u200b\u202e]/u.test(name))).toBe(true);
+  });
+
   it("bodies are strict: an unknown field, a bad request id, an empty or over-long name and a missing check are refused in fixed words", async () => {
     const w = hosted();
     const bad: unknown[] = [

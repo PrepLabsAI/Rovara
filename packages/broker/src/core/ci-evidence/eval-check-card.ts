@@ -126,7 +126,7 @@ export interface EvalCheckAct {
   canManage: boolean;
   repositories: readonly EvalCheckRepository[];
   /** The audit record of the act, written before the row. Throws when it cannot be written. */
-  record(details: { requestId: string; check: EvalCheck | undefined; previous: EvalCheck | undefined }): Promise<void>;
+  record(details: { requestId: string; check: EvalCheck | undefined; previous: EvalCheck | undefined; previousRequestId: string | undefined }): Promise<void>;
 }
 
 /** Confirms one proposed check, or none. Answers the view. */
@@ -146,7 +146,7 @@ export async function setEvalCheck(deps: EvalCheckCardDeps, act: EvalCheckAct, r
   const chosen: EvalCheck | undefined = check === null ? undefined : { name: check.name, ...(check.source === undefined ? {} : { source: check.source }) };
   // A repeat of this request (the same id AND the same choice) is one act: nothing more is recorded or written.
   if (before !== undefined && before.requestId === requestId && sameChoice(before.check, chosen)) return evalCheckView(deps, { project: act.project, canManage: true, repositories: act.repositories });
-  try { await act.record({ requestId, check: chosen, previous: before?.check }); } catch { throw agentXError("AUDIT_UNAVAILABLE", EVAL_CHECK_WORDS.auditUnavailable); }
+  try { await act.record({ requestId, check: chosen, previous: before?.check, previousRequestId: before?.requestId }); } catch { throw agentXError("AUDIT_UNAVAILABLE", EVAL_CHECK_WORDS.auditUnavailable); }
   try { await writeEvalCheckSetting(deps, { project: act.project, check: chosen, requestId, now: deps.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", EVAL_CHECK_WORDS.unreadable); }
   return evalCheckView(deps, { project: act.project, canManage: true, repositories: act.repositories });
 }
