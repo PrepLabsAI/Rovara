@@ -507,6 +507,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
+    // L4-TA6: automatic fixing is held to the task's live run limit, the same `taskLimitUsd` the round cap above and the model proxy enforce (nothing when `ROVARA_RUN_LIMIT=0` turns the limit off: then no limit is enforced and its own cap is the only one).
+    ...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),
     // Decision 70(c): the owner's own machine acts on its own as far as `prepare`, the same default merge tracking reads for a task (there is no recipe or company limit to read here).
     autonomy: async () => ({ autonomy: "prepare" as const }),
     ...(options.now === undefined ? {} : { now: options.now }),

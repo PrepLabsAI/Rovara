@@ -232,6 +232,11 @@ export interface DispatcherCoreInputs {
    * while it runs, and is told to. Built over the registry's store. Absent: dispatch as before.
    */
   moneyStop?: (registry: AdapterRegistry, companyId: OrgId) => MoneyStop;
+  /**
+   * L4-TA6: the cap one task is held to now (the value the dispatcher's own Admission and the per-run stop enforce: the install's task cap lowered to the project's own limit), for automatic fixing's per-task dollar cap.
+   * Absent: the flow has no live cap and automatic fixing would fall back to its larger default, so the deployed dispatcher always gives it; a function that throws asks the owner instead.
+   */
+  taskCapUsd?: (registry: AdapterRegistry, companyId: OrgId) => (task: { companyId: string; taskId: string; project: string }) => Promise<number>;
   log: (entry: Record<string, unknown>) => void;
   now?: () => Date;
 }
@@ -306,6 +311,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended (this company's store only).
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }),
         ...(inputs.moneyStop === undefined ? {} : { moneyStop: inputs.moneyStop(registry, companyId) }),
+        ...(inputs.taskCapUsd === undefined ? {} : { taskCapUsd: inputs.taskCapUsd(registry, companyId) }),
         // L4-ART: the flow's reader of saved documents (the approved plan, a diff, the eval rounds), held to THIS company's own workspaces (an outside key or another company's workspace reads as "not there").
         // The dispatcher's role reads only the admission objects today, so a read of the others fails closed here until the install grants it (the first eval round needs no read at all).
         artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.artifact_read_refused", companyId, reason }) }),

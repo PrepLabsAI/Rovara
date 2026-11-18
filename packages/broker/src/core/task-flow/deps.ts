@@ -321,6 +321,13 @@ export interface TaskFlowDeps {
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
   /**
+   * L4-TA6: the cap this task is held to RIGHT NOW, in dollars: the very value the install's own money checks enforce (hosted: `taskCapOf`, the install's task cap lowered to the project's own per-task limit, the figure
+   * Admission, the per-run stop and the owner's round read; laptop: `taskLimitUsd`, the planning allowance plus the plan's run limit, the figure the round cap reads). Automatic fixing holds its rounds to
+   * this (`min(this, autofix.capUsd)`), never to a larger default, so it cannot keep sending work back until Admission stops the round with a spending-limit refusal. Throws, answers undefined or a number that is not a
+   * finite non-negative one: the cap is unknown, and the owner is asked (the same as an unknown spend). Absent: this install holds no per-task limit (a laptop with `ROVARA_RUN_LIMIT=0`), and `autofix.capUsd` (default 15) is the only cap.
+   */
+  taskCapUsd?: (task: TaskRecord) => Promise<number | undefined>;
+  /**
    * Decision 70(c): how far Rovara may act on its own for this task NOW (the stricter of the task's frozen recipe and the company's limit), read again where a merged base's checks would be re-run by themselves and
    * before the reviews that follow. `suggest` asks the owner instead; `unreadable` and `noCompany` say why a `suggest` is not the owner's setting, so the ask is true. Absent: `suggest` (nothing is re-run by
    * itself) and the reviews are never stopped; an install that lets its owner's machine act on its own says so here (`rovara up` answers `prepare`, as merge tracking does).
