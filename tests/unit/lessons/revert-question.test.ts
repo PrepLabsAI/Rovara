@@ -133,7 +133,7 @@ describe("a revert puts the loaded lessons under question only where its files a
     await lessons.putManifest(manifest(TASK, ["les_aaaa1111"]));
     await markLessonsUnderQuestion(deps, { project: PROJECT, taskId: TASK, via: "https://github.com/acme/x/pull/9 canary words", files: ["src/a.ts"] });
     const row = (await rowsOf(docs))[0]!;
-    expect(String(row["via"])).toMatch(/^x[a-f0-9]{39}$/u);
+    expect(row["via"]).toMatch(/^x[a-f0-9]{39}$/u);
     expect(JSON.stringify(row)).not.toContain("canary");
   });
 });

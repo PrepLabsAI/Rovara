@@ -18,7 +18,7 @@ export interface LessonsRevertWatchOptions {
 }
 
 export function createLessonsRevertWatch(options: LessonsRevertWatchOptions): RevertWatch {
-  const hosts = createTaskHosts({ store: options.store, registry: options.registry as RegistryView, ...(options.projectsOf === undefined ? {} : { projectsOf: options.projectsOf }) });
+  const hosts = createTaskHosts({ store: options.store, registry: options.registry, ...(options.projectsOf === undefined ? {} : { projectsOf: options.projectsOf }) });
   return createRevertWatch({
     companyId: options.companyId, store: options.store, hosts, now: options.now, log: (event, fields) => options.log(event, fields),
     onReverted: async ({ finding, files }) => { await options.host.noteReverted(finding.taskId, { via: finding.via, files }); },

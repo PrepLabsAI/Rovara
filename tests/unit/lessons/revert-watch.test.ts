@@ -526,7 +526,7 @@ describe("no lesson is touched and no model is called", () => {
     const service = createRevertWatch({ companyId: ORG, store, hosts, now: () => NOW_MS });
     await service.pass({ budgetMs: 30_000 });
     const kinds = new Set<string>();
-    for (const pk of [revertWatchPk(ORG), `DEVTASK#${TASK}`, companyScoped(ORG, "GITHUB_MERGE")]) for (const row of (await store.query({ pk })).items) kinds.add(String(row["entityType"]));
+    for (const pk of [revertWatchPk(ORG), `DEVTASK#${TASK}`, companyScoped(ORG, "GITHUB_MERGE")]) for (const row of (await store.query({ pk })).items) kinds.add(row["entityType"] as string);
     expect([...kinds].sort()).toEqual(["DEVELOPER_TASK", "GITHUB_WORKFLOW_MERGE", "REVERT_WATCH_CURSOR", "REVERT_WATCH_ROTATION", "REVERT_WATCH_SCAN", "TASK_REVERT"].sort());
   });
 
