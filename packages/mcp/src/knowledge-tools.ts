@@ -36,6 +36,10 @@ export function safeRemote(remote: string): string | undefined {
 /** The project that held a repository, kept for the life of this server (one per client), so a tool call that names no project does not ask every project again. A cached project that stops answering is forgotten. */
 const FOUND = new WeakMap<object, Map<string, string>>();
 
+/** A repository no project holds, or two projects hold, remembered for a few minutes so a call that names no project does not probe every project again each time (each probe counts toward the person's day). */
+const MISSES = new WeakMap<object, Map<string, { line: string; until: number }>>();
+const MISS_MS = 5 * 60_000;
+
 type Resolved<T> = { kind: "answer"; project: string; repo: string | undefined; response: T } | { kind: "line"; line: string };
 
 /**
@@ -57,6 +61,10 @@ export async function resolveProject<T>(context: ToolContext, input: { project?:
     return { kind: "line", line: LOCAL_LESSONS_NOT_FOUND_LINE };
   }
   if (repo === undefined) return { kind: "line", line: LOCAL_LESSONS_NO_PROJECT_LINE };
+  const misses = MISSES.get(context.client) ?? new Map<string, { line: string; until: number }>();
+  MISSES.set(context.client, misses);
+  const missed = misses.get(repo);
+  if (missed !== undefined && context.now() < missed.until) return { kind: "line", line: missed.line };
   const memory = FOUND.get(context.client) ?? new Map<string, string>();
   FOUND.set(context.client, memory);
   const remembered = memory.get(repo);
@@ -69,10 +77,10 @@ export async function resolveProject<T>(context: ToolContext, input: { project?:
   for (const project of (await context.client.projects()).projects.slice(0, LOCAL_LESSONS_PROJECTS_MAX).map((entry) => entry.name)) {
     const answer = await ask(project, repo);
     if (answer.kind === "not_found") continue;
-    if (found !== undefined) return { kind: "line", line: LOCAL_LESSONS_AMBIGUOUS_LINE };
+    if (found !== undefined) { misses.set(repo, { line: LOCAL_LESSONS_AMBIGUOUS_LINE, until: context.now() + MISS_MS }); return { kind: "line", line: LOCAL_LESSONS_AMBIGUOUS_LINE }; }
     found = { project, response: answer.response };
   }
-  if (found === undefined) return { kind: "line", line: LOCAL_LESSONS_NOT_FOUND_LINE };
+  if (found === undefined) { misses.set(repo, { line: LOCAL_LESSONS_NOT_FOUND_LINE, until: context.now() + MISS_MS }); return { kind: "line", line: LOCAL_LESSONS_NOT_FOUND_LINE }; }
   memory.set(repo, found.project);
   return { kind: "answer", project: found.project, repo, response: found.response };
 }

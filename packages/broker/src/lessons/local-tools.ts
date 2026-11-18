@@ -259,8 +259,9 @@ export function areaOfGlob(glob: string): string {
   const head = fixed === -1 ? glob.slice(0, glob.lastIndexOf("/") + 1) : glob.slice(0, glob.lastIndexOf("/", fixed) + 1);
   const top = head.replace(/^\.?\//u, "").split("/")[0] ?? "";
   const clean = top.replace(/[^\w.@+-]/gu, "_").slice(0, 100);
+  const secretShaped = redactText(top) !== top;
   // A label that holds a secret-shaped string is not shown (the tree is names and numbers only).
-  return clean === "" || redactText(clean) !== clean ? "any folder" : `${clean}/`;
+  return clean === "" || secretShaped || redactText(clean) !== clean ? "any folder" : `${clean}/`;
 }
 /** The (repository, top folder) rows a lesson is about: for each repository it names (or `any repository`) and each distinct top folder of its path globs (or `whole repository`). */
 export function areasOfLesson(lesson: Pick<Lesson, "scope">): Array<{ repo: string; area: string }> {
