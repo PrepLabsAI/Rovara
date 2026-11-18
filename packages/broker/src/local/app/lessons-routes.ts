@@ -21,11 +21,9 @@ import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { LESSON_PAGE_MAX, buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
-import { LOCAL_OFF_MESSAGES, LocalLessonsUnavailable, localToolsGate, proveLocalRepo, type LocalLessonsDeps, type LocalToolsCounter } from "../../lessons/local-tools.js";
-import { takeRate } from "../../core/script-tokens/rate.js";
-import { proposeKnowledge } from "../../lessons/propose.js";
-import { KNOWLEDGE_NO_SUCH_PROJECT as NO_SUCH_PROJECT, KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
-import { knowledgeLimits, proposeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
+import type { LocalToolsCounter } from "../../lessons/local-tools.js";
+import { KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
+import { knowledgeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
 import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
 import { peopleOf, type Lesson } from "../../lessons/types.js";
@@ -107,42 +105,9 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
   const localRead = async (project: string, request: BrokerRequest, caller: TaskCaller, tool: "lessons" | "areas"): Promise<object> =>
     await server.read({ project, developerId: caller.principal.personId, tool, body: request.body, ...(caller.scriptToken === undefined ? {} : { token: caller.scriptToken }) });
 
-  /**
-   * A tool's team suggestion (L4-AK3). The same door rules as a read (the person's per-minute limit, the token's permission and project, the project must exist, the repository proved to be the project's), then the
-   * switches: the company's "Knowledge stays in Rovara" (or any other off reason) answers its fixed sentence and stores nothing. Then `proposeKnowledge` (shape, guards, the day's limit, audit, a weak-source lesson).
-   */
-  async function proposeFromTool(project: string, request: BrokerRequest, caller: TaskCaller): Promise<object> {
-    const developerId = caller.principal.personId;
-    let allowed: boolean;
-    try { allowed = await takeRate(flow.store, { pk: companyScoped(companyId, "LESSON_LOCAL_READS"), sk: developerId }, LOCAL_LESSONS_PER_MINUTE, 60_000, nowMs); }
-    catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    if (!allowed) throw agentXError("TOO_MANY_REQUESTS", "Too many lesson requests. Try again in a minute.");
-    if (caller.scriptToken !== undefined && (!caller.scriptToken.permissions.includes("lessons") || !caller.scriptToken.projects.includes(project))) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    if (await flow.projects.latest(project) === undefined) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
-    let raw: unknown;
-    try { raw = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
-    const checked = KnowledgeProposeBodySchema.safeParse(raw);
-    if (!checked.success) {
-      const issue = checked.error.issues[0];
-      throw agentXError("CONFIG_INVALID", `${issue === undefined || issue.path.length === 0 ? "body" : issue.path.join(".")}: ${issue === undefined || issue.code === "unrecognized_keys" ? "has a field this route does not take" : issue.message}`);
-    }
-    const key: ScopeKey = { workspaceId: companyId, project };
-    const count = async (refusal: string): Promise<void> => { try { await counter.count({ orgId: companyId, project, developerId, lessons: 0, refusal }); } catch { /* bookkeeping only */ } };
-    const deps: LocalLessonsDeps = { store: runtime.store, settings: runtime.settings, access: runtime.access, localTools: runtime.localTools, now: nowMs };
-    try {
-      const { repo: remote, ...proposal } = checked.data;
-      const proved = await proveLocalRepo(deps, key, remote);
-      if (proved === "unknown_repo") { await count("unknown_repo"); throw agentXError("NOT_FOUND", NO_SUCH_PROJECT); }
-      const gate = await localToolsGate(deps, key);
-      if (gate.kind === "off") { await count(gate.reason); return { status: "off", message: LOCAL_OFF_MESSAGES[gate.reason] }; }
-      const answer = await proposeKnowledge({ process: runtime.process, limits: proposeLimits(flow.store, nowMs) }, { companyId, project, proposer: { kind: "tool", personId: developerId }, proposal, ...(proved === undefined ? {} : { repo: proved }) });
-      await count(answer.status === "received" ? "proposed" : (answer.reason ?? "refused"));
-      return answer;
-    } catch (error) {
-      if (error instanceof LocalLessonsUnavailable) { await count("unavailable"); throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-      throw error;
-    }
-  }
+  // A tool's team suggestion (L4-AK3): the shared server's `propose`, the one the hosted twin also runs.
+  const proposeFromTool = async (project: string, request: BrokerRequest, caller: TaskCaller): Promise<object> =>
+    await server.propose({ project, developerId: caller.principal.personId, body: request.body, ...(caller.scriptToken === undefined ? {} : { token: caller.scriptToken }) });
 
   return async (request, caller) => {
     const path = request.path.split("?")[0] ?? request.path;
