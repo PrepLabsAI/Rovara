@@ -38,7 +38,7 @@ import type { LinearConnections } from "./linear-connections.js";
 export interface HostedIntakeCompany {
   store: DocumentStore;
   access: Pick<TaskAccess, "checkStart">;
-  flow: Pick<TaskFlow, "start">;
+  flow: Pick<TaskFlow, "start" | "deps">;
   /** The hosted identity point: a member of THIS company, read live (membership and the sign-in record). */
   identity: Pick<IdentityProvider, "getPrincipal">;
   audit: Pick<AuditSink, "record">;
