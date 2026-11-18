@@ -310,6 +310,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "PUT", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).
   { method: "GET", path: "/v1/app/tasks/{taskId}/feature-choices", requires: "full" },
+  // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it (a fresh step-up) or withdraws it.
+  { method: "GET", path: "/v1/app/company/system-runs", requires: "full" },
+  { method: "PUT", path: "/v1/app/company/system-runs", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

@@ -9,6 +9,7 @@
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
 import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, systemRunsConsentKey } from "../system-runs/consent.js";
+import { requireFreshStepUp } from "../system-runs/consent-control.js";
 import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
 
 export const UPKEEP_WORDS = {
@@ -42,6 +43,11 @@ export interface UpkeepSettingsDeps {
    */
   recordConsent?: ((details: { requestId: string; on: boolean; previous: string }) => Promise<void>) | undefined;
   cap?: (() => Promise<number | null>) | undefined;
+  /**
+   * L4-P3 (owner 2026-11-17): ALLOWING the company's automatic runs (`allowSystemRuns: true`) needs a FRESH STEP-UP, the same check that guards making a script token. It is run after the role check and before anything is
+   * read for the change or written; it throws REAUTH_REQUIRED (or a 503 when the company's window cannot be read). Absent: nothing can be allowed through this host (the laptop never allows). Withdrawing never calls it.
+   */
+  requireStepUp?: (() => Promise<void>) | undefined;
   /** The laptop has ONE person and no operator ceiling: nothing is consented to, so the switch alone decides (`systemRunsOn` follows `available`). Hosted never sets this. */
   noConsentNeeded?: true | undefined;
 }
@@ -151,6 +157,8 @@ export async function setSystemRunsAndUpkeep(deps: UpkeepSettingsDeps, input: { 
   try { standing = await deps.standing(input.personId, input.project); } catch { throw agentXError("FORBIDDEN", SYSTEM_RUNS_CONSENT_WORDS.notAllowed); }
   if (standing.access === "none") throw agentXError("PROJECT_NOT_FOUND", UPKEEP_WORDS.projectNotFound);
   if (standing.access !== "manage" || standing.companyAdmin !== true) throw agentXError("FORBIDDEN", SYSTEM_RUNS_CONSENT_WORDS.notAllowed);
+  // Allowing (never withdrawing) needs a fresh step-up, checked here, after who and before anything is read for the change or written.
+  if (input.allow) await requireFreshStepUp(deps);
   const scope = { orgId: deps.companyId, project: input.project };
   const settingsKey = upkeepSettingsKey(scope);
   const consentKey = systemRunsConsentKey(deps.companyId);

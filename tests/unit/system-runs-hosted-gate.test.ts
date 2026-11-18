@@ -59,7 +59,7 @@ describe("the hosted SystemRuns gate is always supplied", () => {
     expect(await deps.systemRuns!.enabled()).toBe(false);
     await consent(deps.store, A, true);
     expect(await deps.systemRuns!.enabled()).toBe(true);
-    const broken = { systemRuns: undefined as Gate | undefined, store: { get: async () => { throw new Error("down"); } } };
+    const broken: { systemRuns?: Gate; store: { get: () => Promise<never> } } = { store: { get: async () => { throw new Error("down"); } } };
     hostedSystemRunsFor(broken, A, parseCoreSwitch("on").value);
     expect(await broken.systemRuns!.enabled()).toBe(false);
     // A row that is another company's, or not exactly `enabled: true`, is no consent.
