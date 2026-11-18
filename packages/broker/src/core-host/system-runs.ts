@@ -32,6 +32,15 @@ export function systemRunsGateOf(flag: CoreSwitch, companyId: string): { enabled
   return { enabled: () => switchCovers(flag, companyId) };
 }
 
+/**
+ * Whether nightly upkeep REALLY runs for a company on this install (what the setup page's upkeep switch is told, `HostedUpkeepWiring.available`): the system starter and the `upkeep-night` job are both wired exactly
+ * where the company's SystemRuns flag covers it (the same flag builds the starter, wires the night service and enables the schedule). So availability IS the flag: off (the default), the switch stays hidden and a change is
+ * refused; no company is ever reported available that has no starter. It is read from the flag each time, never remembered.
+ */
+export function upkeepAvailableFor(flag: CoreSwitch): (companyId: string) => boolean {
+  return (companyId) => switchCovers(flag, companyId);
+}
+
 export interface HostedSystemRunsOptions {
   flow: TaskFlow;
   companyId: OrgId;

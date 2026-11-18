@@ -55,7 +55,7 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
-import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf } from "../core-host/system-runs.js";
+import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -678,8 +678,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             map: wikiMapWiring,
             displayName: displayNameOf,
           },
-          // Lead 4 N1: the nightly upkeep switch. The same live standing as the wiki controls; no scheduler is wired here yet (the switch is recorded; the hosted night waits for its scheduler).
-          upkeep: { standing: setupRunStanding },
+          // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
+          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,
