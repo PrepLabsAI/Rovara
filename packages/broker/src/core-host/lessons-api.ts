@@ -60,13 +60,14 @@ import { resolveDigestSettingStrict, writeDigestSetting } from "../lessons/diges
 import { LESSON_PAGE_LISTS, LESSON_PAGE_MAX, buildLessonsByArea, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import { folderOfRequest, type AreaSelection } from "../lessons/area-index.js";
 import { buildLearningSources, setLearningSourcePause } from "../lessons/learning-sources.js";
+import { buildLessonsDigest } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
 import { LESSONS_GRADUATION_API, answerGraduation } from "./lessons-graduation.js";
 import type { SkillGraduation } from "../lessons/graduate.js";
 import { digestPilotOf, switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|tuning|replay|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly|weekly-summary|retire-requests|decisions|measure|tuning|replay|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path) || LESSONS_GRADUATION_API.test(path);
@@ -271,7 +272,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
     const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);
     const route = graduation !== null ? "graduation" : skillsPath ? (rawSkill === undefined ? "skills" : skillAction === undefined ? "skill-edit" : `skill-${skillAction}`) : rawSource !== undefined ? "learning-source" : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", replay: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", weekly: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", replay: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
     if (graduation === null && (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method)) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -301,6 +302,17 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const deps = runtime.routes;
     const who = { orgId: companyId, developerId: personId };
     const where = { workspaceId: companyId, project };
+
+    if (route === "weekly") {
+      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
+      try {
+        const digest = await buildLessonsDigest(deps, who, project);
+        return { project, weekly: { needLook: digest.weekly?.needLook ?? [], picks: digest.weekly?.picks ?? [] } };
+      } catch (error) {
+        if (error instanceof AgentXError) throw error;
+        throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
+      }
+    }
 
     /** Who may inspect replay or change the project's lessons settings: company owner/admin or project maintainer. */
     const mayChange = async (): Promise<boolean> => {

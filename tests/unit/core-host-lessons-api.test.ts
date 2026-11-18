@@ -106,6 +106,33 @@ async function call(target: ReturnType<typeof createLessonsApi>, personId: strin
 }
 
 const P = "/v1/dev/projects/payments";
+describe("lessons weekly route", () => {
+  const PATH = `${P}/lessons/weekly`;
+  it("returns only the weekly lists, for a person who decides", async () => {
+    const w = await setUp();
+    const result = await call(api(w).api, "a-admin", "GET", PATH);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(Object.keys(result.body).sort()).toEqual(["project", "weekly"]);
+    if (result.ok) expect(Object.keys(result.body.weekly as object).sort()).toEqual(["needLook", "picks"]);
+  });
+  it("refuses a member who cannot decide and hides another company's project", async () => {
+    const w = await setUp();
+    expect(await call(api(w).api, "a-contrib", "GET", PATH)).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(await call(api(w).api, "a-admin", "GET", "/v1/dev/projects/not-ours/lessons/weekly")).toMatchObject({ ok: false, code: "NOT_FOUND", message: NO_SUCH_PROJECT });
+  });
+  it("refuses a company admin who is not on the project's roster, before reading the digest", async () => {
+    const w = await setUp();
+    vi.spyOn(w.people, "onProjectRoster").mockImplementation(async (companyId, project, personId) => personId !== "a-admin" && project === "payments" && (companyId === A || companyId === B));
+    expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, status: 404, message: NO_SUCH_PROJECT });
+  });
+  it("refuses script tokens and obeys the lessons switch", async () => {
+    const w = await setUp();
+    const target = api(w).api;
+    expect(await call(target, "a-admin", "GET", PATH, undefined, undefined, { scriptToken: { tokenId: "sct_aaaaaaaaaaaaaaaaaaaa" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    const off = api(w, { lessonsSwitch: { mode: "off" } });
+    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
+  });
+});
 /** The lesson events the audit sink recorded (task starts are the fixture's own). */
 const lessonEvents = (w: World) => w.world.audit.filter((event) => event.action.startsWith("lesson."));
 const lesson = (companyId: string, id: string, over: Parameters<typeof lessonRecord>[0] = {}) => lessonRecord({
@@ -118,7 +145,7 @@ async function put(w: World, companyId: OrgId, ...lessons: ReturnType<typeof les
 }
 
 const ROUTES: Array<[string, string, unknown?]> = [
-  ["GET", `${P}/lessons`], ["GET", `${P}/lessons/retire-requests`], ["GET", `${P}/lessons/mode`], ["PUT", `${P}/lessons/mode`, { mode: "auto" }],
+  ["GET", `${P}/lessons`], ["GET", `${P}/lessons/weekly`], ["GET", `${P}/lessons/retire-requests`], ["GET", `${P}/lessons/mode`], ["PUT", `${P}/lessons/mode`, { mode: "auto" }],
   ["POST", `${P}/lessons/les_aaaa1111/approve`, { version: 1 }], ["POST", `${P}/lessons/les_aaaa1111/reject`, { version: 1, reason: "wrong" }], ["POST", `${P}/lessons/les_aaaa1111/retire`, { reason: "outdated" }],
   ["POST", `${P}/lessons/les_aaaa1111/retire-request`, {}], ["POST", `${P}/lessons/les_aaaa1111/keep`, {}], ["GET", `${P}/tasks/${randomUUID()}/lessons`],
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
@@ -135,7 +162,7 @@ describe("the paths", () => {
     // The phase 4 rows (graduation, Tidy, draft checks, both-places) are held by core-host-lessons-graduation.test.ts.
     const rows = DEV_ROUTES.filter((route) => route.path.includes("/lessons") && !route.path.endsWith("/repeats") && !route.path.endsWith("/lessons-slack") && !(route.method === "POST" && route.path.endsWith("/lessons")) && !/\/lessons\/(?:graduation$|tidy\/|check-drafts\/|rules\/|\{lessonId\}\/(?:graduate|graduate-later|both-places)$)/u.test(route.path));
     expect(rows.map((route) => `${route.method} ${route.path}`).sort()).toEqual([...[
-      "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
+      "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/weekly", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/skill", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
