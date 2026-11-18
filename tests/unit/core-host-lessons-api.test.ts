@@ -300,6 +300,28 @@ describe("decisions on one lesson", () => {
     expect(w.world.audit.every((event) => event.actor.id !== "a-contrib")).toBe(true);
   });
 
+  it("Keep (single approve and the batch) on a held lesson clears its review flag in the approval itself; a reader's try and another company's same-named lesson change nothing", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_hold0001", { status: "pending", reviewRequired: true }), lesson(A, "les_hold0002", { status: "pending", reviewRequired: true }), lesson(A, "les_hold0003", { status: "pending", reviewRequired: true, contradictsWith: "les_aaaa1111" }));
+    await put(w, B, lesson(B, "les_hold0001", { status: "pending", reviewRequired: true }));
+    const { api: target } = api(w);
+    const store = w.lessons.get(A)!.runtime.store;
+    const key = { workspaceId: A, project: "payments" };
+    expect(await call(target, "a-contrib", "POST", `${P}/lessons/les_hold0001/approve`, { version: 1 })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(await store.get(key, "les_hold0001")).toMatchObject({ status: "pending", reviewRequired: true });
+    expect(await call(target, "a-maint", "POST", `${P}/lessons/les_hold0001/approve`, { version: 1 })).toMatchObject({ ok: true, body: { status: "active" } });
+    const batch = await call(target, "a-maint", "POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_hold0002", version: 1, decision: "keep" }, { lessonId: "les_hold0003", version: 1, decision: "keep" }] });
+    expect(batch.ok && (batch.body["results"] as Array<Record<string, unknown>>).map((r) => r["status"])).toEqual(["active", "active"]);
+    for (const id of ["les_hold0001", "les_hold0002", "les_hold0003"]) {
+      const stored = (await store.get(key, id))!;
+      expect(stored.status).toBe("active");
+      expect(stored.reviewRequired).toBeUndefined();
+    }
+    // The lesson that still contradicts another keeps that flag (it stays out of the agent's pull set until settled).
+    expect((await store.get(key, "les_hold0003"))!.contradictsWith).toBe("les_aaaa1111");
+    expect(await w.lessons.get(B)!.runtime.store.get({ workspaceId: B, project: "payments" }, "les_hold0001")).toMatchObject({ status: "pending", reviewRequired: true, approvals: [] });
+  });
+
   it("reject takes a fixed reason (never a person's text); retire answers the lesson's retire request", async () => {
     const w = await setUp();
     await put(w, A, lesson(A, "les_apend001", { status: "pending" }), lesson(A, "les_aaaa1111"));
