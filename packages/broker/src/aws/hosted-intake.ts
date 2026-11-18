@@ -24,6 +24,8 @@ import { taskSharedOf } from "../core/task-log/task-shared.js";
 import { taskKey } from "../core/task-flow/keys.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { developerIdOf } from "../core/sessions/create.js";
+import type { SessionMembers } from "../core/sessions/access.js";
+import { HOSTED_IDENTITY_PROVIDER } from "../core-host/hosted-modules.js";
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { waitingViewOf } from "../local/app/intake.js";
@@ -177,6 +179,19 @@ export interface HostedTicketUpdatesInput {
   planSummaryOf?: TicketUpdatesDependencies["planSummaryOf"];
   /** The task log's hook (`core/task-log/hooks.ts`): the ticket's thread is brought up to date when an answer, a decision or a question is committed. Absent: only a milestone updates the thread. */
   taskLog?: Pick<TaskLogHooks, "subscribe"> | undefined;
+  /** The company's session-levels members reader (`deployedSessionMembers`): a `web` People entry counts toward "shared" only while this finds the person a live member with a grant on the task's project. Absent: web entries do not count. */
+  members?: SessionMembers | undefined;
+}
+
+/**
+ * Whether a task counts as shared for this company's ticket thread: started from a ticket (the ticket rule), else the company's own session and People records (`taskSharedOf`), where a web People entry counts only while that
+ * person's project grant is live now (`members`, the session levels' reader; absent: web entries do not count).
+ */
+export function hostedTaskShared(input: { store: DocumentStore; now: () => number; companyId: OrgId; members?: SessionMembers | undefined }): (orgId: OrgId, taskId: string) => Promise<boolean> {
+  const companyId = OrgIdSchema.parse(input.companyId);
+  return ticketStartedShared({ store: input.store, now: input.now, scope: { orgId: companyId } }, taskSharedOf({
+    store: input.store, webPeople: input.members === undefined ? undefined : { members: input.members, provider: HOSTED_IDENTITY_PROVIDER },
+  }));
 }
 
 /**
@@ -184,7 +199,7 @@ export interface HostedTicketUpdatesInput {
  * is read); any other tracker has no write-back here. The handlers go on the company's milestones, the task log's first (its entries are then there when the thread is drawn) and the ticket's second, as on a laptop.
  *
  * What may leave is the project's own level (default `status_only`: unchanged for every project that exists). Above it, a task counts as shared when it was started from a ticket (`ticketStartedShared`, owner decision 254zzq:
- * the ticket is a shared place and the project chose the level) or when the company's own session and People records say so (`taskSharedOf`); a task only its owner can see that did not start from a ticket
+ * the ticket is a shared place and the project chose the level) or when the company's own session and People records say so (`taskSharedOf`; a web People entry counts only while that person's project grant is live now, `members`); a task only its owner can see that did not start from a ticket
  * stays at `status_only`: a Linear comment is seen by everyone who can see the ticket. A refresh told of a task that is not this company's is refused before anything is read or written.
  */
 export function hostedTicketUpdates(input: HostedTicketUpdatesInput): CodeMilestoneHandler[] {
@@ -193,7 +208,7 @@ export function hostedTicketUpdates(input: HostedTicketUpdatesInput): CodeMilest
   const emit = (event: string, fields: Record<string, unknown>): void => { log({ component: "intake", event, ...fields }); };
   const deps: TicketUpdatesDependencies = {
     store: input.store, now: input.now, scope: { orgId: companyId }, trackerFor: hostedTrackerFor(companyId, input.connections, input.fetch), log: emit,
-    taskShared: ticketStartedShared({ store: input.store, now: input.now, scope: { orgId: companyId } }, taskSharedOf({ store: input.store })),
+    taskShared: hostedTaskShared({ store: input.store, now: input.now, companyId, members: input.members }),
     ...(input.planSummaryOf === undefined ? {} : { planSummaryOf: input.planSummaryOf }),
   };
   input.taskLog?.subscribe(async (taskId) => {
