@@ -74,7 +74,7 @@ describe("the /v1/app route table", () => {
     // Wiki W0: a project's free file map.
     ["GET", "/v1/app/projects/payments/wiki-map", "full"], ["POST", "/v1/app/projects/payments/wiki-map", "full"],
     // Lead 4 W2: the project wiki's reads.
-    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/search", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
+    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/search", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/lessons", "full"],
     // L4-B3b: approving the project's test environment (the state read keeps its own row above).
     ["POST", "/v1/app/projects/payments/test-environment/approve", "full"],
     // Lead 4 L4-MF3: the company-wide agent directory (a live company owner or administrator reads it).

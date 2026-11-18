@@ -73,6 +73,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.trial_offer_answered": { action: "lesson.trial_offer_answered", facts: (e) => ({ answer: word(e.facts["answer"], "unknown"), approvals: num(e.facts["approvals"]), drops: num(e.facts["drops"]) }) },
   // A project or company admin turned the weekly lessons summary in the chats on or off (developer API).
   "lesson.digest_switched": { action: "lesson.digest_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
+  // A project or company admin paused or resumed one source of learning on "Where Rovara learns from" (`learning-sources.ts`): which row (a fixed key) and whether it is now paused. Written BEFORE the change.
+  "lesson.learning_source_switched": { action: "lesson.learning_source_switched", facts: (e) => ({ source: word(e.facts["source"], "unknown"), paused: e.facts["paused"] === true }) },
   "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
   // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
   "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },

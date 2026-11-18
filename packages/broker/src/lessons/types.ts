@@ -274,6 +274,7 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.local_tools_switched",
   "lesson.replay_started", "lesson.replay_read", "lesson.snapshot_created",
   "lesson.knowledge_read", "lesson.knowledge_read_alert",
+  "lesson.learning_source_switched",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];
 

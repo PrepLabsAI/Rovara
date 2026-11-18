@@ -835,6 +835,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             standing: setupRunStanding,
             projectRepositories: async (companyId, project) => (companyId !== runtime.companyId ? undefined : (await runtime.flow.deps.projects.latest(project))?.definition.repositories.map((repository) => repository.name)),
             displayName: displayNameOf,
+            // Lead 4 L4-LP3W: "Team lessons for this area" reads this company's own lessons library, and no other company's.
+            lessonsOf: (companyId) => (companyId === runtime.companyId ? lessonsByCompany.get(companyId)?.runtime.load : undefined),
           },
           // Lead 4 C1: the wiki's corrections. The role is read live from membership; "Suggest as a lesson" exists only where lessons are on for the company (it writes one PENDING lesson, never approves).
           wikiCorrections: {

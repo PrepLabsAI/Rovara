@@ -52,7 +52,11 @@ async function mayHandle(deps: { directory: ApproverDirectory; access: AccessChe
 }
 
 /** What a go-live rests on: the exact lesson version the approvals were given for, the set version that was current when the decision was made, and the decision's own commit conditions. */
-export interface ActivationPin { version: number; setVersion: number; fence?: readonly unknown[] }
+export interface ActivationPin {
+  version: number; setVersion: number; fence?: readonly unknown[];
+  /** Set only by a person's approval just now (`approveLesson`, which has checked who they are): the go-live then also clears `reviewRequired`, in the same commit. A restore that re-counts old approvals does not set it. */
+  decidedByPerson?: true;
+}
 
 /**
  * Makes a lesson live: status active, expiry set, approvals recorded, and the lesson it supersedes retired. ONE conditional commit, pinned: it applies only if the stored lesson is still
@@ -78,6 +82,9 @@ export async function activateLesson(deps: LessonDeps & { store: LessonStore; ve
   delete (next as { pendingExpiresAt?: number }).pendingExpiresAt;
   // A person's go-live (or any other way than trial) is not a trial: a leftover trial record would let one thumbs-down retire an approved lesson and make it publishable without ever having been a trial.
   if (action !== "lesson.trial_started") delete (next as { trial?: Lesson["trial"] }).trial;
+  // A held or sent-back lesson that a person has now approved is no longer waiting for one: the flag is cleared in the SAME conditional commit as the approval (never a second write that could be lost), so the agent's pull set and the wiki's team lessons can
+  // include it. Every other flag (a retire proposal, a contradiction, a possible duplicate) is left alone and keeps it out until it is settled.
+  if (pin.decidedByPerson === true && action === "lesson.activated") delete (next as { reviewRequired?: boolean }).reviewRequired;
   const writes = [next];
   if (fresh.supersedes !== undefined) {
     const old = await deps.store.get(key, fresh.supersedes);
@@ -198,7 +205,7 @@ export async function approveLesson(deps: ApproveDeps, input: ApproveInput): Pro
     if (complete && inGroup) {
       // The edited text must be saved with the activation: write the edit first as a version of the pending lesson when there is one. The go-live is then pinned to THAT version and the
       // set version the edit produced, so nothing written between the two steps is made live under these approvals.
-      let pin: ActivationPin = { version: lesson.version, setVersion, ...(group.fence === undefined ? {} : { fence: group.fence }) };
+      let pin: ActivationPin = { version: lesson.version, setVersion, decidedByPerson: true, ...(group.fence === undefined ? {} : { fence: group.fence }) };
       if (input.edit !== undefined) {
         const version = nextVersion(lesson, await deps.store.versions(key, lesson.id));
         const saved = await deps.store.commit(key, setVersion, [{ ...working, approvals: [], version, updatedAt: now }], now, group.fence);

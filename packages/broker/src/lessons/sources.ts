@@ -80,6 +80,13 @@ async function noteProjectVolume(deps: LessonDeps, store: LessonStore, key: Scop
 export const attributableSources = (provenance: { sources: readonly string[]; inputSources: readonly string[] }): string[] =>
   [...new Set([...provenance.sources, ...provenance.inputSources.filter((s) => memberOfSource(s) === undefined)])];
 
+/**
+ * Every key a lesson can be HELD under (lead 4 L4-LP3W): its attributable sources (a member, a channel, CI: paused by a spike) and the kind of each piece of evidence it rests on, `kind:<span kind>`, which a person pauses
+ * from "Where Rovara learns from" (`learning-sources.ts`). One list, so a hold of either sort holds the lesson and a resume re-settles it.
+ */
+export const heldKeysOf = (provenance: { sources: readonly string[]; inputSources: readonly string[]; sourceKinds: readonly string[] }): string[] =>
+  [...new Set([...attributableSources(provenance), ...provenance.sourceKinds.map((kind) => `kind:${kind}`)])];
+
 /** True when any of a lesson\'s attributable sources is paused: the lesson is held. */
 export const isHeldBySource = (flags: ProjectFlags, sources: readonly string[]): boolean => sources.some((s) => pausedKey(flags, s) !== undefined);
 
