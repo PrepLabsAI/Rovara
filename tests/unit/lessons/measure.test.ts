@@ -4,7 +4,7 @@ import { companyScoped, type OrgId } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
 import {
-  MEASURE_FIT_FLOOR, MEASURE_KEEP_MS, MEASURE_LEFT_OUT, MEASURE_WRITE_MS, documentMeasureSink, fitPk, mergePk, readLessonMeasure, type LoadMeasure, type MeasureSink,
+  MEASURE_FIT_FLOOR, MEASURE_KEEP_MS, MEASURE_WRITE_MS, documentMeasureSink, fitPk, mergePk, readLessonMeasure, type LoadMeasure, type MeasureSink,
 } from "../../../packages/broker/src/lessons/measure.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
@@ -77,7 +77,9 @@ describe("phase 0: loads are identical with and without the measurement (golden)
   it("nothing is recorded for an eval snapshot, a memory-off load, a stage with no lessons, or a project with no active lesson", async () => {
     const w = await world((documents, clock) => documentMeasureSink(documents, A, clock.now));
     await loadLessonsForStage(w.deps, request({ memory: { mode: "off" } }));
-    await loadLessonsForStage(w.deps, request({ memory: { mode: "snapshot", snapshotId: "snap-1", lessons: [] } }));
+    const frozen = await w.store.list({ workspaceId: WS, project: PROJECT }, { statuses: ["active"] });
+    expect(frozen.length).toBeGreaterThan(0);
+    expect((await loadLessonsForStage(w.deps, request({ memory: { mode: "snapshot", snapshotId: "snap-1", lessons: frozen } }))).context?.lessons.length).toBeGreaterThan(0);
     await loadLessonsForStage(w.deps, request({ stage: "CHECKS" }));
     await loadLessonsForStage(w.deps, request({ wanted: () => false }));
     expect(await fitRows(w.documents)).toEqual([]);
@@ -98,7 +100,7 @@ describe("phase 0: what a load records", () => {
     // The ids and the order are the load's own (the manifest's), and the left-out are the next in rank, never one that was loaded.
     expect(loaded.map((s) => s.id)).toEqual(result.manifest.lessons.map((e) => e.id));
     expect(loaded).toHaveLength(5);
-    expect(left).toHaveLength(MEASURE_LEFT_OUT);
+    expect(left).toHaveLength(5);
     expect(left.every((s) => !loaded.some((l) => l.id === s.id))).toBe(true);
     for (const sample of [...loaded, ...left]) { expect(sample.fit).toBeGreaterThanOrEqual(0); expect(sample.fit).toBeLessThanOrEqual(1); }
     // Scores are what the loader sorted by: the loaded lessons' scores are the manifest's.
@@ -187,8 +189,8 @@ describe("phase 0: isolation by company and by project", () => {
     await sink.load({ workspaceId: A, project: "payments", taskId: "task-1", stage: "PLAN", round: 1, at: clock.now(), budgetLessons: 5, activeCount: 7, eligibleCount: 7, loaded, leftOut: [] });
     await sink.load({ workspaceId: A, project: "billing", taskId: "task-2", stage: "PLAN", round: 1, at: clock.now(), budgetLessons: 5, activeCount: 2, eligibleCount: 2, loaded: [], leftOut: [] });
     await sink.merged({ workspaceId: A, project: "payments", taskId: "task-1", at: clock.now() });
-    await sink.merged({ workspaceId: A, project: "billing", taskId: "task-2", at: clock.now() });
-    await sink.reverted({ workspaceId: A, project: "billing", taskId: "task-2", at: clock.now() });
+    await sink.merged({ workspaceId: A, project: "billing", taskId: "task-1", at: clock.now() });
+    await sink.reverted({ workspaceId: A, project: "billing", taskId: "task-1", at: clock.now() });
     const payments = await readLessonMeasure(documents, { companyId: A, project: "payments", now: clock.now() });
     const billing = await readLessonMeasure(documents, { companyId: A, project: "billing", now: clock.now() });
     expect(payments).toMatchObject({ loads: 1, lessonsInUse: 7, loadedBelowFloor: 1, cleanMerge: { merged: 1, reverted: 0, clean: 1, rate: 1 } });
