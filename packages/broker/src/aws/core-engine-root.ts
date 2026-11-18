@@ -60,6 +60,8 @@ import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-hos
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
+import { readUpkeepCap, type UpkeepCapReader } from "../core/upkeep/cap.js";
+import { upkeepCapReaderFromEnvironment } from "../core-host/upkeep-cap-http.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { listProjectMembers } from "./admin-actions.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
@@ -167,6 +169,11 @@ export interface BrokerCoreRootInputs {
    * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
    */
   offeredModels?: OfferedModelsReader;
+  /**
+   * L4-SR1: the gateway's own answer about one company's projects' nightly upkeep caps (core/upkeep/cap.ts; the contract is `UpkeepCapReadSchema`, a service read on the gateway). Absent, it is built from the environment
+   * where the gateway's origin and the task-token signer are configured, and where that gateway does not answer the read nothing that spends AI starts by itself.
+   */
+  upkeepCap?: (companyId: OrgId) => UpkeepCapReader | undefined;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -568,6 +575,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const pauses = upkeepPauseHooks({ store, companyId, now: () => now().getTime(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.upkeep", ...entry }) });
     return { gate, administers, pauses };
   };
+  // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
+  const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -652,8 +661,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
         const systemRuns = createHostedSystemRuns({
           flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
-          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
-          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, log }),
+          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input), cap: upkeepCapFor(companyId),
+          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
@@ -737,7 +746,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             displayName: displayNameOf,
           },
           // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
-          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
+          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value),
+            // L4-SR1: the project's monthly cap as the gateway says now (the page's "of $Y"); null where the gateway does not answer.
+            cap: async (company, project) => { const read = await readUpkeepCap(upkeepCapFor(company), project, now().getTime(), company); return read.state === "enforced" ? read.limitUsd : null; } },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

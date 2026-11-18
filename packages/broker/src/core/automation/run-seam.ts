@@ -75,6 +75,11 @@ export interface UnattendedStartDeps {
   /** The store the open runs are kept in, and the host's view of tasks. Absent: runs are not recorded (a test, or an install with nothing to settle). */
   store?: DocumentStore | undefined;
   tasks?: UnattendedTasks | undefined;
+  /**
+   * Told once a run's task has ended and BEFORE its reservation is settled (lead 4 L4-SR1: the nightly spend line). `costUsd` is the task's cost when the install can tell it (absent: unknown, never 0). A throw leaves
+   * the run open and its reservation held, and the next sweep asks again, so a hook must be safe to repeat (the nightly spend row is written once per request).
+   */
+  onSettled?: ((run: { requestId: string; taskId: string; project: string; origin: string; startedAt: string; costUsd: number | undefined; end: string }) => Promise<void>) | undefined;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -175,8 +180,9 @@ export async function sweepUnattendedRuns(deps: UnattendedStartDeps): Promise<Un
       const state = await deps.tasks.read(taskId);
       if (state === undefined || state.end !== undefined) {
         const reservationId = typeof row["reservationId"] === "string" ? row["reservationId"] : undefined;
+        const cost = state === undefined ? undefined : await deps.tasks.costUsd?.(taskId);
+        await deps.onSettled?.({ requestId: text(row["requestId"]), taskId, project: text(row["project"]), origin: text(row["origin"]), startedAt: text(row["startedAt"]), costUsd: cost, end: state?.end ?? "gone" });
         if (reservationId !== undefined) {
-          const cost = state === undefined ? undefined : await deps.tasks.costUsd?.(taskId);
           await deps.admission.settle(reservationId, cost === undefined ? {} : { cost: { micros: Math.round(cost * 1_000_000), currency: "USD" } });
         }
         await deps.store.delete({ key, condition: when.present() });
