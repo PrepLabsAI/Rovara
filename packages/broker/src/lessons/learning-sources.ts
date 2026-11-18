@@ -28,6 +28,8 @@ export const SOURCE_KINDS: Readonly<Record<LearningSourceKey, readonly SpanKind[
   remember: ["remembered"],
   after_merge: ["outcome"],
   ci: ["ci_failure"],
+  // The ticket-comments source (not merged yet) reads its pause under `ticket_comment`: this row writes the same key.
+  tickets: ["ticket_comment"],
 };
 export const SOURCES_WINDOW_MS = 30 * 86_400_000;
 /** The most lessons one read counts (newest first); past it the answer says so. */

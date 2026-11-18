@@ -87,7 +87,7 @@ export const LESSON_STATUSES = ["candidate", "pending", "active", "stale", "reti
 export type LessonStatus = (typeof LESSON_STATUSES)[number];
 export type Tier = 0 | 1 | 2;
 
-export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment"] as const;
+export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "ticket_comment"] as const;
 export type SpanKind = (typeof SPAN_KINDS)[number];
 
 const PrCitationSchema = z.object({ kind: z.literal("pr"), url: z.string().url().max(300).refine((u) => u.startsWith("https://"), "https only") }).strict();
