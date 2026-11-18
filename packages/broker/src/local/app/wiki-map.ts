@@ -4,7 +4,7 @@
 //   POST /v1/app/projects/{project}/wiki-map   make it now: the project's repositories read through the code host the registry holds; no model, no key, nothing spent or stored
 //
 // Who: the owner of this install, on the API session. A script token never reaches these routes (the setup page's rule). A project that does not exist answers `PROJECT_NOT_FOUND`.
-import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type OrgId, type PluginKind } from "@agentx/contracts";
+import { AgentXError, IMPLICIT_COMPANY_ID, agentXError, type AdapterRegistry, type OrgId, type PluginKind, type WikiFileMap } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { unregisteredHost, type FileMapRepository } from "../../core/wiki/file-map.js";
@@ -22,7 +22,11 @@ export interface LocalWikiMapOptions {
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
 
-export interface LocalWikiMap { routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> }
+export interface LocalWikiMap {
+  routes(request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined>;
+  /** The map the wiki build (W4) plans from: the kept one (what the owner saw) or a new one; `fresh` always reads the branches again. The same kept map as the route's. */
+  mapFor(project: string, repositories: ReadonlyArray<{ name: string; url: string; defaultBranch: string; host?: { kind: PluginKind } | undefined }>, options: { fresh: boolean }): Promise<WikiFileMap>;
+}
 
 export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
   const companyId = options.companyId ?? IMPLICIT_COMPANY_ID;
@@ -32,6 +36,13 @@ export function createLocalWikiMap(options: LocalWikiMapOptions): LocalWikiMap {
     try { return codeHostForRecord(options.registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return unregisteredHost; }
   };
   return {
+    async mapFor(project, repositories, options) {
+      if (!options.fresh) {
+        const kept = service.read(companyId, project, repositories.map(repositoryKeyOf));
+        if (kept !== undefined) return kept;
+      }
+      return await service.make(companyId, project, repositories.map((repository) => ({ name: repository.name, url: repository.url, defaultBranch: repository.defaultBranch, host: hostOf(repository) })), { orgId: companyId });
+    },
     async routes(request, caller) {
       const match = ROUTE.exec(request.path.split("?")[0] ?? request.path);
       if (match === null || (request.method !== "GET" && request.method !== "POST")) return undefined;

@@ -15,13 +15,14 @@
 // status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes and counts only.
 import { createHash } from "node:crypto";
 import {
-  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
-  sessionTaskStatus, taskStatusText, when,
+  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, UPKEEP_NOTICE_WORDS, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  sessionTaskStatus, taskStatusText, upkeepMonthOf, upkeepSubjectId, upkeepSubjectOf, when,
   type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
-  type SessionSummary, type StoredDocument,
+  type SessionSummary, type StoredDocument, type UpkeepPauseReason,
 } from "@agentx/contracts";
 import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
+import { upkeepExpiryOf, upkeepNoticeKey } from "../upkeep/keys.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
 import { digestSlotDay, holdOf } from "./schedule.js"; import { putInboxRow } from "./inbox-rows.js";
@@ -29,8 +30,11 @@ import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 
-/** What a person is told about. */
-export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done";
+/**
+ * What a person is told about. `upkeep_paused` (lead 4 N1) is not about a session: it tells a project's admins that nightly upkeep stopped at its cap (`queueUpkeepPaused`). Its row names a project, a month and a
+ * reason where a task's row names a session, and it is delivered by its own checks (the person may still administer the project), never by a session read.
+ */
+export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done" | "upkeep_paused";
 
 export const PENDING_PK = "NOTIFY_PENDING";
 const PENDING_KEEP_SECONDS = 3 * 86_400;
@@ -132,6 +136,48 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
   }
 }
 
+/**
+ * Lead 4 N1: nightly upkeep stopped at its limit (the gateway refused an upkeep call with `upkeep_paused`, or the limit read says so before one was made). Tells the project's admins ONCE per company, project,
+ * month and reason, in fixed words, in the same inbox and chats as every other attention: a marker row (`NOTICE#<month>#<reason>`) is written first and only while absent, so a second pause of the same kind in
+ * the month writes nothing, however many nights or workers see it; the winner writes one pending row per person `recipients` names (the project's admins and the company's owners and admins, as the host reads them
+ * now). Nobody to tell, or a recipient read that failed, gives the marker back so a later night tries again. Never throws: a notice is never a reason for the night to fail. Answers how many people were queued.
+ */
+export async function queueUpkeepPaused(
+  deps: { store: Pick<DocumentStore, "put" | "delete" | "transact">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; recipients(orgId: OrgId, project: string): Promise<readonly string[]> },
+  input: { orgId: OrgId; project: string; reason: UpkeepPauseReason; month?: string },
+): Promise<{ queued: number; deduped: boolean }> {
+  const log = deps.log ?? ((): void => undefined);
+  const clock = deps.now ?? (() => new Date());
+  try {
+    const orgId = OrgIdSchema.parse(input.orgId);
+    const nowMs = clock().getTime();
+    const month = input.month ?? upkeepMonthOf(nowMs);
+    const subjectId = upkeepSubjectId({ project: input.project, month, reason: input.reason });
+    const marker = upkeepNoticeKey({ orgId, project: input.project }, month, input.reason);
+    const first = await deps.store.put({ item: { ...marker, entityType: "UPKEEP_NOTICE", orgId, project: input.project, month, reason: input.reason, at: new Date(nowMs).toISOString(), ...upkeepExpiryOf(nowMs) }, condition: when.absent() });
+    if (!first.applied) return { queued: 0, deduped: true };
+    let people: string[];
+    try {
+      people = [...new Set((await deps.recipients(orgId, input.project)).filter((id) => /^[a-f0-9]{64}$/u.test(id)))].slice(0, RECIPIENTS_MAX);
+    } catch (error) {
+      await deps.store.delete({ key: marker }).catch(() => undefined);
+      log({ event: "upkeep.notice_recipients_failed", error: error instanceof Error ? error.name : "unknown" });
+      return { queued: 0, deduped: false };
+    }
+    if (people.length === 0) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
+    // All the rows or none, so a partial failure never leaves some admins told and the marker standing over the rest.
+    const written = await deps.store.transact(people.map((developerId) => ({
+      kind: "put" as const,
+      item: { ...pendingKey(orgId, developerId, subjectId, "upkeep_paused"), entityType: "NOTIFY_PENDING", orgId, developerId, sessionId: subjectId, kind: "upkeep_paused", at: new Date(nowMs).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
+    }))).catch(() => ({ applied: false as const }));
+    if (!written.applied) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
+    await publishAttentionChanged(deps.realtime, orgId, people, subjectId, "upkeep_paused");
+    return { queued: people.length, deduped: false };
+  } catch (error) {
+    log({ event: "upkeep.notice_failed", error: error instanceof Error ? error.name : "unknown" });
+    return { queued: 0, deduped: false };
+  }
+}
 
 // ---- deliver
 
@@ -176,6 +222,11 @@ export interface AttentionDeliveryDependencies {
   urgent?: (orgId: OrgId, row: { developerId: string; sessionId: string; kind: AttentionKind }) => Promise<boolean>;
   /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
   emailLinks?: AttentionEmailLinks;
+  /**
+   * Lead 4 N1: what an `upkeep_paused` row needs. `administers`: whether the person still administers the project now (a project admin, or a company owner or admin), read live before every send; a row whose person no
+   * longer does, or any failure to tell, is dropped without a word. `link`: the address of the Spending limits page for the project (a plain https link), or undefined. Absent: no upkeep row is delivered (it is dropped).
+   */
+  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean>; link?(project: string): string | undefined };
   log?: Log;
 }
 
@@ -193,8 +244,10 @@ export const oneLine = (text: string, max: number): string => {
  */
 export function attentionText(lines: readonly Line[], more: number, maxLength: number, footer?: string): string {
   const count = lines.length + more;
+  const upkeepLines = lines.filter((line) => line.kind === "upkeep_paused").length;
   const body = [
-    count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:",
+    upkeepLines === 0 ? (count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:")
+      : upkeepLines === lines.length && more === 0 ? "Nightly upkeep needs your attention in Rovara:" : "These items need your attention in Rovara:",
     ...lines.map((line) => `- ${line.title}: ${line.status}${line.link === undefined ? "" : ` ${line.link}`}`),
     ...(more > 0 ? [`- and ${String(more)} more`] : []),
   ].join("\n");
@@ -205,7 +258,7 @@ export function attentionText(lines: readonly Line[], more: number, maxLength: n
 }
 
 const doneText = (lines: readonly Line[], maxLength: number, footer?: string): string => attentionText(lines, 0, maxLength, footer).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
-const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "Your Rovara digest:");
+const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need|Nightly upkeep needs|These items need) your attention in Rovara:/u, "Your Rovara digest:");
 
 /** The event id of a batch: the same rows to the same target are the same event, so an adapter that is told twice drops the repeat. */
 export function batchEventId(orgId: string, developerId: string, target: string, rows: readonly { sk: string; at: string }[]): string {
@@ -221,7 +274,9 @@ interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerI
 function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | undefined {
   const { orgId, developerId, sessionId, kind, at, sk } = item;
   if (typeof orgId !== "string" || typeof developerId !== "string" || typeof sessionId !== "string" || typeof at !== "string" || typeof sk !== "string") return undefined;
-  if (typeof kind !== "string" || !["needs_you", "paused", "ready", "failed", "done"].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  if (typeof kind !== "string" || !["needs_you", "paused", "ready", "failed", "done", "upkeep_paused"].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  // An upkeep row's subject must be an upkeep subject (and a task's row never one): a row that is neither reads as nothing.
+  if ((kind === "upkeep_paused") !== (upkeepSubjectOf(sessionId) !== undefined)) return undefined;
   // A row past its expiry is not delivered (the store deletes expired items late).
   const expires = item[INDEX_EXPIRY_ATTRIBUTE];
   if (typeof expires === "number" && expires <= nowSeconds) return undefined;
@@ -340,6 +395,16 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     const stale: PendingRow[] = [];
     const carded = new Set<string>();
     for (const row of rows) {
+      if (row.kind === "upkeep_paused") {
+        // Not a session's row: the notice is about a project. Still theirs to read only while they administer it.
+        const subject = upkeepSubjectOf(row.sessionId);
+        // No upkeep wiring on this host: the row waits (it expires by itself) instead of being dropped over a notice that was written once for the month.
+        if (deps.upkeep === undefined) continue;
+        const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
+        if (!allowed) { stale.push(row); continue; }
+        current.push({ row, line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: UPKEEP_NOTICE_WORDS[subject.reason], link: deps.upkeep.link?.(subject.project), kind: "upkeep_paused" } });
+        continue;
+      }
       const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
       if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
       const session = await sessions.get(orgId, row.sessionId);
@@ -358,7 +423,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     // Where each session's change is also told: the conversation it was started from, when this person started it.
     const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
     if (deps.thread !== undefined) {
-      for (const sessionId of new Set(current.map(({ row }) => row.sessionId))) {
+      for (const sessionId of new Set(current.filter(({ row }) => row.kind !== "upkeep_paused").map(({ row }) => row.sessionId))) {
         const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
         if (thread === undefined || thread.personId !== developerId) continue;
         const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };

@@ -239,6 +239,18 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/decide", requires: "full" },
+  // Lead 4 W4: the wiki build controls (core-host/wiki-build-routes.ts): full access only, then any live role on the project reads the state; a live company owner or admin, or the project's
+  // administrator, builds, continues, stops, refreshes, gives the wiki to agents and deletes it.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki-build", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/continue", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/stop", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/refresh", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/agents", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-build/delete", requires: "full" },
+  // Lead 4 N1: the nightly upkeep switch (core-host/upkeep-routes.ts): full access only, then any live role on the project reads it; a live company owner or admin, or the project's administrator, switches it.
+  { method: "GET", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
+  { method: "PUT", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
