@@ -151,7 +151,7 @@ describe("team_knowledge and team_knowledge_for", () => {
     const mcp = await connect({ knowledgeFor: async () => answer([{ id: "les_aaaa1111", advice: "Use\u0007 the helper sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", why: "ok" }]) });
     const result = await mcp.callTool({ name: "team_knowledge", arguments: { project: "payments" } });
     expect(JSON.stringify(result)).not.toMatch(/sk-ant-api03-abcdefgh/u);
-    expect(structured(result).units[0].advice).not.toContain("\u0007");
+    expect(structured(result).units[0]?.advice).not.toContain("\u0007");
   });
 });
 

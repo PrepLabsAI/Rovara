@@ -241,9 +241,9 @@ describe("the table of contents: a tree, names and numbers only", () => {
     expect(tree.status).toBe(200);
     expect(tree.body).toMatchObject({ status: "ok", project: "payments", complete: true, more: 0 });
     const demo = tree.body.repos.find((r: { repo: string }) => r.repo === "demo");
-    expect(demo.areas).toEqual([{ area: "src/", rules: 0, lessons: 2, facts: 0, skills: 0 }, { area: "tests/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    expect(demo?.areas).toEqual([{ area: "src/", rules: 0, lessons: 2, facts: 0, skills: 0 }, { area: "tests/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
     const any = tree.body.repos.find((r: { repo: string }) => r.repo === "any repository");
-    expect(any.areas).toEqual([{ area: "any folder", rules: 0, lessons: 1, facts: 0, skills: 0 }, { area: "whole repository", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    expect(any?.areas).toEqual([{ area: "any folder", rules: 0, lessons: 1, facts: 0, skills: 0 }, { area: "whole repository", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
     const written = JSON.stringify(tree.body);
     for (const text of ["TITLE-NOT-IN-TREE", "les_tree", "withRetry", TEXT]) expect(written, text).not.toContain(text);
     // Narrowed to one repository (the checkout's remote): that repository's rows and the ones that apply to every repository.
@@ -273,6 +273,6 @@ describe("the table of contents: a tree, names and numbers only", () => {
     await put(w, active({ id: "les_ok000001", scope: { paths: ["src/**"] } }), active({ id: "les_pend0001", status: "pending", approvals: [], pendingExpiresAt: 1_900_000_000_000, scope: { paths: ["src/**"] } }),
       active({ id: "les_trial001", approvals: [{ approvalId: "tr", by: "system:trial", at: 1, mode: "trial" }], trial: { state: "trial", startedAt: 1 }, scope: { paths: ["src/**"] } }));
     const tree = await areas(w);
-    expect(tree.body.repos[0].areas).toEqual([{ area: "src/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
+    expect(tree.body.repos[0]?.areas).toEqual([{ area: "src/", rules: 0, lessons: 1, facts: 0, skills: 0 }]);
   });
 });
