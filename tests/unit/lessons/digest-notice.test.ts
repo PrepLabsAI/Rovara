@@ -9,7 +9,7 @@ import { prefsKey } from "../../../packages/broker/src/core/notify/prefs.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import { digestPilotOf, switchNames } from "../../../packages/broker/src/core-host/flags.js";
-import { DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestChoiceStrict, readDigestSetting, resolveDigestSettingStrict, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
+import { DIGEST_RETRY_AFTER_MS, DIGEST_RETRY_MAX, DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestChoiceStrict, readDigestSetting, resolveDigestSettingStrict, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
@@ -214,9 +214,15 @@ describe("the weekly lessons summary", () => {
     const logs: string[] = [];
     expect(await run(deps(busy, A, broken, { log: (event) => { logs.push(event); } }))).toMatchObject({ sent: 0, failed: 1 });
     expect(logs).toEqual(expect.arrayContaining(["digest.send_failed", "digest.undelivered"]));
-    expect(await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toBeUndefined();
+    const held = await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" });
+    expect(held).toMatchObject({ failWeek: digestWeekOf(busy.world.clock.now), tries: 1 });
+    expect(held!["week"]).toBeLessThan(digestWeekOf(busy.world.clock.now));
     expect(await busy.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
     const good = adapter();
+    // Not before the retry time (the project stays open, the adapter is not asked).
+    expect(await run(deps(busy, A, good))).toMatchObject({ sent: 0 });
+    expect(good.events).toHaveLength(0);
+    busy.world.clock.now += DIGEST_RETRY_AFTER_MS + 1;
     expect(await run(deps(busy, A, good))).toMatchObject({ sent: 1 });
     expect(await run(deps(busy, A, good))).toMatchObject({ sent: 0 });
     expect(good.events).toHaveLength(1);
@@ -230,11 +236,73 @@ describe("the weekly lessons summary", () => {
     expect(await run(deps(w, A, undefined, { log: (event, fields) => { logs.push([event, fields]); } }))).toMatchObject({ sent: 0, failed: 1 });
     expect(logs.map(([event]) => event)).toEqual(expect.arrayContaining(["digest.no_adapter", "digest.undelivered"]));
     expect(logs.find(([event]) => event === "digest.no_adapter")![1]).toEqual({ channel: "chat" });
-    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toBeUndefined();
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toMatchObject({ tries: 1, failWeek: digestWeekOf(w.world.clock.now) });
     expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
     const slack = adapter();
+    w.world.clock.now += DIGEST_RETRY_AFTER_MS + 1;
     expect(await run(deps(w, A, slack))).toMatchObject({ sent: 1 });
     expect(slack.events).toHaveLength(1);
+  });
+
+  it("a stuck person is retried at most DIGEST_RETRY_MAX times a week, never sooner than the retry time, and then let go: the week closes and the others are not starved (L4-JA56 review M1)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, A, "a-maint");
+    const calls: string[] = [];
+    const stuck = adapter();
+    stuck.deliver = async (event) => { const space = (event as { conversation: { space: string } }).conversation.space; calls.push(space); if (space === "D-a-admin") throw new Error("down"); };
+    const week = digestWeekOf(w.world.clock.now);
+    for (let pass = 0; pass < DIGEST_RETRY_MAX + 3; pass += 1) {
+      await run(deps(w, A, stuck));
+      // A pass right after is held (no call for the stuck person).
+      await run(deps(w, A, stuck));
+      if (digestWeekOf(w.world.clock.now + DIGEST_RETRY_AFTER_MS + 1) !== week) break;
+      w.world.clock.now += DIGEST_RETRY_AFTER_MS + 1;
+    }
+    expect(calls.filter((space) => space === "D-a-admin")).toHaveLength(DIGEST_RETRY_MAX);
+    expect(calls.filter((space) => space === "D-a-maint")).toHaveLength(1);
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeDefined();
+  });
+
+  it("a send that times out may have arrived: it is not repeated and the person is closed for the week (review M2)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    const slow = adapter();
+    let calls = 0;
+    slow.deliver = async () => { calls += 1; throw new Error("timeout"); };
+    expect(await run(deps(w, A, slow))).toMatchObject({ sent: 0, failed: 1 });
+    w.world.clock.now += DIGEST_RETRY_AFTER_MS + 1;
+    await run(deps(w, A, slow));
+    expect(calls).toBe(1);
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toMatchObject({ week: digestWeekOf(w.world.clock.now) });
+  });
+
+  it("a claim lost to a pass at the same moment keeps the project open (the other pass may give it back)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    const base = deps(w, A, adapter());
+    const documents = new Proxy(base.documents, { get(target, prop) {
+      if (prop === "put") return async (request: { item: Record<string, unknown> }) => (request.item["sk"] === "SENT#a-admin" ? { applied: false } : await target.put(request as never));
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    } });
+    expect(await run({ ...base, documents })).toMatchObject({ sent: 0 });
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
+  });
+
+  it("a claim held by another pass that may give it back keeps the project open: a lost claim does not close the week (review L1)", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    const key = { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" };
+    // Another pass's claim, just made.
+    await w.world.store.put({ item: { ...key, entityType: "LESSON_DIGEST", week: digestWeekOf(w.world.clock.now), at: w.world.clock.now } });
+    const slack = adapter();
+    expect(await run(deps(w, A, slack))).toMatchObject({ sent: 0 });
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
+    // An old claim (told long ago this week) is plainly done and closes the week.
+    w.world.clock.now += 2 * 60_000;
+    await run(deps(w, A, slack));
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeDefined();
   });
 
   it("with two places, one delivery is enough to close the person for the week (the other place is not retried)", async () => {
@@ -245,6 +313,7 @@ describe("the weekly lessons summary", () => {
     const deliver = flaky.deliver.bind(flaky);
     flaky.deliver = async (event) => { calls += 1; if (calls === 1) throw new Error("down"); await deliver(event); };
     expect(await run(deps(w, A, flaky))).toMatchObject({ sent: 1, failed: 1 });
+    w.world.clock.now += DIGEST_RETRY_AFTER_MS + 1;
     expect(await run(deps(w, A, flaky))).toMatchObject({ sent: 0 });
     expect(flaky.events).toHaveLength(1);
   });

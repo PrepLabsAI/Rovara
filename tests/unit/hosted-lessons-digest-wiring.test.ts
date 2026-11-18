@@ -197,9 +197,10 @@ describe("B6: the weekly lessons summary is delivered through the company's own 
     const failed = await job(s, "lessons");
     expect(failed.companies.find((entry) => entry.companyId === A)).toMatchObject({ outcome: "ran" });
     expect(await weekRow(s, A)).toBeUndefined();
-    expect(await sentRow(s, A)).toBeUndefined();
+    expect(await sentRow(s, A)).toMatchObject({ tries: 1 });
     expect(s.logs.some((entry) => typeof entry["event"] === "string" && (entry["event"].includes("no_adapter") || entry["event"].includes("undelivered")))).toBe(true);
     s.own[A] = mine;
+    s.world.clock.now += 3_600_001;
     await job(s, "lessons");
     expect(mine.events).toHaveLength(1);
     expect(await weekRow(s, A)).toBeDefined();
@@ -212,9 +213,10 @@ describe("B6: the weekly lessons summary is delivered through the company's own 
     await job(s, "lessons");
     expect(broken.events).toHaveLength(0);
     expect(await weekRow(s, A)).toBeUndefined();
-    expect(await sentRow(s, A)).toBeUndefined();
+    expect(await sentRow(s, A)).toMatchObject({ tries: 1 });
     const fixed = chatAdapter();
     s.own[A] = fixed;
+    s.world.clock.now += 3_600_001;
     await job(s, "lessons");
     await job(s, "lessons");
     expect(fixed.events).toHaveLength(1);
@@ -226,6 +228,6 @@ describe("B6: the weekly lessons summary is delivered through the company's own 
     await ready(s, A, "TA");
     await job(s, "lessons");
     expect(await weekRow(s, A)).toBeUndefined();
-    expect(await sentRow(s, A)).toBeUndefined();
+    expect(await sentRow(s, A)).toMatchObject({ tries: 1 });
   });
 });
