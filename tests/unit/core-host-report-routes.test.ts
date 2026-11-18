@@ -144,6 +144,19 @@ describe("the report tasks route", () => {
     expect(await read(adminB, "&project=ledger")).toEqual([]);
   });
 
+  it("each row carries the page of its own task, and an admin of the other company never gets one for a task of this company", async () => {
+    const { routes, as, start } = await setup();
+    const a = await start(FAKE_COMPANY, "p1", "payments");
+    const b = await start(OTHER, "p2", "payments");
+    const pages = async (caller: DeployedCaller) => ((body(await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}`), caller))) as unknown as ReportTasksResponse).tasks.map((row) => [row.taskId, row.taskPage]);
+    expect(await pages(as(FAKE_COMPANY, "admin", "admin-a"))).toEqual([[a, `/review/${a}/task`]]);
+    expect(await pages(as(OTHER, "owner", "owner-b"))).toEqual([[b, `/review/${b}/task`]]);
+    // a member is refused before any row is read: no reference leaves with the refusal
+    const refused = await routes.route(get(`/v1/app/org/report/tasks?from=${SINCE}`), as(FAKE_COMPANY, "member", "member-1"));
+    expect(refused?.statusCode).toBe(403);
+    expect(refused!.body).not.toContain("/review/");
+  });
+
   it("refuses a query it does not know, twice-given parameters, empty values and a limit that is not a number, with fixed words", async () => {
     const { routes, as } = await setup();
     const caller = as(FAKE_COMPANY, "admin", "admin-1");

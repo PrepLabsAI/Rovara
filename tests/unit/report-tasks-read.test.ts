@@ -122,7 +122,7 @@ describe("GET report tasks: the rows", () => {
     const page = await w.read(A, { from: day(1) });
     expect(page).toMatchObject({ hasMore: false, skipped: 0, unreadable: 0 });
     expect(page.tasks).toEqual([{
-      taskId, project: "alpha", title: "Add checkout", origin: "linear", path: "full", state: "merged", feature: { id: feature.id, source: "chosen" }, startedAt: day(3), firstPrAt: day(4), endedAt: day(5, 10),
+      taskId, taskPage: `/review/${taskId}/task`, project: "alpha", title: "Add checkout", origin: "linear", path: "full", state: "merged", feature: { id: feature.id, source: "chosen" }, startedAt: day(3), firstPrAt: day(4), endedAt: day(5, 10),
       prsOpened: 1, prsMerged: 1, prLinks: ["https://github.com/acme/web/pull/7"], costMicros: 1_234_567, currency: "USD", unpricedCalls: 1,
     }]);
     expect(ReportTaskRowSchema.safeParse(page.tasks[0]).success).toBe(true);

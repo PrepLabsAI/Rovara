@@ -8,7 +8,7 @@
 //
 // Bounded: one call looks at most `REPORT_SCAN_MAX` stored rows and returns at most the page limit; the cursor is bound to the company and the filters (`company-read-cursor.ts`).
 import {
-  AgentXError, OrgIdSchema, REPORT_PAGE_DEFAULT, REPORT_QUERY_REFUSED, REPORT_SCAN_MAX, REPORT_SK, REPORT_TASK_POSITION, ReportTaskRowSchema, ReportTasksQuerySchema, agentXError, change, reportPartition,
+  AgentXError, OrgIdSchema, REPORT_PAGE_DEFAULT, REPORT_QUERY_REFUSED, REPORT_SCAN_MAX, REPORT_SK, REPORT_TASK_POSITION, ReportTaskRowSchema, ReportTasksQuerySchema, agentXError, taskPagePath, change, reportPartition,
   reportTaskFeatureKey, when,
   type DocumentKey, type DocumentStore, type OrgId, type ReportTaskRow, type ReportTasksResponse, type StoredDocument,
 } from "@agentx/contracts";
@@ -205,7 +205,7 @@ export async function readCompanyReportTasks(store: ReportReadStore, companyId: 
         if (cost === undefined) { counters.unreadable += 1; continue; }
         const feature = featureOfAssignment(taskFeatureOf(pick(assignments, reportTaskFeatureKey(orgId, row.taskId)), orgId), featureMap);
         const built = ReportTaskRowSchema.safeParse({
-          taskId: row.taskId, project: row.project, title: row.title, origin: row.origin, ...(facts.path === undefined ? {} : { path: facts.path }), state: facts.state,
+          taskId: row.taskId, project: row.project, title: row.title, taskPage: taskPagePath(row.taskId), origin: row.origin, ...(facts.path === undefined ? {} : { path: facts.path }), state: facts.state,
           ...(feature === undefined ? {} : { feature }), startedAt: row.startedAt, ...(facts.firstPrAt === undefined ? {} : { firstPrAt: facts.firstPrAt }), ...(facts.endedAt === undefined ? {} : { endedAt: facts.endedAt }),
           prsOpened: facts.prsOpened, prsMerged: facts.prsMerged, prLinks: facts.prLinks, costMicros: cost.micros, ...(cost.currency === undefined ? {} : { currency: cost.currency }), unpricedCalls: cost.unpriced,
           // Slice A4: all six numbers or none (absent is "not known", never zero), and `timesComplete` only with them.
