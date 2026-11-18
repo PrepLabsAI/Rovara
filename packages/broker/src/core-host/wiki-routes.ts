@@ -16,7 +16,7 @@
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a store fault is a fixed 503.
 import {
   WIKI_LIMITS, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, WikiIndexResponseSchema, WikiPageIdSchema, WikiPageResponseSchema, WikiProjectSchema, WikiSearchResponseSchema, WikiSourcesResponseSchema,
-  AgentXError, agentXError, redactText, stripHiddenCharacters, type DocumentStore, type OrgId, type WikiIndexResponse, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
+  AgentXError, agentXError, redactText, stripHiddenCharacters, type DocumentStore, type OrgId, type WikiIndexResponse, type WikiToolsOff, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
 } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { WIKI_FORMER_MEMBER, createWikiStore } from "../core/wiki/store.js";
@@ -35,6 +35,11 @@ export interface HostedWikiWiring {
   projectRepositories(companyId: OrgId, project: string): Promise<readonly string[] | undefined>;
   /** A person's display name now, for a note's author. Absent or unknown: "a former member". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
+  /**
+   * The company's switch "Knowledge stays in Rovara" for a caller that is NOT the Rovara web app (a tool outside Rovara: `wiki_list`, `wiki_read`), through the lessons gate (`wikiToolsGate`). Answers the fixed "off" answer, or
+   * undefined when the tool may read. Throws when a setting cannot be read (the read then says "unavailable"). Absent: the company has no such switch here (lessons are not on for it), and nothing changes.
+   */
+  toolGate?: ((companyId: OrgId, project: string) => Promise<WikiToolsOff | undefined>) | undefined;
 }
 
 export interface HostedWikiInput {
@@ -47,6 +52,11 @@ export interface HostedWikiInput {
   store: DocumentStore;
   wiring: HostedWikiWiring;
   now: () => number;
+  /**
+   * True only for the Rovara web app's own verified sign-in client (`DeployedCaller.webApp`). Anyone else (a CLI token, another client, a script token, or a caller that says nothing) is a tool outside Rovara and is held to the
+   * company's "Knowledge stays in Rovara" switch before anything of the wiki is read. The web app's own Wiki tab is never held back by it.
+   */
+  webApp?: boolean | undefined;
 }
 
 const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/(?:search|pages\/([^/]+)(\/sources)?))?$/u;
@@ -80,6 +90,13 @@ export async function routeHostedWiki(input: HostedWikiInput): Promise<BrokerRes
     try { project = decodeURIComponent(match[1]!); } catch { throw projectNotFound(); }
     if (!WikiProjectSchema.safeParse(project).success) throw projectNotFound();
     if (!(await mayRead(input, project))) throw projectNotFound();
+    // The company's "Knowledge stays in Rovara" (owner decision 2026-11-17), for a tool outside Rovara: after the person's standing and the project (so a project one may not read is still "not found") and BEFORE any read of the
+    // wiki, the repositories or the prune below, the way the knowledge tools run their one gate after the repository is proved and before anything is read.
+    if (input.webApp !== true && input.wiring.toolGate !== undefined) {
+      let off: WikiToolsOff | undefined;
+      try { off = await input.wiring.toolGate(input.companyId, project); } catch { throw unavailable(); }
+      if (off !== undefined) return json(200, off);
+    }
     let repositories: readonly string[] | undefined;
     try { repositories = await input.wiring.projectRepositories(input.companyId, project); } catch { throw unavailable(); }
     if (!Array.isArray(repositories)) throw projectNotFound();

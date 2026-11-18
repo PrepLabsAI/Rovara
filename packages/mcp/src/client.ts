@@ -4,7 +4,7 @@ import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { randomUUID } from "node:crypto";
 import {
   AgentXConfigurationConfirmSchema,
-  WikiIndexResponseSchema, WikiPageResponseSchema, type WikiIndexResponse, type WikiPageResponse,
+  WikiIndexResponseSchema, WikiPageResponseSchema, WikiToolsOffSchema, type WikiIndexResponse, type WikiPageResponse, type WikiToolsOff,
   AgentXError,
   DeveloperCloseResponseSchema,
   DeveloperProjectsResponseSchema,
@@ -156,8 +156,10 @@ export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
-  getWikiIndex(project: string): Promise<WikiIndexResponse>;
-  getWikiPage(project: string, pageId: string): Promise<WikiPageResponse>;
+  /** The project's wiki index, or the company switch's fixed "off" answer ("Knowledge stays in Rovara": nothing of the wiki comes with it). */
+  getWikiIndex(project: string): Promise<WikiIndexResponse | WikiToolsOff>;
+  /** One wiki page, or the company switch's fixed "off" answer. */
+  getWikiPage(project: string, pageId: string): Promise<WikiPageResponse | WikiToolsOff>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskClientView>;
   /** PLANFULLDOC: one stored version of the task's plan, whole (the latest when `version` is left out). */
@@ -441,12 +443,14 @@ export function httpControlPlaneClient(options: {
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
     getWikiIndex: async (project) => {
-      const answer = await call(WikiIndexResponseSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki`);
+      const answer = await call(z.union([WikiToolsOffSchema, WikiIndexResponseSchema]), "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki`);
+      if ("status" in answer) return answer;
       if (answer.project !== project) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE);
       return answer;
     },
     getWikiPage: async (project, pageId) => {
-      const answer = await call(WikiPageResponseSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki/pages/${encodeURIComponent(pageId)}`);
+      const answer = await call(z.union([WikiToolsOffSchema, WikiPageResponseSchema]), "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki/pages/${encodeURIComponent(pageId)}`);
+      if ("status" in answer) return answer;
       if (answer.project !== project || answer.page.pageId !== pageId) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE);
       return answer;
     },
