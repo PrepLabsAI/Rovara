@@ -733,6 +733,75 @@ describe("DEC 253q(a): the eval the agent drafts goes to the broker through the 
   });
 });
 
+describe("L4-E12: the free dry run of the drafted eval goes through the same callback, after the report, and never changes the run", () => {
+  const IMAGE = `registry.example/worker@sha256:${"e".repeat(64)}`;
+  const EVAL = { suites: [{ selection: "evals/demo", questions: [{ id: "q1", category: "ordinary", path: "evals/demo/q1.txt" }], command: { executable: "node", args: ["evals/run.js"], cwd: "." },
+    report: { cwd: ".", argument: "rovara-measures.json" }, model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001", judge: { kind: "rule", scoringPath: "evals/demo/score.txt" }, subsetSupported: false, maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 10 }] };
+  const tracked = new Map([["web", new Set(["package.json", ".github/workflows/ci.yml", "evals/demo/q1.txt", "evals/demo/score.txt"])]]);
+  const scan = { repositories: [], setup: [], tests: [], checks: [], knowledge: [], sources: [], foundNotUsed: [], notes: [] };
+  const LIST = { version: 1, modelCalls: 0, ended: "failed", databases: [{ port: 5432, engine: "postgres" }], hosts: [], envVars: [] };
+  const evalWorld = async (dry?: (report: unknown) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
+    const t = await world({ final: options.final ?? block({ ...ANSWER, eval: EVAL }), ...(options.files === undefined ? {} : { files: options.files }) });
+    t.input.ports.beforeStart = async () => ({ scan, tracked });
+    t.input.evalImage = IMAGE;
+    t.input.discoverEvals = async () => ({ status: "found", candidates: [{ path: "evals/demo", label: "x", tool: "eval folder" }], omitted: [], message: "" });
+    if (dry !== undefined) t.input.evalDryRun = dry as never;
+    return t;
+  };
+  const kinds = (t: { w: World }) => t.w.callbacks.map((body) => (body as { kind: string }).kind);
+
+  it("sends the list once, right after the eval report, only for a report the broker took", async () => {
+    const seen: unknown[] = [];
+    const t = await evalWorld(async (report) => { seen.push(report); return LIST; });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(kinds(t).slice(-2)).toEqual(["eval_discovery", "eval_dry_run"]);
+    expect(t.w.callbacks.at(-1)).toEqual({ kind: "eval_dry_run", list: LIST });
+    expect(seen).toHaveLength(1);
+    expect(SetupEvalDiscoveryReportSchema.safeParse(seen[0]).success).toBe(true);
+  });
+
+  it("runs nothing (and sends nothing) when the broker refused the report, the run drafted no eval, or the run ended without a proposal (mutant: the reported gate)", async () => {
+    let calls = 0;
+    const dry = async () => { calls += 1; return LIST; };
+    const refused = await evalWorld(dry);
+    const ports = refused.input.ports;
+    refused.input.ports = { ...ports, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") throw new Error("refused"); return ports.callback(body); } };
+    await runSetupAgent(refused.input);
+    for (const t of [await evalWorld(dry, { final: block(ANSWER) }), await evalWorld(dry, { files: [{ ok: false, reason: "tracked_files_changed" }] })]) {
+      await runSetupAgent(t.input);
+      expect(kinds(t)).not.toContain("eval_dry_run");
+    }
+    expect(calls).toBe(0);
+    expect(kinds(refused)).not.toContain("eval_dry_run");
+  });
+
+  it("a dry run that fails, finds nothing to say (undefined) or whose callback is refused leaves the run's result exactly as it was", async () => {
+    const plain = await evalWorld();
+    const base = await runSetupAgent(plain.input);
+    for (const dry of [async () => { throw new Error("boom"); }, async () => undefined]) {
+      const t = await evalWorld(dry);
+      const result = await runSetupAgent(t.input);
+      expect(result.setupRunSummary).toMatchObject({ stop: base.setupRunSummary.stop });
+      expect(result.setupProposal).toEqual(base.setupProposal);
+      expect(kinds(t)).not.toContain("eval_dry_run");
+    }
+    const t = await evalWorld(async () => LIST);
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, callback: async (body) => { if ((body as { kind: string }).kind === "eval_dry_run") throw new Error("refused"); return ports.callback(body); } };
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(result.setupProposal).toBeDefined();
+  });
+
+  it("without a dry-run host nothing changes: the callbacks are exactly the report's (a host that cannot run one sends nothing)", async () => {
+    const t = await evalWorld();
+    await runSetupAgent(t.input);
+    expect(kinds(t)).not.toContain("eval_dry_run");
+    expect(kinds(t).at(-1)).toBe("eval_discovery");
+  });
+});
+
 // L4-SR2: the gateway's upkeep pause under an unattended repair draft. The worker reads the gateway's fixed sentence (as the wiki build's worker does), ends the run `infrastructure` and puts the reason in the summary; a plain
 // model refusal, a spent budget and any other fault carry none. The broker takes the word only from an unattended draft (tests/unit/setup-repair-draft.test.ts).
 describe("L4-SR2: the gateway's upkeep pause", () => {

@@ -126,7 +126,8 @@ describe("off by default", () => {
     expect(main).toMatch(/const evalRequested = invocation\.payload\.evalRequest !== undefined;/u);
     expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: evalEnvironmentWithGateway\(process\.env, invocation\.payload\.evalGatewayUrl\), controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
     // DEC 253n(2): the fresh check sandbox is the worker's own (its environment, Docker and workspace key), built per check from the delivered plan.
-    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\) \} \}\) : undefined \}\)/u);
+    // L4-E12 (E1): the fresh sandbox also gets the task's own services, from the task's dependency plan, only through the starter (undefined without a configuration or a local plan).
+    expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\),\s*\/\/[^\n]*\n\s*services: \(\) => createEvalServicesStarter\(\{ config: testServicesConfigFromEnvironment\(process\.env\), dependencies: invocation\.payload\.testEnvironment\?\.dependencies \}\) \} \}\) : undefined \}\)/u);
     expect(main).toMatch(/\.\.\.\(evalFinalCheck === undefined \? \{\} : \{ evalFinalCheck \}\)/u);
   });
 });

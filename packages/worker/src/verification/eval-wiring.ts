@@ -24,6 +24,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EVAL_VERTEX_ROW, evalImageDigestOf, type EvalEnvironment } from "@agentx/contracts";
+import type { EvalServicesStarter } from "./eval-services.js";
 import { createBridgedEvalExec, createFreshEvalSandbox, freshEvalSandboxOffered, FRESH_EVAL_RUN_MAX_MS, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import type { DockerCli } from "../swebench/containers.js";
@@ -128,6 +129,10 @@ export function evalPlanSourcesFor(invocation: EvalSourceInvocation, options: { 
   };
 }
 
+/** L4-E12: the operator's off switch for the sealed name server on eval rounds (exactly "0" is off; anything else is on). */
+export const EVAL_SEALED_DNS_VARIABLE = "ROVARA_EVAL_SEALED_DNS";
+export const evalSealedDnsOn = (environment: NodeJS.ProcessEnv): boolean => environment[EVAL_SEALED_DNS_VARIABLE] !== "0";
+
 /** The worker's own image variable: the model helper and the fresh check sandbox run it (pinned by digest). */
 export const EVAL_WORKER_IMAGE_VARIABLE = "AGENTX_WORKER_IMAGE";
 
@@ -137,6 +142,8 @@ export interface EvalFreshHost {
   readonly docker: DockerCli;
   /** `setupWorkspaceKey(rootPath)`: the round network's labels and sweep. */
   readonly workspaceKey: () => Promise<string>;
+  /** L4-E12 (E1): the project's test services for the eval (the starter `createEvalServicesStarter` makes from the task's dependency plan), read at each run. Absent or undefined: the box gets no service, exactly as before. */
+  readonly services?: (() => EvalServicesStarter | undefined) | undefined;
   /** Test seam; default `createFreshEvalSandbox`. */
   readonly make?: (config: FreshEvalSandboxConfig) => FreshEvalSandbox;
   /** Test seam: the tree of a commit in a repository. Default: the safe git path (`createProcessCandidateGit(...).treeOf`). */
@@ -182,12 +189,15 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
       } finally { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); }
       // L4-EVS: the environment of this plan's ask (an unreadable one is no environment: the bare image, as before).
       const evalEnvironment = await deliveredEnvironment().catch(() => undefined);
+      const services = (() => { try { return host.services?.(); } catch { return undefined; } })();
       const config: FreshEvalSandboxConfig = {
         ...(evalEnvironment === undefined ? {} : { evalEnvironment }),
         docker: host.docker, image, workspace: await host.workspaceKey(), taskId: invocation.operationId,
         roundBudgetMs: Math.min(Math.max(1, Math.floor(check.round.roundBudgetMs)), FRESH_EVAL_RUN_MAX_MS),
         repository: { directory: check.repository.directory, baseCommit: check.repository.baseCommit, candidateCommit: check.repository.candidateCommit },
         command: check.command, report: check.report, rowId: check.rowId, scratchDir: check.round.scratchDir, workingSandbox: check.round.workingSandbox, environment: host.environment,
+        // L4-E12: this run's own services (E1) and the sealed name server (E2, on unless the operator switched it off).
+        ...(services === undefined ? {} : { services }), sealedDns: evalSealedDnsOn(host.environment),
       };
       pinned = { row: check.rowId, path: evalModelPathPattern(check.rowId, check.model) };
       return await (host.make ?? createFreshEvalSandbox)(config).run(input);

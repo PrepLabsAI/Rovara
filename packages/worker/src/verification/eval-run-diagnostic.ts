@@ -119,7 +119,7 @@ const MODEL_ROUTE_BASE: readonly string[] = ["rovara-models", "metadata.google.i
 /** The model route of a run: the hosts pinned to the model helper and the suffixes (Azure) that are model hosts. A failed connection to one is the model route, never "blocked" (a client that ignored the redirect has its own wording). */
 export interface ModelRoute { readonly hosts: readonly string[]; readonly suffixes: readonly string[] }
 const GOOGLE_AI_SUFFIX = "-aiplatform.googleapis.com";
-function isModelRoute(host: string, route: ModelRoute | undefined): boolean {
+export function isModelRoute(host: string, route: ModelRoute | undefined): boolean {
   if (MODEL_ROUTE_BASE.includes(host) || host.endsWith(GOOGLE_AI_SUFFIX) || host === "generativelanguage.googleapis.com" || host === "aiplatform.googleapis.com") return true;
   if (route === undefined) return false;
   return route.hosts.some(h => h.toLowerCase() === host) || route.suffixes.some(suffix => { const bare = suffix.toLowerCase().replace(/^\./u, ""); return host === bare || host.endsWith(`.${bare}`); });
@@ -189,30 +189,68 @@ function cleanHost(raw: string | undefined, secrets: readonly string[]): string 
   return host;
 }
 
+/** Every reach shape the output names, in the order the output names them (at most 200). */
+function reachesOf(text: string): Reach[] {
+  const found: Array<{ at: number; reach: Reach }> = [];
+  for (const { pattern, host, port, db } of REACH_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const m of text.matchAll(pattern)) {
+      const p = port === undefined || m[port] === undefined ? undefined : Number(m[port]);
+      found.push({ at: m.index ?? 0, reach: { host: host === undefined ? undefined : m[host], port: p !== undefined && Number.isInteger(p) && p >= 1 && p <= 65_535 ? p : undefined, database: db === true } });
+      if (found.length >= 200) break;
+    }
+  }
+  found.sort((a, b) => a.at - b.at);
+  return found.map(({ reach }) => reach);
+}
+
+/** What one reach is, after the model route and the strict host shape: a database (named by its port alone) or an outside service (a host name, with the port when one was seen). Undefined when it is nothing nameable. */
+function classifyReach(reach: Reach, secrets: readonly string[], route: ModelRoute | undefined): { kind: "database"; port: number | undefined } | { kind: "service"; host: string; port: number | undefined } | undefined {
+  const raw = reach.host === undefined ? "" : normalHost(reach.host);
+  if (isModelRoute(raw, route)) return undefined;
+  const host = cleanHost(reach.host, secrets);
+  // A database is named by its port alone (its host is the project's own private name); anything else needs a host name that passed the shape.
+  if (reach.database || (reach.port !== undefined && DATABASE_PORTS.has(reach.port))) return { kind: "database", port: reach.port };
+  return host === undefined ? undefined : { kind: "service", host, port: reach.port };
+}
+
+/**
+ * L4-E12: EVERY distinct thing the eval tried to reach (no cap of 3), for the dry run's dependency list: databases by port, outside hosts by name with the port when the error named one. The same closed shapes, the same
+ * model-route exclusion and the same host allow-list as `findBlockedReach`. Never throws.
+ */
+export function findAllReaches(text: string, secrets: readonly string[] = [], route?: ModelRoute): { databases: Array<{ port: number | undefined }>; databaseHosts: string[]; hosts: Array<{ name: string; port: number | undefined }> } {
+  const databases: Array<{ port: number | undefined }> = [];
+  // The databases' own host names (private to the project): kept ONLY to tell a database's name from an outside service when the name server also recorded it. They never leave the worker.
+  const databaseHosts = new Set<string>();
+  const hosts: Array<{ name: string; port: number | undefined }> = [];
+  try {
+    for (const reach of reachesOf(text)) {
+      const item = classifyReach(reach, secrets, route);
+      if (item === undefined) continue;
+      if (item.kind === "database") {
+        if (reach.host !== undefined) databaseHosts.add(normalHost(reach.host));
+        if (!databases.some(d => d.port === item.port)) databases.push({ port: item.port });
+      } else {
+        const known = hosts.find(h => h.name === item.host);
+        if (known === undefined) hosts.push({ name: item.host, port: item.port });
+        else if (known.port === undefined && item.port !== undefined) known.port = item.port;
+      }
+    }
+  } catch { /* an unreadable text names nothing */ }
+  // A database seen with no port is the same one as a database seen with a port (a driver names the host in one line and the port in another).
+  const withPort = databases.some(d => d.port !== undefined);
+  return { databases: databases.filter(d => !(withPort && d.port === undefined)), databaseHosts: [...databaseHosts], hosts };
+}
+
 /** What the eval tried to reach, from the command's own output: up to 3 items (databases by port, outside services by host name), in the order the output names them. Undefined when nothing nameable was found. */
 export function findBlockedReach(text: string, secrets: readonly string[] = [], route?: ModelRoute): EvalBlockedReach | undefined {
   try {
     const items: Array<EvalBlockedReach["items"][number]> = [];
     const seen = new Set<string>();
-    const found: Array<{ at: number; reach: Reach }> = [];
-    for (const { pattern, host, port, db } of REACH_PATTERNS) {
-      pattern.lastIndex = 0;
-      for (const m of text.matchAll(pattern)) {
-        const p = port === undefined || m[port] === undefined ? undefined : Number(m[port]);
-        found.push({ at: m.index ?? 0, reach: { host: host === undefined ? undefined : m[host], port: p !== undefined && Number.isInteger(p) && p >= 1 && p <= 65_535 ? p : undefined, database: db === true } });
-        if (found.length >= 200) break;
-      }
-    }
-    found.sort((a, b) => a.at - b.at);
-    for (const { reach } of found) {
-      const raw = reach.host === undefined ? "" : normalHost(reach.host);
-      if (isModelRoute(raw, route)) continue;
-      const host = cleanHost(reach.host, secrets);
-      // A database is named by its port alone (its host is the project's own private name); anything else needs a host name that passed the shape.
-      const item: EvalBlockedReach["items"][number] | undefined = reach.database || (reach.port !== undefined && DATABASE_PORTS.has(reach.port))
-        ? { kind: "database", ...(reach.port === undefined ? {} : { port: reach.port }) }
-        : host === undefined ? undefined : { kind: "service", host };
-      if (item === undefined) continue;
+    for (const reach of reachesOf(text)) {
+      const classified = classifyReach(reach, secrets, route);
+      if (classified === undefined) continue;
+      const item: EvalBlockedReach["items"][number] = classified.kind === "database" ? { kind: "database", ...(classified.port === undefined ? {} : { port: classified.port }) } : { kind: "service", host: classified.host };
       const key = item.kind === "database" ? `d:${String(item.port ?? "")}` : `s:${item.host}`;
       if (seen.has(key)) continue;
       seen.add(key);
