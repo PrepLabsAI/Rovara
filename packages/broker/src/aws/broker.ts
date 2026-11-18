@@ -297,6 +297,7 @@ import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusa
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -761,8 +762,10 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
 /** Spec 025 phase 25d: what the admin read routes need, from the broker's own dependencies. */
 function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
   const developer = dependencies.developer;
+  // DEC 254zzz6 D2: production sets the membership reader on the developer configuration only (COMPANY_SIGNIN), never top-level; without it here every admin read's company check passed.
+  const companies = adminCompanyReader(dependencies);
   return {
-    ...(dependencies.companies === undefined ? {} : { companies: dependencies.companies }),
+    ...(companies === undefined ? {} : { companies }),
     ...(dependencies.workspaces === undefined ? {} : { slackWorkspaces: {
       requireCompany: (teamId: string) => dependencies.workspaces!.requireCompany(teamId),
       scopesForCompany: (companyId: string) => listSlackWorkspaceScopes({ client: dependencies.documentClient, tableName: dependencies.tableName }, companyId),
@@ -779,6 +782,11 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     log: brokerLogLine,
     ...dependencies.adminReads,
   };
+}
+
+/** DEC 254zzz6 D2: the live company membership reader for admin routes: the top-level one (tests, the Slack company handler), else the developer configuration's (production). */
+function adminCompanyReader(dependencies: AwsBrokerDependencies): CompanyMembershipReader | undefined {
+  return dependencies.companies ?? dependencies.developer?.companies;
 }
 
 /** Spec 025 phase 25e: the existing admin handlers a confirmed change applies through (FR-040). */
@@ -6025,7 +6033,7 @@ async function cancelWorkspaceTask(
   identity: AuthenticatedIdentity,
   workspaceId: string,
 ): Promise<TaskCancellation | CoreStopOutcome> {
-  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministrator(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts)
+  const core = await coreAdminStop(dependencies, dependencies.developer?.coreTasks, identity, workspaceId, (project) => requireAdministratorGrant(dependencies, identity, project)); if (core !== undefined) return core; // S2: a core task's workspace: the core's stop (core-stop-entry.ts), which binds the grant to the task's company itself (D2)
   const workspace = await requireWorkspace(dependencies, workspaceId); await requireAdministrator(dependencies, identity, workspace.projectName);
   return cancelRunningTask(dependencies, workspace, {});
 }
@@ -14912,7 +14920,21 @@ async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: stri
   return getItem<MembershipRecord>(dependencies, { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` });
 }
 
+/**
+ * A name-only admin project route's check: the claim, the name-keyed administrator grant, then (DEC 254zzz6 D2) a refusal when a named company also has a project of
+ * that name (admin-name-collision.ts). The collision check runs last, so a caller without the grant gets exactly today's answers.
+ */
 async function requireAdministrator(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  projectName: string,
+): Promise<void> {
+  await requireAdministratorGrant(dependencies, identity, projectName);
+  await refuseNamedCompanyName({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, companies: adminCompanyReader(dependencies) }, identity.developer?.developerId ?? identity.ownerKey, projectName);
+}
+
+/** The claim and the name-keyed administrator grant only. Only for a caller that binds the grant to a company itself (the core's administrator stop, core-stop-entry.ts). */
+async function requireAdministratorGrant(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   projectName: string,
