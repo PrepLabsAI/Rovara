@@ -26,11 +26,13 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, companyScoped, redactAndCap, workspaceProjectIndexValue,
-  type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
+  type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupApproval, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
   WORKSPACE_PROJECT_INDEX,
 } from "@agentx/contracts";
 import { readModelSelectionPolicy, PolicyUnreadable } from "../core/model-selection/policy-store.js";
 import { SETUP_AGENT_FAILURES, readState } from "../core/setup-agent/agent.js";
+import { readSetupApply } from "../core/setup-agent/apply.js";
+import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { evalDiscoveryKey, readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
 import { journalKey, setupAgentKey, setupPartition } from "../core/setup-agent/keys.js";
 import { taskKey, taskPointerKey } from "../core/task-flow/keys.js";
@@ -81,6 +83,11 @@ export interface SetupStatusReaders {
    * #838 supplies `GET /v1/dev/company/linear/projects/{project}`'s record here; nothing else in this file changes.
    */
   linearTeam?: (() => Promise<{ id: string; name?: string } | undefined>) | undefined;
+  /**
+   * L4-T2 (setup review G6): whether the company can run a model call now, as the model gateway says it: true (Rovara's AI chosen, or a key that passed its test), false (nothing to call), null (it could not say).
+   * Absent: this install has no gateway to ask, and the AI row is as it was. A throw reads as null. Only a false makes the AI row `needs_you`; a guess never does.
+   */
+  modelCall?: (() => Promise<boolean | null>) | undefined;
 }
 
 export interface SetupStatusInput {
@@ -104,6 +111,22 @@ function readOnlyStore(client: Client, tableName: string): DocumentStore {
     get(_target, name) {
       if (name === "get") return async (key: DocumentKey): Promise<StoredDocument | undefined> => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: StoredDocument }).Item;
       if (name === "indexes") return [];
+      // The one other read the shared setup-check reader makes: a failed check's recorded error (one partition, sort keys that begin with a prefix).
+      if (name === "query") return async (request: { pk: string; sk?: { op: string; prefix?: string } }): Promise<{ items: StoredDocument[] }> => {
+        if (request.sk?.op !== "beginsWith" || typeof request.sk.prefix !== "string") throw new Error("read only");
+        const items: StoredDocument[] = [];
+        let start: Record<string, unknown> | undefined;
+        for (let page = 0; page < JOURNAL_PAGES; page += 1) {
+          const response = await client.send(new QueryCommand({
+            TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)", ExpressionAttributeValues: { ":pk": request.pk, ":prefix": request.sk.prefix }, ConsistentRead: true, Limit: JOURNAL_PAGE,
+            ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+          })) as { Items?: StoredDocument[]; LastEvaluatedKey?: Record<string, unknown> };
+          items.push(...(response.Items ?? []));
+          start = response.LastEvaluatedKey;
+          if (start === undefined) break;
+        }
+        return { items };
+      };
       return refuse;
     },
   }) as DocumentStore;
@@ -299,11 +322,53 @@ function testOutcomeOf(proposal: SetupProposal | undefined, entries: readonly Se
   return ran.some((entry) => entry.timedOut || entry.exitCode !== 0) ? (ran.some((entry) => !entry.timedOut && entry.exitCode === 0) ? "unknown" : "failed") : "passed";
 }
 
+/** Where the setup stands in the approval (L4-T2): the proposal row's own state, and the check of the candidate it holds. Read through the same reader the setup page uses (`readSetupApply`), never a guess. */
+interface ApprovalRead {
+  approval: SetupApproval;
+  check?: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
+  approvedAt?: string;
+  /** When the proposal row was made: a setup run that started after it has a proposal nobody has used. */
+  madeAt?: string;
+}
+
+async function approvalRead(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ApprovalRead> {
+  const store = readOnlyStore(client, input.tableName);
+  const flow = { store, now: () => new Date(input.now()), companyId } as unknown as TaskFlowDeps;
+  const row = await readSetupApply({ flow, store, companyId, now: input.now }, input.project);
+  // A row for another project or company never counts (a stored row that does not read back as this project's is no approval).
+  if (row === undefined || row.project !== input.project || row.orgId !== companyId) return { approval: "none" };
+  const check = { status: row.checkState.status, ...(row.checkState.failedStep === undefined ? {} : { failedStep: redactAndCap(row.checkState.failedStep, 300).text }) };
+  if (row.state === "checking") return { approval: check.status === "checking" ? "checking" : "candidate", check, madeAt: row.createdAt };
+  if (row.state === "approved") return { approval: "approved", check, madeAt: row.createdAt, ...(row.decidedAt === undefined ? {} : { approvedAt: row.decidedAt }) };
+  return { approval: "none", madeAt: row.createdAt };
+}
+
+/**
+ * The "Setup run" row's state (L4-T2, decision D1): `done` means a person APPROVED a setup and its check on a fresh machine is ready, not that a run ended with a proposal.
+ *   a check going                       running  (Checking on a fresh machine)
+ *   a candidate waiting for a decision  needs_you (Needs you: approve; a failed or stale check says why in `check`)
+ *   a proposal nobody has used          needs_you (Needs you: review the setup)
+ *   approved, check ready, no newer proposal   done
+ *   approved, check failed / stale      needs_you, with the check's reason
+ */
+function setupRowState(run: { status: "ready"; proposalWaiting: boolean } | { status: "none" }, approval: ApprovalRead): SetupRowState {
+  if (approval.approval === "checking") return "running";
+  if (approval.approval === "candidate") return "needs_you";
+  if (approval.approval === "approved") {
+    if (approval.check?.status === "checking") return "running";
+    if (approval.check?.status !== "ready") return "needs_you";
+    return run.status === "ready" && run.proposalWaiting ? "needs_you" : "done";
+  }
+  return "needs_you";
+}
+
 async function setupRunRow(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ProjectSetupChecklist["setupRun"]> {
   const store = readOnlyStore(client, input.tableName);
   const view = (await readState({ store, companyId, now: input.now }, input.project, input.definition.revision)).view;
-  if (view.status === "none") return { state: "needs_you", status: "none" };
-  const base = { status: view.status, ...(view.startedAt === undefined ? {} : { startedAt: view.startedAt }) };
+  const approval = await approvalRead(input, client, companyId);
+  const approvalFacts = { approval: approval.approval, ...(approval.check === undefined ? {} : { check: approval.check }), ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }) };
+  if (view.status === "none") return { state: setupRowState({ status: "none" }, approval), status: "none", ...approvalFacts };
+  const base = { status: view.status, ...(view.startedAt === undefined ? {} : { startedAt: view.startedAt }), ...approvalFacts };
   if (view.status === "running") return { state: "running", ...base };
   const summary = view.summary;
   // The stored proposal is read through its schema again; one that does not parse is counted as no proposal, never guessed at.
@@ -314,22 +379,26 @@ async function setupRunRow(input: SetupStatusInput, client: Client, companyId: O
   };
   const entries = view.taskId === undefined ? [] : await journalOf(client, input.tableName, companyId, input.project, view.taskId);
   const testOutcome = testOutcomeOf(proposal, entries);
-  // A run that ended with a proposal is done; one that stopped at a limit kept only a partial one: shown as failed, with the fixed sentence for the limit it hit.
-  if (view.status === "ready" && summary?.partial !== true) return { state: "done", ...base, ...facts, testOutcome };
+  // A run that ended with a whole proposal has something to approve; the row is done only once that is approved and checked. One that stopped at a limit kept only a partial one: shown as failed, with the fixed sentence for the limit it hit.
+  if (view.status === "ready" && summary?.partial !== true) {
+    // The run's proposal is unused when the proposal row (a candidate made from a proposal) is older than the run, or there is none; a row made after the run started has dealt with it.
+    const started = view.startedAt === undefined ? Number.NaN : Date.parse(view.startedAt), made = approval.madeAt === undefined ? Number.NaN : Date.parse(approval.madeAt);
+    return { state: setupRowState({ status: "ready", proposalWaiting: !(made >= started) }, approval), ...base, ...facts, testOutcome };
+  }
   const stop = view.stop;
   const failure = view.status === "failed" ? view.failure : stop === undefined ? undefined : (SETUP_AGENT_FAILURES as Record<string, string>)[stop];
   const failedCommand = failedCommandOf(entries);
   return { state: "failed", ...base, ...facts, testOutcome, ...(failure === undefined ? {} : { failure }), ...(failedCommand === undefined ? {} : { failedCommand }) };
 }
 
-async function evalConfirmRow(input: SetupStatusInput, client: Client, companyId: OrgId, setupDone: boolean): Promise<ProjectSetupChecklist["evalConfirm"]> {
+async function evalConfirmRow(input: SetupStatusInput, client: Client, companyId: OrgId, setupProposed: boolean): Promise<ProjectSetupChecklist["evalConfirm"]> {
   const discovery = await readEvalDiscovery({ store: readOnlyStore(client, input.tableName), companyId }, input.project);
-  const blocked = setupDone ? {} : { blockedBy: "setupRun" as const };
+  const blocked = setupProposed ? {} : { blockedBy: "setupRun" as const };
   const suites = discovery === undefined ? undefined : discovery.report.suites.map((suite) => ({ selection: suite.selection, questions: suite.questions.length }));
   if (discovery?.state === "confirmed") return { state: "done", report: "confirmed", suites: suites!, ...(discovery.confirmedSelection === undefined ? {} : { confirmedSelection: discovery.confirmedSelection }) };
   // L2-5 c: a person's "no evals" counts only for the run it was given for, and only while that run is the project's latest finished one.
   const none = await readEvalNone(client, input.tableName, companyId, input.project);
-  if (none !== undefined && setupDone) {
+  if (none !== undefined && setupProposed) {
     const run = await finishedSetupRun(client, input.tableName, companyId, input.project, input.definition.revision, input.now);
     if (run !== undefined && run === none.taskId) return { state: "done", report: "no_evals", ...(suites === undefined ? {} : { suites }), noEvals: { confirmedAt: none.confirmedAt } };
   }
@@ -349,8 +418,12 @@ async function aiAndSpendRow(input: SetupStatusInput, client: Client, companyId:
   let companyModelSaved: boolean;
   try { companyModelSaved = (await readModelSelectionPolicy(readOnlyStore(client, input.tableName), companyId)).revision > 0; }
   catch (error) { if (error instanceof PolicyUnreadable) throw unreadable(); throw error; }
+  // L4-T2 (G6): the row is done only while a model call is possible. The gateway's answer decides; one that cannot be had is "unknown" and never blocks. No reader (no gateway on this install): as before.
+  let call: boolean | null | undefined;
+  if (input.readers.modelCall !== undefined) { try { const said = await input.readers.modelCall(); call = said === true || said === false ? said : null; } catch { call = null; } }
+  const modelCall = call === undefined ? undefined : call === true ? "possible" as const : call === false ? "none" as const : "unknown" as const;
   // The seam for PR #835's company engine model: its reader joins `companyModelSaved` here.
-  return { state: "done", source: budget !== null ? "project" : companyModelSaved ? "company" : "default", companyModelSaved, modelBudgetUsd: budget };
+  return { state: call === false ? "needs_you" : "done", source: budget !== null ? "project" : companyModelSaved ? "company" : "default", companyModelSaved, modelBudgetUsd: budget, ...(modelCall === undefined ? {} : { modelCall }) };
 }
 
 /** Whether the project has a task that is not a setup run. Looks at the newest workspaces of this company's own index partition (and the install's legacy one, for the implicit company only). */
@@ -394,7 +467,8 @@ export async function readProjectSetupStatus(input: SetupStatusInput): Promise<P
     ]);
     const repos = await reposRow(input, client, companyId);
     const setupRun = await setupRunRow(input, client, companyId);
-    const evalConfirm = await evalConfirmRow(input, client, companyId, setupRun.state === "done");
+    // The eval row waits on the run's PROPOSAL (as it always did), not on the approval: approving the setup is not what the eval report needs.
+    const evalConfirm = await evalConfirmRow(input, client, companyId, setupRun.status === "ready" && setupRun.partial !== true);
     const skipped = (row: SetupSkippableRow) => skips.skipped.includes(row);
     const canStart = setupRun.state === "done" && evalConfirm.state === "done" && aiAndSpend.state === "done";
     const rows: Record<SetupStatusRow, { state: SetupRowState }> = {
