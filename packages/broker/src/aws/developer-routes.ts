@@ -23,7 +23,7 @@ import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
 import type { LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
-import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions } from "./company-member-routes.js";
+import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions, type CompanyMemberRouteContext } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
 import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js"; import { isCompanyEgressPath, routeCompanyEgress, type CompanyEgressWiring } from "./company-egress-routes.js";
@@ -2165,7 +2165,24 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
     ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
+    ...(taskHandOverOf(deps, person) ?? {}),
   }, { caller: person, companyId, webApp: _webApp === true }, request, url);
+}
+
+/**
+ * DEC 254zzz84 (5): the task People parts a removal's hand-over needs (the successor's live proof on each task, and their registration on it), built the way the
+ * task routes build them. Absent when this deployment has no developer tasks: no task is handed over then.
+ */
+function taskHandOverOf(deps: DeveloperRouteDependencies, caller: DeveloperCaller): { taskHandOver: NonNullable<CompanyMemberRouteContext["taskHandOver"]> } | undefined {
+  if (deps.tasks === undefined) return undefined;
+  const route = developerTaskRouteDependencies(deps, caller);
+  const { checkTaskPerson, registerTaskWebPerson: register } = route;
+  if (checkTaskPerson === undefined || register === undefined) return undefined;
+  return { taskHandOver: {
+    deps: { documentClient: deps.documentClient, tableName: deps.tableName, now: deps.now, checkTaskPerson,
+      ...(route.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: route.taskPeopleConfiguration }) },
+    register: (task, developerId) => register(task, developerId),
+  } };
 }
 
 /** Guided onboarding PR 1: the GitHub connect routes. Unknown, before anyone is authenticated, without the company layer or the wiring. */

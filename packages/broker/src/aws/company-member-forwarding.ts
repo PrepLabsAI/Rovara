@@ -8,7 +8,8 @@ import type { ChannelMembersInvokeResult, DeveloperCaller } from "./developer-ro
 import { CompanyMember, MemberListInput, MemberPersonId, MemberReply, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
 
 const Request = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: MemberPersonId }).strict(),
+  // DEC 254zzz84 (5): the removal's fences (the role the remover saw, the live successor); the identity side checks both inside its transaction.
+  z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: MemberPersonId, expectedRole: OrgRoleSchema.optional(), successorId: MemberPersonId.optional() }).strict(),
   z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
   MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
 ]);

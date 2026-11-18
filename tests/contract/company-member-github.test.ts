@@ -59,8 +59,13 @@ function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean
     },
   };
   const jwt = () => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
+  // DEC 254zzz84 (5): a removal names its request (a fresh id per call, the same sequence in every world) and the role the remover saw.
+  let removals = 0;
   const call = async (method: string, path: string, body?: unknown) => {
-    const request = { method, path, headers: { authorization: jwt() }, requestId: "r", ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const target = /\/members\/([a-f0-9]{64})\/removal$/u.exec(path)?.[1];
+    const sent = method === "POST" && target !== undefined && body !== null && typeof body === "object" && Object.keys(body).length === 0
+      ? { requestId: `00000000-0000-4000-8000-${String(++removals).padStart(12, "0")}`, expectedRole: role(target) ?? "member" } : body;
+    const request = { method, path, headers: { authorization: jwt() }, requestId: "r", ...(sent === undefined ? {} : { body: JSON.stringify(sent) }) };
     try { return { status: 200, body: await routeDeveloperRequest(deps, request, new URL(path, "https://broker.example.test")) as Record<string, unknown> }; } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
       return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } as Record<string, unknown> };
@@ -81,13 +86,13 @@ describe("GitHub-signed-in company admins (DEC 254n)", () => {
     expect((list.body["members"] as Array<{ personId: string }>).map((row) => row.personId).sort()).toEqual([OWNER, ADMIN, MEMBER, TARGET].sort());
     expect((await h.call("GET", member(TARGET, "removal-preview"))).status).toBe(200);
     expect(await h.call("PUT", member(TARGET, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(await h.call("POST", member(TARGET, "removal"), {})).toEqual({ status: 200, body: { ok: true } });
+    expect(await h.call("POST", member(TARGET, "removal"), {})).toMatchObject({ status: 200, body: { state: "DONE", successorId: id } });
     expect(h.revoked(TARGET)).toBe(true);
     // The identity side heard the caller's live company and the caller as the actor, nothing the request named.
     expect(h.forwarded).toEqual([
       { kind: "company-member-list", companyId: A },
       { kind: "company-member-role-set", companyId: A, personId: TARGET, role: "member", createdBy: id },
-      { kind: "company-member-revoke", companyId: A, personId: TARGET, createdBy: id },
+      { kind: "company-member-revoke", companyId: A, personId: TARGET, expectedRole: "member", successorId: id, createdBy: id },
     ]);
   });
 
