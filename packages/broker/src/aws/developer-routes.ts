@@ -1717,7 +1717,8 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
     return { project, members: named } satisfies ClientProjectMembersResponse;
   }
   if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
-  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), caller.companyId);
+  // The target is fenced to the same LIVE company the grant is written in (the built-in company and none: as before, the caller's company).
+  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), grantCompany ?? caller.companyId);
   if (request.method === "PUT") {
     const granted = await grantProjectAccess(actions, by, project, target.developerId, grantCompany);
     console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));

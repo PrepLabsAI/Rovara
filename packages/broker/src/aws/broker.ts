@@ -8739,6 +8739,16 @@ async function loadCurrentProjectAuthority(dependencies: AwsBrokerDependencies, 
  * The creator's current authority over the project (an unrevoked identity with a versioned direct grant or locally bound channels), which must be exactly the proof the
  * round was admitted under (`admittedProof`): a grant re-issued, a role changed or a channel rebound during the round refuses.
  */
+/**
+ * DEC 254zzz80: the creator's grant row, in the company checkProjectAccess reads it in (the creator's LIVE membership through the same reader): a named company's own
+ * partition, else the legacy row. So the proof and the transaction fence watch the very grant the access check used.
+ */
+async function creatorGrantKey(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<{ pk: string; sk: string }> {
+  const reader = dependencies.companies ?? dependencies.developer?.companies;
+  const company = reader === undefined ? undefined : namedCompany(await resolveCompany(reader, task.developerId));
+  return grantKeyFor(company, task.developerId, task.project);
+}
+
 async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, admittedProof: unknown, mark: AuthorityMark, reject: AuthorityReject) {
   mark("creator-project-access");
   const creator = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
@@ -8749,7 +8759,7 @@ async function loadCurrentCreatorAuthority(dependencies: AwsBrokerDependencies, 
       developer: dependencies.developer, now: Date.now },
     { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
   } catch { reject("current-creator-project-access-unavailable"); return undefined; }
-  const creatorMembershipKey = { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` };
+  const creatorMembershipKey = await creatorGrantKey(dependencies, task);
   const creatorMembership = await getItem<Record<string, unknown>>(dependencies, creatorMembershipKey);
   const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
   if (creatorAuthority === undefined || canonicalJson(admittedProof) !== canonicalJson(creatorAuthority)) { reject("creator-membership-proof-changed-or-unavailable"); return undefined; }
@@ -11489,7 +11499,7 @@ async function requireWorkflowE2ECreatorAuthority(dependencies: AwsBrokerDepende
     }
     throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
   }
-  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
+  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, await creatorGrantKey(dependencies, task));
   const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
   if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
   return creatorAuthority;
