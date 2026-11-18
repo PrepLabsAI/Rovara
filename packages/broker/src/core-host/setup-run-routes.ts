@@ -1,7 +1,7 @@
 // Guided onboarding L2-3 (DEC 254o c, DEC 254n 3): the hosted setup run. The core setup agent (core/setup-agent/*), which the laptop serves to its install owner only
 // (local/app/setup-agent.ts), served on the deployed developer API for a company on the core engine, AS the signed-in person:
 //
-//   GET  /v1/app/projects/{project}/setup-agent            where the project's setup run stands (the core's SetupAgentView) plus `canManage`
+//   GET  /v1/app/projects/{project}/setup-agent            where the project's setup run stands (the core's SetupAgentView) plus `canManage`, the waiting candidate (`apply`, with `draftedByRovara` when Rovara's automatic repair drafted it) and, for managers, the broken-setup card (`repair`, L4-RD)
 //   POST /v1/app/projects/{project}/setup-agent            start a run, or RE-RUN one that ended ({ requestId }); 202 started, 200 a repeat of the same request id
 //   POST /v1/app/projects/{project}/setup-agent/stop       stop the running run ({ requestId })
 //   GET  /v1/app/projects/{project}/setup-agent/journal    the run's journal (`?after=<n>`) and the websites it asked for
@@ -29,7 +29,7 @@
 //     transaction; the others' before the act, so nothing is done when the record cannot be written.
 //   - A start needs the company on the core for NEW tasks and the install's model gateway (which meters the run); otherwise a fixed 503 and nothing is written.
 //   - Bodies are the core's strict schemas (a request id and nothing else for start and stop: limits, payer and goal never come from the client).
-import { AgentXError, SetupHostSchema, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
+import { AgentXError, SetupHostSchema, agentXError, isSystemOwnerId, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { startTask } from "../core/task-flow/start.js";
@@ -40,6 +40,7 @@ import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSet
 import { SETUP_RISK_APPROVER, setupApproverAllows, setupHostApproverAllows, type SetupRisk } from "../core/setup-agent/setup-risk.js";
 import { dismissSetupUpdate, markSetupUpdateApplied, prepareSetupUpdate, readSetupUpdates } from "../core/setup-agent/plan-update.js";
 import type { GateResult } from "../core/decisions/approval-gate.js";
+import { readRepairView } from "../core/setup-agent/repair-draft.js";
 import { SETUP_HOST_NEEDS_ADMIN, setupApproverRefusal, setupCardOf, setupDecisionRequestId, setupHostCardOf, type HostedSetupApproval } from "./setup-approval.js";
 import { z } from "zod";
 import { readSetupJournal } from "../core/setup-agent/journal.js";
@@ -185,6 +186,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
+    // L4-RD: the candidate was drafted by Rovara's automatic repair (its check ran as the project's system owner); a person still decides it, by the same rule.
+    ...(isSystemOwnerId(apply.by) ? { draftedByRovara: true } : {}),
     canApprove: ready && setupApproverAllows(who, risk, "approve"), canReject: ready && setupApproverAllows(who, risk, "reject"),
     // The decision is offered only once the candidate's check passed.
     ...(ready ? { approval: { requestId: setupDecisionRequestId(apply.digest, apply.candidateRevision), revision: apply.candidateRevision, artifactDigest: apply.digest, kind: "setup", risk } } : {}),
@@ -328,7 +331,9 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
 
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
-      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }) });
+      // L4-RD: the admin card of a broken setup ("Approve new setup" / "Fix setup"), for the people who manage the project's setup only. Absent while the setup is not broken.
+      const repair = standing.access === "manage" ? await readRepairView(deps, project) : undefined;
+      return json(200, { ...(await getSetupAgent(deps, project)), canManage: standing.access === "manage", ...(apply === undefined ? {} : { apply }), ...(repair === undefined ? {} : { repair }) });
     }
     if (input.request.method === "GET" && tail === "updates") {
       // The offers are for the people who manage the project's setup (and only where a candidate can be approved); a reader sees none, and no other company's or project's.

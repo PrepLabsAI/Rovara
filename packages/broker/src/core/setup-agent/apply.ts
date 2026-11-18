@@ -220,13 +220,16 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes };
 }
 
-/** The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. */
-export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string): Promise<boolean> {
+/**
+ * The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. With `onlyRequestId` (L4-RD: Rovara's own failed draft) it drops the
+ * waiting proposal ONLY if it is that request's: a person's candidate that replaced it is never touched.
+ */
+export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string): Promise<boolean> {
   const row = await waitingSetupApply(deps.store, deps.companyId, project);
-  if (row === undefined) return false;
+  if (row === undefined || (onlyRequestId !== undefined && row.requestId !== onlyRequestId)) return false;
   const at = new Date(deps.now()).toISOString();
   const result = await deps.store.transact([
-    { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: when.eq("state", "checking") },
+    { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: onlyRequestId === undefined ? when.eq("state", "checking") : when.and(when.eq("state", "checking"), when.eq("requestId", onlyRequestId)) },
     { kind: "delete", key: projectRevisionKey(deps.companyId, project, row.candidateRevision) },
   ]);
   return result.applied;
