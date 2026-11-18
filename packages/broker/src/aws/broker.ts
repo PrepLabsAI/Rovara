@@ -3,7 +3,7 @@ import { createHostedBrokerCoreServices } from "./core-job-services.js"; import 
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
-import { namedCompanySlackBinding } from "./company-layout.js";
+import { latestRevisionRowFor, namedCompanySlackBinding, slackChannelBindingKeyFor } from "./company-layout.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
@@ -3252,7 +3252,11 @@ async function putSlackBinding(
     updatedAt: new Date().toISOString(),
   });
   await requireAdministrator(dependencies, identity, binding.projectName);
-  if (!await slackCompanyProject(dependencies, binding.teamId, binding.projectName)) throw agentXError("NOT_FOUND", "Slack channel binding not found");
+  // DEC 254zzz80 (R2-F1): a NAMED company's binding is written in its own partition, for a project of its own partition; the built-in company as before.
+  const named = await slackBindingCompany(dependencies, binding.teamId);
+  if (!(named === undefined ? await slackCompanyProject(dependencies, binding.teamId, binding.projectName) : await latestRevisionRowFor(dependencies.documentClient, dependencies.tableName, named, binding.projectName) !== undefined)) {
+    throw agentXError("NOT_FOUND", "Slack channel binding not found");
+  }
   const existing = await getSlackBinding(dependencies, binding.teamId, binding.channelId);
   if (existing && existing.projectName !== binding.projectName) {
     await requireAdministrator(dependencies, identity, existing.projectName);
@@ -3260,7 +3264,7 @@ async function putSlackBinding(
   const latest = await requireLatestProject(dependencies, binding.projectName);
   await dependencies.documentClient.send(new PutCommand({
     TableName: dependencies.tableName,
-    Item: { ...slackBindingKey(binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
+    Item: { ...slackChannelBindingKeyFor(named, binding.teamId, binding.channelId), ...channelBindingAttributes(channelBindingFromSlack(binding)), updatedBy: identity.ownerKey },
   }));
   return { binding, latestRevision: latest.definition.revision };
 }
@@ -3276,9 +3280,10 @@ async function deleteSlackBinding(
   const binding = await getSlackBinding(dependencies, teamId, channelId);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found");
   await requireAdministrator(dependencies, identity, binding.projectName);
+  // DEC 254zzz80 (R2-F1): the row the read found: a NAMED company's own (its binding carries companyId), else the legacy one.
   await dependencies.documentClient.send(new DeleteCommand({
     TableName: dependencies.tableName,
-    Key: slackBindingKey(teamId, channelId),
+    Key: slackChannelBindingKeyFor((binding as { companyId?: string }).companyId, teamId, channelId),
   }));
   return { deleted: true, binding };
 }
@@ -3303,7 +3308,9 @@ async function getSlackBinding(
 ): Promise<SlackChannelBinding | undefined> {
   const named = await slackBindingCompany(dependencies, teamId);
   if (named === undefined) return getLegacySlackBinding(dependencies, teamId, channelId);
-  return namedCompanySlackBinding(dependencies.documentClient, dependencies.tableName, named, teamId, channelId);
+  const binding = await namedCompanySlackBinding(dependencies.documentClient, dependencies.tableName, named, teamId, channelId);
+  // The bound project must be a project of the company's own partition (the core's order; a row naming another company is absent).
+  return binding !== undefined && await latestRevisionRowFor(dependencies.documentClient, dependencies.tableName, named, binding.projectName) !== undefined ? binding : undefined;
 }
 
 /** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */

@@ -8,7 +8,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_jckf8av6ri11rszcdjsa"; // the staging company
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -27,12 +27,22 @@ const companyBinding = (company: string, team = SLACK_TEAM, project = "demo-task
   updatedBy: "e".repeat(64), updatedAt: "2026-10-27T15:07:04.991Z", entityType: "SLACK_BINDING",
 });
 
+/** A NAMED company's project revision in its own partition (schema-valid, as staging's). */
+const companyProject = (company: string, name: string) => ({
+  pk: `ORG#${company}#PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", companyId: company,
+  definition: { name, revision: 1, orchestratorInstructions: "x", setup: [{ executable: "npm", args: ["ci"], cwd: "repo/r", timeoutSeconds: 900 }],
+    readiness: [{ executable: "npm", args: ["test"], cwd: "repo/r", timeoutSeconds: 900 }],
+    repositories: [{ name: "r", url: "https://github.com/acme/r", defaultBranch: "main", path: "repo/r", credentialRef: "github-agentx-sdlc" }] },
+});
+
 /**
  * A broker with Slack company mode on. `installCompany` is what the install team's (SLACK_TEAM's) operator binding names; OTHER_TEAM is company B's (company mode). The person is
  * linked in the install team's company. `legacyInstall`: the install team takes the legacy view (slackWorkspaceLegacyTeamId), as on staging.
  */
 async function world(options: { installCompany: string; legacyInstall?: boolean }) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
+  h.db.set(companyProject(A, "demo-tasklog"));
+  h.db.set(companyProject(B, "b-project"));
   const store = new MemoryDocumentStore();
   const members = new Map([[PERSON, options.installCompany], [PERSON_B, B]]);
   const companyOfTeam = vi.fn(async (team: string): Promise<string> => { if (team === SLACK_TEAM) return options.installCompany; if (team === OTHER_TEAM) return B; throw Error("private"); });
@@ -96,6 +106,26 @@ describe("the Slack start reads the binding in the company's own layout", () => 
     w.db.set(companyBinding(B));
     expect((await w.start()).statusCode).not.toBe(200);
     expect(w.entry.route).not.toHaveBeenCalled();
+  });
+
+  it("a named company's binding to a project that is not in its own partition (another company's, or none) binds nothing", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A, SLACK_TEAM, "b-project"));
+    expect((await w.start()).statusCode).not.toBe(200);
+    w.db.set(companyBinding(A, SLACK_TEAM, "no-such-project"));
+    expect((await w.start()).statusCode).not.toBe(200);
+    expect(w.entry.route).not.toHaveBeenCalled();
+  });
+
+  it("an administrator's unbind of a named company's channel never deletes a row the read did not find (today it is refused before any write)", async () => {
+    const w = await world({ installCompany: A });
+    w.db.set(companyBinding(A));
+    const before = { own: w.db.get(`ORG#${A}#SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`), legacy: w.db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`) };
+    const answer = await call(w.handler, { method: "DELETE", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${SLACK_CHANNEL}`, user: { subject: "admin-subject", admin: true } });
+    // The install administrator's project check still reads the legacy project (R2-F1 lane 1); until then the unbind is refused and nothing is deleted, never a
+    // "deleted" answer that left the company's row in place.
+    expect(answer.status).toBe(404);
+    expect({ own: w.db.get(`ORG#${A}#SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`), legacy: w.db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`) }).toEqual(before);
   });
 
   it("a person not linked in the named company is refused before anything starts", async () => {

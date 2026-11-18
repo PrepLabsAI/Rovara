@@ -21,7 +21,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { agentXError, companyLog, OrgIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { slackChannelBindingPkFor } from "./company-layout.js";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -316,8 +317,9 @@ async function complete(ctx: SlackInstallContext, member: z.infer<typeof Members
 }
 
 /** The company's channel links in its workspace (SLACK_BINDING#<team> / CHANNEL#<channel>), bounded; more than the bound refuses. */
-async function channelLinks(ctx: SlackInstallContext, teamId: string): Promise<Array<{ key: { pk: string; sk: string }; projectName?: string }>> {
-  const pk = channelBindingPartition(SLACK_CHANNEL, teamId);
+async function channelLinks(ctx: SlackInstallContext, companyId: string, teamId: string): Promise<Array<{ key: { pk: string; sk: string }; projectName?: string }>> {
+  // DEC 254zzz80 (R2-F1): a NAMED company's links live only in its own partition (ORG#<company>#SLACK_BINDING#<team>); the built-in company's are the legacy rows.
+  const pk = slackChannelBindingPkFor(companyId, teamId);
   const links: Array<{ key: { pk: string; sk: string }; projectName?: string }> = [];
   let cursor: Record<string, unknown> | undefined;
   let pages = 0;
@@ -352,7 +354,7 @@ async function disconnect(ctx: SlackInstallContext, member: z.infer<typeof Membe
     if (!bound && record === undefined) throw agentXError("NOT_FOUND", SLACK_NOT_CONNECTED);
     // A record whose team's binding is not this company's holds nothing of this company's in Slack: no token is revoked and no channel link is touched (they are
     // keyed by team, not company); only the stale record goes.
-    links = bound ? await channelLinks(ctx, teamId) : [];
+    links = bound ? await channelLinks(ctx, companyId, teamId) : [];
   } catch (error) {
     if (error instanceof Error && error.name === "AgentXError") throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", SLACK_DISCONNECT_UNAVAILABLE);

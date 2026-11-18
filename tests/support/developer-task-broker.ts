@@ -239,12 +239,20 @@ export async function registerRevision(handler: Handler, revision: number, devel
 
 /**
  * DEC 254zzz80 (R2-F1): a NAMED company keeps its Slack channel bindings only in its own partition (`ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>`), the
- * staging layout. This copies the registered (legacy) binding there, so a company-mode world whose workspace belongs to `company` finds its channel bound.
+ * staging layout. This copies the registered (legacy) binding there, with the bound project's revision in the company's partition, so a company-mode world whose workspace
+ * belongs to `company` finds its channel bound.
  */
 export function bindSlackChannelInCompany(db: FakeDynamoDb, company: string, team = SLACK_TEAM, channel = SLACK_CHANNEL): void {
   const legacy = db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
   if (legacy === undefined) throw new Error("no registered Slack binding to copy");
   db.set({ ...legacy, pk: `ORG#${company}#SLACK_BINDING#${team}` });
+  // The bound project is the company's own (its revision in the company's partition), as the broker checks.
+  const name = String(legacy.projectName);
+  db.set({ pk: `ORG#${company}#PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", companyId: company, definition: {
+    name, revision: 1, orchestratorInstructions: "x", setup: [{ executable: "npm", args: ["ci"], cwd: "repo/r", timeoutSeconds: 900 }],
+    readiness: [{ executable: "npm", args: ["test"], cwd: "repo/r", timeoutSeconds: 900 }],
+    repositories: [{ name: "r", url: "https://github.com/acme/r", defaultBranch: "main", path: "repo/r", credentialRef: "github-agentx-sdlc" }],
+  } });
 }
 
 /** An admin grant (FR-013), so access does not depend on a bound channel. */

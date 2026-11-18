@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { IMPLICIT_COMPANY_ID, type OrgId } from "@agentx/contracts";
-import { namedCompanySlackBinding } from "../../packages/broker/src/aws/company-layout.js";
+import { namedCompanySlackBinding, slackChannelBindingKeyFor, slackChannelBindingPkFor } from "../../packages/broker/src/aws/company-layout.js";
 import { slackBindingCompany, slackBindingInCompany, slackRequestWorkspace } from "../../packages/broker/src/aws/slack-person.js";
 import {
   SLACK_CHANNEL_NOT_BOUND_NOTICE, awsSlackRouterDependencies, createSlackMentionRouter, type SlackMention, type SlackRouterTransport,
@@ -117,6 +117,18 @@ describe("namedCompanySlackBinding: one named company's own partition, by key", 
     expect(await namedCompanySlackBinding(table, STATE, A, "not-a-team", CHANNEL)).toBeUndefined();
     expect(await namedCompanySlackBinding(table, STATE, A, TEAM, "C0#WEIRD")).toBeUndefined();
     expect(table.gets).toEqual([]);
+  });
+});
+
+describe("slackChannelBindingKeyFor / slackChannelBindingPkFor: the one key choice for readers, writers and deleters", () => {
+  it("a named company's own partition; the built-in company, no company and a malformed id the legacy key; a bad ref throws", () => {
+    expect(slackChannelBindingKeyFor(A, TEAM, CHANNEL)).toEqual({ pk: `ORG#${A}#SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}` });
+    expect(slackChannelBindingPkFor(A, TEAM)).toBe(`ORG#${A}#SLACK_BINDING#${TEAM}`);
+    for (const legacy of [undefined, IMPLICIT_COMPANY_ID, "not-an-org"]) {
+      expect(slackChannelBindingKeyFor(legacy, TEAM, CHANNEL)).toEqual({ pk: `SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}` });
+      expect(slackChannelBindingPkFor(legacy, TEAM)).toBe(`SLACK_BINDING#${TEAM}`);
+    }
+    expect(() => slackChannelBindingKeyFor(A, TEAM, "C0#WEIRD")).toThrow();
   });
 });
 

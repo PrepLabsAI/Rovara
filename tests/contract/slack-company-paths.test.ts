@@ -345,6 +345,10 @@ it("broker refuses a channel binding to a foreign project on read and write", as
   const own = h.db.get(`ORG#${A}#SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!;
   h.db.delete(String(own.pk), String(own.sk));
   h.db.set({ ...own, pk: `ORG#${B}#SLACK_BINDING#${SLACK_TEAM}` });
+  // And the project is not A's: its revision is only in B's partition.
+  const project = h.db.get(`ORG#${A}#PROJECT#payments`, "REV#000000000001")!;
+  h.db.delete(String(project.pk), String(project.sk));
+  h.db.set({ ...project, pk: `ORG#${B}#PROJECT#payments`, companyId: B });
   const read = await call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal,
     thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
   expect(JSON.stringify(read.body)).toContain("Slack channel is not bound to a project");
