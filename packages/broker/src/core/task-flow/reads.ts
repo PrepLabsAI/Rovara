@@ -2,6 +2,7 @@ import { locateWorkspace, type WorkspaceLocation } from "./workspace-location.js
 // Lane L6a, task flow core: reading a task. A task of someone else reads as "not found" (no leak).
 import { AgentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, type DeveloperTaskFailure, type DeveloperTaskStatus, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from "../../developer/task-records.js";
+import { taskOwnerView, type TaskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { OPERATION_SK_PREFIX, taskKey } from "./keys.js";
@@ -9,6 +10,8 @@ import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRe
 
 export interface TaskView {
   taskId: string;
+  /** The task's own person (Q7). Absent for a record with no sign-in owner. */
+  owner?: TaskOwnerView;
   project: string;
   title: string;
   status: DeveloperTaskStatus;
@@ -93,8 +96,10 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     operations,
   });
   const workflow: WorkflowSnapshot | undefined = task.workflow;
+  const owner = taskOwnerView(task);
   return {
     taskId: task.taskId,
+    ...(owner === undefined ? {} : { owner }),
     project: task.project,
     title: task.title,
     status: derived.status,

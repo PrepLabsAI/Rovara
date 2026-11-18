@@ -6,6 +6,7 @@ import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
 import { WORKFLOW_ACTIONABLE_REFUSALS } from "../developer/workflow-actions.js";
+import { taskOwnerView } from "../developer/task-owner-view.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -1379,8 +1380,10 @@ export async function taskView(
     catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
   const spent = taskSpent(task);
+  const owner = taskOwnerView(task);
   return {
     taskId: task.taskId,
+    ...(owner === undefined ? {} : { owner }),
     title: task.title,
     project: task.project,
     status: derived.status,

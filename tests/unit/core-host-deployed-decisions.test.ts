@@ -714,6 +714,14 @@ describe("a core task's read by the People list's commenters and viewers (web ta
     expect(stranger?.body ?? "").not.toContain(t.taskId);
   });
 
+  it("names the task's own person as the owner on the route's answer, to a co-owner, a commenter and a viewer alike (the same owner whoever reads)", async () => {
+    const t = await readWorld();
+    for (const who of [PA, PB, PC, PD]) {
+      const task = (JSON.parse((await t.get(who))!.body) as { task: { owner?: { developerId: string; name: string } } }).task;
+      expect(task.owner, who).toEqual({ developerId: PA, name: PA });
+    }
+  });
+
   it("refuses the reader when membership, the grant or the live proof is lost, or the list has no one left to own the task, at once", async () => {
     const losses: Array<[string, (t: Awaited<ReturnType<typeof readWorld>>) => Promise<void> | void]> = [
       ["membership", (t) => { t.memberships.delete(PC); }],

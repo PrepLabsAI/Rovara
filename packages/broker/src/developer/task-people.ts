@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
+import { BUILT_IN_SIGN_IN_METHODS, SlackThreadSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { ProjectAccessSubject, TaskPersonIdentity } from "./task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "./task-people-display-budget.js";
@@ -49,7 +49,8 @@ export interface TaskPeopleDependencies {
 export interface TaskPeopleView {
   revision: number;
   orphaned: boolean;
-  people: Array<{ personId: string; name: string; role: StoredTaskRole; you: boolean; effectiveRole: TaskRole | null }>;
+  /** `method`: how the person signs in (Q7 follow-up), for a client's label. Absent on an outcome stored before it existed. */
+  people: Array<{ personId: string; name: string; role: StoredTaskRole; you: boolean; effectiveRole: TaskRole | null; method?: (typeof BUILT_IN_SIGN_IN_METHODS)[number] }>;
   canManage: boolean;
   canTakeOwnership: boolean;
   addPeopleUrl?: string;
@@ -404,7 +405,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     rendered.push({
       personId: candidate.personId,
       name: safeName(labeledName, taskPersonNameFallback(candidate.identity)),
-      role, you: candidate.identity.developerId === caller.developerId, effectiveRole: effective,
+      role, you: candidate.identity.developerId === caller.developerId, effectiveRole: effective, method: candidate.identity.method,
     });
   }
   rendered.sort((left, right) => left.name.localeCompare(right.name) || left.personId.localeCompare(right.personId));
@@ -434,7 +435,9 @@ function parseView(value: unknown): TaskPeopleView | undefined {
     || (value.addPeopleUrl !== undefined && typeof value.addPeopleUrl !== "string")
     || !Array.isArray(value.people)) return undefined;
   for (const person of value.people) {
-    if (!isRecord(person) || !exactKeys(person, ["personId", "name", "role", "you", "effectiveRole"])
+    // `method` (Q7 follow-up) is optional: an outcome stored before it existed has none and must still read.
+    if (!isRecord(person) || !exactKeys(person, Object.hasOwn(person, "method") ? ["personId", "name", "role", "you", "effectiveRole", "method"] : ["personId", "name", "role", "you", "effectiveRole"])
+      || (person.method !== undefined && (typeof person.method !== "string" || !(BUILT_IN_SIGN_IN_METHODS as readonly string[]).includes(person.method)))
       || typeof person.personId !== "string" || !UUID.test(person.personId) || typeof person.name !== "string"
       || (person.role !== "owner" && person.role !== "commenter" && person.role !== "viewer" && person.role !== "denied")
       || typeof person.you !== "boolean" || (person.effectiveRole !== null && person.effectiveRole !== "owner" && person.effectiveRole !== "commenter" && person.effectiveRole !== "viewer")) return undefined;

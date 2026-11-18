@@ -58,6 +58,8 @@ export const TaskPeopleViewSchema = z.object({
     role: TaskPeopleRoleSchema,
     you: z.boolean(),
     effectiveRole: z.enum(["owner", "commenter", "viewer"]).nullable(),
+    /** Web task channel (Q7 follow-up): how the person signs in (slack, github, ...), so a client can label them. Absent from older servers; never an issuer, a subject or an address. */
+    method: z.enum(BUILT_IN_SIGN_IN_METHODS).optional(),
   }).strict()).max(100),
   canManage: z.boolean(),
   canTakeOwnership: z.boolean(),

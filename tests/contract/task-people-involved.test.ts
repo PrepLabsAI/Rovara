@@ -246,3 +246,35 @@ describe("the row People writes is the row the readers use", () => {
     await expect(involvedTaskIds({ store, companyId: COMPANY_A }, { companyId: COMPANY_B, personId: WREN_ID })).resolves.toEqual([]);
   });
 });
+
+describe("the People view says how each person signs in", () => {
+  it("gives each person's sign-in method, read from the stored identity, and nothing else of it", async () => {
+    const h = harness();
+    const committed = await h.add("owner");
+    expect(committed.status).toBe("COMMITTED");
+    const people = (committed as { view: { people: Array<Record<string, unknown>> } }).view.people;
+    expect(people.map((entry) => [entry.name, entry.method])).toEqual([["Gale GitHub", "github"], ["Wren Cloud", "cloud"]]);
+    for (const entry of people) expect(Object.keys(entry).sort()).toEqual(["effectiveRole", "method", "name", "personId", "role", "you"]);
+    expect(JSON.stringify(people)).not.toContain(CLOUD);
+    expect(JSON.stringify(people)).not.toContain("wren-7");
+  });
+
+  it("still answers a replay whose stored outcome was written before `method` existed", async () => {
+    const h = harness();
+    await h.add("commenter", 1);
+    const requestRow = h.db.find((item) => String(item.sk).startsWith("PEOPLE_REQUEST#") && item.requestId === uuid(1))[0]!;
+    const outcome = requestRow.outcome as { people: Array<Record<string, unknown>> };
+    const older = { ...requestRow, outcome: { ...outcome, people: outcome.people.map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "method"))) } };
+    h.db.set(older);
+    await expect(confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(1))).resolves.toMatchObject({ status: "COMMITTED" });
+  });
+
+  it("refuses a stored outcome with a method that is not a built-in one (a damaged row reads as no outcome, never a guess)", async () => {
+    const h = harness();
+    await h.add("commenter", 1);
+    const requestRow = h.db.find((item) => String(item.sk).startsWith("PEOPLE_REQUEST#") && item.requestId === uuid(1))[0]!;
+    const outcome = requestRow.outcome as { people: Array<Record<string, unknown>> };
+    h.db.set({ ...requestRow, outcome: { ...outcome, people: outcome.people.map((entry) => ({ ...entry, method: "mystery" })) } });
+    await expect(confirmTaskPeopleProposal(h.deps, GALE_CALLER, TASK_A, uuid(1))).rejects.toThrow();
+  });
+});
