@@ -1,5 +1,5 @@
 // L4-EVC (DEC 254zzz20 D5, D8): the hosted eval card routes on the deployed API (setup-run-routes.ts): GET eval (the card, dollars only), POST eval-approve (the confirm AND the spend approval in one
-// act: a fresh step-up, the live owner/admin/maintainer rule, the dollars the person saw), POST eval-decide (a waiting item), POST eval-health (the opt-in). Through the real hosted approvers point, the
+// act: the live owner/admin/maintainer rule (DEC 254zzz73: no step-up), the dollars the person saw), POST eval-decide (a waiting item), POST eval-health (the opt-in). Through the real hosted approvers point, the
 // real decision gate and the real eval spend subject over the company's own store.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, EVAL_APPROVAL_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../../packages/broker/src/core-host/setup-approval.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { evalSpendKey, readEvalSpendRecord } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
@@ -20,7 +20,7 @@ import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-h
 import { CAP, company, filesOf, gitReader, project as PROJECT, reportOf } from "../support/eval-card-world.js";
 
 const OTHER = "org_corehost00000000000b";
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const definition = (name: string): ProjectDefinition => ({
@@ -49,10 +49,9 @@ async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; hea
   const people = new Map<string, Person>();
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => people.get(personId)?.grants[name];
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
-    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }) };
+    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud" };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {
     const found = people.get(personId);
@@ -155,16 +154,14 @@ describe("POST eval-approve: one approval", () => {
     expect(audit.find((e) => e.action === "eval.approve_requested")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: `p-${role}` }, subject: { type: "project", id: PROJECT } });
     expect(audit.find((e) => e.action === "decision.approved")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: `p-${role}` }, subject: { type: "eval_spend", id: PROJECT } });
   });
-  it("needs a fresh step-up: without one the person is told to confirm it's them, and nothing is confirmed or approved", async () => {
+  it("needs no step-up (DEC 254zzz73), and an admin of another company approves nothing here: our record and report stay as they were", async () => {
     const { world, person, call, reported } = await hosted();
     await reported(FAKE_COMPANY);
-    const stale = person("p-admin", FAKE_COMPANY, "admin", {}, 3_600_000);
-    const refused = await call(post(`${RUN}/eval-approve`, await approveBody(call, stale)), stale);
-    expect(refused.body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    const body = await approveBody(call, person("p-admin", FAKE_COMPANY, "admin"));
+    const stranger = person("o-admin", OTHER, "admin");
+    expect((await call(post(`${RUN}/eval-approve`, body), stranger)).status).toBeGreaterThanOrEqual(400);
     expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
     expect((await readEvalDiscovery({ store: world.store, companyId: FAKE_COMPANY }, PROJECT))?.state).toBe("reported");
-    const none = person("p-none-stepup", FAKE_COMPANY, "admin", {}, null);
-    expect((await call(post(`${RUN}/eval-approve`, await approveBody(call, none)), none)).body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
   });
   it("refuses a project user and a member with no grant, writing nothing", async () => {
     const { world, person, call, reported } = await hosted();
@@ -214,7 +211,7 @@ describe("POST eval-decide: a waiting item", () => {
     await h.reported(FAKE_COMPANY);
     return { ...h, admin: h.person("p-admin", FAKE_COMPANY, "admin") };
   }
-  it("approves or rejects the waiting item by the offer the card showed, with a fresh step-up and the live rule; a stale digest is refused", async () => {
+  it("approves or rejects the waiting item by the offer the card showed, with no step-up and the live rule; a stale digest is refused", async () => {
     const h = await waiting();
     // Seed a waiting item through the broker's own confirm (no approve).
     const { confirmEvalDiscovery } = await import("../../packages/broker/src/core/setup-agent/eval-discovery.js");
@@ -234,8 +231,9 @@ describe("POST eval-decide: a waiting item", () => {
     expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
     const dev = h.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
     expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), dev)).status).toBe(403);
-    const lapsed = h.person("p-lapsed", FAKE_COMPANY, "admin", {}, 3_600_000);
-    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), lapsed)).body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    const stranger = h.person("o-admin", OTHER, "admin");
+    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), stranger)).status).toBeGreaterThanOrEqual(400);
+    expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
     const done = await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), h.admin);
     expect(done.status, done.raw).toBe(200);
     expect(done.body).toEqual({ project: PROJECT, decision: "approved" });

@@ -137,4 +137,6 @@ describe("the knowledge routes at the developer router", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
-const OTHER_ROWS_DIGEST = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
+// Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full) and #1086 removes GET /v1/dev/me/sign-in-factors (full). Taking out exactly those two rows and putting the
+// removed one back after DELETE /v1/dev/company/members/{personId}/sign-ins/{method} gives the previous pin 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0.
+const OTHER_ROWS_DIGEST = "def66b837d965162d878b558394161c74f0d3c9499b3b3eb8dc127970f7cdddd";

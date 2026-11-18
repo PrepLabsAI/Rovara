@@ -3,8 +3,8 @@
 //
 //   GET  /v1/dev/company/members[?cursor=&limit=]               the company's people and roles, one page (T3b's list)
 //   GET  /v1/dev/company/members/{personId}/removal-preview      what removing the person would take from them: open tasks, decisions waiting on them, projects
-//   POST /v1/dev/company/members/{personId}/removal              remove them (T3b's revoke); fresh step-up
-//   PUT  /v1/dev/company/members/{personId}/role                 change their role (T3b's role-set); fresh step-up
+//   POST /v1/dev/company/members/{personId}/removal              remove them (T3b's revoke)
+//   PUT  /v1/dev/company/members/{personId}/role                 change their role (T3b's role-set)
 //
 // Rules:
 //   - The company is the caller's LIVE membership (read here from the sign-in table), never a header, a query, a body or a token claim. The member writes and the list go
@@ -12,7 +12,7 @@
 //   - A plain member, and anyone whose membership does not read, gets the same answers as the invitation routes (404 "not found" / 401 sign in again).
 //   - A person of another company, a missing person and an id that does not read all answer the same "member not found".
 //   - Only an owner may change or remove an owner, or make someone an owner (DEC 232e). Nobody changes their own role or removes themselves here.
-//   - A removal or a role change needs a FRESH step-up from the verified token (lane ID's contract, #682's check), every time.
+//   - DEC 254zzz73: there is no step-up; a removal or a role change needs the signed-in admin's live membership and the role rules above, read now.
 //   - Bodies and queries are validated at runtime and strictly; every refusal is a fixed sentence that never echoes what was sent.
 //   - Reads are bounded in total; past a bound the whole answer is refused, never a partial one.
 //   - L4-GH2: a removal takes the person's GitHub link (core/people/github-links.ts) with it, in the same request, only after the removal itself succeeded. The cleanup is conditional and idempotent, never blocks
@@ -24,17 +24,15 @@ import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { unlinkGithubAccount } from "../core/people/github-links.js";
 import { profileDisplayName } from "../developer/github-profile.js";
-import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { companyMemberActionsThroughLambda } from "./company-member-forwarding.js";
-import { CompanyMember, MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, MEMBER_STEP_UP, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
+import { CompanyMember, MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";
 
 export const MEMBER_NOT_FOUND = "member not found";
 export const NOT_FOUND = "not found";
 /** T3b's own words for DEC 232e; the route refuses first with the same sentence, and the store refuses again inside its transaction. */
 export const OWNER_ONLY = MEMBER_ONLY_OWNER;
 export const OWN_MEMBERSHIP = "you cannot change your own role or remove yourself here";
-export const REMOVAL_STEP_UP = "this removal needs a fresh sign-in check; sign in again and retry";
 export const ROLE_BODY = "send the new role: member, admin or owner";
 export const REMOVAL_BODY = "a removal takes no body";
 export const LIST_QUERY = "the list takes an optional cursor this list gave and a limit from 1 to 100";
@@ -104,7 +102,6 @@ async function membershipOf(ctx: CompanyMemberRouteContext, personId: string): P
 function unwrap(reply: CompanyMemberReply): Extract<CompanyMemberReply, { ok: true }> {
   if (reply.ok) return reply;
   const message = "message" in reply ? reply.message : undefined;
-  if (reply.error === "step_up_required") throw agentXError("REAUTH_REQUIRED", MEMBER_STEP_UP);
   if (message === MEMBER_LAST_OWNER) throw agentXError("LAST_OWNER", MEMBER_LAST_OWNER);
   if (message === MEMBER_REVOKED) throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
   if (message === MEMBER_ONLY_OWNER) throw agentXError("FORBIDDEN", MEMBER_ONLY_OWNER);
@@ -117,7 +114,7 @@ function unwrap(reply: CompanyMemberReply): Extract<CompanyMemberReply, { ok: tr
  * Company admin routes. The caller is already authenticated and its route row (`full`) applied; `companyId` is the company its live membership names (resolveCompany).
  * The membership is read again here, so a role or company that changed since is what counts.
  */
-export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input: { caller: DeveloperCaller; stepUp?: CallerStepUp | undefined; companyId: string }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input: { caller: DeveloperCaller; companyId: string }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const { caller, companyId } = input;
   let me: z.infer<typeof Membership> | undefined;
   try { me = await membershipOf(ctx, caller.developerId); } catch { me = undefined; }
@@ -149,18 +146,16 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
     const parsed = RoleBody.safeParse(body(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", ROLE_BODY);
     if ((target.role === "owner" || parsed.data.role === "owner") && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
-    requireFreshStepUp(input.stepUp, ctx.now(), MEMBER_STEP_UP);
     unwrap(await ctx.members.setRole(caller, { companyId: me.companyId, personId: targetId, role: parsed.data.role }));
     return { ok: true };
   }
   if (!RemovalBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", REMOVAL_BODY);
   if (target.role === "owner" && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
   if (target.revokedAt !== undefined) {
-    // A repeat of a removal retries a link left behind by an earlier cleanup that failed. It takes away only what a removed member still holds, so it needs no step-up.
+    // A repeat of a removal retries a link left behind by an earlier cleanup that failed. It takes away only what a removed member still holds.
     await dropGithubLink(ctx, me.companyId, targetId);
     throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
   }
-  requireFreshStepUp(input.stepUp, ctx.now(), REMOVAL_STEP_UP);
   unwrap(await ctx.members.revoke(caller, { companyId: me.companyId, personId: targetId }));
   await dropGithubLink(ctx, me.companyId, targetId);
   return { ok: true };
@@ -250,6 +245,5 @@ async function removalPreview(ctx: CompanyMemberRouteContext, me: z.infer<typeof
     personId, role: target.role, openTasks, awaitingTheirDecision, ownedProjects, projectGrants,
     // What the caller would be refused before pressing: an owner only by an owner, never themselves.
     mayRemove: personId !== me.personId && (target.role !== "owner" || me.role === "owner"),
-    stepUpRequired: true,
   };
 }

@@ -9,7 +9,7 @@
 //   POST /v1/app/projects/{project}/setup-agent/confirm    "Use this setup": a candidate revision from the run's verified commands, and its check on a fresh workspace (L4-D)
 //   POST /v1/app/projects/{project}/setup-agent/discard    drop the waiting candidate ({ requestId })
 //   GET  /v1/app/projects/{project}/setup-agent/eval          L4-EVC: the project's ONE eval card, in dollars (eval-card.ts)
-//   POST /v1/app/projects/{project}/setup-agent/eval-approve  ONE approval: confirm the eval AND approve its spend in the same act (a fresh step-up, the live approver rule, the dollars the person saw)
+//   POST /v1/app/projects/{project}/setup-agent/eval-approve  ONE approval: confirm the eval AND approve its spend in the same act (the live approver rule, the dollars the person saw)
 //   POST /v1/app/projects/{project}/setup-agent/eval-wrapper   L4-EVW4 (DEC 254zzz43): a person's act on the wrapper card ({ requestId, action: open_pull_request | dismiss | reopen | check, selection? }). ONLY a person's POST opens a pull
 //                                                         (one new file on a new branch, never merged by Rovara; owner, admin or project maintainer); `check` (look for the file on the default branch) is a read any member may ask
 //   GET  /v1/app/projects/{project}/setup-agent/updates    L4-SC (DEC 254z c): the "Update setup" offers a merged plan's setup changes left (managers only; a reader sees none)
@@ -17,9 +17,9 @@
 //   POST /v1/app/projects/{project}/setup-agent/updates/dismiss   "Not now" ({ requestId, taskId })
 //   POST /v1/app/projects/{project}/setup-agent/eval-decide   approve or reject a waiting eval spend item (a changed eval that grew past its approved limit asks again)
 //   POST /v1/app/projects/{project}/setup-agent/eval-health   the OPT-IN "Check my evals now": records the person's yes; nothing runs without it (eval-health-request.ts)
-//   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): a fresh step-up, then the risk-based
+//   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
-//   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), a fresh step-up, through
+//   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), through
 //                                                         the approval gate, bound to the exact ask (its host and when it was asked); the journal lists each open ask's `approval` and `canDecide`
 //
 // Confirm, discard and decide are served only where the deployment wires the hosted approval (`approval`): without it a confirm would leave a candidate nothing can approve.
@@ -74,7 +74,6 @@ export const SETUP_RUN_UNREADABLE = "The project's setup could not be read just 
 export const SETUP_RUN_AUDIT_UNAVAILABLE = "The record of this change could not be written, so nothing was done. Try again.";
 export const SETUP_APPROVAL_UNAVAILABLE = "Approving a project's setup isn't available on this install yet.";
 export const SETUP_NOTHING_WAITING = "There is no setup waiting for a decision. Open the project's setup again.";
-export const SETUP_DECIDE_ON_A_PAGE = "A setup is decided right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
 export const EVAL_WRAPPER_UNAVAILABLE = "Setting up the file Rovara needs to read your eval isn't available on this install yet.";
 /** "Check now" looks at the code host at most once in this long per eval (any member may press it; the host's quota is the company's). */
 const CHECK_NOW_FLOOR_MS = 15_000;
@@ -135,8 +134,6 @@ export interface HostedSetupRunInput {
   /** Whether the switch sends this company's NEW tasks to the core. False: a start is refused. */
   startsNewTasks: boolean;
   now: () => number;
-  /** The dev routes' step-up check (fresh for this company now), with the refusal's words; it throws the refusal. Absent: nothing is decided. */
-  freshStepUp?: (refusal: string) => Promise<{ at: string; method: string }>;
 }
 
 const DecideBodySchema = z.object({
@@ -244,17 +241,15 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
 function gateRefusal(result: Extract<GateResult, { status: "refused" }>): AgentXError {
   switch (result.reason) {
     case "stale": case "not_waiting": case "not_found": case "link_gone": return agentXError("CHANGE_STALE", result.detail);
-    case "sign_in_not_fresh": case "expired": return agentXError("REAUTH_REQUIRED", result.detail);
+    case "expired": return agentXError("REAUTH_REQUIRED", result.detail);
     case "proof_already_used": case "request_id_reused": return agentXError("IDEMPOTENCY_CONFLICT", result.detail);
     case "invalid": case "unsupported": case "invalid_outcome": return agentXError("CONFIG_INVALID", result.detail);
     default: return agentXError("FORBIDDEN", result.detail);
   }
 }
 
-/** Approve or reject the waiting candidate: a fresh step-up, the live risk rule, the point's proof, then the gate (which loads the candidate again and re-checks the rule). */
+/** Approve or reject the waiting candidate: the live risk rule, the point's proof, then the gate (which loads the candidate again and re-checks the rule). */
 async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, raw: unknown): Promise<BrokerResponse> {
-  if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
-  const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
   const body = parsed(DecideBodySchema, raw);
   const { flow, companyId } = input;
   const personId = input.principal.personId;
@@ -267,7 +262,7 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
   const card = setupCardOf(project, body.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issue({ companyId, personId, stepUp, requestId: body.requestId, kind: "setup", project, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
+    credential = await approval.issue({ companyId, personId, requestId: body.requestId, kind: "setup", project, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -284,12 +279,10 @@ async function decide(input: HostedSetupRunInput, approval: HostedSetupApproval,
 }
 
 /**
- * Allow or refuse a website the setup run asked for (L4-SF d): a fresh step-up, the high-risk rule on the person's live standing (a company owner or admin, either answer), the point's proof bound to the
+ * Allow or refuse a website the setup run asked for (L4-SF d): the high-risk rule on the person's live standing (a company owner or admin, either answer), the point's proof bound to the
  * exact ask, then the gate (which loads the ask again, re-checks the rule and the host's own refusal list on approval). The ask is found by the project and host the person named, in THIS company only.
  */
 async function decideHost(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, raw: unknown): Promise<BrokerResponse> {
-  if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", SETUP_APPROVAL_UNAVAILABLE);
-  const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
   const body = parsed(HostDecideBodySchema, raw);
   const { flow, companyId } = input;
   const personId = input.principal.personId;
@@ -305,7 +298,7 @@ async function decideHost(input: HostedSetupRunInput, approval: HostedSetupAppro
   const card = setupHostCardOf(subjectId, body.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issueHost({ companyId, personId, stepUp, requestId: body.requestId, kind: "setup_host", subjectId, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
+    credential = await approval.issueHost({ companyId, personId, requestId: body.requestId, kind: "setup_host", subjectId, revision: body.seen.revision, artifactDigest: body.seen.artifactDigest, outcome: body.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -318,15 +311,15 @@ async function decideHost(input: HostedSetupRunInput, approval: HostedSetupAppro
 }
 
 /**
- * L4-EVC: one decision on the project's eval spend item, as the person: the proof of this one act (a fresh step-up bound to the item's request id, revision, digest, the answer and its card), then the
+ * L4-EVC: one decision on the project's eval spend item, as the person: the proof of this one act (bound to the item's request id, revision, digest, the answer and its card), then the
  * ONE approval gate, whose eval subject re-reads the person's live role inside the decision. Throws the gate's fixed refusal.
  */
-async function decideEvalItem(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, act: { requestId: string; outcome: "approve" | "reject"; seen: { revision: number; artifactDigest: string } }, stepUp: { at: string; method: string }, principal: { personId: string }): Promise<void> {
+async function decideEvalItem(input: HostedSetupRunInput, approval: HostedSetupApproval, project: string, act: { requestId: string; outcome: "approve" | "reject"; seen: { revision: number; artifactDigest: string } }, principal: { personId: string }): Promise<void> {
   const { companyId } = input;
   const card = evalSpendCardOf(project, act.seen.artifactDigest);
   let credential: { method: string; token: string };
   try {
-    credential = await approval.issueEval({ companyId, personId: principal.personId, stepUp, requestId: act.requestId, kind: EVAL_SPEND_KIND, project, revision: act.seen.revision, artifactDigest: act.seen.artifactDigest, outcome: act.outcome, card });
+    credential = await approval.issueEval({ companyId, personId: principal.personId, requestId: act.requestId, kind: EVAL_SPEND_KIND, project, revision: act.seen.revision, artifactDigest: act.seen.artifactDigest, outcome: act.outcome, card });
   } catch {
     throw agentXError("FORBIDDEN", SETUP_PROOF_UNAVAILABLE);
   }
@@ -535,15 +528,13 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         if (!asked.duplicate) await Promise.resolve(evalWiring.healthRun?.(project)).catch(() => undefined);
         return json(200, { project, ...asked });
       }
-      if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
       if (tail === "eval-decide") {
         const body = parsed(EvalDecideBodySchema, raw);
         // The offer is the waiting item's own (its digest and revision), never an id the card did not show.
         const waiting = await readEvalSpendRecord({ store: flow.store, companyId }, project);
         if (waiting === undefined || body.requestId !== `eval-${waiting.digest.slice(0, 40)}-${String(waiting.revision)}`) throw agentXError("CHANGE_STALE", EVAL_DECIDE_STALE);
         await recorded(input, auditEvent(input, "eval.spend_decision_requested", `eval.decide:${companyId}:${project}:${personId}:${stamp}`, project, basis, { outcome: body.outcome }));
-        await decideEvalItem(input, approval, project, body, stepUp, input.principal);
+        await decideEvalItem(input, approval, project, body, input.principal);
         return json(200, { project, decision: body.outcome === "approve" ? "approved" : "rejected" });
       }
       // ONE approval: confirm the eval and approve its spend in the same act. The body names the dollars the person saw; the broker holds them against its own figures.
@@ -552,7 +543,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       await recorded(input, auditEvent(input, "eval.approve_requested", `eval.approve:${companyId}:${project}:${personId}:${stamp}`, project, basis, { taskId: body.taskId }));
       const answer = await confirmEvalDiscovery({
         store: flow.store, companyId, now: input.now, members: approval.evalMembers, monthlyCap: evalWiring.monthlyCap, readFile: evalWiring.readFile, latest: (name) => deps.latest(name),
-        approve: (offer, principal) => decideEvalItem(input, approval, project, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }, stepUp, principal),
+        approve: (offer, principal) => decideEvalItem(input, approval, project, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }, principal),
       }, project, body, input.principal);
       return json(200, { project, state: answer.evalSpend?.state, ...(answer.evalSpend?.card === undefined ? {} : { perPr: answer.evalSpend.card.perPr, monthly: answer.evalSpend.card.monthly, carried: answer.evalSpend.card.carried === true }) });
     }

@@ -1,12 +1,12 @@
 # Agents pick the models Rovara's AI serves
 
-DEC 243c (Rovara's AI offers every Bedrock coding model, not only Claude), DEC 236j (model choices are made on the web page only, after a fresh step-up) and DEC 240 (the customer pays for Rovara's AI).
+DEC 243c (Rovara's AI offers every Bedrock coding model, not only Claude), DEC 236j (model choices are made by an owner or administrator; DEC 254zzz73 removed the fresh step-up the web page used to need) and DEC 240 (the customer pays for Rovara's AI).
 
 ## What Code does
 
 - A company chooses the model each step of its agents runs on (the same per-step rule the laptop has: understand, plan, build, the checks, the pull request step) on the web page, from the models the gateway offers THAT company.
   - `GET /v1/app/agent-models`: any member reads the setting and the whole offered list (`AgentModelPage`: `state` plus `offered`).
-  - `POST /v1/app/agent-models`: the change (`ModelSelectionBody`). Only right after a fresh step-up the route checks itself (an API token or script token has none and is refused in fixed words), only by an owner or administrator (live role from membership), and only for a model on the offered list now. A less-safe change still needs the company's approval rule.
+  - `POST /v1/app/agent-models`: the change (`ModelSelectionBody`). Only by an owner or administrator (live role from membership), and only for a model on the offered list now. A less-safe change still needs the company's approval rule.
   - The choice is the company's own `MODEL_SELECTION_POLICY` row (company-keyed). Project-level choices are not built (the laptop rule has none either).
 - The core engine runs every step on the model the rule chooses, always through the gateway's agent route (`/v1/messages`, Anthropic Messages) with the model's own name as the alias and as the catalog entry. A model that is not on the offered list is never CHOSEN for a step: the step ends before any machine starts, with fixed words. Two things keep what they hold, because the gateway checks the company's source and meters every call anyway: a step that already holds its choice (a repeat delivery after the model left the list), and an operation with no model step of its own (it runs on the default model). With nothing chosen a step runs on the install's default model (`ROVARA_CORE_AGENT_MODEL`), as before, and is refused the same way if that model is no longer offered.
 - A list that cannot be read, or is not the contract, offers nothing (fail closed). The broker list is reused for five seconds at most; dispatcher validation expires after 60 seconds.
@@ -28,5 +28,5 @@ Code reads it with `core-host/offered-models-http.ts`:
 
 **The dispatcher does not sign (ANSWER-3).** The task key's policy still permits only the broker's role. The broker validates all saved choices and fallbacks against the company's offered list and stores `agentModelValidation` (validated choice, offered list, validatedAt, expiresAt) on its existing company-scoped `MODEL_SELECTION_POLICY` row. A validation-only default row has revision zero; an owner's first edit still advances it to revision one. Page reads/changes and broker outbox handoff refresh validation. Policy edits replace the row and invalidate an earlier validation; writes are fenced by revision. The dispatcher reads this row consistently for each new step choice, using the workspace record's company. A fresh valid row supplies the selected model; absent or expired validation uses the configured default, with one fixed-word expiry event; malformed, off-list or mismatched data refuses. It has no offered-models reader, signing rights, new IAM grant or task-key environment variable. The broker switch is off by default; with it off, no fresh choice rows are published and dispatch uses the existing default model route.
 
-- Cloud's web page shows the picker from `offered` and sends the change to Code's `POST /v1/app/agent-models` after its sign-in step-up.
-- "Web page only" means a fresh step-up proven by the verified token (as the decision cards): a CLI token issued right after a step-up would pass; requiring a registered web client as well is a follow-up.
+- Cloud's web page shows the picker from `offered` and sends the change to Code's `POST /v1/app/agent-models` as the signed-in person.
+- There is no step-up (DEC 254zzz73): any client acting as a signed-in owner or administrator may make the change.

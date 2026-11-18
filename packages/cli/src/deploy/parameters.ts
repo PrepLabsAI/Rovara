@@ -97,8 +97,6 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAnswersModel",
     // DEC 254zzz58: the hosted lessons learning model (agentx config set coreEngine.learningModel), empty = claude-haiku-5-5 (DEC 254zzz63; a company may choose its own).
     "CoreLearningModel",
-    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
-    "StepUpEmailSender",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
     "CompanySignIn", "CompanySelfServe",
     // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).

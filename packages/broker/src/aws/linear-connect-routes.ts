@@ -3,7 +3,7 @@
 //   POST   /v1/dev/company/linear/connect               {}                owner/admin: a single-use state and Linear's consent address (PKCE S256, actor=app)
 //   POST   /v1/dev/company/linear/complete              { state, code }   owner/admin: spend the state, exchange the code, read the workspace, bind it, store the tokens
 //   GET    /v1/dev/company/linear                                         any member: the connection's status, workspace, who connected it and when (never a token)
-//   DELETE /v1/dev/company/linear                                         owner + fresh step-up: revoke, unbind, clear every team pick, name the projects that had one
+//   DELETE /v1/dev/company/linear                                         owner: revoke, unbind, clear every team pick, name the projects that had one
 //   GET    /v1/dev/company/linear/projects/{project}                      owner/admin or the project's admin: the project's team and the teams the company's token can see
 //   PUT    /v1/dev/company/linear/projects/{project}    { teamId }        owner/admin or the project's admin: set the project's team (one the company's token can see)
 //   DELETE /v1/dev/company/linear/projects/{project}                      owner/admin or the project's admin: clear the project's team
@@ -19,7 +19,6 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { agentXError, AgentXError, AgentXNameSchema, OrgIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
-import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { exchangeLinearCode, linearAuthorizeUrl, linearTeamsOf, linearWorkspaceOf, revokeLinearToken, type LinearTokens, type LinearWorkspace } from "./linear-oauth-client.js";
@@ -34,7 +33,6 @@ export const CONNECT_NOT_SET_UP = "Connecting Linear isn't set up on this Rovara
 export const CONNECT_UNAVAILABLE = "Linear could not be connected just now. Start again from Rovara.";
 export const STATUS_UNAVAILABLE = "The company's Linear connection could not be read just now; try again.";
 export const DISCONNECT_OWNER_ONLY = "Only a company owner can disconnect Linear.";
-export const DISCONNECT_STEP_UP = "Disconnecting Linear needs a fresh sign-in check; sign in again and retry.";
 export const DISCONNECT_UNAVAILABLE = "Linear could not be disconnected just now; try again.";
 export const TEAM_ADMIN_ONLY = "Only a company owner or admin, or the project's admin, can choose its Linear team.";
 export const PROJECT_NOT_FOUND = "project not found";
@@ -112,7 +110,7 @@ async function discard(ctx: LinearConnectContext, companyId: string, tokens: Lin
  * The routes. The caller is authenticated and its route row (`full`) applied; `companyId` is its live membership's company (resolveCompany). The membership row is read again
  * here, so a role or company that changed since is what counts.
  */
-export async function routeLinearConnect(ctx: LinearConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL, stepUp?: CallerStepUp): Promise<unknown> {
+export async function routeLinearConnect(ctx: LinearConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const member = await liveMembership(ctx, caller, companyId);
   const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
 
@@ -121,7 +119,7 @@ export async function routeLinearConnect(ctx: LinearConnectContext, caller: Deve
 
   if (url.pathname === LINEAR_CONNECT_PATH) {
     if (request.method === "GET") return readStatus(ctx, member.companyId);
-    if (request.method === "DELETE") return disconnect(ctx, member, caller.developerId, stepUp);
+    if (request.method === "DELETE") return disconnect(ctx, member, caller.developerId);
     throw agentXError("NOT_FOUND", "not found");
   }
   if (request.method !== "POST") throw agentXError("NOT_FOUND", "not found");
@@ -182,10 +180,9 @@ async function readStatus(ctx: LinearConnectContext, companyId: string): Promise
   };
 }
 
-/** Owner + fresh step-up, in that order, before anything is read; then the store's conditional disconnect (revoke, unbind, clear picks). */
-async function disconnect(ctx: LinearConnectContext, member: z.infer<typeof Membership>, personId: string, stepUp: CallerStepUp | undefined): Promise<unknown> {
+/** A live owner, before anything is read; then the store's conditional disconnect (revoke, unbind, clear picks). */
+async function disconnect(ctx: LinearConnectContext, member: z.infer<typeof Membership>, personId: string): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", DISCONNECT_OWNER_ONLY);
-  requireFreshStepUp(stepUp, ctx.now(), DISCONNECT_STEP_UP);
   let outcome: Awaited<ReturnType<LinearConnectWiring["connections"]["disconnect"]>>;
   try { outcome = await ctx.wiring.connections.disconnect(member.companyId, personId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE); }
   if (outcome.outcome === "not_found") throw agentXError("LINEAR_NOT_CONNECTED", LINEAR_NOT_CONNECTED);

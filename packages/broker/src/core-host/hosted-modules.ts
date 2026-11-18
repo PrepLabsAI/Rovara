@@ -17,7 +17,7 @@
 //               It authenticates no credential itself.
 //   audit-sink  Code's audit records: the `AUDIT` rows of the company's own partition (the document audit sink), read back by lane AU's company audit read.
 //
-//   approvers   Switch-on lane L2a (core-host/hosted-approvers.ts): the task owner, as the broker's existing rule, with #662's fresh step-up proved for one act, bound to its card, and
+//   approvers   Switch-on lane L2a (core-host/hosted-approvers.ts): the task owner, as the broker's existing rule, with a proof of one act by the signed-in person, bound to its card, and
 //               its one-time part claimed in the company's partition. Built after identity (it names people through that point). A host without the proof key (the dispatcher, which
 //               decides nothing for a person) refuses every proof.
 //
@@ -36,7 +36,7 @@ import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
-import { createHostedApprovers, stepUpApprovalKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
 import { GITHUB_LINK_PROVIDER, githubLinkReaderOver, type GithubLinkReader } from "../core/people/github-links.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
@@ -548,7 +548,7 @@ export interface HostedSecurityInputs {
   taskOwner?: (input: { companyId: OrgId; store: DocumentStore; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => Promise<boolean>;
   /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
   projectTaskCap?: ProjectTaskCap | undefined;
-  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the step-up alone. */
+  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the page's proof alone. */
   chat?: HostedChatApproval | undefined;
 }
 
@@ -574,7 +574,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
       point: "approvers", name: "hosted-step-up", owner: "switch-on lane L2a",
       create: (context, registry) => createHostedApprovers({
         store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
-        ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
+        ...(inputs.callbackSigningKey === undefined ? {} : { key: approvalProofKeyOf(inputs.callbackSigningKey) }),
         ...(inputs.taskOwner === undefined ? {} : { taskOwner: (asked: { companyId: OrgId; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => inputs.taskOwner!({ ...asked, store: registry.require("storage") }) }),
         ...(inputs.chat === undefined ? {} : { chat: inputs.chat }),
       }),

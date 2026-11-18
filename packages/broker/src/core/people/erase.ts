@@ -67,7 +67,7 @@ export const noWikiToErase = async (): Promise<void> => undefined;
 export interface PersonEraseInput {
   companyId: string;
   personId: string;
-  /** The person who erased (a member of the company; the route checked their role and a fresh step-up). */
+  /** The person who erased (a member of the company; the route checked their role). */
   by: string;
   requestId: string;
   /** The most milliseconds this call gives the evidence walk. Default PERSON_ERASE_BUDGET_MS. */

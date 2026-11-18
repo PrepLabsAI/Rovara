@@ -286,16 +286,15 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives DeveloperIdentity exactly the item operations its store uses on the sign-in table, nothing table-wide", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
-    expect(tableStatements).toHaveLength(3);
+    expect(tableStatements).toHaveLength(2);
     // TransactWriteItems is authorized per item as PutItem and UpdateItem; the store never condition-checks.
     expect(actionsOf(tableStatements[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]);
     expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
     // Spec 063: it lists and removes sign-in clients, and deletes or queries nothing else.
     expect(actionsOf(tableStatements[1]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
     expect(tableStatements[1]!.Condition).toEqual({ "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } });
-    // Lane ID part 2b (hosted wiring (b)): it lists and removes a person's passkeys, only in PASSKEYS# partitions (named environments only).
-    expect(actionsOf(tableStatements[2]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
-    expect(tableStatements[2]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } });
+    // DEC 254zzz73: the passkey statement (Query/DeleteItem on PASSKEYS#) is gone with the step-up; nothing reaches a PASSKEYS# partition.
+    expect(JSON.stringify(tableStatements)).not.toContain("PASSKEYS#");
   });
 
   it("throttles the public /v1/auth/*, /v1/dev/*, and /review/* routes on the default stage (burst 50, 20 requests a second)", () => {
@@ -706,7 +705,10 @@ describe("task-token key and membership IAM", () => {
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack + the attention email, whose resources are asserted and taken out by withoutCoreEngine); the named synth differs from
     // batch 13's head only in the machine size changes and the attention email's conditional resources, parameters, rule and `ae` setting.
     // Batch 14 combined (DEC 254zzl-amend3, 254zzn(2)): and for the CoreSystemRuns/CoreAnswersModel parameters, the system-runs condition and upkeep-night schedule, and `aa`/`sy` packed (nothing else).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668");
+    // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
+    // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
+    // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("c8615c4a5a67361e911f7e38383ef9f63ed2df3c18ea7390ecb0f4d635a2f86b");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1704,7 +1706,8 @@ const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRe
 
 // Core-engine grants are already pinned in beforeTuples (the stacked #666 fixture). Do not count them twice.
 /**
- * Hosted wiring: (a) SES SendEmail for the sign-in function on the StepUpEmailSender identity; (b) its passkey Query/DeleteItem on PASSKEYS#; (c) the policy hook's key (broker Sign,
+ * Hosted wiring: (a) SES SendEmail for the sign-in function and (b) its passkey Query/DeleteItem on PASSKEYS# were REMOVED by owner DEC 254zzz73 (no step-up; rule D: those three tuples
+ * are the only ones taken out here, and the effective-tuple test proves nothing else moved); (c) the policy hook's key (broker Sign,
  * public key to the broker and the sign-in function, key-policy Denies); (h) the company-secrets role; (i) the TLS-only Deny on both core dispatch queues. All additive.
  */
 const hostedWiringTuples: AccessTuple[] = [
@@ -1724,10 +1727,7 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:CompanySecretsRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:Query","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
 /** DEC 254h: the sign-in function reads the GitHub OAuth app's client secret, that one secret only. */

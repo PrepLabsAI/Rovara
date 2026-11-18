@@ -18,9 +18,6 @@ import {
   TaskPeopleDisplayReadRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
-  DEVELOPER_AUTH_REQUEST_SECONDS,
-  DEVELOPER_STEP_UP_ACR,
-  DEVELOPER_STEP_UP_WINDOW_SECONDS,
   EndDeveloperSessionsRequestSchema,
   SetDisplayNameRequestSchema,
   SetMyNameBodySchema,
@@ -60,16 +57,6 @@ import {
   type SlackAuthCheckResponse,
   type SlackUserByEmailRequest,
   type SlackUserByEmailResponse,
-  type ListPasskeysRequest,
-  type ListPasskeysResponse,
-  type ListSignInFactorsRequest,
-  type ListSignInFactorsResponse,
-  type RemovePasskeyRequest,
-  type RemovePasskeyResponse,
-  type RemovePersonPasskeysRequest,
-  type RemovePersonPasskeysResponse,
-  type SetFactorEmailRequest,
-  type SetFactorEmailResponse,
   type SignInLinkStartRequest, type SignInLinkFinishRequest, type SignInLinksListRequest, type SignInUnlinkRequest,
   type SignInLinkStartResponse, type SignInLinkFinishResponse, type SignInLinksListResponse, type SignInUnlinkResponse,
 } from "@agentx/contracts";
@@ -78,9 +65,7 @@ import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { mergeSurvivor } from "../aws/install-company.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
-import { createFactorAdmin } from "./factor-admin.js";
 import { createSignInLinks } from "./sign-in-links.js";
-import { createStepUpPages, STEP_UP_TEXT, type StepUpDependencies } from "./step-up.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
@@ -105,8 +90,6 @@ export interface DeveloperIdentityDependencies {
   directoryForWorkspace?: (workspace: unknown) => Promise<SlackDirectory>;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
-  /** Lane ID part 2: the factors Code owns for a step-up. Absent: a step-up is refused for everyone (no code is issued), and every other sign-in is as before. */
-  stepUp?: StepUpDependencies;
   company?: CompanySignInStore;
   /** DEC 254a, 253z: invite codes and self-serve create (with `company` only). Absent: those events answer unavailable, and nobody signs in with no company. */
   companyInvites?: CompanyInviteStore;
@@ -125,8 +108,6 @@ export interface HttpResult { statusCode: number; headers: Record<string, string
 export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
-/** A company sign-in's auth_time this far ahead of the clock is not believed. */
-const AUTH_TIME_SKEW_SECONDS = 120;
 // The PR-feedback review page, or the read-only task page, which may name one document and the earlier version it came from.
 // Spec 062 FR-031: also a channel link page, /review/link/<32-character code>.
 const REVIEW_RETURN_TO = /^\/review\/(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?|link\/[A-Za-z0-9_-]{32})$/i;
@@ -326,13 +307,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     issueAccessToken(deps.signer, {
       issuer: config.issuer, subject: session.developerId, amr: session.amr, env: config.env, sessionId: session.sessionId, now: deps.now(),
       ...(client === undefined ? {} : { client: { clientId: client.clientId, audience: client.audience, scopes: (session.scopes ?? []).filter((scope) => client.scopes?.includes(scope as ClientScope) === true) } }),
-      ...(session.stepUpAt === undefined || session.stepUpMethod === undefined ? {} : { stepUp: { at: session.stepUpAt, method: session.stepUpMethod } }),
     });
-  const factorAdmin = createFactorAdmin({
-    env: config.env, store, email: deps.stepUp?.email, companyAdmin: deps.stepUp?.companyAdmin, now: deps.now, log: deps.log,
-    // As a refresh checks: the session's method is still on, and was on when it started.
-    methodLive: (session) => enabledMethods(deps).includes(session.amr) && !startedBeforeMethodOn(session.startedAt, methodSince(config, session.amr)),
-  });
   // DEC 254w: connecting a second sign-in method to the signed-in person (sign-in-links.ts).
   const signInLinks = createSignInLinks({
     store, company: () => deps.company, provider, methodEnabled: (method) => enabledMethods(deps).includes(method),
@@ -340,7 +315,6 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     registeredClient: (clientId) => registeredClient(clientId), installSlackCompany: () => slackCompany(),
     slackTeamCompany: async (teamId) => deps.slackTeamCompany === undefined ? undefined : deps.slackTeamCompany(teamId), endpoint, now: deps.now, log: deps.log,
   });
-  const stepUpPages = createStepUpPages({ issuer: config.issuer, env: config.env, store, deps: deps.stepUp, now: deps.now, log: deps.log, issue: (grant, clientState) => issueCode(grant, clientState, 303) });
 
   /** The registered client a request names, or undefined for an unknown ID (an unreadable row reads as none). */
   const registeredClient = async (clientId: string): Promise<SignInClientRecord | undefined> =>
@@ -397,7 +371,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
-        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.stepUp === true, request.companyId, workspaceHint);
+        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.companyId, workspaceHint);
       } catch (error) {
         return serverError(error, "/v1/auth/authorize", request.clientRedirectUri, request.clientState);
       }
@@ -454,16 +428,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (chosen === undefined) return methodUnavailable();
       methods = [chosen];
     }
-    // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
-    const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
-    // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
-    // A step-up re-proves who someone is; it never joins anyone.
-    if (stepUp && invite !== null) return methodUnavailable();
-    if (stepUp && deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined) return toClient(redirectUri, { error: "access_denied", error_description: STEP_UP_TEXT.noFactor, state: clientState });
+    // DEC 254zzz73: there is no step-up. `acr_values` (any value, `step-up` included) is not Code's and is ignored: the sign-in is an ordinary one.
     let request: AuthRequestRecord;
     try {
       request = await store.createAuthRequest({
-        ...(stepUp ? { stepUp: true as const } : {}),
         clientRedirectUri: redirectUri, clientState, codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"),
         ...(client === undefined ? {} : { clientId: client.clientId }),
         // Spec 065 FR-002: a scope the registration does not allow is dropped, not refused.
@@ -474,7 +442,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (methods.length === 1) {
         const method = methods[0]!;
         if (await store.chooseMethod(request.id, method) === undefined) return expired();
-        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, stepUp, request.companyId, workspaceHint);
+        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, request.companyId, workspaceHint);
       }
     } catch (error) {
       return serverError(error, "/v1/auth/authorize", redirectUri, clientState);
@@ -523,10 +491,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
   }
 
-  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, stepUp = false, companyId?: string, workspaceHint?: string): Promise<HttpResult> {
+  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, companyId?: string, workspaceHint?: string): Promise<HttpResult> {
     try {
       return redirect(await (await providerFor(method, companyId)).authorizeUrl({
-        state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`), ...(stepUp ? { reauthenticate: { maxAgeSeconds: DEVELOPER_STEP_UP_WINDOW_SECONDS } } : {}),
+        state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`),
         ...(method === "slack" && workspaceHint !== undefined ? { workspaceHint } : {}),
       }));
     } catch (error) {
@@ -695,7 +663,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash! })
           : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
-      companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined && request.stepUp !== true
+      companyless = !joined.ok && joined.reason === "not_invited" && request.companyId === undefined && request.browserReturnTo === undefined
         && await companylessMayMint(developerId, method, registered);
       if (!joined.ok && !companyless) {
         // DEC 254h: with an invite secret, every failure (unknown, used, expired, withdrawn, wrong company, a member elsewhere, a removed member) is the one answer.
@@ -752,37 +720,19 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // DEC 254b (a): and only into the built-in company, as before; a member of another company signed in through the shared method never is one.
       ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) ? { administrator: true as const } : {}),
     };
-    if (request.stepUp === true) {
-      // Lane ID part 2: a company sign-in's own re-authentication counts when it says when it happened (auth_time) and that is inside the window. A Slack round trip never counts.
-      const nowSeconds = Math.floor(deps.now() / 1000);
-      const authTime = method === "oidc" ? identity.authTime : undefined;
-      // It must also be no earlier than this sign-in request (less the skew): an older company session that the issuer simply reused is not a re-authentication.
-      const requestedAt = request.expiresAt - DEVELOPER_AUTH_REQUEST_SECONDS;
-      if (authTime !== undefined && nowSeconds - authTime <= DEVELOPER_STEP_UP_WINDOW_SECONDS && authTime - nowSeconds <= AUTH_TIME_SKEW_SECONDS && authTime >= requestedAt - AUTH_TIME_SKEW_SECONDS) {
-        deps.log({ event: "signin.step_up_succeeded", method, stepUpMethod: "company_reauth", developerId });
-        return issueCode({ ...grant, stepUpAt: Math.min(authTime, nowSeconds), stepUpMethod: "company_reauth" }, request.clientState);
-      }
-      // ID-STEPUP-FOLLOWUPS (a): the code goes only to the person's factor email as the record held it BEFORE this sign-in (captured at their first sign-in, or set by a company admin).
-      // The provider's email, now or ever since, never chooses or moves it.
-      const started = await stepUpPages.start(grant, request.clientState, existing?.factorEmail);
-      if (typeof started !== "string") return started;
-      deps.log({ event: "signin.step_up_refused", method, developerId, reason: started });
-      return client({ error: "access_denied", error_description: started === "limited" ? STEP_UP_TEXT.limited : STEP_UP_TEXT.noFactor });
-    }
     return issueCode(grant, request.clientState);
   }
 
-  /** Issues the code for the client and sends the browser back to it. A step-up's grant carries its time and method. */
-  async function issueCode(grant: CodeGrant & { codeChallenge: string; redirectUri: string }, clientState: string, status: 302 | 303 = 302): Promise<HttpResult> {
+  /** Issues the code for the client and sends the browser back to it. */
+  async function issueCode(grant: CodeGrant & { codeChallenge: string; redirectUri: string }, clientState: string): Promise<HttpResult> {
     const agentxCode = await store.issueCode(grant);
-    deps.log({ event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }), ...(grant.stepUpMethod === undefined ? {} : { stepUpMethod: grant.stepUpMethod }) });
-    const back = toClient(grant.redirectUri, { code: agentxCode, state: clientState });
-    return { ...back, statusCode: status };
+    deps.log({ event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }) });
+    return toClient(grant.redirectUri, { code: agentxCode, state: clientState });
   }
 
   /**
    * DEC 254w: a merged or connected sign-in still stands for its person: its identity's walk ends at that person now. Once a connected method is
-   * removed (or a merge undone), a code, step-up grant or session it made before that is refused, whenever it is used.
+   * removed (or a merge undone), a code or session it made before that is refused, whenever it is used.
    */
   async function stillSeated(signedInId: string | undefined, developerId: string): Promise<boolean> {
     if (signedInId === undefined) return true;
@@ -953,7 +903,6 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     jwks_uri: endpoint("/.well-known/jwks.json"), response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS, revocation_endpoint_auth_methods_supported: CLIENT_AUTH_METHODS,
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
-    ...(deps.stepUp?.email === undefined && deps.stepUp?.passkeys === undefined ? {} : { acr_values_supported: [DEVELOPER_STEP_UP_ACR] }),
   });
 
   async function route(method: string, pathname: string, url: URL, body: string | undefined, headers: Record<string, string | undefined>): Promise<HttpResult> {
@@ -991,42 +940,28 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         // DEC 254h: GitHub's callback; with GitHub off (or the company layer off) the sign-in request never chose it, so this answers "expired".
         case "/v1/auth/callback/github":
           return callback("github", url.searchParams, headers);
-        case "/v1/auth/step-up":
-          return stepUpPages.show(headers);
       }
     }
-    if (method === "POST" && pathname === "/v1/auth/step-up/email") return stepUpPages.sendEmail(headers);
-    if (method === "POST" && pathname === "/v1/auth/step-up/verify") return stepUpPages.verify(headers, new URLSearchParams(body ?? ""));
-    if (method === "POST" && pathname === "/v1/auth/step-up/continue") return stepUpPages.continueWithoutPasskey(headers);
-    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/options") return stepUpPages.passkeyOptions(headers);
-    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/verify") return stepUpPages.passkeyVerify(headers, body);
-    if (method === "POST" && pathname === "/v1/auth/step-up/passkey/register") return stepUpPages.passkeyRegister(headers, body);
     if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""), headers.authorization);
     if (method === "POST" && pathname === "/v1/auth/revoke") return revokeToken(new URLSearchParams(body ?? ""), headers.authorization);
     return jsonResult(404, { error: "not_found" });
   }
 
-  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/") || pathname.startsWith("/v1/auth/step-up");
+  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
       | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest
-      | ListPasskeysRequest | ListSignInFactorsRequest | RemovePasskeyRequest | RemovePersonPasskeysRequest | SetFactorEmailRequest | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke
+      | CompanyOperatorRequest | CompanyImportEventInput | SlackInstallInvoke
       | SignInLinkStartRequest | SignInLinkFinishRequest | SignInLinksListRequest | SignInUnlinkRequest,
   ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse | SignInClientsResponse | SetDisplayNameResponse
-    | ListPasskeysResponse | ListSignInFactorsResponse | RemovePasskeyResponse | RemovePersonPasskeysResponse | SetFactorEmailResponse | CompanyOperatorResponse | CompanyImportReplyValue
+    | CompanyOperatorResponse | CompanyImportReplyValue
     | SignInLinkStartResponse | SignInLinkFinishResponse | SignInLinksListResponse | SignInUnlinkResponse | Record<string, unknown>> => {
     if (deps.company !== undefined && (event === null || typeof event !== "object" || Array.isArray(event))) return { ok: false, error: "invalid_request" };
     if ("kind" in event) {
       if (event.kind === "slack-install") return deps.slackInstall === undefined ? { ok: false, error: "not_set_up" } : deps.slackInstall(event);
       if (deps.companyImport !== undefined && (event.kind === "company-import" || event.kind === "company-import-undo")) return companyImportOperator({ store: deps.companyImport, log: deps.log }, event);
       if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
-      // ID-STEPUP-FOLLOWUPS: the factor email and passkeys. Each checks the caller's own live session (and, for a change, its fresh step-up) in this table.
-      if (event.kind === "list-passkeys") return factorAdmin.listPasskeys(event);
-      if (event.kind === "list-sign-in-factors") return factorAdmin.listSignInFactors(event);
-      if (event.kind === "remove-passkey") return factorAdmin.removePasskey(event);
-      if (event.kind === "remove-person-passkeys") return factorAdmin.removePersonPasskeys(event);
-      if (event.kind === "set-factor-email") return factorAdmin.setFactorEmail(event);
       // DEC 254w: connected sign-ins. Each checks the caller's own live session in this table.
       if (event.kind === "sign-in-link-start") return signInLinks.start(event);
       if (event.kind === "sign-in-link-finish") return signInLinks.finish(event);

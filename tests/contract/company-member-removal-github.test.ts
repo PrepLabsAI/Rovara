@@ -7,7 +7,6 @@ import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-c
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { REMOVAL_STEP_UP } from "../../packages/broker/src/aws/company-member-routes.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import { MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
@@ -61,17 +60,16 @@ function world(options: { store?: DocumentStore; noWiring?: boolean } = {}) {
     }
   };
   const as = (id: string) => { claims.sub = id; claims.sid = SESSIONS[id]; };
-  const stepUp = () => { claims.step_up_at = Math.floor((NOW - 30_000) / 1000); claims.step_up_amr = "passkey"; };
   const revoked = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { revokedAt?: string } | undefined)?.revokedAt !== undefined;
   const link = (company: OrgId, person: string, accountId: string, login: string) => linkGithubAccount(links, { companyId: company, githubUserId: accountId, login, personId: person, linkedAt: TIME });
-  return { db, claims, deps, call, as, stepUp, revoked, links, logs, link, operate, join };
+  return { db, claims, deps, call, as, revoked, links, logs, link, operate, join };
 }
 
 const linkedTo = async (links: DocumentStore, company: OrgId, person: string) => (await githubLinkOf(links, company, person))?.accountId;
 
 describe("removing a member takes their GitHub link with it", () => {
   it("deletes both link rows of the removed person, and only that person's", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     await h.link(A, MEMBER, "7", "max"); await h.link(A, PEER, "8", "pat"); await h.link(A, ADMIN, "9", "ada");
     expect(await h.call("POST", removal(MEMBER))).toEqual({ status: 200, body: { ok: true } });
     expect(h.revoked(MEMBER)).toBe(true);
@@ -83,7 +81,7 @@ describe("removing a member takes their GitHub link with it", () => {
   });
 
   it("two companies: the removal leaves the other company's rows alone, even ones under the same person id or the same GitHub account", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     await h.link(A, MEMBER, "7", "max");
     // Company B holds the same GitHub account for its own person, and (a stray) a row for the same person id.
     await h.link(B, OTHER, "7", "bea");
@@ -96,14 +94,14 @@ describe("removing a member takes their GitHub link with it", () => {
   });
 
   it("another company's admin cannot remove A's member, and A's link stays", async () => {
-    const h = world(); h.as(OTHER); h.stepUp();
+    const h = world(); h.as(OTHER);
     await h.link(A, MEMBER, "7", "max");
     expect((await h.call("POST", removal(MEMBER))).status).toBe(404);
     expect(await linkedTo(h.links, A, MEMBER)).toBe("7");
   });
 
   it("re-adding the person starts with no link: the account is nobody's, the person has none, and the account can be linked again by anyone", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     await h.link(A, MEMBER, "7", "max");
     await h.call("POST", removal(MEMBER));
     expect(await h.operate({ kind: "company-member-restore", companyId: A, personId: MEMBER })).toMatchObject({ ok: true });
@@ -118,7 +116,7 @@ describe("removing a member takes their GitHub link with it", () => {
   });
 
   it("a member with no link: the removal succeeds, writes nothing and logs nothing", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     const writes = vi.spyOn(h.links, "transact"); const deletes = vi.spyOn(h.links, "delete");
     expect(await h.call("POST", removal(MEMBER))).toEqual({ status: 200, body: { ok: true } });
     expect(writes).not.toHaveBeenCalled(); expect(deletes).not.toHaveBeenCalled();
@@ -126,13 +124,13 @@ describe("removing a member takes their GitHub link with it", () => {
   });
 
   it("a removal without the GitHub link wiring still removes the member", async () => {
-    const h = world({ noWiring: true }); h.stepUp();
+    const h = world({ noWiring: true });
     expect(await h.call("POST", removal(MEMBER))).toEqual({ status: 200, body: { ok: true } });
     expect(h.revoked(MEMBER)).toBe(true);
   });
 
   it("an account row that names someone else is not removed with this person's (conditional deletes)", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     await h.link(A, MEMBER, "7", "max");
     // The account moved to another member after the person row was written (a stale person row remains).
     const { githubAccountKey } = await import("../../packages/broker/src/core/people/github-links.js");
@@ -144,7 +142,7 @@ describe("removing a member takes their GitHub link with it", () => {
 
 describe("the cleanup never removes a row another member wrote since", () => {
   it("an account row that changed hands between the cleanup's read and its delete stays the other member's", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     const { githubAccountKey } = await import("../../packages/broker/src/core/people/github-links.js");
     await h.link(A, MEMBER, "7", "max");
     const remove = h.links.delete.bind(h.links);
@@ -161,12 +159,9 @@ describe("the cleanup never removes a row another member wrote since", () => {
 });
 
 describe("only a removal that happened removes the link", () => {
-  it("a removal refused for a missing step-up, for oneself, for an owner by an admin, or by an unavailable helper leaves the link", async () => {
+  it("a removal refused for oneself, for an owner by an admin, or by an unavailable helper leaves the link", async () => {
     const h = world();
     await h.link(A, MEMBER, "7", "max"); await h.link(A, OWNER, "8", "olive"); await h.link(A, ADMIN, "9", "ada");
-    // No step-up.
-    expect(await h.call("POST", removal(MEMBER))).toEqual(refusal(403, "REAUTH_REQUIRED", REMOVAL_STEP_UP));
-    h.stepUp();
     // Oneself, and an owner by an admin.
     expect((await h.call("POST", removal(ADMIN))).status).toBe(403);
     expect((await h.call("POST", removal(OWNER))).status).toBe(403);
@@ -195,7 +190,7 @@ function failingStore() {
 describe("a failed cleanup never blocks the removal", () => {
   it("the removal still succeeds, the failure is logged in fixed words without the cause, and a repeat of the removal request retries it", async () => {
     const failing = failingStore();
-    const h = world({ store: failing.store }); h.stepUp();
+    const h = world({ store: failing.store });
     await h.link(A, MEMBER, "7", "max");
     failing.break();
     expect(await h.call("POST", removal(MEMBER))).toEqual({ status: 200, body: { ok: true } });
@@ -204,8 +199,7 @@ describe("a failed cleanup never blocks the removal", () => {
     expect(JSON.stringify(h.logs)).not.toContain(CANARY);
     failing.heal();
     expect(await linkedTo(h.links, A, MEMBER)).toBe("7");
-    // The same request again, with no step-up at all (it only takes what a removed member still holds): the member is already removed (the answer is unchanged), and the leftover link is taken now.
-    delete h.claims.step_up_at; delete h.claims.step_up_amr;
+    // The same request again: the member is already removed (the answer is unchanged), and the leftover link is taken now.
     expect(await h.call("POST", removal(MEMBER))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
     expect(await linkedTo(h.links, A, MEMBER)).toBeUndefined();
     expect(await linkedGithubPerson(h.links, A, "7")).toBeUndefined();
@@ -213,7 +207,7 @@ describe("a failed cleanup never blocks the removal", () => {
 
   it("a repeat that fails again is also answered as already removed, and logs again", async () => {
     const failing = failingStore();
-    const h = world({ store: failing.store }); h.stepUp();
+    const h = world({ store: failing.store });
     await h.link(A, MEMBER, "7", "max");
     failing.break();
     await h.call("POST", removal(MEMBER));
@@ -222,7 +216,7 @@ describe("a failed cleanup never blocks the removal", () => {
   });
 
   it("a repeat removal request of a removed member never touches another company's person or link", async () => {
-    const h = world(); h.stepUp();
+    const h = world();
     await h.call("POST", removal(MEMBER));
     await h.link(B, MEMBER, "11", "max-b");
     expect(await h.call("POST", removal(MEMBER))).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));

@@ -52,42 +52,36 @@ beforeAll(() => {
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
-describe("(a) step-up email through SES", () => {
-  it("declares StepUpEmailSender in named environments only, empty by default, one address or empty", () => {
-    const parameter = named.Parameters.StepUpEmailSender!;
-    expect(parameter).toMatchObject({ Type: "String", Default: "", MaxLength: 254 });
-    const pattern = new RegExp(parameter.AllowedPattern as string, "u");
-    for (const ok of ["", "codes@example.com", "step-up.codes@mail.example.co"]) expect(pattern.test(ok), ok).toBe(true);
-    for (const bad of ["Codes <codes@example.com>", "codes@example", "a b@example.com", "codes@@example.com", "*@example.com"]) expect(pattern.test(bad), bad).toBe(false);
+describe("(a) no step-up email (DEC 254zzz73)", () => {
+  it("declares no StepUpEmailSender parameter and gives the sign-in function no STEP_UP_EMAIL_FROM, in either template", () => {
+    expect(named.Parameters.StepUpEmailSender).toBeUndefined();
     expect(legacy.Parameters.StepUpEmailSender).toBeUndefined();
+    expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toBeUndefined();
+    expect(JSON.stringify(named)).not.toContain("StepUpEmailSender");
+    expect(JSON.stringify(named)).not.toContain("STEP_UP_EMAIL_FROM");
+    expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
   });
 
-  it("lets the sign-in function send only as that identity, with the From address pinned, and nobody else send", () => {
-    const sends = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")));
-    expect(sends).toEqual([{
-      Action: "ses:SendEmail", Effect: "Allow",
-      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "StepUpEmailSender" }]] },
-      Condition: { StringEquals: { "ses:FromAddress": { Ref: "StepUpEmailSender" } } },
-    }]);
-    expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toEqual({ Ref: "StepUpEmailSender" });
+  it("lets the sign-in function send no email: the only SES right in the stack is the attention email sender's own", () => {
+    expect(statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")))).toEqual([]);
     // No other role in the stack may send email, except the attention email's own sender (DEC 254zx, #907): one ses:SendEmail on its own CoreAttentionEmailSender identity, From
     // pinned, in its own policy that exists only while CoreAttentionEmail is on (core-engine-infrastructure.test.ts pins the rest of it).
     const sesByPolicy = ofType(named, "AWS::IAM::Policy").flatMap(([id, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
       .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))).map((statement) => ({ id, statement })));
-    expect(sesByPolicy).toHaveLength(2);
-    const attention = sesByPolicy.filter(({ id }) => id.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy"));
-    expect(attention.map(({ statement }) => statement)).toEqual([{
+    expect(sesByPolicy).toHaveLength(1);
+    expect(sesByPolicy[0]!.id.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy")).toBe(true);
+    expect(sesByPolicy.map(({ statement }) => statement)).toEqual([{
       Action: "ses:SendEmail", Effect: "Allow",
       Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "CoreAttentionEmailSender" }]] },
       Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
       Sid: "AttentionEmailSend",
     }]);
     expect(JSON.stringify(legacy)).not.toContain("ses:");
-    expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
   });
 });
 
 describe("(a) the default boundary's SES statement", () => {
+  // Kept for the attention email sender; the Sid keeps its old name so the deployed boundary does not change (DEC 254zzz73).
   it("allows only ses:SendEmail, only on this account's email identities in this region", () => {
     const scope = { env: "staging", partition: "aws", region: "us-west-2", account: "111122223333", cloudFormationRoleName: "agentx-staging-cloudformation" };
     const statements = defaultBoundaryStatements(scope);
@@ -97,12 +91,14 @@ describe("(a) the default boundary's SES statement", () => {
   });
 });
 
-describe("(b) passkeys", () => {
-  it("turns passkeys on in named environments, and the function's Query and DeleteItem reach only PASSKEYS# and the sign-in clients' partition", () => {
-    expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBe("enabled");
+describe("(b) no passkeys (DEC 254zzz73)", () => {
+  it("turns no passkeys on, and the function's Query and DeleteItem reach only the sign-in clients' partition and the company grants, never PASSKEYS#", () => {
+    expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBeUndefined();
+    expect(JSON.stringify(named)).not.toContain("DEVELOPER_PASSKEYS");
     expect(JSON.stringify(legacy)).not.toContain("DEVELOPER_PASSKEYS");
+    expect(JSON.stringify(named)).not.toContain("PASSKEYS#");
     const all = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action === "dynamodb:Query" || action === "dynamodb:DeleteItem"));
-    // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here); the passkey ones are unchanged.
+    // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here).
     const companyGrant = (statement: (typeof all)[number]) => /SIGNIN_LINKS#|#MEMBERS"|COMPANY_INVITE_CODES|#PREAPPROVAL"|#COMPANY"|COMPANY_MEMBER#/u.test(JSON.stringify(statement.Condition));
     expect(all.filter(companyGrant).map((statement) => [actionsOf(statement), statement.Condition])).toEqual([
       [["dynamodb:Query"], { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS", "ORG#org_????????????????????#PREAPPROVAL", "COMPANY_INVITE_CODES", "SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }],
@@ -112,7 +108,6 @@ describe("(b) passkeys", () => {
     const scoped = all.filter((statement) => !companyGrant(statement));
     expect(scoped.map((statement) => statement.Condition)).toEqual([
       { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } },
-      { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
     ]);
     for (const statement of scoped) expect(actionsOf(statement).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
     expect(JSON.stringify(statementsOfRole(named, "DeveloperSignInFunctionServiceRole"))).not.toContain("dynamodb:Scan");
