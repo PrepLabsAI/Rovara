@@ -38,7 +38,9 @@ function brokerSecretPolicyAccess(template: TemplateJson): Record<string, string
   const broker = idOf(template, "BrokerServiceRole", "AWS::IAM::Role");
   const out: Record<string, string[]> = {};
   for (const [, policy] of ofType(template, "AWS::SecretsManager::ResourcePolicy")) {
-    const secret = (policy.Properties.SecretId as { Ref: string }).Ref;
+    const secretId = policy.Properties.SecretId as { Ref?: string };
+    if (typeof secretId?.Ref !== "string") throw new Error("a secret resource policy names its secret other than by reference");
+    const secret = secretId.Ref;
     for (const statement of (policy.Properties.ResourcePolicy as { Statement: Statement[] }).Statement) {
       if (statement.Effect !== "Allow") continue;
       const principal = JSON.stringify(statement.Principal);
@@ -56,7 +58,7 @@ function brokerIdentitySecretStatements(template: TemplateJson): Statement[] {
   return ofType(template, "AWS::IAM::Policy")
     .filter(([, policy]) => JSON.stringify(policy.Properties.Roles).includes(`"${broker}"`))
     .flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement)
-    .filter((statement) => list(statement.Action).some((action) => /^(secretsmanager|kms):|^\*$/u.test(action)));
+    .filter((statement) => (statement as { NotAction?: unknown }).NotAction !== undefined || list(statement.Action).some((action) => /^(secretsmanager|kms):|^\*$/iu.test(action)));
 }
 
 /** The whole of change 2 and 3, as one checker. Throws a message naming the first thing that is not exactly as approved. */
@@ -221,6 +223,14 @@ describe("the broker's Slack poster and its read of the Slack adapter secret (L4
       ["M12 an identity statement reads the adapter secrets by prefix (the broker role's policy grows)", (t) => {
         const [, policy] = ofType(t, "AWS::IAM::Policy").find(([, p]) => JSON.stringify(p.Properties.Roles).includes(idOf(t, "BrokerServiceRole", "AWS::IAM::Role")))!;
         (policy.Properties.PolicyDocument as { Statement: unknown[] }).Statement.push({ Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { "Fn::GetAtt": [ofType(t, "AWS::SecretsManager::Secret").find(([, s]) => s.Properties.Name === "agentx/staging/channel-adapter/slack")![0], "Id"] } });
+      }],
+      ["M13b a NotAction statement is added to the broker", (t) => {
+        const [, policy] = ofType(t, "AWS::IAM::Policy").find(([, p]) => JSON.stringify(p.Properties.Roles).includes(idOf(t, "BrokerServiceRole", "AWS::IAM::Role")))!;
+        (policy.Properties.PolicyDocument as { Statement: unknown[] }).Statement.push({ Effect: "Allow", NotAction: "s3:*", Resource: "*" });
+      }],
+      ["M13c a mixed-case GetSecretValue statement is added", (t) => {
+        const [, policy] = ofType(t, "AWS::IAM::Policy").find(([, p]) => JSON.stringify(p.Properties.Roles).includes(idOf(t, "BrokerServiceRole", "AWS::IAM::Role")))!;
+        (policy.Properties.PolicyDocument as { Statement: unknown[] }).Statement.push({ Effect: "Allow", Action: "SecretsManager:GetSecretValue", Resource: "*" });
       }],
       ["M13 a kms grant is added to the broker", (t) => {
         const [, policy] = ofType(t, "AWS::IAM::Policy").find(([, p]) => JSON.stringify(p.Properties.Roles).includes(idOf(t, "BrokerServiceRole", "AWS::IAM::Role")))!;
