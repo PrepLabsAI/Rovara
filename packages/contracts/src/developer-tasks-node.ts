@@ -294,6 +294,24 @@ export const DeveloperTaskListItemSchema = DeveloperTaskViewSchema.pick({ taskId
 
 export type DeveloperTaskListItem = z.infer<typeof DeveloperTaskListItemSchema>;
 
+/**
+ * Core task web routes (Cloud #188 item 5): what `GET /v1/dev/tasks?detail=1` adds to each row, for a task of either engine, so a list page needs no read per task. Asked for only with `detail=1` (an older client's
+ * strict list never sees it). Each part is left out when it is not known: the workflow's stage, state, revision, path and block reason (as the task read's `workflow` says them), the pull requests the workflow
+ * recorded, what the task has cost in dollars, and the run limit it is held to (a core task's cap; a workflow task names none). Never a guess.
+ */
+export const DeveloperTaskListDetailSchema = z.object({
+  workflow: z.object({ stage: z.string().min(1).max(40), state: z.string().min(1).max(40), revision: z.number().int().nonnegative(), path: z.string().min(1).max(40), blockReason: z.string().max(1000).optional() }).strict().optional(),
+  pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048), state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]) }).strict()).max(32).optional(),
+  costUsd: z.number().nonnegative().optional(),
+  runLimitUsd: z.number().nonnegative().optional(),
+}).strict();
+export type DeveloperTaskListDetail = z.infer<typeof DeveloperTaskListDetailSchema>;
+
+/** A row of `GET /v1/dev/tasks?detail=1`: the ordinary row and its detail. */
+export const DeveloperTaskDetailedListItemSchema = DeveloperTaskListItemSchema.extend(DeveloperTaskListDetailSchema.shape);
+export type DeveloperTaskDetailedListItem = z.infer<typeof DeveloperTaskDetailedListItemSchema>;
+export const DeveloperTaskDetailedListResponseSchema = z.object({ tasks: z.array(DeveloperTaskDetailedListItemSchema), nextCursor: z.string().optional() }).strict();
+
 /** `nextCursor` is opaque: pass it back as `cursor` for the next page; it is absent on the last page. */
 export const DeveloperTaskListResponseSchema = z.object({ tasks: z.array(DeveloperTaskListItemSchema), nextCursor: z.string().optional() });
 

@@ -2,7 +2,7 @@
 // (`testEnvironmentView`) from the company's records: the company is the membership's, a project the person may not read answers exactly like a missing one, another company's records are never read, a script
 // token is refused, and the answer says whether test services are on, why they are not available here (hosted Code: "workers"), and which catalog they would use (the owner starter list).
 import { describe, expect, it, vi } from "vitest";
-import { OWNER_STARTER_IMAGES, TestEnvironmentBodySchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { OWNER_STARTER_IMAGES, TestEnvironmentBodySchema, testEnvDigest, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { proposeTestEnvironment } from "../../packages/broker/src/core/test-env/environment.js";
 import { TEST_SERVICES_UNAVAILABLE_WORDS } from "../../packages/broker/src/core/test-env/test-services-switch.js";
@@ -100,6 +100,26 @@ describe("the state answer on the deployed API", () => {
     expect((mine["proposal"] as { digest?: string } | undefined)?.digest).toMatch(/^[a-f0-9]{64}$/u);
     expect(theirs["proposal"]).toBeUndefined();
     expect(theirs["project"]).toBe("payments");
+  });
+
+  it("Cloud #188 item 4: the proposal that waits carries its whole proposed body, exactly the stored one for the digest it names, with the revision approving it makes; the other company's read carries none", async () => {
+    const h = await setup({});
+    const deps = () => ({ store: h.world.store, now: () => h.world.clock.now, env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } });
+    await proposeTestEnvironment(deps(), { orgId: FAKE_COMPANY, project: "payments", proposedBy: "owner", body: BODY });
+    const proposal = bodyOf(await h.routes.route(get(PATH), h.callerOf(FAKE_COMPANY)))["proposal"] as { digest: string; nextRevision: number; environment?: unknown };
+    expect(proposal.digest).toBe(testEnvDigest(BODY));
+    expect(proposal.nextRevision).toBe(1);
+    expect(TestEnvironmentBodySchema.parse(proposal.environment)).toEqual(BODY);
+    expect(testEnvDigest(TestEnvironmentBodySchema.parse(proposal.environment))).toBe(proposal.digest);
+    // A member with the grant reads the same; a member without it reads nothing; the other company's same-named project carries no proposal or body.
+    expect((bodyOf(await h.routes.route(get(PATH), h.callerOf(FAKE_COMPANY, "member", "reader")))["proposal"] as { environment?: unknown }).environment).toEqual(proposal.environment);
+    const theirs = await h.routes.route(get(PATH), h.callerOf(OTHER));
+    expect(bodyOf(theirs)["proposal"]).toBeUndefined();
+    expect(theirs!.body).not.toContain("pytest");
+    h.allowed.delete("payments");
+    const hidden = await h.routes.route(get(PATH), h.callerOf(FAKE_COMPANY, "member", "reader"));
+    expect(hidden?.statusCode).toBe(404);
+    expect(hidden!.body).not.toContain("pytest");
   });
 
   it("a project the person may not read answers exactly like a missing one, and nothing of it is read (a member: an owner or admin needs no grant, see 'the state read by company role')", async () => {
