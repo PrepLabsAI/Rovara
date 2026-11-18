@@ -148,6 +148,10 @@ export interface MergeTrackingServiceOptions {
   /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
   scan?: { cursor: string | undefined; complete?: boolean };
   ciMode?: MergeTrackingDependencies["ciMode"];
+  /** TE-E0 / L4-EVCI: the project's CI evidence settings (the checks the customer marked, and their own eval check), read per pass; the host stores them. Absent: nothing is marked or named and a pass is what it always was. */
+  ciEvidence?: MergeTrackingDependencies["ciEvidence"];
+  /** TE-E0 option B: the host's per-test report parser. Absent: no per-test report is read. */
+  reportParser?: MergeTrackingDependencies["reportParser"];
   /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
   repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
@@ -198,6 +202,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const base: MergeTrackingDependencies = {
     store, now,
     ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
+    ...(options.ciEvidence === undefined ? {} : { ciEvidence: options.ciEvidence }),
+    ...(options.reportParser === undefined ? {} : { reportParser: options.reportParser }),
     settings, milestones, timeline, people, links: storeLinkedChangeRequests(store),
     scope: (orgId) => ({ orgId }),
     loadTask,

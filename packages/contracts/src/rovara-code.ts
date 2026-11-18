@@ -500,6 +500,10 @@ export const MergeTrackingItemSchema = z
     ciMarked: z.array(MarkedCheckEntrySchema).max(CI_EVIDENCE_LIMITS.markedChecksMax).optional(),
     /** TE-E0 option A: since when a head a PERSON pushed has been waited on for its marked checks (Rovara's heads use `lastRovaraPushAt`). */
     ciMarkedSince: InstantSchema.optional(),
+    /** L4-EVCI: the customer's own eval check on this head (one entry, the marked-check shape): what their CI said, kept so the description says it once. Absent on every row written before, and on every project with no eval check named. */
+    ciEval: MarkedCheckEntrySchema.optional(),
+    /** L4-EVCI: since when a head a PERSON pushed has been waited on for the eval check (Rovara's heads use `lastRovaraPushAt`). */
+    ciEvalSince: InstantSchema.optional(),
     failingChecks: z.array(z.string().min(1).max(200)).max(10),
     review: z.enum(["not_requested", "requested", "changes_requested", "approved"]),
     approval: z.object({ hostUserId: z.string().min(1).max(200), login: z.string().min(1).max(100), commitId: GitShaSchema }).strict().optional(),
@@ -743,6 +747,8 @@ export const CodeMilestoneSchema = z
     sessionId: SessionIdSchema.optional(),
     at: InstantSchema,
     text: z.string().min(1).max(500),
+    /** L4-EVCI: on a `pr_ready` milestone, the customer's own eval result as `evalCiLine` says it (fixed words, numbers and a plain https address), for the chat and ticket lines. Absent: nothing to say. */
+    evalLine: z.string().min(1).max(500).optional(),
     pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048) }).strict()).max(32).optional(),
     bindings: z.array(SessionBindingSchema).max(2).optional(),
     to: z.array(z.string().min(1).max(200)).max(50).optional(),

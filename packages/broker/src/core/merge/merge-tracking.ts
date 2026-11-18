@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
   withoutOwnRovaraCheck,
+  evalCiLine,
   TRACKING_REQUESTS_BASE,
   TRACKING_REQUESTS_PER_EXTRA_PR,
   CI_STATE_WORDS,
@@ -28,6 +29,7 @@ import {
   type HostAccountKind,
   type CodeSettings,
   type DocumentStore,
+  type EvalCiResult,
   type HostScope,
   type MergeTrackingItem,
   type OrgId,
@@ -49,9 +51,20 @@ import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryR
 import { orderHoldsReady, providersWaitingFor } from "./order-watch.js";
 import { requireRepositoryKey } from "./repository-key.js";
 import { SETTINGS_UNKNOWN, ciEvidencePass, readEvidenceSettings } from "../ci-evidence/tracking.js";
+import { evalCiPass, writeEvalDescription } from "../ci-evidence/eval-ci.js";
 import type { CodeMilestones, CodeSettingsReader, LinkedChangeRequestFinder, MergePassHooks, MergeTask, SessionTimeline } from "./seams.js";
 import type { MergePeople } from "./people.js";
 import { prHeadItems, publicTrackingItem, readMergeTracking, readTrackingItem, recoveryRowKey, trackingItemOf, trackingWriteItem, workflowUpdateItem } from "./store.js";
+
+/** The customer's own eval line for a ready milestone: as `evalCiLine` says it, without its address when the whole text would be over the milestone's limit; nothing when the check has not answered. */
+export function readyEvalLine(result: EvalCiResult | undefined, readyText: string): string | undefined {
+  if (result === undefined) return undefined;
+  const full = evalCiLine(result);
+  if (readyText.length + 1 + full.length <= MILESTONE_TEXT_MAX) return full;
+  const short = evalCiLine({ ...result, url: undefined });
+  return readyText.length + 1 + short.length <= MILESTONE_TEXT_MAX ? short : undefined;
+}
+const MILESTONE_TEXT_MAX = 500;
 
 /** The default row for a decider's dispatch: the task-flow core's row. Its runner knows UNDERSTAND and PLAN today; IMPLEMENT and SYNC rows are written as the decider asked and wait for the runner that learns them. */
 function defaultDispatchRow(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem {
@@ -778,6 +791,17 @@ async function trackOne(
     Object.assign(fields, pipeline.fields);
     if (pipeline.recheckAt !== undefined) ci.recheckAt = ci.recheckAt === undefined ? pipeline.recheckAt : Math.min(ci.recheckAt, pipeline.recheckAt);
   }
+  // L4-EVCI: the customer's own eval check, when a maintainer named one at setup. Advisory only: it is read after the marked checks and never held for, fixed, commented on or fed to the Check; it only says its
+  // result in the description (and on the ready line below). Nothing named: nothing read, and the item is what it was.
+  const evalPass = evidence?.evalCheck === undefined ? undefined : await evalCiPass({
+    eval: evidence.evalCheck, settings: evidence, status, prior, fields, now, runner: home.checkRunner, ref, repository: { url }, scope, budget, ...(deps.reportParser === undefined ? {} : { reportParser: deps.reportParser }),
+    describe: (line) => writeEvalDescription({ host: codeHost, store: deps.store, companyId: task.orgId, workspaceId: task.workspaceId, repositoryId: pullRequest.repositoryId, number: pullRequest.number, ref, scope, budget, now: deps.now }, line),
+    ...(deps.log === undefined ? {} : { log: (event: string, logged: Record<string, unknown>) => deps.log?.(event, logged) }),
+  });
+  if (evalPass !== undefined) {
+    Object.assign(fields, evalPass.fields);
+    if (evalPass.recheckAt !== undefined) ci.recheckAt = ci.recheckAt === undefined ? evalPass.recheckAt : Math.min(ci.recheckAt, evalPass.recheckAt);
+  }
 
   // Track record (best effort, after the item is written, never changes the pass): what this pass saw of the code the candidate published (its head; its checks on that head), a person's first
   // request for changes (about the candidate whose head the review is on), and a round of fixes started from people's comments. A close is not scored here (it may be reopened), and a merge is scored
@@ -900,9 +924,12 @@ async function trackOne(
     }
     if (justReady) {
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));
+      const readyText = `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`;
+      // L4-EVCI: the customer's own eval result, when it had landed by now: the same one line, on the session and in the chat and ticket lines (no cost). The address is left off before the text would be too long.
+      const evalSaid = readyEvalLine(evalPass?.result, readyText);
       items.push(...deps.milestones.items({
         kind: "pr_ready", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-        text: `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`,
+        text: evalSaid === undefined ? readyText : `${readyText} ${evalSaid}`, ...(evalSaid === undefined ? {} : { evalLine: evalSaid }),
         pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
       }, index, { definitionVersion: task.workflow.definitionVersion }));
     }

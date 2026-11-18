@@ -17,7 +17,7 @@ export type MarkedEntry = MarkedCheckEntry;
 
 /** The errors a pass must not swallow (the host's rate limit, the pass's allowance): named, so this module needs no import of the pass. */
 const PASS_LIMIT_NAMES: ReadonlySet<string> = new Set(["TrackingRequestCapError", "GithubBudgetExhaustedError", "GithubMergeRateLimitError", "HostRateLimitError"]);
-const isPassLimit = (error: unknown): boolean => error instanceof Error && (PASS_LIMIT_NAMES.has(error.name) || (error as { retryAt?: unknown }).retryAt !== undefined);
+export const isPassLimit = (error: unknown): boolean => error instanceof Error && (PASS_LIMIT_NAMES.has(error.name) || (error as { retryAt?: unknown }).retryAt !== undefined);
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 const ms = (text: string | undefined): number | undefined => {
@@ -50,7 +50,7 @@ function entryOf(marked: MarkedCheck, state: MarkedState, run: MarkedRun | undef
 export async function observeMarked(input: {
   settings: CiEvidenceSettings;
   status: ChangeRequestStatus;
-  prior: MergeTrackingItem | undefined;
+  prior: Pick<MergeTrackingItem, "headSha" | "ciMarked"> | undefined;
   waitStart: number;
   now: number;
   history: (check: MarkedCheck) => readonly number[];
@@ -376,8 +376,11 @@ export function reportFields(input: { report: RunReport; base: RunReport | undef
 }
 
 /** Whether per-test reports are read for this pass: the customer left them on, and the host gave a parser and a runner that hands out report files. */
-const reportsOn = (input: { settings: CiEvidenceSettings; reportParser?: PipelineReportParser | undefined; runner?: CheckRunner | undefined }): boolean =>
+export const reportsOn = (input: { settings: CiEvidenceSettings; reportParser?: PipelineReportParser | undefined; runner?: CheckRunner | undefined }): boolean =>
   input.settings.perTestReports && input.reportParser !== undefined && input.runner?.reportFiles !== undefined;
+
+/** What reading per-test reports needs of a pass (the marked checks' and the eval check's passes both give it). */
+export type ReportInput = Pick<Parameters<typeof ciEvidencePass>[0], "settings" | "status" | "now" | "runner" | "repository" | "scope" | "budget" | "log" | "reportParser" | "baseCommit"> & { prior: Pick<MergeTrackingItem, "headSha" | "ciMarked"> | undefined };
 
 const REPORT_FIELDS = ["report", "reportTries", "counts", "proven", "added", "flaky", "failedTests"] as const;
 /** Reports read on one pass: the reads cost requests from the pass's allowance, so the rest wait for the next pass (soon), never all at once. */
@@ -399,7 +402,7 @@ const without = (entry: MarkedEntry): MarkedEntry => {
  * The entries with what their runs' per-test reports say. A report kept for the same run on this head is reused (read once per run); `none` and `unreadable` are read again up to `REPORT_TRIES_MAX`
  * times. At most `REPORT_READS_PER_PASS` runs are read on one pass; one left for later makes the pass look again soon. With per-test reports off (or no parser), nothing read is kept or used.
  */
-async function withReports(input: Parameters<typeof ciEvidencePass>[0], entries: readonly MarkedEntry[]): Promise<{ entries: MarkedEntry[]; recheckAt?: number }> {
+export async function withReports(input: ReportInput, entries: readonly MarkedEntry[]): Promise<{ entries: MarkedEntry[]; recheckAt?: number }> {
   const head = input.status.headRevision;
   const priorEntries = input.prior?.headSha === head ? input.prior.ciMarked ?? [] : [];
   const on = reportsOn(input);

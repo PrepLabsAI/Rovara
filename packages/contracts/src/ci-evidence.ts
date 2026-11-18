@@ -31,6 +31,17 @@ export const MarkedCheckSchema = z.object({
 }).strict();
 export type MarkedCheck = z.infer<typeof MarkedCheckSchema>;
 
+/**
+ * L4-EVCI (owner decision D7, the Influur fallback): the ONE check of the customer's CI that is their eval, named at setup. Rovara reads that check's result on its pull request and says it as "Eval (reported
+ * by your CI)", next to its own eval line when it has one. Advisory only: it is never a marked check (no waiting for readiness, no fix round, no comment) and never changes the Rovara Check. Matched by name (and by
+ * `source`, the reporting app, when given), exactly as a marked check is.
+ */
+export const EvalCheckSchema = z.object({
+  name: z.string().min(1).max(CI_EVIDENCE_LIMITS.checkNameMax),
+  source: z.string().min(1).max(CI_EVIDENCE_LIMITS.sourceMax).optional(),
+}).strict();
+export type EvalCheck = z.infer<typeof EvalCheckSchema>;
+
 const markedKey = (check: Pick<MarkedCheck, "name" | "source">): string => `${check.name}\u0000${check.source ?? ""}`;
 
 export const CiEvidenceSettingsSchema = z.object({
@@ -43,6 +54,8 @@ export const CiEvidenceSettingsSchema = z.object({
   perTestReports: z.boolean(),
   /** Job logs and other artifacts of marked checks may reach the model. Off until the customer turns it on: failure text can carry customer data. */
   shareLogs: z.boolean(),
+  /** L4-EVCI: the customer's own eval check, when a maintainer confirmed one at setup. Absent: nothing is read and every pull request is exactly what it was. */
+  evalCheck: EvalCheckSchema.optional(),
 }).strict();
 export type CiEvidenceSettings = z.infer<typeof CiEvidenceSettingsSchema>;
 
@@ -157,6 +170,47 @@ function safeLink(address: string | undefined): string | undefined {
     return undefined;
   }
 }
+
+// ---- the customer's eval check (L4-EVCI)
+
+/** The label of the customer's own eval result: said as theirs, and never merged with Rovara's own eval verdict ("Improved on eval", "Worse on eval", ...). */
+export const EVAL_CI_LABEL = "Eval (reported by your CI)";
+
+/** What the customer's eval check said on one head. `not_run`: the CI never reported it in time, skipped it or called it neutral. */
+export interface EvalCiResult {
+  outcome: "passed" | "failed" | "not_run";
+  /** Why it did not run (`not_run` only). */
+  reason?: NotRunReason | undefined;
+  /** How long Rovara waited, for a `timed_out` (`not_run` only). */
+  afterMs?: number | undefined;
+  /** The test counts of the run's per-test report, when it exposed one Rovara could read. */
+  counts?: PipelineCounts | undefined;
+  /** The run's address, shown only when it is a plain https address. */
+  url?: string | undefined;
+}
+
+/**
+ * The one line: "Eval (reported by your CI): failed, 3 of 42 cases failing, https://...". Only fixed words, numbers and a plain https address are printed: nothing the customer or the repository wrote (not
+ * the check's name, not a test's name, not a failure text), so the line is safe in a pull request, a chat message and a ticket as it stands.
+ */
+export function evalCiLine(result: EvalCiResult): string {
+  const link = safeLink(result.url);
+  const where = link === undefined ? "" : `, ${link}`;
+  if (result.outcome === "not_run") {
+    const why = result.reason === "timed_out" ? ` (no result after ${waitWords(result.afterMs ?? 0)})` : result.reason === "skipped" ? " (your CI skipped it)" : result.reason === "neutral" ? " (your CI reported it as neutral)" : "";
+    return `${EVAL_CI_LABEL}: not run${why}${where}`;
+  }
+  const counts = result.counts;
+  const total = counts === undefined ? undefined : counts.passed + counts.failed + counts.skipped;
+  // Cases are said when some failed (or the count is not a number: shown as "?", never hidden), and, for a pass, how many there were; a failure that left no failed case (it failed before any ran) says no cases.
+  const cases = counts === undefined ? ""
+    : counts.failed !== 0 ? `, ${count(counts.failed)} of ${count(total!)} cases failing`
+      : result.outcome === "passed" && total! > 0 ? `, ${count(total!)} ${total === 1 ? "case" : "cases"}, none failing` : "";
+  return `${EVAL_CI_LABEL}: ${result.outcome}${cases}${where}`;
+}
+
+/** The line exactly as `evalCiLine` writes it (any outcome, with or without cases or an address): the only line of this kind Rovara will change or take out of a description. */
+export const EVAL_CI_LINE_PATTERN = /^Eval \(reported by your CI\): (?:passed|failed|not run)(?: \([^()\r\n]{1,80}\))?(?:, [0-9,?]+ of [0-9,?]+ cases failing|, [0-9,?]+ cases?, none failing)?(?:, https:\/\/[^\s<>()[\]]{1,300})?$/u;
 
 // ---- per-test reports (TE-E0 option B)
 

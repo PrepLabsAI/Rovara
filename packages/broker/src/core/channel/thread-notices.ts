@@ -15,7 +15,7 @@
 // stays on while the host gives a gate. Nothing here is a reason for the work to fail: a handler that throws is told again, up to the hook's limit.
 import { createHash } from "node:crypto";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
+  EVAL_CI_LINE_PATTERN, INDEX_EXPIRY_ATTRIBUTE, SESSION_RETENTION_DAYS, change, orgScoped, when,
   type AgentSessionRecord, type ChannelEvent, type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type OrgId, type RegistryView, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { CodeMilestoneHandler } from "../milestones/milestones.js";
@@ -215,9 +215,12 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const requests = (milestone.pullRequests ?? []).slice(0, PULL_REQUESTS_MAX);
         const key = `pr_opened#${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(",")).slice(0, 24)}`;
         const links = requests.flatMap((request) => plainHttpsLink(request.url) ?? []);
-        await send(orgId, sessionId, key, () => tell(links.length === 1
+        // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
+        // not exactly Rovara's own words is not sent). The typed pull request event has no place for it, so a ready line that carries it is the plain progress text.
+        const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
+        await send(orgId, sessionId, key, () => tell(links.length === 1 && evalLine === undefined
           ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened" } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${links.map((link) => `\n${link}`).join("")}` } }));
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}` } }));
         return;
       }
 

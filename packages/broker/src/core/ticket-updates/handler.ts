@@ -10,7 +10,7 @@
 // A ticket is written through the Tracker port (`comment`, `setStatusByName`), so Linear and Jira (or any tracker that registers) are the same code here.
 import { createHash } from "node:crypto";
 import {
-  AgentXError, INDEX_EXPIRY_ATTRIBUTE, TICKET_MOMENT_WORDS, TrackerWriteRefusedError, change, intakeItemIdOf, ticketUpdateCallsKey, when,
+  AgentXError, EVAL_CI_LINE_PATTERN, INDEX_EXPIRY_ATTRIBUTE, TICKET_MOMENT_WORDS, TrackerWriteRefusedError, change, intakeItemIdOf, ticketUpdateCallsKey, when,
   type CodeMilestone, type CodeMilestoneKind, type DocumentKey, type DocumentStore, type HostScope, type OrgId, type Tracker, type TicketUpdateMoment,
 } from "@agentx/contracts";
 import { readIntakeItem } from "../intake/store.js";
@@ -62,12 +62,15 @@ function plainHttpsLink(link: string): string | undefined {
 }
 
 /** The words of one update: the moment, the title, the status it moved to, the pull request's link. Nothing else. */
-export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined }): string {
+export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined; evalLine?: string | undefined }): string {
   const links = (input.pullRequests ?? []).flatMap((link) => plainHttpsLink(link) ?? []).slice(0, 5);
+  // L4-EVCI: the customer's own eval result as one line, only when it is exactly the words Rovara writes for it (never a free text), and only on the ready line.
+  const evalLine = input.moment === "pr_opened" && input.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(input.evalLine) ? [input.evalLine] : [];
   return [
     `${TICKET_MOMENT_WORDS[input.moment]}: "${inertTicketTitle(input.title)}".`,
     ...(input.status === undefined ? [] : [`Status: ${inertTicketTitle(input.status)}.`]),
     ...links.map((link) => `Pull request: ${link}`),
+    ...evalLine,
   ].join("\n");
 }
 
@@ -179,7 +182,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     if (settings.comments) {
       if (tracker.comment === undefined) posted = "not_connected";
       else {
-        const text = ticketUpdateText({ moment, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }) });
+        const text = ticketUpdateText({ moment, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }), ...(milestone.evalLine === undefined ? {} : { evalLine: milestone.evalLine }) });
         // The comment's key is the claim's: the same update again is the same comment, never a second one. A task only its owner can see is written as an internal comment.
         posted = await tracker.comment(ref, text, deps.scope, { key: `ticket_update:${milestone.taskId}:${key}`, requirePrivate: true }).then(() => "posted", (error: unknown) => { if (isFinal(error)) return refusalOf(error); throw error; });
         if (posted === "needs_write_access") missing = true;
