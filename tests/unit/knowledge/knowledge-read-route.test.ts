@@ -200,6 +200,17 @@ describe("the admin notice: above 150 distinct units, once a day", () => {
     expect(w.notices.queueAdmin).toHaveBeenCalledTimes(2);
   });
 
+  it("a counter fault while noting the units leaves the answer and logs one fixed event, no text", async () => {
+    const w = await world();
+    await put(w, active());
+    const logs: Array<Record<string, unknown>> = [];
+    w.h.deps.log = (entry: Record<string, unknown>) => { logs.push(entry); };
+    const realPut = w.h.store.put.bind(w.h.store);
+    w.h.store.put = (async (request: Parameters<typeof realPut>[0]) => { if (String(request.item.pk).includes("KNOWLEDGE_UNIT_DAY")) throw new Error("store down"); return realPut(request); }) as typeof realPut;
+    expect((await ask(w)).status).toBe(200);
+    expect(logs.filter((entry) => entry["event"] === "knowledge.note_failed")).toEqual([{ component: "lessons", event: "knowledge.note_failed", error: "Error" }]);
+  });
+
   it("a person under the line is never told, and a failing notice never changes the answer", async () => {
     const w = await world();
     await put(w, active());
@@ -241,6 +252,17 @@ describe("the table of contents: a tree, names and numbers only", () => {
     const cut = await areas(big);
     expect(cut.body["repos"].flatMap((r: { areas: unknown[] }) => r.areas)).toHaveLength(100);
     expect(cut.body["more"]).toBe(30);
+  });
+
+  it("shows no secret-shaped label and no lesson whose scope names a person", async () => {
+    const w = await world();
+    const ownerName = w.lessons.owner.name;
+    await put(w, active({ id: "les_secret01", scope: { repos: ["sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"], paths: ["src/**"] } }), active({ id: "les_person01", scope: { paths: [`${ownerName}/**`] } }), active({ id: "les_fine0001", scope: { paths: ["lib/**"] } }));
+    const written = JSON.stringify((await areas(w)).body);
+    expect(written).not.toContain("sk-ant-api03");
+    expect(written).not.toContain(ownerName);
+    expect(written).toContain("lib/");
+    expect(written).toContain("any repository");
   });
 
   it("counts only what an answer could give: a pending lesson, a lesson on trial and a lesson that names a person are not counted", async () => {

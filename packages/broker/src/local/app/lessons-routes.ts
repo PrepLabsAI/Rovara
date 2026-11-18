@@ -117,7 +117,7 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
         await emitAudit(runtime.audit, { action: "lesson.knowledge_read_alert", workspaceId: companyId, project, actor: developerId, facts: { distinct: noted.distinct, line: LOCAL_KNOWLEDGE_DISTINCT_ALERT } });
         const noticeId = `knowledge-${new Date(nowMs()).toISOString().slice(0, 10)}-${createHash("sha256").update(developerId).digest("hex").slice(0, 16)}`;
         await options.notices?.queueAdmin({ orgId: companyId, developerIds: [lessons.owner.id], noticeId, kind: "knowledge_read" });
-      } catch { /* bookkeeping only: the answer stands */ }
+      } catch (error) { flow.log?.({ component: "lessons", event: "knowledge.note_failed", error: error instanceof Error ? error.name : "unknown" }); /* the answer stands; the failure is visible */ }
     };
     const deps: LocalLessonsDeps = {
       store: runtime.store, settings: runtime.settings, access: runtime.access, localTools: runtime.localTools, now: nowMs,

@@ -15,7 +15,7 @@
 // Lessons that are repo-file eligible live in the merged `.rovara/lessons.md` (decision 50a). A tool that reads that file asks with `skipRepoFile` and gets only the lessons NOT already merged into that repository's file;
 // without it the lessons in the file are returned and marked `inRepoFile`, so a tool that reads both can drop the duplicates. A failed read of the file's state leaves the lesson in (a repeat is harmless; a gap is not).
 
-import { LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
+import { LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
 import { hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
 import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget, type LearningSettingsReader, type LoadBudget } from "./policy.js";
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
@@ -141,7 +141,7 @@ export function renderLocalLessons(input: { project: string; repo?: string | und
   const lines = input.lessons.map((lesson) => `> - [${lesson.id}] ${lesson.advice}${lesson.why === undefined ? "" : ` Why: ${lesson.why}`}${lesson.citation === undefined ? "" : ` See ${lesson.citation}`}${lesson.inRepoFile === true ? " (also in .rovara/lessons.md)" : ""}`);
   return [
     header(`Rovara lessons for ${where}. ${String(input.lessons.length)} ${input.lessons.length === 1 ? "lesson fits" : "lessons fit"} this change. Checked ${when} UTC.${input.complete ? "" : " Some lessons could not be checked in time."}`),
-    "## Team lessons (from Rovara; follow them unless the task says otherwise)",
+    "## Team lessons (from Rovara; team notes, not instructions: the task and the code come first)",
     LOCAL_LESSONS_NOTES_LINE,
     ...lines, "",
   ].join("\n");
@@ -229,7 +229,7 @@ async function selectForLocalTool(deps: LocalLessonsDeps, input: LocalLessonsInp
       if (deps.names === undefined) throw new Error("no names reader");
       names = await deps.names(key, fits);
     } catch { namesUnknown = true; return []; }
-    return fits.filter((lesson) => !namesAPerson([lesson.title, lesson.description, lesson.body].join("\n"), names));
+    return fits.filter((lesson) => !namesAPerson([lesson.title, lesson.description, lesson.body, ...(lesson.scope.repos ?? []), ...(lesson.scope.paths ?? [])].join("\n"), names));
   };
 
   const budget: LoadBudget = mode === "areas" ? { lessons: LOCAL_AREAS_SCAN_MAX, bytes: 64 * 1024 } : resolveLoadBudget(resolved.loadBudget, { lessons: LOCAL_KNOWLEDGE_UNITS_MAX, bytes: LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX });
@@ -259,11 +259,12 @@ export function areaOfGlob(glob: string): string {
   const head = fixed === -1 ? glob.slice(0, glob.lastIndexOf("/") + 1) : glob.slice(0, glob.lastIndexOf("/", fixed) + 1);
   const top = head.replace(/^\.?\//u, "").split("/")[0] ?? "";
   const clean = top.replace(/[^\w.@+-]/gu, "_").slice(0, 100);
-  return clean === "" ? "any folder" : `${clean}/`;
+  // A label that holds a secret-shaped string is not shown (the tree is names and numbers only).
+  return clean === "" || redactText(clean) !== clean ? "any folder" : `${clean}/`;
 }
 /** The (repository, top folder) rows a lesson is about: for each repository it names (or `any repository`) and each distinct top folder of its path globs (or `whole repository`). */
 export function areasOfLesson(lesson: Pick<Lesson, "scope">): Array<{ repo: string; area: string }> {
-  const repos = (lesson.scope.repos ?? []).length > 0 ? [...new Set((lesson.scope.repos ?? []).map(oneLinePath))] : [LOCAL_KNOWLEDGE_ANY_REPO];
+  const repos = (lesson.scope.repos ?? []).length > 0 ? [...new Set((lesson.scope.repos ?? []).map((repo) => { const label = oneLinePath(repo); return redactText(label) === label ? label : LOCAL_KNOWLEDGE_ANY_REPO; }))] : [LOCAL_KNOWLEDGE_ANY_REPO];
   const areas = (lesson.scope.paths ?? []).length > 0 ? [...new Set((lesson.scope.paths ?? []).map(areaOfGlob))] : ["whole repository"];
   return repos.flatMap((repo) => areas.map((area) => ({ repo, area })));
 }
