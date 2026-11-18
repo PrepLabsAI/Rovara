@@ -67,9 +67,12 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
     // The look-up (lead 4 L4-AK2) runs on a share of its own, and it can never fail the lessons: while it runs, a read past its share of reads, past its own short clock, past what is left of the shared caps, or a read that
     // fails, throws HERE (`PullBudgetSpent`) before anything is counted or `failed` is set, so the look-up ends and the lessons stand.
     let pulling = false;
+    // Set when the look-up has ended (finished or given up on): work of it that is still in flight can no longer read, count or fail anything.
+    let pullOver = false;
     let pullReads = 0;
     let pullDeadline = 0;
     const read = async <T>(work: () => Promise<T>, count = 1): Promise<T> => {
+      if (pullOver) throw new PullBudgetSpent();
       check();
       if (pulling && (Date.now() >= pullDeadline || ++pullReads > DISPATCHER_PULL_READS || reads + 1 > DISPATCHER_LESSONS_LIMITS.reads || items + count > DISPATCHER_LESSONS_LIMITS.items || bytes >= DISPATCHER_LESSONS_LIMITS.bytes / 2)) throw new PullBudgetSpent();
       reads++; items += count;
@@ -78,9 +81,9 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         const answer = await work();
         check();
         bytes += Buffer.byteLength(JSON.stringify(answer) ?? "", "utf8");
-        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { if (pulling) throw new PullBudgetSpent(); failed = true; refuse(); }
+        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { if (pulling || pullOver) throw new PullBudgetSpent(); failed = true; refuse(); }
         return answer;
-      } catch { if (pulling) throw new PullBudgetSpent(); failed = true; return refuse(); }
+      } catch { if (pulling || pullOver) throw new PullBudgetSpent(); failed = true; return refuse(); }
     };
     // The shared lesson selector can catch dependency failures. A sticky failed budget ensures
     // those catches never turn a cap or failed read into a partial successful answer.
@@ -195,10 +198,10 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
             : Promise.resolve(undefined);
           const [wider, facts] = await Promise.all([bounded(widerRun), bounded(factsRun)]);
           knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, ...(wider !== undefined && wider.ok && wider.complete ? { pull: wider.picked, pullLeftOut: 0 } : {}), facts });
-        } catch { knowledgeContext = undefined; } finally { pulling = false; if (pullTimer !== undefined) clearTimeout(pullTimer); }
+        } catch { knowledgeContext = undefined; } finally { pulling = false; pullOver = true; if (pullTimer !== undefined) clearTimeout(pullTimer); }
       }
       // The ids this delivery gives, kept once for the operation so the worker's use report can be checked against it (a hosted step's report was dropped for want of this). A store fault, a slow write or a repeated delivery is only "no
-      // new record": the briefing still goes. Never written once the call is over, and never past its own short share of the clock.
+      // new record": the briefing still goes. Never STARTED once the call is over or with less than its margin left; a write already started may still land late (it is idempotent: the same ids).
       if (knowledgeContext !== undefined) {
         const room = Math.min(DISPATCHER_RECORD_MS, deadline - Date.now() - DISPATCHER_RECORD_MARGIN_MS);
         if (!stopped && !failed && room > 0) {

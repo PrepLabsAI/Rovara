@@ -398,7 +398,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
       expect(await w.store.get({ pk: companyScoped(A, "KNOWLEDGE_GIVEN"), sk: TASK })).toBeUndefined();
     });
 
-    it("is never written once the call is over (a late finish writes nothing)", async () => {
+    it("is never started once the call is over (a late finish writes nothing)", async () => {
       vi.useFakeTimers();
       const w = await scopedWorld();
       let release!: () => void;

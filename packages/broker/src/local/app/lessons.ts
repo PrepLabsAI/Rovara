@@ -103,9 +103,9 @@ export interface LocalLessons {
   localToolsSwitches(): Promise<LessonLocalToolsView | undefined>;
   /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
   localToolsSwitch(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
-  /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
   /** The team knowledge briefing for an answer about one project (lead 4 L4-AK2b); see `LessonsHost.answerBriefing`. */
   answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
+  /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;

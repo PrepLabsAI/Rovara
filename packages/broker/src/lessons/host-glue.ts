@@ -79,7 +79,7 @@ export interface LessonsHostInput {
 
 export interface LessonsHost {
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
-  /** Lead 4 L4-AK2b: the team knowledge briefing for the answer a person asks of one project (the same lessons read path, facts and "more" line as a coding step; whole-project readers only). Undefined when learning is off here, nothing fits, or anything cannot be read in time. Never throws, never writes. */
+  /** Lead 4 L4-AK2b: the team knowledge briefing for the answer a person asks of one project (the same lessons read path, facts and "more" line as a coding step; whole-project readers only). Undefined when learning is off here, nothing fits, or anything cannot be read in time. Never throws, never writes. It takes no person: the caller (the answer service) has already checked the asker's role on this project. */
   answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
