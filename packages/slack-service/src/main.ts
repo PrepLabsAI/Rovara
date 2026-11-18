@@ -38,6 +38,7 @@ import { createThreadApi } from "./thread-api.js";
 import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
+import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "./company-models.js";
 import { createAnswerChoices, createAnswerDoor } from "./slack-answer-door.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { createContinuationRecorder } from "./thread-continuation.js";
@@ -274,6 +275,15 @@ async function slackScope(input: TurnInput): Promise<ServiceScope> {
 
 const runTurn = (input: TurnInput): Promise<string> => runTurnAs(input, slackScope);
 
+/**
+ * DEC 254zzz79 (3): the message router for one Slack message. An install with no company workspaces keeps its own router; a company's workspace routes on the company's AI through the gateway
+ * (counted in its caps, never Rovara-paid Bedrock), and one that cannot be served routes `unavailable` without a model call.
+ */
+const routerFor = (message: { thread: SlackThread; userId: string }) => requestRouterFor({
+  install: requestRouter, timeoutMs: gateClassifierTimeoutMs,
+  resolve: () => resolveTurnModels({ controlPlaneUrl, signedFetch: createSignedServiceFetch({ region, credentials, thread: message.thread, userId: message.userId }), log }),
+});
+
 async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promise<ServiceScope>): Promise<string> {
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const directory = await mkdtemp(join(stateDirectory, "thread-"));
@@ -285,13 +295,22 @@ async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promis
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
     const signedFetch = createSignedServiceFetch({ region, credentials, ...await scopeOf(input) });
+    // DEC 254zzz79 (3): how this thread's model calls are made. A company's thread runs on the company's AI through the gateway; one that cannot be served is told the fixed words and no model is called
+    // (Rovara-paid Bedrock is never a fallback). Only the customer's own install, with no company workspaces, keeps the Bedrock runtime.
+    const turnModels = await resolveTurnModels({ controlPlaneUrl, signedFetch, ...(input.signal === undefined ? {} : { signal: input.signal }), log });
+    if (turnModels.kind === "refused") {
+      log("model_access.refused", { eventId: input.message.eventId, reason: turnModels.reason });
+      return refusalWords(turnModels.reason);
+    }
+    const turnClassifier = await classifierForTurn(turnModels, classifier, { model: classifierModel, timeoutMs: gateClassifierTimeoutMs });
     // MODEL3: the model that ran in place of a missing-key one is said under the reply.
     let fallbackNote: string | undefined;
     const runtime = await createHostedSlackRuntime(input, {
       stateDirectory: directory,
       onModelFallback: (notice) => { fallbackNote = notice.text; },
       api: new ControlPlaneApi(controlPlaneUrl, "slack-service", input.workspaceId, signedFetch),
-      model,
+      model: turnModels.kind === "gateway" ? turnModels.models.model : model,
+      ...(turnModels.kind === "gateway" ? { modelRuntime: turnModels.models.runtime } : {}),
       ...(sessionFile === undefined ? {} : { sessionFile }),
       // Operators see why a connector was missing from a turn; the message is the control plane's sanitized error.
       onConnectorUnavailable: (failure) => log("connector.discovery_failed", {
@@ -300,7 +319,7 @@ async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promis
       onExtensionError: (failure) => log("extension.handler_failed", {
         eventId: input.message.eventId, ...failure,
       }),
-      classifier,
+      classifier: turnClassifier,
       // The gate's own deadline follows the same setting, so a longer timeout is not cut at 8 seconds.
       classifierTimeoutMs: gateClassifierTimeoutMs,
       // One line per gate decision until turn records carry them; never the call's arguments.
@@ -308,9 +327,18 @@ async function runTurnAs(input: TurnInput, scopeOf: (input: TurnInput) => Promis
     });
     try {
       // Issue 157: a handed-off turn's model stops (or never starts), and its unfinished session is not saved.
-      const response = await runHostedTurn(runtime, input.signal, () => runOrchestratorTurn(runtime, input.message.text, input.recorder), (error) => {
-        log("turn.abort_failed", { eventId: input.message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
-      });
+      let response: string;
+      try {
+        response = await runHostedTurn(runtime, input.signal, () => runOrchestratorTurn(runtime, input.message.text, input.recorder), (error) => {
+          log("turn.abort_failed", { eventId: input.message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
+        });
+      } catch (error) {
+        // The company's gateway refused the call (no AI connected, no room, a fault): the fixed words, not the model's or the gateway's.
+        const words = input.signal?.aborted === true ? undefined : turnRefusalWords(turnModels);
+        if (words === undefined) throw error;
+        log("model_access.turn_refused", { eventId: input.message.eventId });
+        return words;
+      }
       const written = runtime.session.sessionManager.getSessionFile();
       if (input.answerOnly !== true && input.signal?.aborted !== true && written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
@@ -486,14 +514,14 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
         // Phase 7c2: what the core's router marked, routed as Slack's own queue routes it, posting through the adapter.
         ...(slackAdapter === undefined ? {} : {
           routed: ({ message, routing, context, answer }) => routing.kind === "suggest"
-            ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }),
+            ? routeSlackRequest(message, { route: routerFor(message),
               offer: createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => slackAdapter.post(thread, text, blocks), log }),
               notify: async (thread, text) => { await slackAdapter.post(thread, text); },
               // The adapter cannot edit a message, so the answer is posted once, without a "Looking..." line.
               justAnswer: createAnswerDoor({ api: threadApi, post: (thread, text, blocks) => slackAdapter.post(thread, text, blocks), choices: answerChoices, log }),
               answer, finish: (subject) => threads.finish(subject), log })
             : handleTaskQuestion(message, { taskId: routing.taskId, noteTs: routing.noteId, chat: routing.chat }, {
-              ...(requestRouter === undefined ? {} : { route: requestRouter }),
+              route: routerFor(message),
               answer: (question) => runTaskAnswer(message, { taskId: routing.taskId, noteTs: routing.noteId, chat: routing.chat }, question,
                 { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
               post: async (thread, text) => { await slackAdapter.post(thread, text); },
@@ -528,7 +556,7 @@ const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableN
 const rememberAnswered = createContinuationRecorder({ documentClient, tableName: threadsTableName, log });
 await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQuestion !== undefined
   ? handleTaskQuestion(message, taskQuestion, {
-    ...(requestRouter === undefined ? {} : { route: requestRouter }),
+    route: routerFor(message),
     answer: (question) => runTaskAnswer(message, taskQuestion, question, { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
     post: async (thread, text) => { await postToSlack(thread, text); },
     postPrivate: (thread, userId, text) => slackDelivery.ephemeral(thread, userId, text),
@@ -542,7 +570,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
   : route === "suggest"
   ? routeSlackRequest(message, {
     // Decision 147: the person AgentX answered here may reply without a mention for the next 24 hours.
-    answered: (request) => rememberAnswered(request.thread, request.userId), ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice, justAnswer: answerDoor,
+    answered: (request) => rememberAnswered(request.thread, request.userId), route: routerFor(message), offer: offerChoice, justAnswer: answerDoor,
     notify: async (thread, text, blocks) => { await postToSlack(thread, text, blocks); },
     // Decision 134: a clear small change starts Quick on its own, through the broker's check and the requester's own start.
     autoStart: async ({ message: request, requestId }) => {
