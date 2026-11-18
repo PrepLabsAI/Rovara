@@ -287,6 +287,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // Lead 4 J5: answers feed the wiki. "Not right" is the asker's own press (core-host/answer-routes.ts); the gap list is read from the answer records, maintainers only (core-host/wiki-corrections-routes.ts). Additive.
   { method: "POST", path: "/v1/app/projects/{project}/answers/{answerId}/not-right", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/gaps", requires: "full" },
+  // L4-SF (d): allow or refuse a website a setup run asked for: a company owner or admin (the high-risk rule), a fresh step-up, bound to the exact ask.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/host-decide", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

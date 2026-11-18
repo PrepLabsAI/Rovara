@@ -243,6 +243,11 @@ export interface SetupProposalApproval {
   mayDecide: (approver: Principal, input: { project: string; risk: SetupRisk; outcome: "approve" | "reject" }) => Promise<boolean>;
   /** The fixed words of a refusal, by the risk the candidate is at and the answer. */
   refusal: (risk: SetupRisk, outcome: "approve" | "reject") => string;
+  /**
+   * L4-SF (c): more steps for the APPROVAL's transaction, for a host that keeps another copy of the project's revisions (the old broker's registry, aws/setup-registry-mirror.ts). Called only when approving;
+   * it throws a `SubjectRefusal` when that copy no longer matches what the setup was made from. Absent: nothing more is written.
+   */
+  registryMirror?: { itemsFor: (row: { project: string; baseRevision: number; candidateRevision: number }, at: string) => Promise<readonly TransactItem[]> };
 }
 
 /** The candidate's risk and its changes, from its stored revision against the project's approved (base) revision. A row it cannot read is high. */
@@ -290,12 +295,15 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       const approver = approvers[0]!;
       const orgId = row.orgId;
       if (attempt.outcome === "approve") {
+        // A host's other copy of the revisions moves in the same transaction (L4-SF c); a copy that has moved refuses the approval.
+        const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
         return {
           ops: [change.set("state", "approved"), change.set("decidedAt", at), change.set("decidedBy", approver.personId)],
           extra: [
             // The project moves to the candidate only if it is still at the revision the owner looked at.
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
             { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.present() },
+            ...mirrored,
           ],
           result: { project: row.project, revision: row.candidateRevision },
         };

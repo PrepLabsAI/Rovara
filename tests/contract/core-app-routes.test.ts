@@ -97,6 +97,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/answers", "full"],
     // Lead 4 J5: answers feed the wiki (additive: no existing row changed).
     ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right", "full"], ["GET", "/v1/app/projects/payments/wiki/gaps", "full"],
+    // L4-SF: allow or refuse a website a setup run asked for.
+    ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -111,7 +113,7 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/projects/payments/test-environment/propose"], ["GET", "/v1/app/projects/payments/test-environment/approve"], ["PUT", "/v1/app/projects/payments/test-environment/approve"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
-      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
+      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.

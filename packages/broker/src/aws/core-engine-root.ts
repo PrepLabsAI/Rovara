@@ -44,6 +44,7 @@ import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
 import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
+import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
@@ -691,6 +692,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             approval: createHostedSetupApproval({
               flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
               people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+              // L4-SF (c): an approval keeps the old broker's project registry in step with the core's, in the same decision.
+              registryMirror: createSetupRegistryMirror({ store: runtime.flow.deps.store, companyId: runtime.companyId }),
             }),
           },
           // Wiki W0: the free file map reads the company's own code host (company-bound, listings only) and uses the setup run's live standing; no model key is involved.
