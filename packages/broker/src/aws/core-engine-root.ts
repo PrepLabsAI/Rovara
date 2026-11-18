@@ -55,6 +55,8 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
+import { createKnowledgeApi, scriptTokenAuthenticator, type KnowledgeApi } from "../core-host/knowledge-api.js";
+import { developerIdOf } from "../core/sessions/create.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -181,6 +183,13 @@ export interface BrokerCoreRoot {
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
+  /**
+   * L4-AK1H: the team knowledge reads for tools outside Rovara (`deps.knowledge`, `core-host/knowledge-api.ts`), behind the same lessons switch and people port as `lessons`. Undefined in the same cases: a person is then
+   * given the fixed "off" answer, a script token is refused, and nothing is read.
+   */
+  readonly knowledge: KnowledgeApi | undefined;
+  /** L4-AK1H: whether a person may be told an admin notice now (they are one of the company's admins, read live). Handed to the notice delivery (`notification.adminNotice`). Undefined with `knowledge`. */
+  readonly adminNotice: ((orgId: string, developerId: string) => Promise<boolean>) | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
@@ -588,6 +597,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   let coreTasks: CoreTaskEntry | undefined;
   let coreApp: CoreAppEntry | undefined;
   let lessons: LessonsApi | undefined;
+  let knowledge: KnowledgeApi | undefined;
+  let adminNotice: BrokerCoreRoot["adminNotice"];
   if (settingsBlocked) {
     const blockedSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]).value;
     coreTasks = {
@@ -672,6 +683,45 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           isErased: (companyId, personId) => lessonsPeople(companyId).isErased(companyId, personId),
         },
         projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project))),
+        now: () => now().getTime(),
+        log,
+      });
+      // L4-AK1H: the same company, people and lessons, for the reads a tool outside Rovara makes. A script token is checked against its own company's token store and identity (never the caller's word), and only for a company the
+      // lessons switch covers; its creator is read live (a removed member, or one whose role changed, is nobody).
+      const switchValue = lessonsSwitch.value;
+      // Who is told about an unusual amount of reading: the company's owners (the people port's list) now, by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
+      const adminsOf = async (companyId: OrgId): Promise<string[]> => {
+        const listed = await lessonsPeople(companyId).approvers(companyId, undefined);
+        if (!listed.complete) return [];
+        const identity = (await app.registry()).require("identity");
+        const ids: string[] = [];
+        for (const personId of listed.ownerIds.slice(0, 20)) {
+          const principal = await identity.getPrincipal(companyId, personId);
+          if (principal !== undefined) ids.push(developerIdOf(principal));
+        }
+        return ids;
+      };
+      // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
+      adminNotice = async (orgId, developerId) => (await adminsOf(orgId as OrgId)).includes(developerId);
+      knowledge = createKnowledgeApi({
+        lessonsSwitch: switchValue,
+        companyOf: async (caller) => await membershipOf(caller.personId),
+        lessonsOf: async (companyId) => {
+          try { await app.runtimeFor(companyId); } catch { return undefined; }
+          return lessonsByCompany.get(companyId);
+        },
+        people: {
+          onProjectRoster: (companyId, project, personId) => lessonsPeople(companyId).onProjectRoster(companyId, project, personId),
+          approvers: (companyId, project) => lessonsPeople(companyId).approvers(companyId, project),
+          projectMembers: async (companyId, project) => (await lessonsPeople(companyId).projectMembers?.(companyId, project)) ?? { complete: true, ids: [] },
+        },
+        authenticateToken: scriptTokenAuthenticator({
+          lessonsSwitch: switchValue, now: () => now().getTime(),
+          // The token is checked against the SHARED registry's store (every key is company-scoped) BEFORE any company runtime is built: a made-up company id in an unverified header builds nothing.
+          companyOf: async () => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity") }; },
+        }),
+        // Who is told about an unusual amount of reading: the company's owners now (the people port's ownerIds; company admins who are not owners are not told until the port lists them), by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
+        adminsOf,
         now: () => now().getTime(),
         log,
       });
@@ -793,6 +843,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreTasks,
     coreApp,
     lessons,
+    knowledge,
+    adminNotice,
     intake,
     ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {

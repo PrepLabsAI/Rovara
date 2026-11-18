@@ -82,7 +82,8 @@ export interface BrokerCoreServicesOptions {
   people?: MergePeople;
   settings?: CodeSettingsReader;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread">;
+  /** `adminNotice` (L4-AK1H): whether a person may be told an admin notice now (an owner or admin of the company, read at delivery). Absent: no one is, and a queued admin notice is dropped (fail closed). */
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "adminNotice">;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
