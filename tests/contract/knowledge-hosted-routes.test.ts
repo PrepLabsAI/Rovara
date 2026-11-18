@@ -128,6 +128,10 @@ describe("the knowledge routes at the developer router", () => {
     const others = all.filter((row) => !added.includes(row));
     expect(others).toHaveLength(DEV_ROUTES.length - 3);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
+    // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
+    const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));
+    expect(switchRows).toEqual(["GET /v1/dev/company/lessons/local-tools full", "PUT /v1/dev/company/lessons/local-tools full", "GET /v1/dev/projects/{project}/lessons/local-tools full", "PUT /v1/dev/projects/{project}/lessons/local-tools full"]);
+    expect(createHash("sha256").update(others.filter((row) => !switchRows.includes(row)).join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST_BEFORE_JA7);
   });
 });
 
@@ -137,4 +141,7 @@ describe("the knowledge routes at the developer router", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
-const OTHER_ROWS_DIGEST = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
+// L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
+// removing exactly those 4 rows gives back the pin below.
+const OTHER_ROWS_DIGEST_BEFORE_JA7 = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
+const OTHER_ROWS_DIGEST = "40458f23691ac35d2bfb5c2c10abd4cff1d8057b3a1d6d3b6b731a2d050a8050";

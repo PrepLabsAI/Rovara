@@ -67,6 +67,7 @@ import {
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createLessonsSlackSwitchApi, type LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
+import { createKnowledgeSwitchApi, type KnowledgeSwitchApi } from "../core-host/knowledge-switch-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
 import { createHostedSetupRepair } from "../core-host/setup-repair.js";
@@ -294,6 +295,8 @@ export interface BrokerCoreRoot {
   readonly adminNotice: ((orgId: string, developerId: string) => Promise<boolean>) | undefined;
   /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`), whenever the core serves. */
   readonly lessonsSlackSwitch?: LessonsSlackSwitchApi | undefined;
+  /** L4-JA7: the company's "Knowledge stays in Rovara" and a project's "local coding tools can fetch lessons" (`core-host/knowledge-switch-api.ts`), whenever the core serves; it does not depend on the lessons switch. */
+  readonly knowledgeSwitch?: KnowledgeSwitchApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
@@ -1347,6 +1350,17 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       companyOf: async (caller) => await membershipOf(caller.personId),
       store: async () => (await app.registry()).require("storage"),
       now: () => now().getTime(),
+    }) }),
+    // L4-JA7: the two "knowledge stays in Rovara" switches (company; project). The rows are the ones the knowledge reads and the wiki tools gate read (`DocumentLocalToolsSettings` over the registry's storage); the company comes only from
+    // live membership, the project's role from the broker's own grant (administrator: maintainer), and the project must be in that company's own catalog. It does not need the lessons switch.
+    ...(settingsBlocked || !app.serving ? {} : { knowledgeSwitch: createKnowledgeSwitchApi({
+      companyOf: async (caller) => await membershipOf(caller.personId),
+      store: async () => (await app.registry()).require("storage"),
+      audit: async () => (await app.registry()).require("audit-sink"),
+      projectExists: async (companyId, project) => (await (await app.runtimeFor(companyId)).flow.deps.projects.latest(project)) !== undefined,
+      projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project))),
+      now: () => now().getTime(),
+      log,
     }) }),
     intake,
     ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
