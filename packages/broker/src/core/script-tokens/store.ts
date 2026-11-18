@@ -43,6 +43,8 @@ import {
   type CreatedScriptToken,
 } from "@agentx/contracts";
 import { mintScriptToken, scriptTokenHint } from "./token-format.js";
+
+export const SCRIPT_TOKEN_CREATE_ADMIN_ONLY = "Only an owner or an admin of the company can create script tokens.";
 import { takeRate } from "./rate.js";
 
 export interface ScriptTokenDependencies {
@@ -213,10 +215,10 @@ function auditEvent(input: { orgId: OrgId; at: string; actor: AuditEvent["actor"
  * Makes a token for the caller, on projects they can reach today (`checkProject` refuses one they can't), and returns it this once. The request's own item remembers only the token's id: a repeat of
  * the request is refused, never answered with the token. A person keeps at most `SCRIPT_TOKENS_PER_PERSON_MAX` live tokens, counted from what is stored; two requests can pass the count together,
  * so the list is read again after the write and a request that finds more takes its own token back and is refused.
- *
- * Who may call this is the surface's rule, not this function's: in Code only a local page the owner opened a few minutes ago does (never the API token, which an AI tool holds).
+ * Only a live company owner or admin may create. The surface supplies that role from membership (a laptop supplies its sole owner's role) and requires fresh browser proof, never the API token a tool holds.
  */
 export async function createScriptToken(deps: ScriptTokenDependencies, caller: ScriptTokenCaller, body: unknown, checkProject: (project: string) => Promise<void>, options: { lifetimeCapSeconds?: number; signIn?: ScriptTokenSignIn } = {}): Promise<CreatedScriptToken> {
+  if (!isAdmin(caller.orgRole)) throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
   const parsed = CreateScriptTokenBodySchema.safeParse(body);
   if (!parsed.success) throw invalidBody(parsed.error.issues[0]);
   const input = parsed.data;

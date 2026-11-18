@@ -6,16 +6,17 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  CreateScriptTokenBodySchema, CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, scriptTokenKey,
+  CreateScriptTokenBodySchema, CreatedScriptTokenSchema, IMPLICIT_COMPANY_ID, SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, SCRIPT_TOKEN_PERMISSIONS, SCRIPT_TOKENS_PER_PERSON_MAX, ScriptTokenListSchema, WORKER_INVOCATION_FEATURES, orgScriptTokensKey, orgProjectCatalogKey, scriptTokenKey,
   type AuditEvent, type AuditSink,
 } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { scriptTokenRoute } from "../../packages/broker/src/core/script-tokens/authenticate.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/broker/src/core/script-tokens/store.js";
+import { createScriptToken, listScriptTokens, noteScriptTokenUse, readScriptToken, revokeScriptToken, SCRIPT_TOKEN_CREATE_ADMIN_ONLY, ScriptTokenRecordSchema, type ScriptTokenDependencies } from "../../packages/broker/src/core/script-tokens/store.js";
 import { hashScriptToken, isScriptTokenHeader, mintScriptToken, parseScriptTokenHeader, scriptTokenMatches } from "../../packages/broker/src/core/script-tokens/token-format.js";
 import { scriptTokensEnabled } from "../../packages/broker/src/core/script-tokens/switch.js";
 import { takeRate } from "../../packages/broker/src/core/script-tokens/rate.js";
+import { createLocalScriptTokens } from "../../packages/broker/src/local/app/script-tokens.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { LocalPageSessions, MAX_SESSIONS } from "../../packages/broker/src/core/local-pages/guard.js";
@@ -39,7 +40,7 @@ const REQUEST = (n: number) => `${String(n).padStart(8, "0")}-1111-4111-8111-111
 
 interface TaskBody { taskId: string; client: string; project: string; workflow: { decisions: unknown[] }; closing?: boolean }
 /** What the routes answer, as far as these tests read it. */
-interface Json { task: TaskBody; tasks: TaskBody[]; tokens: unknown[]; projects: Array<{ name: string }>; token: { tokenId: string; status: string }; error: { code: string; message: string } }
+interface Json { task: TaskBody; tasks: TaskBody[]; tokens: unknown[]; canCreate: boolean; projects: Array<{ name: string }>; token: { tokenId: string; status: string }; error: { code: string; message: string } }
 
 async function launch(extra: { environment?: NodeJS.ProcessEnv; storage?: "sqlite" | "memory"; root?: string } = {}) {
   const root = extra.root ?? await mkdtemp(join(tmpdir(), "rovara-surfaces-"));
@@ -158,6 +159,55 @@ describe("the stored tokens (document store port)", () => {
     return { store, deps, events, advance: (ms: number) => { clock += ms; } };
   };
   const anyProject = async () => undefined;
+
+  it("refuses a member in the core before reading the body or making any token", async () => {
+    const w = world();
+    const unreadBody = { get requestId() { throw new Error("body must not be read"); } };
+    await expect(createScriptToken(w.deps, { ...owner, orgRole: "member" }, unreadBody, anyProject)).rejects.toMatchObject({
+      code: "FORBIDDEN", statusCode: 403, message: `FORBIDDEN: ${SCRIPT_TOKEN_CREATE_ADMIN_ONLY}`,
+    });
+    await expect(createScriptToken(w.deps, { ...owner, orgRole: "member" }, body(1), anyProject)).rejects.toMatchObject({
+      code: "FORBIDDEN", statusCode: 403, message: `FORBIDDEN: ${SCRIPT_TOKEN_CREATE_ADMIN_ONLY}`,
+    });
+    expect(await listScriptTokens(w.deps, owner, async () => undefined)).toEqual([]);
+    expect(w.events).toEqual([]);
+  });
+
+  it.each(["owner", "admin"] as const)("lets a company %s create in the core", async (orgRole) => {
+    const w = world();
+    const made = CreatedScriptTokenSchema.parse(await createScriptToken(w.deps, { ...owner, orgRole }, body(1), anyProject));
+    expect(await w.store.get(scriptTokenKey(IMPLICIT_COMPANY_ID, made.token.tokenId))).toMatchObject({ createdRole: orgRole });
+  });
+
+  it("requires a boolean canCreate in the list contract", () => {
+    expect(ScriptTokenListSchema.safeParse({ tokens: [], canCreate: true }).success).toBe(true);
+    expect(ScriptTokenListSchema.safeParse({ tokens: [], canCreate: false }).success).toBe(true);
+    expect(ScriptTokenListSchema.safeParse({ tokens: [] }).success).toBe(false);
+    expect(ScriptTokenListSchema.safeParse({ tokens: [], canCreate: "true" }).success).toBe(false);
+  });
+
+  it("keeps the single-owner laptop service working without a hosted membership or step-up", async () => {
+    const w = world();
+    const principal = localOwnerPrincipal();
+    await w.store.put({ item: { ...orgProjectCatalogKey(IMPLICIT_COMPANY_ID, "payments"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+    const local = createLocalScriptTokens({ ...w.deps, companyId: IMPLICIT_COMPANY_ID, owner: principal, identity: { getPrincipal: async () => principal }, enabled: () => true });
+    const made = CreatedScriptTokenSchema.parse(await local.create(body(1)));
+    expect(await w.store.get(scriptTokenKey(IMPLICIT_COMPANY_ID, made.token.tokenId))).toMatchObject({ createdRole: "owner", amr: "local" });
+    const answer = await local.routes({ method: "GET", path: "/v1/app/script-tokens", headers: {} });
+    expect(answer?.statusCode).toBe(200);
+    expect(ScriptTokenListSchema.parse(JSON.parse(answer!.body))).toMatchObject({ canCreate: true, tokens: [{ tokenId: made.token.tokenId, mine: true }] });
+    expect(await local.revoke(made.token.tokenId)).toMatchObject({ status: "revoked" });
+  });
+
+  it("refuses laptop token creation for a member and reports canCreate false", async () => {
+    const w = world();
+    const principal = { ...localOwnerPrincipal(), roles: ["member"] as const };
+    const local = createLocalScriptTokens({ ...w.deps, companyId: IMPLICIT_COMPANY_ID, owner: principal, identity: { getPrincipal: async () => principal }, enabled: () => true });
+    const answer = await local.routes({ method: "GET", path: "/v1/app/script-tokens", headers: {} });
+    expect(answer?.statusCode).toBe(200);
+    expect(ScriptTokenListSchema.parse(JSON.parse(answer!.body))).toMatchObject({ canCreate: false, tokens: [] });
+    await expect(local.create(body(1))).rejects.toMatchObject({ code: "FORBIDDEN", message: `FORBIDDEN: ${SCRIPT_TOKEN_CREATE_ADMIN_ONLY}` });
+  });
 
   it("keeps the hash under Cloud's keys and never the token, and audits the making", async () => {
     const w = world();
@@ -279,6 +329,7 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect(ScriptTokenListSchema.safeParse(listed.body).success).toBe(true);
     expect(listed.text).not.toContain(secretPart);
     expect(listed.body["tokens"]).toHaveLength(1);
+    expect(listed.body["canCreate"]).toBe(true);
     expect(h.events.map((event) => event.action)).toEqual(["script_token.created"]);
   });
 

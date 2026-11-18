@@ -347,6 +347,29 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect((await call("GET", "/v1/app/script-tokens", await cli(ADA))).body).toMatchObject({ tokens: [{ tokenId, status: "active" }] });
   });
 
+  it("uses live membership for canCreate and creation, while a demoted member can still list and revoke their own tokens", async () => {
+    const authorization = await cli(ADA, 30);
+    const create = () => call("POST", "/v1/app/script-tokens", authorization, { body: { ...makeToken, requestId: randomUUID() } });
+    const own = await create();
+    expect(own.status).toBe(201);
+    const tokenId = (own.body as { token: { tokenId: string } }).token.tokenId;
+    expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: true });
+    // A second person's token in this company stays hidden from the demoted member.
+    membership(BO, FAKE_COMPANY, "owner");
+    const others = await call("POST", "/v1/app/script-tokens", await cli(BO, 30), { body: { ...makeToken, requestId: randomUUID() } });
+    expect(others.status).toBe(201);
+    const otherId = (others.body as { token: { tokenId: string } }).token.tokenId;
+    membership(ADA, FAKE_COMPANY, "member");
+    expect(await create()).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." } } });
+    expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: false, tokens: [{ tokenId }] });
+    expect((await call("POST", `/v1/app/script-tokens/${otherId}/revoke`, authorization)).status).toBe(404);
+    expect(await call("POST", `/v1/app/script-tokens/${tokenId}/revoke`, authorization)).toMatchObject({ status: 200, body: { token: { tokenId, status: "revoked" } } });
+    membership(ADA, FAKE_COMPANY, "owner");
+    expect((await create()).status).toBe(201);
+    membership(ADA, FAKE_COMPANY, "owner", new Date(T0 - 1_000).toISOString());
+    expect(await create()).toMatchObject({ status: 401, body: { error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } } });
+  });
+
   it("erases a removed person only for an admin of that person's company with a fresh step-up; another company's admin is told 'not found'", async () => {
     const erase = async (who: string, stepUp?: number) => await call("POST", `/v1/app/people/${CY}/erase`, await cli(who, stepUp), { body: { requestId: randomUUID() } });
     expect(await erase(BO, 30)).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });

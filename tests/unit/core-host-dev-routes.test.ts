@@ -137,7 +137,7 @@ describe("the core's handlers on the deployed API", () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [] });
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [], canCreate: true });
     const made = await routes.route(post("/v1/app/script-tokens", { name: "ci", projects: ["payments"], permissions: ["read"], expiresInDays: 30 }), caller);
     expect(made?.statusCode).toBe(403);
     expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(MAKE_SCRIPT_TOKEN_ON_A_PAGE);
@@ -157,13 +157,13 @@ describe("the core's handlers on the deployed API", () => {
     const deps = { store: runtime.flow.deps.store, audit: runtime.flow.deps.audit, now: () => world.clock.now };
     const made = await createScriptToken(deps, { developerId: developerIdOf(owner.principal), personId: owner.principal.personId, orgId: FAKE_COMPANY, orgRole: "owner" }, { requestId: randomUUID(), name: "ci", projects: ["payments"], permissions: ["read"] }, async () => undefined);
     const tokenId = (made as { token: { tokenId: string } }).token.tokenId;
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), member))!.body)).toEqual({ tokens: [] });
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), member))!.body)).toEqual({ tokens: [], canCreate: false });
     expect((await routes.route(post(`/v1/app/script-tokens/${tokenId}/revoke`), member))?.statusCode).toBe(404);
     const listed = JSON.parse((await routes.route(get("/v1/app/script-tokens"), owner))!.body) as { tokens: Array<{ tokenId: string }> };
     expect(listed.tokens.map((token) => token.tokenId)).toEqual([tokenId]);
     // Another company's administrator cannot see or revoke it.
     const other = remember(OTHER, "owner");
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), other))!.body)).toEqual({ tokens: [] });
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), other))!.body)).toEqual({ tokens: [], canCreate: true });
     expect((await routes.route(post(`/v1/app/script-tokens/${tokenId}/revoke`), other))?.statusCode).toBe(404);
     expect((await routes.route(post(`/v1/app/script-tokens/${tokenId}/revoke`), owner))?.statusCode).toBe(200);
     // A malformed escape is a token that does not exist, never a fault.
@@ -272,6 +272,42 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     return { ...w, routes: routesFor({}), routesFor, list, performer };
   }
 
+  it("refuses a live member before reading the body or asking for step-up, despite owner claims", async () => {
+    const window = vi.fn(async () => 600);
+    const { routes, remember } = await setup({ stepUpWindowSeconds: window });
+    const member = remember(FAKE_COMPANY, "member");
+    expect(member.principal.roles).toContain("owner");
+    const request = { ...post("/v1/app/script-tokens"), headers: { "x-org-role": "owner" }, get body(): string { throw new Error("body must not be read"); } };
+    const answer = await routes.route(request, member);
+    expect(answer?.statusCode).toBe(403);
+    expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
+    expect(window).not.toHaveBeenCalled();
+  });
+
+  it("reads creation authority live on every request and never takes an owner claim over a demotion", async () => {
+    const { world, routes, remember } = await setup();
+    const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "owner"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    for (const role of ["owner", "admin"] as const) {
+      remember(FAKE_COMPANY, role);
+      expect((await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
+      expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toMatchObject({ canCreate: true });
+    }
+    remember(FAKE_COMPANY, "member");
+    const refused = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(errorOf(refused)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toMatchObject({ canCreate: false, tokens: [expect.any(Object), expect.any(Object)] });
+  });
+
+  it("refuses creation when an admin membership belongs to a different company", async () => {
+    const { world, app } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "admin" }), wiring: () => WIRED });
+    const caller = { ...callerOf(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const answer = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(answer?.statusCode).toBe(401);
+    expect(errorOf(answer)).toEqual({ code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN });
+    expect(world.created).toEqual([]);
+  });
+
   it("makes a script token for a caller whose step-up is inside the window, and lists it after", async () => {
     const { world, routes, remember } = await setup();
     const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 2), method: "email_code" } };
@@ -339,7 +375,7 @@ describe("a fresh step-up opens making a script token and acting on a decision c
       expect(errorOf(acted)).toEqual({ code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE });
     }
     expect(list).not.toHaveBeenCalled();
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), base))!.body)).toEqual({ tokens: [] });
+    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), base))!.body)).toEqual({ tokens: [], canCreate: true });
   });
 
   it("takes the company's shorter window from the hook, never a longer one, and refuses when the hook gives no readable answer", async () => {
