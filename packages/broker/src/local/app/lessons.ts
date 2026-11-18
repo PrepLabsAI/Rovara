@@ -43,7 +43,8 @@ import { codeHostForRecord } from "../../plugins/routing.js";
 import type { KnowledgeSources } from "../../lessons/knowledge-brief.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
-import { createLocalLessonSources } from "./lessons-sources.js";
+import { createLocalLessonSources, type LessonTicketWiring } from "./lessons-sources.js";
+import { ticketSourcePaused } from "../../lessons/ticket-comments.js";
 import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
@@ -160,7 +161,16 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   const model = createLocalPipelineModel({ choice: options.model.choice, keys: options.model.keys, companyId, providers: options.model.providers, endpoints: options.model.endpoints, fetch: options.model.fetch, now, metering: options.metering });
   const spend = createLocalLearningSpend(options.admission, companyId);
-  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields) });
+  // L4-SRC-TK: the ticket source. The trackers are the ones intake and the ticket thread use; a tracker account counts only when the identity point links it to the owner (the one person here). Paused: read live from the lessons' own flags.
+  const tickets: LessonTicketWiring = {
+    trackerFor: (system) => registry.get("tracker", system), scope: { orgId: companyId },
+    async personOfAccount(tracker, tenant, accountId) {
+      const principal = await options.identity.resolveExternalAccount(companyId, { provider: tracker, tenant, accountId }).catch(() => undefined);
+      return principal !== undefined && principal.companyId === companyId && principal.personId === ownerId ? ownerId : undefined;
+    },
+    paused: (project) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
+  };
+  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields), tickets });
 
   const runtime = createLessonsRuntime({
     store: flow.store, companyId, now, log: (event, fields) => log(event, fields), audit: options.audit, reader,

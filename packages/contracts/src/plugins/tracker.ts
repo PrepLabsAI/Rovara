@@ -165,7 +165,7 @@ export interface Tracker {
   link?(ref: TrackerItemRef, changeRequest: ChangeRequestRef, scope: HostScope): Promise<void>;
   readonly events?: TrackerEvents;
   /**
-   * Optional (port lane P6, item E1; interface only, nothing reads it yet): the comments on an item, oldest first, created or edited since `since`, 100 a page. FETCH ONLY, like `CodeHost.comments`
+   * Optional (port lane P6, item E1; the Linear and Jira adapters implement it, and the lessons' ticket source (L4-SRC-TK) reads it once at a task end; no comment command reads it yet): the comments on an item, oldest first, created or edited since `since`, 100 a page. FETCH ONLY, like `CodeHost.comments`
    * (decision 66): the adapter says what was written, by whom, when and on which item; whether it is a command and whether its author may give one is decided in Rovara's core. An adapter without it has no
    * comment commands on its items.
    */

@@ -137,7 +137,8 @@ import { CORE_ENGINE_VARIABLE, digestPilotOf, parseCoreSwitch, switchCovers } fr
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
 import { hostedPlanSummaryOf } from "../core-host/plan-summary.js";
-import { createHostedIntake, hostedTicketUpdates, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import { createHostedIntake, hostedTicketUpdates, hostedTrackerFor, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import { linearAccountResolver } from "./linear-account-links.js";
 import type { LinearConnections } from "./linear-connections.js";
 import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
@@ -753,6 +754,13 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
             knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
+            // L4-SRC-TK: ticket comments as a (weak) lessons source, through the company's own Linear connection and its own account links only.
+            ...(inputs.linearIntake === undefined ? {} : {
+              tickets: {
+                trackerFor: hostedTrackerFor(companyId, inputs.linearIntake.connections, inputs.linearIntake.fetch),
+                resolveAccount: linearAccountResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
+              },
+            }),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
               try { await app.runtimeFor(other); } catch { return undefined; }

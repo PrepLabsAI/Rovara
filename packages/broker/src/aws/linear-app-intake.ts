@@ -46,6 +46,7 @@ export function linearCompanyTracker(input: {
   const api = linearCompanyApiAccess(input.connections, company, input.fetch);
   const read = api.readIssue;
   const write = api.reply;
+  const listComments = api.listComments;
   if (read === undefined || write === undefined) throw agentXError("CONFIG_INVALID", "the Linear access is incomplete");
   const own = (orgId: string): void => { if (orgId !== company) throw agentXError("FORBIDDEN", LINEAR_OTHER_COMPANY); };
   const access: LinearTrackerAccess = {
@@ -54,6 +55,8 @@ export function linearCompanyTracker(input: {
       const issue = await read(orgId, key);
       return issue === undefined || (input.workspace !== undefined && workspaceOfIssueUrl(issue.url) !== input.workspace.toLowerCase()) ? undefined : issue;
     },
+    // L4-SRC-TK: the comments on an issue (fetch only), with the company's own token; another company's scope is refused before anything is read.
+    listComments: async (orgId, key, query) => { own(orgId); return listComments?.(orgId, key, query); },
     // The company's own port, whole: a reply (in a thread, when the request names a parent) and a rewrite of a comment Rovara wrote (the ticket thread's root, edited in place). Each names its company, and another company's is refused before anything is sent.
     reply: {
       reply: async (request) => { own(request.orgId); return write.reply(request); },

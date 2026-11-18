@@ -7,7 +7,8 @@
 // - A reviewer's comment on a pull request is a member's only when the code host says its author is a person with write or admin standing in that repository; every other comment keeps the class `outsider`, which the reflector
 // removes before any model call. A comment's place is the repository's, and its readers are that repository's readers (a restricted audience with no names, which the project's own repositories turn into "the project").
 // - A host that cannot list the comments, or whose standing cannot be read, gives no comment span. Nothing here guesses.
-import { OrgIdSchema, type ChangeRequestRef, type CodeHost, type HostAccount, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
+// - Ticket comments (L4-SRC-TK, weak, only with `tickets`): at the end of a task that a TICKET started (intake's strict rule), the comments on that one ticket, by the checks of `lessons/ticket-comments.ts`. Never for a paused source.
+import { OrgIdSchema, type ChangeRequestRef, type CodeHost, type HostAccount, type HostScope, type OrgId, type Tracker, type TrackerItemRef, type WorkflowSnapshot } from "@agentx/contracts";
 import { WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON, isRovareReplyComment } from "@agentx/contracts";
 import { PAGE_CHANGES_DEFAULT_REASON } from "../../developer/gate-default-reasons.js";
 import { taskOwnerKey } from "../../developer/task-records.js";
@@ -17,10 +18,12 @@ import { changeRequestRef, readChangeRequestFiles } from "../../core/merge/host-
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readOwnerFindingNotes } from "../../core/task-flow/owner-note.js";
 import { readTask } from "../../core/task-flow/reads.js";
+import { originTicketOf } from "../../core/ticket-updates/handler.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { looksLikeCorrection } from "../../lessons/correction-filter.js";
 import { isEvalRunMark } from "../../lessons/eval-run.js";
 import { isHumanSendBack } from "../../lessons/human-send-backs.js";
+import { ticketCommentSpans, type TicketCommentRow } from "../../lessons/ticket-comments.js";
 import { cleanForLearning } from "../../lessons/guards.js";
 import type { EvidenceSpan } from "../../lessons/reflect-input.js";
 import type { OutcomeRowReader, RevertedTasksReader } from "../../lessons/task-outcome-rows.js";
@@ -63,6 +66,34 @@ function lifetimeOf(task: TaskRecord): { from: number; to?: number } | undefined
   return to === undefined || !Number.isFinite(to) ? { from } : { from, to };
 }
 
+/** The most pages of an issue's comments one task end reads, and the longest the whole read may take. A ticket with more is not read at all (never a partial answer). */
+const TICKET_PAGES_MAX = 5;
+const TICKET_READ_MS = 20_000;
+
+/**
+ * What the ticket source needs of an install (L4-SRC-TK). `trackerFor` is the tracker registered under a system's name (the one intake and the ticket thread use); `personOfAccount` is the identity port's answer for a tracker's
+ * own account id (the lessons' developer id of the person it is, undefined for anyone it cannot place, another company's person included); `paused` is the project's Pause of this source, read live (a read that fails answers true).
+ */
+export interface LessonTicketWiring {
+  trackerFor(system: string): Tracker | undefined;
+  scope: HostScope;
+  personOfAccount(tracker: string, tenant: string, accountId: string): Promise<string | undefined>;
+  paused(project: string): Promise<boolean>;
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    work.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error instanceof Error ? error : new Error("failed")); });
+  });
+}
+
+/** Jira accounts are per site: its host is the account's tenant. Any other tracker has none. */
+function tenantOf(tracker: string, url: string): string {
+  if (tracker !== "jira") return "";
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
+}
+
 const present = (value: string | undefined): value is string => value !== undefined && value.trim() !== "";
 
 function outcomeOf(workflow: WorkflowSnapshot | undefined): "merged" | "closed" | undefined {
@@ -98,6 +129,8 @@ export interface LocalSubjectSourceOptions {
   readObject?: ((objectKey: string, maxBytes: number) => Promise<string | undefined>) | undefined;
   now: () => number;
   log?: ((event: string, fields: Record<string, string | number>) => void) | undefined;
+  /** The ticket source (weak). Absent: ticket comments are not read. */
+  tickets?: LessonTicketWiring | undefined;
   /**
    * An install of many people (the core engine on a deployed install). Each person's words are THEIRS: the request is the task's person's, a send-back's reason and a close reason are the deciding person's,
    * and each person's class is read NOW: a person on the project's roster is a member, anyone else an outsider (removed before any model call). An erased person's words are dropped, and a task whose person
@@ -246,6 +279,52 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     work.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(undefined); });
   });
 
+  /**
+   * The comments on the ticket that STARTED this task, as spans (see the top of the file). Only a task that ended; only the ticket intake started THIS task from (`originTicketOf` with `strict`); never a paused source; only
+   * comments created after the task started and before it ended. A tracker with no `comments`, a ticket with more comments than one read reaches, a read that fails or takes too long: no spans (never a partial answer, never a throw).
+   */
+  async function ticketComments(task: TaskRecord): Promise<EvidenceSpan[]> {
+    const tickets = options.tickets;
+    if (tickets === undefined) return [];
+    const skip = (code: string): EvidenceSpan[] => { options.log?.("lessons.ticket_comments_skipped", { code }); return []; };
+    try {
+      if (await tickets.paused(task.project)) return skip("paused");
+      const sessionId = (task as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string") return [];
+      const origin = await originTicketOf({ store: flow.store, now: options.now }, { orgId: options.companyId, project: task.project, taskId: task.taskId, sessionId }, { strict: true });
+      if (origin === undefined) return [];
+      const tracker = tickets.trackerFor(origin.tracker);
+      if (tracker?.comments === undefined) return skip("no_read");
+      const startedAt = Date.parse(task.createdAt);
+      const ended = [task.releasedAt, task.closedAt].flatMap((at) => (typeof at === "string" && Number.isFinite(Date.parse(at)) ? [Date.parse(at)] : []));
+      const endedAt = Math.min(options.now(), ...ended);
+      if (!Number.isFinite(startedAt) || !(endedAt > startedAt)) return [];
+      const ref = { tracker: origin.tracker, id: origin.id, ...(origin.url === "" ? {} : { url: origin.url }) } as TrackerItemRef;
+      const rows: TicketCommentRow[] = [];
+      const progress: { next: number | undefined } = { next: 1 };
+      const stop = { done: false };
+      await withTimeout((async () => {
+        for (let read = 0; progress.next !== undefined && read < TICKET_PAGES_MAX && !stop.done; read += 1) {
+          const got = await tracker.comments!(ref, { since: new Date(startedAt).toISOString(), page: progress.next }, tickets.scope);
+          for (const comment of got.comments) {
+            // A comment the adapter says is on another item is not this ticket's.
+            if (comment.subject.kind !== "item" || comment.subject.ref.tracker !== origin.tracker || comment.subject.ref.id.toLowerCase() !== origin.id.toLowerCase()) continue;
+            rows.push({ id: comment.id, ...(comment.author.hostUserId === undefined ? {} : { accountId: comment.author.hostUserId }), isBot: comment.author.isBot, body: comment.body, createdAt: comment.createdAt, updatedAt: comment.updatedAt });
+          }
+          progress.next = got.nextPage;
+        }
+      })(), TICKET_READ_MS).finally(() => { stop.done = true; });
+      // More comments than one read reaches: not read at all (a partial answer is no answer).
+      if (progress.next !== undefined) return skip("too_many");
+      const tenant = tenantOf(origin.tracker, origin.url);
+      return await ticketCommentSpans({
+        tracker: origin.tracker, ticket: origin.id, project: task.project, startedAt, endedAt, rows,
+        personOf: (accountId) => tickets.personOfAccount(origin.tracker, tenant, accountId),
+        standingOf: (person) => standingOf(person, task.project),
+      });
+    } catch { return skip("failed"); }
+  }
+
   const source: TaskSubjectSource = {
     async projectOf(input) {
       const task = await readTask(flow, input.taskId);
@@ -309,6 +388,9 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
           spans.push(...read);
         }
       }
+
+      // L4-SRC-TK: only a task that ENDED teaches from its ticket's comments (a send-back reflection of an open task reads none), and never for the human-edit job.
+      if (input.context !== "human_edit" && outcomeOf(workflow) !== undefined) spans.push(...(await ticketComments(task)));
 
       const outcome = outcomeOf(workflow);
       const links = (workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.url).slice(0, 32);

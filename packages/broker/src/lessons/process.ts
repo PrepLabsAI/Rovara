@@ -17,6 +17,7 @@ import { classifyTier, type TierContext } from "./tier.js";
 import { TRIAL_APPROVER, trialBlockers, type TrialContext } from "./trial.js";
 import { sameSource, type Lesson } from "./types.js";
 import { proposalSightings, proposedByOf } from "./proposal-mark.js";
+import { hasWeakKind, weakSourceWaits } from "./weak-source.js";
 
 export interface ProcessDeps extends CurateDeps {
   verifier: CitationVerifier; facts: CodeFacts; settings: LearningSettingsReader;
@@ -41,6 +42,8 @@ const VERIFY_TIMEOUT_MS = 3000;
  * corroborated tier-0 fact (a measured outcome behind it). A single-source fact waits as a candidate until something backs it up. Nothing is dropped.
  */
 export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: readonly string[] = []): boolean {
+  // L4-SRC-TK: a lesson that rests only on a weak source (a ticket comment) waits for its second sighting, whatever else is true of it (a contradiction, a measured outcome of the task): nothing is dropped, it stays a candidate.
+  if (weakSourceWaits(lesson.provenance)) return false;
   if (lesson.contradictsWith !== undefined) return true;
   // A possible duplicate is in front of people at once: they decide whether it merges, stays beside the other lesson or is rejected.
   if (lesson.possibleDuplicateOf !== undefined) return true;
@@ -178,7 +181,7 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
     }
 
     // Auto-apply: tier 0, corroborated, not held, not a refinement of an existing lesson, and the policy and mode allow it.
-    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !held && next.possibleDuplicateOf === undefined
+    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !hasWeakKind(next.provenance) && !held && next.possibleDuplicateOf === undefined
       && options.noAutoApply !== true && next.reviewRequired !== true && approversRequired(0, resolved.approval) === 0 && modeAllows(resolved.mode, "auto_apply")) {
       // The policy is read AGAIN at the moment of go-live: a setting tightened while this settle ran wins.
       const now = await resolveLearning(deps.settings, key.workspaceId, key.project);
