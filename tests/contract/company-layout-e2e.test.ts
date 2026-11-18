@@ -19,8 +19,10 @@ import {
 import { grantKeyFor, projectMemberRowKeyFor, revisionKeyFor, revisionPkFor } from "../../packages/broker/src/aws/company-layout.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { linkedProjectOf, type SlackChannelContext } from "../../packages/broker/src/aws/slack-channel-link.js";
+import { namedCompanySlackBinding } from "../../packages/broker/src/aws/company-layout.js";
+import { slackBindingCompany, slackBindingInCompany } from "../../packages/broker/src/aws/slack-person.js";
 import { companyInstallKey } from "../../packages/broker/src/aws/slack-company-install.js";
-import { teamKey } from "../../packages/broker/src/aws/slack-workspace-binding.js";
+import { parseBinding, teamKey } from "../../packages/broker/src/aws/slack-workspace-binding.js";
 import { companyKey } from "../../packages/broker/src/developer/company-membership.js";
 import { mayUseProject } from "../../packages/broker/src/developer/task-project-access.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -136,8 +138,18 @@ function world() {
   const never = async () => { throw new Error("no Slack call in these tests"); };
   const slack: SlackChannelContext = { documentClient: db, tableName: "State", signInTableName: "SignIn", now: () => NOW, wiring: { slack: { channel: never, join: never } as never, log: () => undefined } };
   const channelProject = (companyId: string, teamId: string, channelId: string) => linkedProjectOf(slack, companyId, teamId, channelId);
+  // The @mention path (slack-ingress.ts getBinding + companyRoute), as the install team's legacy view is wired with Slack company mode on: the team's company from its
+  // operator binding (SLACK_TEAM#<team> / BINDING), the binding from that company's own partition, then the binding-in-company check the router makes.
+  const installTeamCompany = async (teamId: string) => parseBinding(db.get(teamKey(teamId).pk, teamKey(teamId).sk)).companyId;
+  const mentionProject = async (teamId: string, channelId: string) => {
+    const view = { slackInstallTeamOnly: teamId, installTeamCompany };
+    const company = await slackBindingCompany(view, teamId);
+    if (company === undefined) return undefined;
+    const binding = await namedCompanySlackBinding(db, "State", company, teamId, channelId);
+    return binding !== undefined && await slackBindingInCompany(view, teamId, binding) ? binding.projectName : undefined;
+  };
 
-  return { db, access, read, setupStatus, members, addMember, removeMember, start, setupStanding, wikiRole, channelProject };
+  return { db, access, read, setupStatus, members, addMember, removeMember, start, setupStanding, wikiRole, channelProject, mentionProject };
 }
 
 type World = ReturnType<typeof world>;
@@ -158,6 +170,11 @@ describe("R2-F1 e2e: the staging shape, company sign-in on, the whole journey", 
   it("the owner: 15 projects in the access list, the project read, the setup status, a task start, the Slack channel", async () => {
     const w = world();
     expect(legacyRowsForDemo(w)).toEqual([]);
+    // The Slack @mention in the bound channel resolves the project (the binding lives only in the company's layout).
+    expect(await w.mentionProject(TEAM, CHANNEL)).toBe("demo-tasklog");
+    expect(await w.channelProject(DEMO, TEAM, CHANNEL)).toBe("demo-tasklog");
+    // Another channel of the same team is not bound.
+    expect(await w.mentionProject(TEAM, "C0NOTBOUND1")).toBeUndefined();
     const answer = await w.access(OWNER);
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({ developerId: OWNER, companyId: DEMO, companyRole: "owner", companyName: "Rovara Demo" });
@@ -182,8 +199,6 @@ describe("R2-F1 e2e: the staging shape, company sign-in on, the whole journey", 
     // A core task start passes the grant check, on staging's company's runtime.
     expect(await w.start(DEMO, OWNER, "demo-tasklog")).toEqual({ allowed: true });
 
-    // The Slack @mention in the bound channel resolves the project (the binding lives only in the company's layout).
-    expect(await w.channelProject(DEMO, TEAM, CHANNEL)).toBe("demo-tasklog");
     expect(legacyRowsForDemo(w)).toEqual([]);
   });
 
@@ -300,6 +315,9 @@ describe("R2-F1 e2e: the staging shape, company sign-in on, the whole journey", 
     expect((await w.read(BOB, "demo-shop")).status).toBe(404);
     // Slack: DEMO's channel is never BETA's project, and BETA has no channel there.
     expect(await w.channelProject(BETA, TEAM, CHANNEL)).toBeUndefined();
+    // A binding row for DEMO's team planted under BETA's partition is never read for the @mention: the team's company is DEMO's, from its operator binding.
+    w.db.set({ pk: `ORG#${BETA}#SLACK_BINDING#${TEAM}`, sk: "CHANNEL#C0BETAPLANT", teamId: TEAM, channelId: "C0BETAPLANT", projectName: "demo-tasklog", updatedAt: TIME, updatedBy: BOB });
+    expect(await w.mentionProject(TEAM, "C0BETAPLANT")).toBeUndefined();
   });
 
   it("drift in the company's own partition is dropped: rows naming the other company", async () => {
