@@ -11,7 +11,8 @@
 //   fitFloorCosine   the same for the embedder's cosine, where the install has an embedder; kept inside 0.50 to 0.90.
 //   priorWeightUses  how many uses the Beta prior is worth: the median number of loads a lesson got in the window (one window of use then roughly balances the prior), kept inside 2 to 12; needs the project's
 //                    clean-merge rate too (at least `TUNING_MIN_MERGED` merged tasks), the prior's centre.
-//   stepLessonCap    the lessons a step loads: raised by one (to at most 8) only when the cap bound in at least a quarter of the loads (the step was full and a lesson that passes the CURRENT floors was left out).
+//   stepLessonCap    the lessons a step loads: raised by one (to at most 8; a budget already at or above 8 is kept) only when the cap bound in at least a quarter of the loads made with the current budget (the step
+//                    was full and a lesson that passes the CURRENT floors was left out).
 //   weeklyPicks      the weekly cap on new suggestions: no value is suggested, because no measured row records how many of a week's suggestions people decide. It is listed so the report names every setting.
 // The clean-merge rows also give the evidence block: how the loads of tasks that merged clean compare with those of tasks that were reverted (shown only with at least `OUTCOME_MIN_TASKS` tasks each side; it is
 // information, not an input to any suggestion).
@@ -199,15 +200,18 @@ export async function readTuningReport(store: Pick<DocumentStore, "query">, inpu
       : merged.size < TUNING_MIN_MERGED
         ? notEnough("priorWeightUses", merged.size, TUNING_MIN_MERGED, "merged tasks")
         : decide("priorWeightUses", current.priorWeightUses, clamp(Math.round(typical), PRIOR_RANGE.min, PRIOR_RANGE.max), { have: perLesson.size, needed: TUNING_MIN_LESSONS, unit: "lessons loaded" }, "a lesson typically gets about this many loads in the window, so one window of use balances the prior"));
-    // The step cap: measured against the budget the loads were actually given (the most common one), and the floors in force.
+    // The step cap. "Now" is the caller's value when it gives one, else the budget the loads were actually given (the most common one). Only loads made under that budget count toward "the cap bound", measured
+    // against the floors in force. The suggestion only ever raises it (by one, to at most STEP_CAP_CEILING); a budget already at or above the ceiling is kept.
     const budgets = new Map<number, number>();
     for (const one of loads) budgets.set(one.budget, (budgets.get(one.budget) ?? 0) + 1);
     const usual = [...budgets.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0] ?? current.stepLessonCap;
+    const now = input.current?.stepLessonCap !== undefined && usable(input.current.stepLessonCap, -1) >= 0 ? input.current.stepLessonCap : usual;
+    const underNow = loads.filter((one) => one.budget === now);
     const passes = (sample: FitSample): boolean => sample.words >= current.fitFloorWords || (sample.cos !== null && sample.cos >= current.fitFloorCosine);
-    const capBound = loads.filter((one) => one.budget > 0 && one.loaded.length >= one.budget && one.leftOut.some(passes)).length;
-    const binds = capBound / loads.length >= CAP_BOUND_SHARE;
-    suggestions.push(decide("stepLessonCap", usual, binds ? Math.min(STEP_CAP_CEILING, usual + 1) : usual, { have: loads.length, needed: TUNING_MIN_LOADS, unit: "loads" },
-      `the step was full with a fitting lesson left out in ${binds ? "" : "only "}${String(capBound)} of ${String(loads.length)} loads`));
+    const capBound = underNow.filter((one) => one.budget > 0 && one.loaded.length >= one.budget && one.leftOut.some(passes)).length;
+    const binds = underNow.length > 0 && capBound / underNow.length >= CAP_BOUND_SHARE;
+    suggestions.push(decide("stepLessonCap", now, binds && now < STEP_CAP_CEILING ? now + 1 : now, { have: loads.length, needed: TUNING_MIN_LOADS, unit: "loads" },
+      `the step was full with a fitting lesson left out in ${binds ? "" : "only "}${String(capBound)} of ${String(underNow.length)} loads made with ${String(now)} places`));
   }
   suggestions.push({
     setting: "weeklyPicks", status: "no_data_source", current: current.weeklyPicks, suggested: null, evidence: { have: 0, needed: 0, unit: "decided weekly suggestions" },
