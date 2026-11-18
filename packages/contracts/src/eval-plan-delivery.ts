@@ -7,6 +7,7 @@
 // wire schema is the transport bound, not the plan's meaning.
 import { z } from "zod";
 import { EvalBaseRecordSchema } from "./eval-base-cache.js";
+import { EvalEnvironmentSchema } from "./eval-environment.js";
 
 /** The callback action, its own purpose: a capability for any other action (or `model-access` alone) is refused. */
 export const EVAL_PLAN_DELIVERY_ACTION = "eval-plan" as const;
@@ -39,6 +40,8 @@ export const EvalPlanDeliverySchema = z.discriminatedUnion("status", [
     plan: z.record(z.string(), z.unknown()),
     approval: EvalPlanDeliveryGrantSchema.nullable(),
     baseline: EvalPlanDeliveryBaselineSchema.nullable(),
+    /** L4-EVS: the environment the sealed eval runs in (saved image or install steps), when the project has one. Absent: the bare worker image, as before. */
+    environment: EvalEnvironmentSchema.optional(),
   }).strict(),
   /** No plan for this project, a source that is not wired, a fault, or an answer over the bound: the eval reads "not connected", with zero calls. */
   z.object({ status: z.literal("not_available") }).strict(),

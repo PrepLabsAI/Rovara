@@ -1,0 +1,3 @@
+# The eval's own settings (read with PyYAML): the team's gate and the default model.
+threshold: 0.9
+model: gemini-2.5-flash
