@@ -109,7 +109,7 @@ export function createSystemStarter(deps: SystemStarterDeps): { start(input: Sys
         // The record said "requested": say that it did not start (best effort; the refusal stands whether or not this can be written).
         await flow.audit.record({
           eventId: eventIdOf("system-run-not-started", orgId, project, input.requestId), companyId: orgId, at: new Date(nowMs()).toISOString(), actor: { type: "system", id: owner }, action: SYSTEM_RUN_AUDIT.notStarted,
-          subject: { type: "project", id: project }, details: { kind, requestId: input.requestId, code: String((error as { code?: unknown } | null)?.code ?? "FAULT").slice(0, 40) },
+          subject: { type: "project", id: project }, details: { kind, requestId: input.requestId, code: typeof (error as { code?: unknown } | null)?.code === "string" ? (error as { code: string }).code.slice(0, 40) : "FAULT" },
         }).catch(() => undefined);
         if ((error as { code?: unknown } | null)?.code === "WORKSPACE_BUSY") return { outcome: "skipped", reason: "busy" };
         throw error;

@@ -38,7 +38,7 @@ const NAMES = {
 const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
-  coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
+  coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
   coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", testServiceImages: "mirrored",
 } as const satisfies Record<BrokerSettingKey, string>;
 

@@ -279,7 +279,7 @@ describe("the core job schedules", () => {
     expect(night).toHaveLength(1);
     expect(night[0]![1].Properties.ScheduleExpression).toBe("rate(1 hour)");
     expect(night[0]![1].Properties.GroupName).toEqual({ Ref: group[0] });
-    expect(json.Parameters!.CoreSystemRuns).toMatchObject({ Type: "String", Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 });
+    expect(json.Parameters.CoreSystemRuns).toMatchObject({ Type: "String", Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 });
   });
 
   it("use a role that only the scheduler can assume, for this group, that can invoke the broker and nothing else", () => {

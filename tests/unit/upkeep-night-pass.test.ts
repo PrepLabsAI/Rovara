@@ -21,7 +21,7 @@ import { readSystemRunUsage } from "../../packages/broker/src/core/system-runs/u
 import { createHarness, definition } from "../support/task-flow-harness.js";
 
 const A: OrgId = IMPLICIT_COMPANY_ID;
-const B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
+const B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const PERSON = "ab".repeat(32);
 const at = (day: string, hour: number, minute = 30): number => Date.parse(`${day}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00.000Z`);
 const DAY = "2026-11-18";
@@ -276,7 +276,7 @@ describe("the flag", () => {
 
 describe("the hosted wiring, end to end on the task flow's fakes", () => {
   const URL_ = "https://examplehost.test/acme/app";
-  const project = (name: string): ProjectDefinition => ({ ...definition, name, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }] } as ProjectDefinition);
+  const project = (name: string): ProjectDefinition => ({ ...definition, name, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }] });
 
   async function hosted(flag: ReturnType<typeof parseCoreSwitch>["value"], company: OrgId = A) {
     const h = createHarness({ companyId: company, audit: "recording", machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] } });
@@ -343,6 +343,6 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
   it("the flag turned off stops the very next pass", async () => {
     const w = await hosted(parseCoreSwitch(`on:${A}`).value);
     expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 1 });
-    expect(await systemRunsGateOf({ mode: "off" }, A).enabled()).toBe(false);
+    expect(systemRunsGateOf({ mode: "off" }, A).enabled()).toBe(false);
   });
 });

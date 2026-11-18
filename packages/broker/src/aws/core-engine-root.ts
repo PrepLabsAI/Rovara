@@ -546,7 +546,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: systemRunsGateOf(systemRunsFlag.value, companyId).enabled, people: {
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => systemRunsGateOf(systemRunsFlag.value, companyId).enabled(), people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
       } }),

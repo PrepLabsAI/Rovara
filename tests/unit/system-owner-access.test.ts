@@ -8,7 +8,7 @@ import { SYSTEM_OWNER_NOT_ALLOWED, SYSTEM_RUN_KINDS_LIVE, SYSTEM_TASK_PURPOSES, 
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const A: OrgId = IMPLICIT_COMPANY_ID;
-const B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
+const B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const MEMBER = "11".repeat(32);
 const OUTSIDER = "22".repeat(32);
 
@@ -37,7 +37,7 @@ describe("the closed table", () => {
     expect(Object.keys(SYSTEM_TASK_PURPOSES).sort()).toEqual(["nightly_run", "setup_agent", "wiki_build"]);
     expect([...SYSTEM_RUN_KINDS_LIVE]).toEqual(["setup_check", "nightly_check"]);
     expect(liveSystemKindOf("nightly_run")).toBe("nightly_check");
-    for (const purpose of ["setup_agent", "wiki_build", "task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), String(purpose)).toBeUndefined();
+    for (const purpose of ["setup_agent", "wiki_build", "task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), JSON.stringify(purpose) ?? "undefined").toBeUndefined();
   });
 });
 
@@ -136,7 +136,8 @@ describe("a system owner's step", () => {
 
   it.each([["setup_agent"], ["wiki_build"], [undefined], ["task"]])("stops for the purpose %j (an AI purpose waits for P2)", async (purpose) => {
     const w = world();
-    const { purpose: _unused, ...base } = systemTask(A, "payments", "x");
+    const base: Record<string, unknown> = { ...systemTask(A, "payments", "x") };
+    delete base["purpose"];
     await putTask(w, "t1", purpose === undefined ? base : { ...base, purpose });
     expect(await w.access.checkStep({ taskId: "t1", developerId: systemOwnerIdOf(A, "payments"), project: "payments" })).toEqual({ allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED });
   });

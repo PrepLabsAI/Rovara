@@ -18,10 +18,10 @@ import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
-const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
+const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const PERSON = "ab".repeat(32);
 
-const projectOf = (name: string): ProjectDefinition => ({ ...definition, name, setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] } as ProjectDefinition);
+const projectOf = (name: string): ProjectDefinition => ({ ...definition, name, setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }] });
 
 interface World { h: Harness; flag: { on: boolean }; starter: ReturnType<typeof createSystemStarter>; company: OrgId; order: string[] }
 

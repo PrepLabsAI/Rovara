@@ -5,14 +5,12 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type AuditEvent, type AuditSink, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { setupStateOf } from "../../packages/broker/src/core/setup-agent/check.js";
 import { projectMetaKey } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_APPROVAL_UNAVAILABLE, SETUP_RUN_AUDIT_UNAVAILABLE, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, SETUP_RUN_UNREADABLE, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_RUN_AUDIT_UNAVAILABLE, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, SETUP_RUN_UNREADABLE, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -40,7 +38,6 @@ async function register(world: FakeWorld, companyId: string, name: string): Prom
 
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
-const RUN = "/v1/app/projects/payments/setup-agent";
 
 interface Person { caller: DeployedCaller; membership: CompanyMembership; grant?: "developer" | "administrator" }
 
@@ -76,8 +73,6 @@ async function setupWorld(options: { env?: NodeJS.ProcessEnv; gateway?: boolean;
   return { world, app, person, standing, call, routes, wiring };
 }
 
-const pointerOf = (world: FakeWorld, companyId: string, name = "payments") => world.store.get(setupAgentKey(companyId, name));
-const setupEvents = (world: FakeWorld): AuditEvent[] => world.audit.filter((event) => event.action.startsWith("setup_run."));
 
 
 const CHECK = "/v1/app/projects/payments/setup-check";

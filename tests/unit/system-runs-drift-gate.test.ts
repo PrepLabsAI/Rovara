@@ -3,7 +3,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, type DocumentStore, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { readSystemRunUsage } from "../../packages/broker/src/core/system-runs/usage.js";
-import { systemOwnerIdOf } from "@agentx/contracts";
 import { readAutomaticRunsUse } from "../../packages/broker/src/core/automatic-runs/cap.js";
 import { type RecheckRow } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { snapshotItem, takeSetupSnapshot } from "../../packages/broker/src/core/setup-agent/snapshot.js";
@@ -21,7 +20,7 @@ const FILES: Record<string, string> = {
 const projectOf = (name = "payments", extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({
   ...definition, name, setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }], ...extra,
   repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }],
-} as ProjectDefinition);
+});
 
 interface World { h: Harness; model: FakeHostModel; host: FakeCodeHost; project: ProjectDefinition; modelRoute: ReturnType<typeof vi.fn> }
 
