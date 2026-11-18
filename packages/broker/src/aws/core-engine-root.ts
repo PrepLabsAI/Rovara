@@ -72,6 +72,8 @@ import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/up
 import { queueSetupBroken } from "../core/notify/attention.js";
 import type { ChatThreads } from "../core-host/chat-threads.js";
 import { projectPageUrl } from "../core/decisions/open-path.js";
+import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
+import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
 import { addChatThreadInput } from "../core-host/chat-thread-input.js";
@@ -165,6 +167,11 @@ export interface BrokerCoreModuleContext {
 export interface BrokerCoreRootInputs {
   env: NodeJS.ProcessEnv;
   checkTaskPerson?: CheckTaskPerson;
+  /**
+   * Core task web routes (Cloud #188 item 3): for one signed-in person and their live company, exactly the dependencies the developer routes build for the old task routes (`developerTaskRouteDependencies`), so a core
+   * task's People, readers, events and plan comments are answered with the old routes' own rules (aws/core-task-rule-routes.ts). Absent: those routes are not the core's here.
+   */
+  taskRules?: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies;
   /** The State table and the sign-in table, as the broker's document client reads them (membership, project grants, the person's name). */
   documentClient: DynamoSender;
   stateTableName: string;
@@ -765,8 +772,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
       // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap: the settled figure in THIS company's cost ledger, read fresh each time; anything not known to be complete throws (an ask, never "nothing spent").
       taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.task_spend_refused", companyId, reason }) }),
-      // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
-      ...(inputs.linearIntake === undefined && inputs.chatThreads === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }) }),
+      // L2-4 + core-task-web-routes (#1045): every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
+      // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
+      startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
       onTaskClosed: async (task, closedAt) => {
@@ -960,6 +968,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
+          // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
+          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules) }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
@@ -1183,6 +1193,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
       ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
       ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
+      // Cloud #188 item 5: the task list's money read for a core task (the caller's own, in their live company).
+      ...(entry.taskMoney === undefined ? {} : { taskMoney: entry.taskMoney.bind(entry) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);

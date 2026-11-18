@@ -121,6 +121,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health", "full"],
     // Audit gap 11b: a project's ticket-sharing settings (the laptop's intake/updates route; additive: no existing row changed).
     ["GET", "/v1/app/projects/payments/intake/updates", "full"], ["PUT", "/v1/app/projects/payments/intake/updates", "full"],
+    // DEC 254zzz39 (6): the task owner's Accept findings on the web page (a security finding needs it). Additive: no existing row changed.
+    ["POST", "/v1/app/tasks/t1/review-findings", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -161,6 +163,8 @@ describe("the /v1/app route table", () => {
       // The eval check card: GET and PUT only, no other tail.
       ["POST", "/v1/app/projects/payments/ci-eval-check"], ["DELETE", "/v1/app/projects/payments/ci-eval-check"], ["PATCH", "/v1/app/projects/payments/ci-eval-check"], ["GET", "/v1/app/projects/payments/ci-eval-check/extra"], ["PUT", "/v1/app/projects/payments/ci-eval-checks"],
       ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
+      // The page's Accept findings: one POST, no other method or tail.
+      ["GET", "/v1/app/tasks/t1/review-findings"], ["PUT", "/v1/app/tasks/t1/review-findings"], ["POST", "/v1/app/tasks/t1/review-findings/x"], ["POST", "/v1/app/tasks/review-findings"],
       // The company's automatic-runs control: GET and PUT only, no other tail.
       ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
       // Ticket-sharing settings: GET and PUT only (the laptop's POST alias is not served here), and none of the laptop's other intake routes (the waiting tickets are /v1/dev/projects/{p}/intake).

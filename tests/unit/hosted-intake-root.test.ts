@@ -2,7 +2,7 @@
 // core-team-context.test.ts does): intake only for a company whose new tasks start on the core, the ticket-only session start extras, and the write-back on the company's milestones.
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import type { OrgId, Principal } from "@agentx/contracts";
+import { SYSTEM_OWNER_PROVIDER, systemOwnerIdOf, type OrgId, type Principal } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { ticketSessionStartExtras } from "../../packages/broker/src/aws/hosted-intake.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
@@ -55,26 +55,40 @@ describe("the core root's hosted intake", () => {
     expect(runtimeFor.mock.calls.map(([companyId]) => companyId)).toEqual([A]);
   });
 
-  it("a start with a ticket writes its session and binding in its own transaction; a start without one gets nothing added", async () => {
-    const { root: built } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" });
-    const extras = (await built.app.runtimeFor(A)).flow.deps.startExtras!;
-    const plain = extras(extrasInput(false));
-    const withTicket = extras(extrasInput(true));
-    expect(plain.sessionId).toBeUndefined();
-    expect(withTicket.sessionId).toMatch(/^ses_/u);
-    // The ticket's items come in addition to exactly the items a plain start carries.
-    expect(withTicket.items.length).toBeGreaterThan(plain.items.length);
-    expect(JSON.stringify(plain.items)).not.toContain("SESSION");
-    expect(JSON.stringify(withTicket.items)).toContain("ENG-1");
-    // Without Linear wired, a ticket start is exactly a plain start (nothing hosted adds sessions).
-    const { root: unwired } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }, { linear: false });
-    expect((await unwired.app.runtimeFor(A)).flow.deps.startExtras!(extrasInput(true)).sessionId).toBeUndefined();
+  it("every person's start writes its session in its own transaction (web, Slack, API, intake); a ticket start adds its binding; a system owner's start gets nothing", async () => {
+    for (const linear of [true, false]) {
+      const { root: built } = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }, { linear });
+      const extras = (await built.app.runtimeFor(A)).flow.deps.startExtras!;
+      for (const client of ["web", "slack", "cli", "mcp", "tracker"]) {
+        const plain = extras({ ...extrasInput(false), client });
+        expect(plain.sessionId).toMatch(/^ses_/u);
+        expect(JSON.stringify(plain.items)).toContain("SESSION");
+        expect(JSON.stringify(plain.items)).not.toContain("ENG-1");
+      }
+      const plain = extras(extrasInput(false));
+      const withTicket = extras(extrasInput(true));
+      expect(withTicket.sessionId).toBe(plain.sessionId);
+      // The ticket's items come in addition to exactly the items a plain start carries.
+      expect(withTicket.items.length).toBeGreaterThan(plain.items.length);
+      expect(JSON.stringify(withTicket.items)).toContain("ENG-1");
+      // Rovara's own unattended runs have no person to own a session.
+      // (The runtime adds only its engine stamp to such a start.)
+      for (const system of [{ ...principal, personId: systemOwnerIdOf(A, "payments") }, { ...principal, provider: SYSTEM_OWNER_PROVIDER }]) {
+        const added = extras({ ...extrasInput(false), principal: system });
+        expect(added.sessionId).toBeUndefined();
+        expect(JSON.stringify(added.items)).not.toContain("SESSION");
+        expect(ticketSessionStartExtras(A)({ ...extrasInput(false), principal: system })).toEqual({ items: [] });
+      }
+    }
   });
 
-  it("ticketSessionStartExtras adds nothing to a start without a ticket", () => {
-    expect(ticketSessionStartExtras(A)(extrasInput(false))).toEqual({ items: [] });
-    const withTicket = ticketSessionStartExtras(A)(extrasInput(true));
-    expect(withTicket.sessionId).toMatch(/^ses_/u);
+  it("ticketSessionStartExtras writes the session of this company only, for any person's start", () => {
+    const plain = ticketSessionStartExtras(A)(extrasInput(false));
+    expect(plain.sessionId).toMatch(/^ses_/u);
+    expect(JSON.stringify(plain.items)).toContain(A);
+    expect(JSON.stringify(plain.items)).not.toContain(B);
+    const withTicket = ticketSessionStartExtras(A, { chatThreads: true })(extrasInput(true));
+    expect(withTicket.sessionId).toBe(plain.sessionId);
     expect(JSON.stringify(withTicket.items)).toContain(A);
     expect(JSON.stringify(withTicket.items)).not.toContain(B);
   });

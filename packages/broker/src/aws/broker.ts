@@ -15621,6 +15621,12 @@ function buildBrokerHandler(callbackSigningKey: string) {
         { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
       return await deps.checkTaskPerson!(task, developerId, admission);
     },
+    // Cloud #188 item 3: a core task's People, readers, events and plan comments use the old task routes' own dependencies for this person (built as the People proof above is), in their live company.
+    taskRules: (person, companyId) => {
+      if (signIn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "task people are unavailable in this deployment");
+      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+        { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId };
+    },
     // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
     codeModules: (core) => brokerCoreModuleDeps(process.env, {
       dynamo: dynamoClient,

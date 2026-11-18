@@ -368,6 +368,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-decide", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-health", requires: "full" },
+  // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
+  // web app's own client, a fresh step-up and the task's owner. Additive: no existing row changed.
+  { method: "POST", path: "/v1/app/tasks/{taskId}/review-findings", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
