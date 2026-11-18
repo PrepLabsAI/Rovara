@@ -79,11 +79,13 @@ export interface BuildKnowledgeInput {
   pullLeftOut?: number | undefined;
   facts?: readonly KnowledgeFact[] | undefined;
   skills?: readonly KnowledgeSkillName[] | undefined;
+  /** Which parts this caller carries, when it is not a task stage (the answers, lead 4 L4-AK2b: facts and the "more" line, no skills). Absent: the stage's own table. A task step never passes it, so no step's parts change. */
+  parts?: { facts: boolean; skills: boolean; more: boolean; pull: boolean } | undefined;
 }
 
 /** The knowledgeContext of a step, or undefined when there is nothing beyond the plain lessons block to send. Valid against the contract by construction (checked before it is returned). */
 export function buildKnowledgeContext(input: BuildKnowledgeInput): KnowledgeContext | undefined {
-  const allowed = KNOWLEDGE_STAGE_PARTS[input.stage];
+  const allowed = input.parts ?? KNOWLEDGE_STAGE_PARTS[input.stage];
   const pushedIds = new Set(input.pushed.map((lesson) => lesson.id));
   const pick = allowed.pull ? pullUnitsOf(input.pull ?? [], input.pullLeftOut ?? 0) : { units: [], leftOut: 0 };
   const facts = allowed.facts ? [...(input.facts ?? [])].slice(0, KNOWLEDGE_FACTS_MAX) : [];
