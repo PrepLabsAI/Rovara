@@ -191,12 +191,24 @@ describe("the cache bounds the calls of one pass", () => {
     w.advance(HOSTED_POLICY_FAILURE_TTL_MS);
     expect(await w.mode(A, "web")).toBe("their_ci_fix");
   });
-  it("a request that carries anything (a task's raise) is not cached", async () => {
+  it("a request that carries anything (a task's raise) is not cached, and does not fill the cache for a later plain ask", async () => {
     const w = world({ withHook: false });
+    w.row(A, "web", { real_check: "sandbox_only" });
     const request = { taskRaises: {} } as unknown as PolicyResolveRequest;
     await w.source.resolve(w.scope(A, "web"), request).catch(() => undefined);
     await w.source.resolve(w.scope(A, "web"), request).catch(() => undefined);
     expect(w.reads).toHaveLength(2);
+    expect(await w.mode(A, "web")).toBe("sandbox_only");
+    expect(w.reads).toHaveLength(3);
+  });
+  it("one company's remembered failure does not touch another company's answer at the same moment", async () => {
+    const w = world({ locks: (cid) => (cid === A ? new Error("down") : { real_check: "rovara_real_run" }) });
+    const [a, b] = await Promise.allSettled([w.mode(A, "web"), w.mode(B, "web")]);
+    expect(a.status).toBe("rejected");
+    expect(b).toEqual({ status: "fulfilled", value: "rovara_real_run" });
+    await expect(w.mode(A, "web")).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
+    expect(await w.mode(B, "web")).toBe("rovara_real_run");
+    expect(w.service.asked).toHaveLength(2);
   });
   it("what a caller does to its answer does not change the next one", async () => {
     const w = world({ withHook: false });
