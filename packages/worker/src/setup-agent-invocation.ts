@@ -1,6 +1,6 @@
 // The setup run as the worker receives it (sh-setup-wire, SH14): builds the real ports of `runSetupAgent` from the task invocation's dependencies and returns the task's result. `run-task.ts` calls it from one
 // early hunk; everything about the run itself is in `setup-agent-run.ts`.
-import { agentXError } from "@agentx/contracts";
+import { SETUP_RUN_REFUSED_MESSAGES, agentXError } from "@agentx/contracts";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { EventBatcher, type EventBatchSink } from "./events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
@@ -59,10 +59,10 @@ export async function runSetupAgentInvocation(
   // A worker whose launcher had to withdraw the setup run's firewall rules refuses here, before any network, helper or sandbox exists.
   assertSetupIsolation(environment);
   const image = environment[TASK_SANDBOX_IMAGE_ENVIRONMENT];
-  if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", `AgentX has no task sandbox image (${TASK_SANDBOX_IMAGE_ENVIRONMENT}), so it did not run the setup`);
+  if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noSandboxImage);
   // Money: a setup run is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
   const proxy = environment["AGENTX_MODEL_PROXY_URL"];
-  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not run the setup (its spending could not be counted)");
+  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
   const price = setupModelPrice(dependencies.model);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;

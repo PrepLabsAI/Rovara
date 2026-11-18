@@ -619,6 +619,35 @@ describe("L12: setup runs turned off for the company end a run that is going", (
     expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", partial: true });
     expect(result.setupProposal).toBeDefined();
   });
+  it("L4-T5: the run says it was turned off (the summary's `cannot`), and a stop for any other reason does not say so", async () => {
+    let polls = 0;
+    const off = await world({
+      script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await new Promise((resolve) => setTimeout(resolve, 80)); await bash.exec("npm test", "/work", { onData: () => undefined }); },
+      poll: () => { polls += 1; return polls >= 2 ? { hosts: [], companyOff: true } : { hosts: [] }; },
+    });
+    expect((await runSetupAgent(off.input)).setupRunSummary).toMatchObject({ stop: "infrastructure", partial: true, cannot: "company_off" });
+    // Nothing can reach the run (5 polls in a row failed): it ends `infrastructure` too, but trying again can help, so it says nothing of being turned off.
+    const unreachable = await world({ script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await new Promise((resolve) => setTimeout(resolve, 200)); await bash.exec("npm test", "/work", { onData: () => undefined }); } });
+    unreachable.input.ports.callback = async (body) => { if ((body as { kind: string }).kind !== "poll") return { ok: true }; throw new Error("the broker is unreachable"); };
+    const summary = (await runSetupAgent(unreachable.input)).setupRunSummary;
+    expect(summary.stop).toBe("infrastructure");
+    expect(summary).not.toHaveProperty("cannot");
+    // The run was already over for another reason (its command limit) when the answer came: the reason it stopped is the one it reports, with no cause of being turned off.
+    let denied = false;
+    const limited = await world({
+      limits: { commands: 1 as never },
+      script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await bash.exec("npm test", "/work", { onData: () => undefined }).catch(() => undefined); denied = true; await new Promise((resolve) => setTimeout(resolve, 150)); },
+      poll: () => (denied ? { hosts: [], companyOff: true } : { hosts: [] }),
+    });
+    const limitedSummary = (await runSetupAgent(limited.input)).setupRunSummary;
+    expect(limitedSummary.stop).toBe("attempts_used");
+    expect(limitedSummary).not.toHaveProperty("cannot");
+    // A run that finished by itself before the answer came reports no cause.
+    const done = await world({ script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await bash.exec("npm test", "/work", { onData: () => undefined }); } });
+    const finished = (await runSetupAgent(done.input)).setupRunSummary;
+    expect(finished.stop).toBe("proposed");
+    expect(finished).not.toHaveProperty("cannot");
+  });
   it("the run still looks at the broker when its journal callback fails: a stop reaches it", async () => {
     let polls = 0;
     const t = await world({

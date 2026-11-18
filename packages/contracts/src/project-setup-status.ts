@@ -67,7 +67,7 @@ export const ProjectSetupChecklistSchema = z.object({
   }).passthrough(),
   evalConfirm: z.object({
     state: State,
-    /** none: the latest run reported no eval; reported: waiting for a person; confirmed; no_evals: a person confirmed the project runs no evals, for the latest finished setup run (done). */
+    /** none: the latest run reported no eval (done by itself once the setup run is done: nothing to confirm, L4-T5); reported: waiting for a person; confirmed; no_evals: a person confirmed the project runs no evals, for the latest finished setup run (done). */
     report: z.enum(["none", "reported", "confirmed", "no_evals"]),
     /** Set while the setup run is not done: the row cannot be acted on yet. */
     blockedBy: z.literal("setupRun").optional(),
