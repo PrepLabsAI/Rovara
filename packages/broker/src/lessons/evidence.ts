@@ -61,13 +61,13 @@ export function documentEvidenceSink(store: Store, companyId: OrgId): EvidenceSi
       } catch { return false; }
     },
     async baseline(input) {
-      // Written even when both are 0: it is the marker that says "this lesson's evidence rows begin here", so a mark made later is never counted twice (by its row and by the baseline).
+      // Kept as long as the fade state (far longer than the evidence window; the reader ages it out by its own time), so the marker is never swept and written again (that would count every row still in the window twice). Written even when both are 0: it is the marker that says "this lesson's evidence rows begin here", so a mark made later is never counted twice (by its row and by the baseline).
       if (!mine(input) || !Number.isFinite(input.forW) || !Number.isFinite(input.againstW)) return false;
       try {
         await store.put({
           item: {
             pk: evidencePk(companyId, input.project), sk: `B#${input.lessonId}`, entityType: "LESSON_EVIDENCE", kind: "baseline", project: input.project, lessonId: input.lessonId,
-            forW: Math.min(10_000, Math.max(0, Math.floor(input.forW))), againstW: Math.min(10_000, Math.max(0, Math.floor(input.againstW))), at: input.at, keepUntil: input.at + EVIDENCE_KEEP_DAYS * DAY, ...ttl(input.at, EVIDENCE_KEEP_DAYS),
+            forW: Math.min(10_000, Math.max(0, Math.floor(input.forW))), againstW: Math.min(10_000, Math.max(0, Math.floor(input.againstW))), at: input.at, keepUntil: input.at + FADE_KEEP_DAYS * DAY, ...ttl(input.at, FADE_KEEP_DAYS),
           },
           condition: when.absent(),
         });

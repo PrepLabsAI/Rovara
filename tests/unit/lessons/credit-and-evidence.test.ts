@@ -254,6 +254,18 @@ describe("the first evidence row keeps the counters the lesson already had (the 
     expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 2, againstW: 4 });
   });
 
+  it("the baseline marker outlives the evidence window, so a mark made after 211 days does not write it again and count the rows twice", async () => {
+    const w = await world();
+    await w.add(lessonRecord({ id: "les_aaaa1111", counters: { loaded: 40, helpful: 30, harmful: 0, citationStale: 0 }, lastHelpfulAt: w.clock.now() }));
+    await w.store.addPending({ key: "helpful:t1:les_aaaa1111", workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", taskId: "t1", dueAt: w.clock.now() - 1, weight: 1 });
+    await settleHelpful(w.counters, KEY);
+    w.clock.advance(211 * DAY);
+    await w.store.addPending({ key: "helpful:t2:les_aaaa1111", workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", taskId: "t2", dueAt: w.clock.now() - 1, weight: 1 });
+    await settleHelpful(w.counters, KEY);
+    // Only the new piece is inside the window; the old baseline and row are aged out, and no new baseline was written from the grown counters.
+    expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 1, againstW: 0 });
+  });
+
   it("the baseline ages out with the window like any evidence", async () => {
     const w = await world();
     await w.add(lessonRecord({ id: "les_aaaa1111", counters: { loaded: 40, helpful: 30, harmful: 0, citationStale: 0 }, lastHelpfulAt: w.clock.now() }));
@@ -312,7 +324,7 @@ describe("the task's use reports are read exactly, and a read that fails defers 
 });
 
 describe("the baseline never counts a mark twice, whichever mark comes first", () => {
-  it("a fresh lesson (0/0): three shared credits then a person's mark give exactly the sum of their own pieces (no baseline drift)", async () => {
+  it("a fresh lesson (0/0): three shared credits give exactly the sum of their own pieces (no baseline drift)", async () => {
     const w = await world();
     await w.add(lessonRecord({ id: "les_aaaa1111", counters: { loaded: 0, helpful: 0, harmful: 0, citationStale: 0 } }));
     for (const [task, weight] of [["t1", 1 / 3], ["t2", 1 / 2], ["t3", 1]] as const) {
