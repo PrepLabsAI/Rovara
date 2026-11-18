@@ -1,5 +1,6 @@
 // Engine host (lane E2, step 6): the core engine's composition root on the deployed broker. Off (the default) builds and reads nothing and gives the routes no core entry; the caller's
 // company is membership, never a claim; the task access re-reads live membership and keeps the broker's project grant rule; the stream hook finds only outbox inserts.
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
@@ -532,4 +533,13 @@ it("shares one resolved hosted-hook setting with the developer API and never fal
   const refused = withCoreRoutes({}, invalid) as { policyHook: NonNullable<typeof invalid.policyHook> };
   expect(refused.policyHook).toBeDefined();
   expect(() => refused.policyHook.settings).toThrow("the policy hook settings are not readable");
+});
+
+describe("the hosted answers' briefing join (lead 4 L4-AK2g)", () => {
+  it("the root's `answers` wiring passes the briefing, made by answersBriefingOf over THIS runtime's company and the lessons hosts by company (deleting the line, or a merge dropping it, turns the briefing off silently)", () => {
+    const text = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
+    const block = /answers: \{\n([\s\S]*?)\n\s{10}\},\n\s{10}auditFor/u.exec(text)?.[1] ?? "";
+    expect(block).toContain("model: answersModel(),");
+    expect(block).toContain("briefing: answersBriefingOf(runtime.companyId, (id) => lessonsByCompany.get(id)?.host),");
+  });
 });
