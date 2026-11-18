@@ -98,7 +98,7 @@ export const ownerGcpPackImagesFor = (environment: Readonly<Record<string, strin
 /** The pack's images as list entries (what `normalizeOwnerList` and `ownerCatalogOf` take). */
 export const ownerGcpPackEntries = (images: readonly OwnerGcpPackImage[]): OwnerListEntry[] => images.map((image) => ({ reference: image.reference, family: image.family, version: image.version }));
 
-/** The pack's images the install's registry mirror may copy: the `mirrored` ones that sit behind no gate but the licence. The pulled image is never in this list. */
+/** The pack's images the install's registry mirror may copy: every `mirrored` one (the licence allows a copy; BigQuery still needs the R8 gate to be switched on before it is offered). The pulled image is never in this list. */
 export const ownerGcpPackMirrorable = (): OwnerGcpPackImage[] => OWNER_GCP_PACK_IMAGES.filter((image) => image.distribution === "mirrored");
 
 /** Whether this exact pinned reference is one the pack pulls straight from the publisher's registry (never mirrored). */
