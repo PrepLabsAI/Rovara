@@ -8,26 +8,27 @@ import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-g
 import { chooseStepModel } from "../../packages/broker/src/core/task-flow/step-model.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { TaskTokenOperation } from "../../packages/broker/src/core/model-gateway/token.js";
-import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
+import { HOSTED_MODEL_WORDS, createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { COMPANY_ENGINE_MODEL_ENTITY, companyEngineModelKey, companyEngineModelRoute } from "../../packages/broker/src/core-host/company-engine-model.js";
 import { dispatcherStoredAgentModelChoice } from "../../packages/broker/src/core-host/stored-agent-model-choice.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
-import { createFakeOfferedModels } from "../support/offered-models-fake.js";
+import { createHarness, newRequestId, type Harness, type HarnessOptions } from "../support/task-flow-harness.js";
+import { createFakeOfferedModels, type FakeOfferedModels } from "../support/offered-models-fake.js";
 
 const INSTALL = "claude-sonnet-5-5";
 const COMPANY_MODEL = "claude-opus-5-5";
 const PLAN = "claude-fable-5-2";
 const BUILD = "qwen.qwen3-coder-480b-a35b-v1:0";
 const REVIEW = "zai.glm-5";
-const OTHER: OrgId = "org_stepmodels000000000b" as OrgId;
+const OTHER: OrgId = "org_stepmodels000000000b";
 const installRoute = { route: async () => ({ alias: INSTALL, api: "anthropic-messages" as const, catalog: INSTALL }) };
 
-async function world(companyId?: OrgId) {
-  const h = createHarness(companyId === undefined ? {} : { companyId });
+/** One company's world. `shared`: the other company's store and the gateway reader, as in production (one table, keys prefixed by the company; one reader for every company). */
+async function world(companyId?: OrgId, shared?: { backend: HarnessOptions["backend"]; reader: FakeOfferedModels }) {
+  const h = createHarness({ ...(companyId === undefined ? {} : { companyId }), ...(shared === undefined ? {} : { backend: shared.backend }) });
   await h.registerProject();
-  const reader = createFakeOfferedModels();
-  const company = h.deps.companyId as OrgId;
+  const reader = shared?.reader ?? createFakeOfferedModels();
+  const company = h.deps.companyId;
   // The broker's wiring (core-engine-root.ts modelFlowOptions): the step rule's default is the company's engine model route, which falls back to the install's.
   const modelAccess = companyEngineModelRoute({ store: h.store, companyId: company, install: installRoute });
   const choice = createAgentModelChoice({
@@ -44,8 +45,8 @@ async function world(companyId?: OrgId) {
   const tk = taskKey(started.task.taskId);
   await h.store.put({ item: { ...(await h.store.get(tk))!, origin: "app" } });
   const scope: TaskTokenOperation = { workspaceId, operationId, fence: 1 };
-  const owner: Principal = { ...localOwnerPrincipal({ companyId: company }), authTime: new Date(h.clock.now).toISOString() } as Principal;
-  return { h, reader, choice, company, key, scope, owner, describer: createTaskTokenDescriber(h.deps) };
+  const owner: Principal = { ...localOwnerPrincipal({ companyId: company }), authTime: new Date(h.clock.now).toISOString() };
+  return { h, reader, choice, company, key, scope, owner, describer: createTaskTokenDescriber(h.deps), shared: { backend: (() => ({ store: h.store, queues: h.queues })) as HarnessOptions["backend"], reader } };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -70,7 +71,7 @@ async function tokenModels(w: World, workflowMode: string, programStepId: string
   return (await w.describer.describe(w.scope))?.models;
 }
 
-const setCompanyModel = (h: Harness, company: OrgId, model: string) => h.store.put({ item: { ...companyEngineModelKey(company), entityType: COMPANY_ENGINE_MODEL_ENTITY, orgId: company, version: 1, model, updatedAt: new Date(h.clock.now).toISOString(), updatedBy: "b".repeat(64) } as never });
+const setCompanyModel = (h: Harness, company: OrgId, model: string) => h.store.put({ item: { ...companyEngineModelKey(company), entityType: COMPANY_ENGINE_MODEL_ENTITY, orgId: company, version: 1, model, updatedAt: new Date(h.clock.now).toISOString(), updatedBy: "b".repeat(64) } });
 
 it("each step's gateway token names exactly the model the company chose for that step", async () => {
   const w = await world();
@@ -92,6 +93,8 @@ it("a step the company did not set runs on the company's own engine model, else 
   // The company's own model replaces the install's for every step it did not set; the step it set keeps its own.
   await setCompanyModel(w.h, w.company, COMPANY_MODEL);
   expect(await tokenModels(w, "PLAN", "plan")).toEqual([COMPANY_MODEL]);
+  // The step rule itself chose the company's model as the step's default (not the describer's own fallback).
+  expect((await w.h.store.get(w.key))!["modelChoice"]).toMatchObject({ reason: "BUILTIN_DEFAULT", route: { alias: COMPANY_MODEL } });
   expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([BUILD]);
 });
 
@@ -100,7 +103,11 @@ it("a step set to a model the gateway no longer offers this company is refused b
   await set(w, "build", BUILD);
   w.reader.set(w.company, [INSTALL, PLAN]);
   w.h.clock.advance(10);
-  await expect(tokenModels(w, "IMPLEMENT", "build")).rejects.toThrow();
+  await expect(tokenModels(w, "IMPLEMENT", "build")).rejects.toThrow(HOSTED_MODEL_WORDS.refusals.MODEL_NOT_VERIFIED);
+  // The page says so too, for that step only.
+  const steps = (await w.choice.service().state()).steps;
+  expect(steps.find((step) => step.stage === "build")?.refusal?.code).toBe("MODEL_NOT_VERIFIED");
+  expect(steps.find((step) => step.stage === "plan")?.refusal).toBeUndefined();
 });
 
 it("a model the gateway does not offer cannot be saved for a step", async () => {
@@ -111,15 +118,24 @@ it("a model the gateway does not offer cannot be saved for a step", async () => 
   expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([INSTALL]);
 });
 
-it("two companies: one company's step choice never reaches the other's steps", async () => {
+it("two companies on one table and one gateway reader: one company's step choice and model never reach the other's steps", async () => {
   const a = await world();
-  const b = await world(OTHER);
+  const b = await world(OTHER, a.shared);
+  expect(b.h.store).toBe(a.h.store);
+  a.reader.set(OTHER, [INSTALL, COMPANY_MODEL]);
   await set(a, "build", BUILD);
+  await setCompanyModel(a.h, a.company, PLAN);
   expect(await tokenModels(a, "IMPLEMENT", "build")).toEqual([BUILD]);
+  expect(await tokenModels(a, "PLAN", "plan")).toEqual([PLAN]);
+  // B: nothing of A's (its setting, its engine model, its published validation) reaches B's steps, on the broker or the dispatcher.
   expect(await tokenModels(b, "IMPLEMENT", "build")).toEqual([INSTALL]);
+  const bDispatcher = dispatcherStoredAgentModelChoice({ store: b.h.store, companyId: b.company, now: () => b.h.clock.now, defaultRoute: () => companyEngineModelRoute({ store: b.h.store, companyId: b.company, install: installRoute }).route(), log: () => undefined });
+  expect(await bDispatcher.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: INSTALL } } });
+  // B's own list decides for B: A's model is not offered to B.
+  expect(await b.choice.service().apply(b.owner, { action: "set", stage: "build", choice: { model: agentModelIdentity(BUILD) }, expectedRevision: 0 }, { fresh: true })).toMatchObject({ ok: false, code: "model_unavailable" });
   await setCompanyModel(b.h, b.company, COMPANY_MODEL);
   expect(await tokenModels(b, "IMPLEMENT", "build")).toEqual([COMPANY_MODEL]);
-  expect(await tokenModels(a, "PLAN", "plan")).toEqual([INSTALL]);
+  expect(await tokenModels(a, "PLAN", "plan")).toEqual([PLAN]);
 });
 
 it("the dispatcher's stored copy follows the same order: the step's validated choice, else the company's model, else the install's", async () => {
@@ -134,4 +150,16 @@ it("the dispatcher's stored copy follows the same order: the step's validated ch
   await set(w, "build", BUILD);
   expect(await dispatcher.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: BUILD } } });
   expect(await dispatcher.choose({ stage: "plan" })).toMatchObject({ ok: true, step: { route: { alias: COMPANY_MODEL } } });
+});
+
+it("on the dispatcher's stored copy (what a deployed step runs with), the token names the step's chosen model too", async () => {
+  const w = await world();
+  await set(w, "build", BUILD);
+  const modelAccess = companyEngineModelRoute({ store: w.h.store, companyId: w.company, install: installRoute });
+  w.h.deps.stepModels = dispatcherStoredAgentModelChoice({ store: w.h.store, companyId: w.company, now: () => w.h.clock.now, defaultRoute: () => modelAccess.route(), log: () => undefined });
+  expect(await tokenModels(w, "IMPLEMENT", "build")).toEqual([BUILD]);
+  const recorded = (await w.h.store.get(w.key))!["modelChoice"] as { reason: string; route: { alias: string } };
+  expect(recorded.route.alias).toBe(BUILD);
+  expect(await tokenModels(w, "PLAN", "plan")).toEqual([INSTALL]);
+  expect(((await w.h.store.get(w.key))!["modelChoice"] as { reason: string }).reason).toBe("BUILTIN_DEFAULT");
 });
