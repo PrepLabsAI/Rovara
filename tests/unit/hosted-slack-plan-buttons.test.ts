@@ -616,6 +616,20 @@ describe("a signed Slack request through the company interactivity gate", () => 
     expect(w.slack.updates).toHaveLength(1);
   });
 
+  it("a press of the card's \"Open the task\" link button is let through with no notice and decides nothing (a linked member); an unlinked account still gets the link notice", async () => {
+    const { w, handler, notices, press } = await gateWorld();
+    const link = (userId: string) => { const payload = press(userId, CORE_APPROVE_ACTION); return { ...payload, actions: [{ action_id: "rovara_open_task", action_ts: "1700000002.000300" }] }; };
+    const rowsBefore = await w.snapshot();
+    expect((await handler(signed(link(OWNER)))).statusCode).toBe(200);
+    expect(notices).toEqual([]);
+    expect(w.calls).toEqual([]);
+    expect(await w.snapshot()).toBe(rowsBefore);
+    expect(await decisionsOf(w)).toEqual([]);
+    expect((await handler(signed(link(STRANGER)))).statusCode).toBe(200);
+    expect(notices.at(-1)).toContain("link your account");
+    expect(slackActionClass("rovara_open_task")).toBe("member");
+  });
+
   it("a forged Reject or Skip press, an unknown decide id, and a high risk card's missing buttons never reach a decision", async () => {
     const { w, handler, notices, press } = await gateWorld();
     const value = JSON.stringify({ r: [...w.cards][0], v: 1, d: "a".repeat(64), o: "REJECT" });
