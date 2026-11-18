@@ -17,7 +17,7 @@
 //   - Only this company's connection (and so its token) is ever used for this company's projects: the company is the caller's, never named by the request.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, AgentXError, AgentXNameSchema, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, AgentXError, AgentXNameSchema, ON_THE_WEBSITE_MESSAGE, OrgIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -119,7 +119,7 @@ export async function routeLinearConnect(ctx: LinearConnectContext, caller: Deve
 
   if (url.pathname === LINEAR_CONNECT_PATH) {
     if (request.method === "GET") return readStatus(ctx, member.companyId);
-    if (request.method === "DELETE") return disconnect(ctx, member, caller.developerId);
+    if (request.method === "DELETE") return disconnect(ctx, member, caller.developerId, caller.webApp === true);
     throw agentXError("NOT_FOUND", "not found");
   }
   if (request.method !== "POST") throw agentXError("NOT_FOUND", "not found");
@@ -181,8 +181,10 @@ async function readStatus(ctx: LinearConnectContext, companyId: string): Promise
 }
 
 /** A live owner, before anything is read; then the store's conditional disconnect (revoke, unbind, clear picks). */
-async function disconnect(ctx: LinearConnectContext, member: z.infer<typeof Membership>, personId: string): Promise<unknown> {
+async function disconnect(ctx: LinearConnectContext, member: z.infer<typeof Membership>, personId: string, webApp: boolean): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", DISCONNECT_OWNER_ONLY);
+  // Owner DEC 254zzz99: a disconnect is made only from the Rovara website's own client (never the CLI's or an AI tool's token), after the owner rule.
+  if (!webApp) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   let outcome: Awaited<ReturnType<LinearConnectWiring["connections"]["disconnect"]>>;
   try { outcome = await ctx.wiring.connections.disconnect(member.companyId, personId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE); }
   if (outcome.outcome === "not_found") throw agentXError("LINEAR_NOT_CONNECTED", LINEAR_NOT_CONNECTED);

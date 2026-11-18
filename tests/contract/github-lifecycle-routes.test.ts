@@ -2,7 +2,7 @@
 // real App client's mint check. Two companies throughout: A (acme, installation 101) and B (beta, installation 202).
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { AgentXError, GITHUB_DISCONNECTED_MESSAGE } from "@agentx/contracts";
+import { AgentXError, GITHUB_DISCONNECTED_MESSAGE, ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -110,6 +110,21 @@ describe("disconnect", () => {
     }
     // The live role counts: the owner demoted since sign-in is refused too.
     h.as(OWNER); h.db.set({ ...h.db.get(membershipKey(OWNER).pk, "COMPANY")!, role: "admin" });
+    expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
+    expect(binding(h.db, 101)).toBeDefined();
+  });
+  it("owner DEC 254zzz99: the owner's CLI (or AI-tool) token, with no web-app client, is refused with the website words; nothing changes", async () => {
+    const h = await world();
+    // The Rovara CLI's own token: no client (azp), the developer audience, and a session no client started.
+    const cli = (id: string) => {
+      h.as(id); delete h.claims.azp; Object.assign(h.claims, { iss: "https://signin.example.test", aud: "agentx-developer" });
+      h.db.set({ pk: `SESSION#${SESSIONS[id]}`, sk: "META", sessionId: SESSIONS[id], developerId: id, amr: "slack", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
+    };
+    cli(OWNER);
+    expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", ON_THE_WEBSITE_MESSAGE));
+    expect(binding(h.db, 101)).toMatchObject({ companyId: A });
+    // An admin's CLI token is refused for the role first (the owner rule comes before the website rule).
+    cli(ADMIN);
     expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
     expect(binding(h.db, 101)).toBeDefined();
   });

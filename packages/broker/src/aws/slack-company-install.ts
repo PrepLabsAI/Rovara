@@ -21,7 +21,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { agentXError, ON_THE_WEBSITE_MESSAGE, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -334,6 +334,8 @@ async function channelLinks(ctx: SlackInstallContext, teamId: string): Promise<A
 
 async function disconnect(ctx: SlackInstallContext, member: z.infer<typeof Membership>, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<unknown> {
   if (member.role !== "owner") throw agentXError("FORBIDDEN", SLACK_OWNER_ONLY);
+  // Owner DEC 254zzz99: a disconnect is made only from the Rovara website's own client (never the CLI's or an AI tool's token), after the owner rule.
+  if (caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   if (!DisconnectBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", "disconnecting Slack takes no body");
   const companyId = member.companyId;
   const send: Send = (command) => ctx.documentClient.send(command);

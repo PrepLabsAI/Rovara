@@ -2,6 +2,7 @@
 // real reader (slack-workspace-tokens.ts), with a fake slack.com behind the fetch seam. Two companies throughout.
 import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import {
@@ -464,7 +465,7 @@ describe("Slack's removal events", () => {
 });
 
 describe("disconnect", () => {
-  it("needs a live owner of the company (no step-up, DEC 254zzz73): an admin, a member and another company's owner change nothing", async () => {
+  it("needs a live owner of the company on the Rovara website (no step-up, DEC 254zzz73; website only, DEC 254zzz99): an admin, a member and another company's owner change nothing", async () => {
     const w = world();
     await w.connect("acme-code");
     expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: SLACK_OWNER_ONLY });
@@ -472,6 +473,12 @@ describe("disconnect", () => {
     expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: SLACK_OWNER_ONLY });
     w.as(PERSON_B, B, "owner");
     expect((await w.disconnect()).status).not.toBe(200);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
+    expect(w.slack.revoked).toEqual([]);
+    // Owner DEC 254zzz99: the owner's CLI (or AI-tool) token, with no web-app client, is refused with the website words and nothing changes.
+    w.as(PERSON, A, "owner", "cli"); delete w.claims.azp;
+    w.db.set({ pk: "SESSION#cli", sk: "META", sessionId: "cli", developerId: PERSON, amr: "slack", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 86_400 });
+    expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
     expect(w.slack.revoked).toEqual([]);
     w.as(PERSON, A, "owner");
