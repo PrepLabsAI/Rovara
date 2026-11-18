@@ -10,8 +10,11 @@ import {
   type KnowledgeContext, type KnowledgeDeliveryRecord, type KnowledgeFact, type KnowledgeSkillName, type KnowledgeUnit, type LessonStage,
 } from "@agentx/contracts";
 import { STRICT_TOKEN, safeScopeLabel } from "./render.js";
-import { hasPersonApproval } from "./repo-eligibility.js";
 import type { Lesson } from "./types.js";
+
+/** Batch 16 (rule F): repo-eligibility.ts went with #979; the same person-approval rule as local-tools.ts (the approvals a PERSON gave, not the trial's or the automatic path's). */
+const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
+const hasPersonApproval = (lesson: Pick<Lesson, "approvals">): boolean => lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
 
 /** Measured facts for a step (the base's known-flaky tests, a repeated CI cause): code counted them, nobody wrote them. Absent: no facts. Never throws into the dispatch. */
 export type KnowledgeFactsPort = (input: { companyId: string; project: string; stage: LessonStage; files: readonly string[]; repos: readonly string[] }) => Promise<readonly KnowledgeFact[]>;
