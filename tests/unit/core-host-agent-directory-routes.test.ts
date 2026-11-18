@@ -146,6 +146,21 @@ describe("what it lists", () => {
     expect(rows(answer).find((row) => row.name === "Old one")?.status).toBe("archived");
   });
 
+  it("reads legacy member owners and round-trips project owners; mine excludes project-owned agents", async () => {
+    const w = world();
+    const legacy = await w.agents(A).create({ orgId: A, name: "Legacy owner", by: ADA });
+    await w.store.update({ key: agentKey(A, legacy.agentId, "META"), ops: [change.set(["owner"], { developerId: ADA })] });
+    expect((await w.agents(A).get(A, legacy.agentId))?.owner).toEqual({ kind: "member", developerId: ADA });
+
+    const project = await w.agents(A).create({ orgId: A, name: "Project owned", by: ADA });
+    const projectOwner = { kind: "project", project: "payments" } as const;
+    await w.store.update({ key: agentKey(A, project.agentId, "META"), ops: [change.set(["owner"], projectOwner)] });
+    expect((await w.agents(A).get(A, project.agentId))?.owner).toEqual(projectOwner);
+    const all = rows(await w.get(A, "owner"));
+    expect(all.find((row) => row.name === "Project owned")?.owner).toEqual(projectOwner);
+    expect(names(await w.get(A, "owner", "scope=mine", ADA))).toEqual(["Legacy owner"]);
+  });
+
   it("a built-in the company turned off in its guardrails says so; another company's setting is not read", async () => {
     const w = world();
     await writeGuardrails({ store: w.store, now }, A, { ...DEFAULT_AGENT_GUARDRAILS, disabledBuiltins: ["ticket-triage"] }, "owner");
