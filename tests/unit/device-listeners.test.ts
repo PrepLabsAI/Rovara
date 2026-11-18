@@ -1,6 +1,6 @@
 // Device testing slice 2: who owns each listening socket in the namespace the device executor shares with the task sandbox, judged on a made-up /proc. The point is the failure cases: a listener that
 // nothing in the executor holds (the sandbox's own code lives in another process namespace) and a listener held by a program that is not the emulator, adb or Maestro must each be a violation.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEVICE_ADB_PATH, DEVICE_EMULATOR_DIR, DEVICE_LISTENER_RESAMPLE, identifyProcess, listenerReport, listeningSockets, watchDeviceListeners, type ProcReader, type Resample } from "../../packages/verifier/src/executor/device-listeners.js";
 
 const HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n";
@@ -162,5 +162,70 @@ describe("device listener ownership: a listener is unowned only if every look fi
       link: base.link,
     };
     expect(listenerReport(proc, { ...DEVICE_LISTENER_RESAMPLE, attempts: 1 }).violations).toEqual([]);
+  });
+});
+
+// ---- the flake that the resample did not fix (9 of ~30 device-runtime runs, 2026-11-16 to 2026-11-17, always this one assertion): a socket whose holder is going away reads unowned for longer than the window ----
+describe("device listener ownership: a socket that an owner held and that nobody holds now is closing, not a stray", () => {
+  /** The emulator's process, with its descriptors, is there for the first `alive` looks at its fd directory and gone after (a closing emulator: its sockets are still in the listening table for a while). */
+  function dyingEmulator(alive: number): ProcReader {
+    const base = fake(normal); let looks = 0;
+    return { ...base, list: (path) => {
+      if (path === "/proc/11/fd") { looks += 1; if (looks > alive) return []; }
+      return base.list(path);
+    } };
+  }
+
+  it("keeps the owner of a socket that was held in an earlier look when nobody holds it any more", () => {
+    // looks: 1 (held), then every later look blind: the emulator's two ports must stay the emulator's, however many looks and resamples follow
+    const report = (() => {
+      const watched = watchDeviceListeners(1_000_000, dyingEmulator(1), noSleep());
+      return watched.stop();
+    })();
+    expect(report.violations).toEqual([]);
+    expect(report.rows.filter((entry) => entry.port === 5554 || entry.port === 5555).map((entry) => entry.owner)).toEqual(["emulator", "emulator"]);
+  });
+
+  it("MUTANT: a socket that was never held by an owner is still unowned, even next to one that was", () => {
+    const base = dyingEmulator(1);
+    const withStray: ProcReader = { ...base, read: (path) => (path === "/proc/net/tcp" ? (normal.tcp ?? "") + row(9, 8081, "0A", 999) : base.read(path)) };
+    const report = watchDeviceListeners(1_000_000, withStray, noSleep()).stop();
+    expect(report.violations).toEqual(["8081 unowned"]);
+  });
+
+  it("MUTANT: the history is by socket, not by port: a new socket on a port whose old socket had an owner is unowned", () => {
+    // 5554's old socket (inode 222) was the emulator's; later the table lists 5554 with a different inode that nobody holds
+    const base = fake(normal); let first = true;
+    const proc: ProcReader = { ...base, read: (path) => {
+      if (path !== "/proc/net/tcp") return base.read(path);
+      if (first) { first = false; return base.read(path); }
+      return HEADER + row(0, 5037, "0A", 111) + row(1, 5554, "0A", 333_333);
+    } };
+    const report = watchDeviceListeners(1_000_000, proc, noSleep()).stop();
+    expect(report.violations).toEqual(["5554 unowned"]);
+  });
+
+  it("MUTANT: a program that holds the socket after the owner let go is 'other', which the history never excuses, even when it lets go too", () => {
+    // look 1: the emulator (11) holds inode 222. look 2: 11 is gone and 13 (not an owner) holds it. look 3: nobody holds it.
+    const base = fake(normal); let looks = 0; let phase = 0;
+    const proc: ProcReader = {
+      ...base,
+      read: (path) => { if (path === "/proc/net/tcp") { looks += 1; phase = looks; } return base.read(path); },
+      list: (path) => {
+        if (path === "/proc") return [...base.list(path), "13"];
+        if (path === "/proc/11/fd") return phase === 1 ? base.list(path) : [];
+        if (path === "/proc/13/fd") return phase === 2 ? ["3"] : [];
+        return base.list(path);
+      },
+      link: (path) => (path === "/proc/13/fd/3" ? "socket:[222]" : path === "/proc/13/exe" ? "/usr/local/bin/node" : base.link(path)),
+    };
+    vi.useFakeTimers();
+    try {
+      const watched = watchDeviceListeners(500, proc, { ...noSleep(), attempts: 1 }); // look 1
+      vi.advanceTimersByTime(500); // look 2
+      const stopped = watched.stop(); // look 3
+      expect(looks).toBe(3);
+      expect(stopped.violations).toEqual(["5554 other /usr/local/bin/node", "5555 other /usr/local/bin/node"]);
+    } finally { vi.useRealTimers(); }
   });
 });
