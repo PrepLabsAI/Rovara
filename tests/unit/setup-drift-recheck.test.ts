@@ -7,6 +7,9 @@
 //   the wait         only the first coding run waits; Understand and Plan go on; a pass is silent and moves the baseline
 //   what blocks      ONLY a setup step failing twice; failing tests and an unclear result never do; nothing here approves a setup
 //   isolation        another project and another company never meet the snapshot, the re-check or the card
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
+import { hostedSystemRunsFor } from "../../packages/broker/src/core-host/system-runs.js";
+import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -314,6 +317,35 @@ describe("the company's system-runs switch (DEC 254zzl: hosted default off)", ()
     await advanceCurrentRecheck(w.h.deps, "payments");
     await startTask(w);
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(2);
+  });
+
+  // L4-P2 (owner DEC 254zzt): the gate is the EFFECTIVE one (the operator's ceiling AND the company's consent, read now and async). The dispatcher runs `setupGateBeforeBuild` -> `retryRecheck` with it.
+  // MUTANT: the retry reads an absent/stale gate, or `retryRecheck` stops awaiting it (a Promise is truthy), so a withdrawn consent still lets the retry start.
+  it("the company withdraws its consent after a first attempt began: the retry (asked at Build, as the dispatcher does) is not started, the re-check ends unclear, nothing blocks", async () => {
+    const w = await world();
+    const orgId = w.h.deps.companyId;
+    const consent = async (enabled: boolean): Promise<void> => { await w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled, changedAt: "2026-11-17T00:00:00.000Z" } }); };
+    await consent(true);
+    hostedSystemRunsFor(w.h.deps, orgId, parseCoreSwitch("on").value);
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const [first] = await rechecksOf(w.h.store, orgId, "payments");
+    expect(first).toBeDefined();
+    await finishCheck(w.h, first!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    await consent(false);
+    w.h.clock.advance(RECHECK_RETRY_DELAY_MS / 1000 + 1);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect((await rechecksOf(w.h.store, orgId, "payments"))).toHaveLength(1);
+    expect((await rechecksOf(w.h.store, orgId, "payments"))[0]).toMatchObject({ state: "unclear", attempt: 1 });
+  });
+
+  it("a gate that rejects is off: no re-check at task start and no retry", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: async () => { throw new Error("consent unreadable"); } };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
   });
 
   it("switched off after a first attempt began: the retry is not started, the re-check ends unclear, and nothing blocks", async () => {

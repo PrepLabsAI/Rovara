@@ -55,7 +55,7 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
-import { createHostedSystemRuns, readSystemRunsSwitch, systemRunsGateOf, upkeepAvailableFor } from "../core-host/system-runs.js";
+import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
 import type { CoreAdapterModule } from "../core-host/registry.js";
 import type { TaskAccess, TaskFlowDeps } from "../core/task-flow/deps.js";
@@ -316,23 +316,23 @@ export function setupRunStandingFrom(people: { membershipOf: (personId: string) 
   };
 }
 
-/**
- * L4-P1 (owner DEC 254zzl): puts the company's SystemRuns gate on its task flow. A hosted runtime ALWAYS gets one (flag off = `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every
- * hosted company would then get Rovara's automatic re-checks. The root calls this for every company's runtime, whether or not the flag covers it; tests/unit/system-runs-hosted-gate.test.ts holds both the function and the call.
- */
-export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean } }, companyId: string, flag: Parameters<typeof systemRunsGateOf>[0]): { enabled(): boolean } {
-  const gate = systemRunsGateOf(flag, companyId);
-  deps.systemRuns = gate;
-  return gate;
-}
+// L4-P1/L4-P2: the gate every hosted runtime carries (core-host/system-runs.ts). Re-exported: tests/unit/system-runs-hosted-gate.test.ts holds the function and the call on the broker AND on the dispatcher.
+export { hostedSystemRunsFor };
 
 export function hostedTaskAccess(inputs: {
   membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
   /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
-  systemRunsOn?: () => boolean;
+  systemRunsOn?: () => boolean | Promise<boolean>;
 }): TaskAccess {
+  // The gate may read the company's consent (async): it is settled once per decision, and anything but an explicit true is off (a gate that throws is off).
+  const settledOn = async (gate: (() => boolean | Promise<boolean>) | undefined): Promise<(() => boolean) | undefined> => {
+    if (gate === undefined) return undefined;
+    let on = false;
+    try { on = (await gate()) === true; } catch { on = false; }
+    return () => on;
+  };
   const liveMember = async (personId: string) => {
     const membership = await inputs.membershipOf(personId);
     return membership !== undefined && membership.companyId === inputs.companyId ? membership : undefined;
@@ -355,7 +355,7 @@ export function hostedTaskAccess(inputs: {
   return {
     async checkStart(principal, project, purpose) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
-      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, principal, project, purpose).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
+      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn) }, principal, project, purpose).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
@@ -376,7 +376,7 @@ export function hostedTaskAccess(inputs: {
       // A task whose developer is a system owner takes the system rule (the task's own stored row, read now), never the member rules.
       if (isSystemOwnerId(task.developerId)) {
         const stored = inputs.storage === undefined ? undefined : await (await inputs.storage()).get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
-        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: inputs.systemRunsOn }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
+        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn) }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
       }
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
@@ -556,7 +556,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => systemRunsGateOf(systemRunsFlag.value, companyId).enabled(), people: {
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(), people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
       } }),

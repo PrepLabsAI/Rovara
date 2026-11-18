@@ -21,6 +21,7 @@ import {
 import { claimAutomaticRun, eventIdOf, releaseAutomaticRun } from "../automatic-runs/cap.js";
 import { startProjectSetupCheck, setupStateOf } from "../setup-agent/check.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { systemRunsGateSaysOn } from "./consent.js";
 import { recordSystemRunUsage } from "./usage.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -28,8 +29,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 export interface SystemStarterDeps {
   /** The company's own task flow deps (store, audit, projects, machines, outbox, now): the same ones a person's start uses. */
   flow: TaskFlowDeps;
-  /** Whether this company's SystemRuns flag is on, read now. */
-  enabled(): boolean;
+  /** Whether this company's system runs are on (L4-P2: the operator's ceiling AND the company's consent), read now. Anything but an explicit `true`, a throw included, is off. */
+  enabled(): boolean | Promise<boolean>;
   /** Whether the project's upkeep switch is on, read now (never throws: anything unreadable is off). */
   upkeepOn(project: string): Promise<boolean>;
   /** Fixed codes only. */
@@ -77,7 +78,7 @@ export function createSystemStarter(deps: SystemStarterDeps): { start(input: Sys
       if (!reason.success || typeof input.project !== "string" || !AGENTX_NAME_PATTERN.test(input.project) || typeof input.requestId !== "string" || !UUID.test(input.requestId)) return refused("invalid_request");
       const project = input.project;
       // 2. The company's flag.
-      if (!deps.enabled()) return refused("system_runs_off");
+      if (!(await systemRunsGateSaysOn(deps))) return refused("system_runs_off");
       // 3. The project, in this company; its upkeep switch for the nightly kind.
       let latest;
       try { latest = await flow.projects.latest(project); } catch { return refused("project_unavailable"); }

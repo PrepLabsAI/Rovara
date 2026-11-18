@@ -45,7 +45,7 @@ export function createLocalUpkeep(options: LocalUpkeepOptions): LocalUpkeep {
         if ((await flow.projects.latest(project)) === undefined) throw agentXError("PROJECT_NOT_FOUND", UPKEEP_WORDS.projectNotFound);
         const personId = caller.principal.personId;
         const deps: UpkeepSettingsDeps = {
-          store: flow.store, companyId, now: options.now, standing: async () => ({ access: "manage" }), schedule: options.schedule, available: options.available,
+          store: flow.store, companyId, now: options.now, standing: async () => ({ access: "manage" }), schedule: options.schedule, available: options.available, noConsentNeeded: true,
           record: async (action, name, details) => {
             await options.audit.record({
               eventId: `upkeep.${action}:${companyId}:${name}:${personId}:${details.requestId}:${details.on ? "on" : "off"}:${details.previous}`, companyId, at: new Date(options.now()).toISOString(), actor: { type: "person", id: personId },

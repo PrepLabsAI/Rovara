@@ -1,6 +1,7 @@
 // L4-P1 (owner DEC 254zzl 6): the hourly upkeep night. Each project has a fixed hour inside 07:00-11:00 UTC from a hash of company and project; the `upkeep-night` job's pass starts only the projects that are DUE
 // (inside the window, at or after their hour, upkeep ON, not claimed today), once a day each, at most five per pass, through the system starter, and the whole thing is behind the SystemRuns flag (default off).
 // Two-company and two-project cases are below. Mutants are listed in the PR body with the test that kills each.
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   CORE_JOB_SCHEDULES, IMPLICIT_COMPANY_ID, UPKEEP_NIGHT_JOB, UPKEEP_NIGHT_WINDOW, WORKER_INVOCATION_FEATURES, projectMetaKey, queryAll, systemOwnerIdOf, upkeepHourOf, upkeepNightDue,
@@ -290,6 +291,8 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     const modelRoute = vi.fn(async () => undefined);
     h.deps.modelAccess = { route: modelRoute };
     await setUpkeepEnabled({ store: h.store, companyId: company, now: () => h.clock.now, standing: async () => ({ access: "manage" }) }, { personId: PERSON, project: name!, requestId: crypto.randomUUID(), on: true, fromPage: true });
+    // The company's consent (L4-P2), the second lock: given here (the ceiling is `flag`); the tests of the two locks are in system-runs-consent.test.ts.
+    await h.store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(h.clock.now).toISOString() } });
     h.clock.now = at(DAY, 8, 10);
     const runs = createHostedSystemRuns({ flow: h.flow, companyId: company, flag, now: () => h.clock.now });
     return { h, name: name!, model, runs, modelRoute, company };

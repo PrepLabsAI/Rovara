@@ -6,7 +6,8 @@
 //   OFF        the company has no system starter and no night service (nothing is built), the free re-check at task start does not run, and the system owner is refused by the access rule.
 //   THE NIGHT  the `upkeep-night` job (core-host/jobs.ts, hourly) calls `service.pass`: each project that is DUE (its hash hour in 07:00-11:00 UTC, upkeep ON, not claimed today) is started through the system starter. This install
 //              has no enforced dollar cap for system runs yet, so no AI is started here (P1): the night is the free nightly check only.
-import { SYSTEM_RUNS_VARIABLE, agentXError, type OrgId } from "@agentx/contracts";
+import { SYSTEM_RUNS_VARIABLE, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { effectiveSystemRunsGate } from "../core/system-runs/consent.js";
 import { createSystemStarter, type SystemStartResult } from "../core/system-runs/starter.js";
 import { runUpkeepNightPass } from "../core/system-runs/night-pass.js";
 import { systemRunRequestId } from "../core/system-runs/starter.js";
@@ -27,9 +28,28 @@ export function readSystemRunsSwitch(env: NodeJS.ProcessEnv = process.env): { va
   return parsed.problem === undefined ? { value: parsed.value } : { value: parsed.value, problem: parsed.problem };
 }
 
-/** This company's flag as a gate the task flow and the access rule read on every use. */
+/** The operator's CEILING for this company as a gate (the install flag alone: it only ALLOWS). Nothing runs on this alone since L4-P2: use `effectiveSystemRunsGateOf`. */
 export function systemRunsGateOf(flag: CoreSwitch, companyId: string): { enabled(): boolean } {
   return { enabled: () => switchCovers(flag, companyId) };
+}
+
+/**
+ * The EFFECTIVE gate the task flow, the access rule, the starter and the night read on every use (L4-P2, owner DEC 254zzt option A): the operator's ceiling (`flag` covers the company) AND the company's stored consent
+ * (read now from the company's own store; a read that fails is off). The one place the AND is made.
+ */
+export function effectiveSystemRunsGateOf(flag: CoreSwitch, companyId: OrgId, store: Pick<DocumentStore, "get">): { enabled(): Promise<boolean> } {
+  return effectiveSystemRunsGate({ ceiling: () => switchCovers(flag, companyId), store, companyId });
+}
+
+/**
+ * L4-P1/L4-P2 (owner DEC 254zzl, 254zzt): puts the company's EFFECTIVE system-runs gate (the operator's ceiling AND the company's consent) on a task flow's deps. A hosted runtime ALWAYS gets one (flag off or no consent =
+ * `enabled()` false), because an ABSENT gate means ON (the laptop's rule) and every hosted company would then get Rovara's automatic re-checks. The broker root calls this for every company's runtime, and so does the
+ * dispatcher's (the dispatcher's setup gate before a build can RETRY a re-check, which must stop when the flag or the consent goes off). tests/unit/system-runs-hosted-gate.test.ts holds the function and both calls.
+ */
+export function hostedSystemRunsFor(deps: { systemRuns?: { enabled(): boolean | Promise<boolean> }; store: Pick<DocumentStore, "get"> }, companyId: OrgId, flag: CoreSwitch): { enabled(): Promise<boolean> } {
+  const gate = effectiveSystemRunsGateOf(flag, companyId, deps.store);
+  deps.systemRuns = gate;
+  return gate;
 }
 
 /**
@@ -61,7 +81,9 @@ export function createHostedSystemRuns(options: HostedSystemRunsOptions): Hosted
   const { flow, companyId, now } = options;
   if (!switchCovers(options.flag, companyId)) return undefined;
   const deps = flow.deps;
-  const enabled = (): boolean => switchCovers(options.flag, companyId);
+  // Both locks, read now: the ceiling (`flag`) AND the company's consent.
+  const gate = effectiveSystemRunsGateOf(options.flag, companyId, deps.store);
+  const enabled = (): Promise<boolean> => gate.enabled();
   const log = (entry: Record<string, unknown>): void => options.log?.({ component: "system-runs", companyId, ...entry });
   const starter = createSystemStarter({ flow: deps, enabled, upkeepOn: (project) => upkeepIsOn({ store: deps.store, companyId }, project), log });
   const store = deps.store;

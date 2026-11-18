@@ -12,6 +12,7 @@ import { routeHostedUpkeep, isUpkeepPath, type HostedUpkeepWiring } from "../../
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createLocalUpkeep } from "../../packages/broker/src/local/app/upkeep.js";
 import { upkeepIsOn, upkeepSwitchControl } from "../../packages/broker/src/core/upkeep/settings.js";
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
 
 const T0 = Date.parse("2026-11-17T12:00:00.000Z");
@@ -33,9 +34,11 @@ const standingOf = (company: OrgId, project: string, person: string): SetupRunSt
   return { access: "none" };
 };
 
-function hosted(options: { store?: MemoryDocumentStore; company?: OrgId; audit?: (event: AuditEvent) => Promise<void>; projects?: string[]; schedule?: HostedUpkeepWiring["schedule"]; standing?: HostedUpkeepWiring["standing"]; available?: boolean } = {}) {
+function hosted(options: { store?: MemoryDocumentStore; company?: OrgId; audit?: (event: AuditEvent) => Promise<void>; projects?: string[]; schedule?: HostedUpkeepWiring["schedule"]; standing?: HostedUpkeepWiring["standing"]; available?: boolean; consent?: boolean } = {}) {
   const store = options.store ?? new MemoryDocumentStore();
   const company = options.company ?? COMPANY_A;
+  // The company's consent (L4-P2): given unless a test says otherwise (the cases of this file that are not about the second lock).
+  if (options.consent !== false) void store.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(T0).toISOString(), requestId: randomUUID() } });
   const audited: AuditEvent[] = [];
   const projects = options.projects ?? ["beacon", "other"];
   const flow = { store, projects: { latest: async (name: string) => (projects.includes(name) ? { definition: { repositories: [] } } : undefined) } } as never;
@@ -51,13 +54,18 @@ function hosted(options: { store?: MemoryDocumentStore; company?: OrgId; audit?:
   return { store, company, audited, call };
 }
 const put = (w: ReturnType<typeof hosted>, person: string, project: string, body: unknown) => w.call(person, "PUT", project, body);
+/** The view a person gets (L4-P2 contract): the company admins (owner, admin) may also set the consent and raise the cap; nobody else. `systemRunsOn` is the ceiling AND the consent. */
+const view = (enabled: boolean, who: "admin" | "maintainer" | "reader", over: Record<string, unknown> = {}): Body => ({
+  enabled, canManage: who !== "reader", available: true, systemRunsOn: true, canEnableSystemRuns: who === "admin", cap: { monthlyUsd: null, canRaise: who === "admin" }, ...over,
+});
 const NOT_FOUND = { status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } };
 
 describe("reading: any role reads, off by default, everyone else the same 404", () => {
   it("shows a manager enabled false canManage true, and a reader canManage false", async () => {
     const w = hosted();
-    for (const person of [OWNER, ADMIN, PROJECT_ADMIN]) expect(await w.call(person, "GET", "beacon")).toEqual({ status: 200, body: { enabled: false, canManage: true, available: true } });
-    expect(await w.call(VIEWER, "GET", "beacon")).toEqual({ status: 200, body: { enabled: false, canManage: false, available: true } });
+    for (const person of [OWNER, ADMIN]) expect(await w.call(person, "GET", "beacon")).toEqual({ status: 200, body: view(false, "admin") });
+    expect(await w.call(PROJECT_ADMIN, "GET", "beacon")).toEqual({ status: 200, body: view(false, "maintainer") });
+    expect(await w.call(VIEWER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "reader") });
   });
 
   it("a person with no role, a role on another project only, a missing project and a malformed name all answer the identical 404", async () => {
@@ -94,9 +102,10 @@ describe("switching: who, the strict body, the audit record first", () => {
   it("a company owner, a company admin and the project's administrator switch it on and off; a reader gets 403 in fixed words and nothing changes", async () => {
     const w = hosted();
     for (const person of [OWNER, ADMIN, PROJECT_ADMIN]) {
-      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: true })).toEqual({ status: 200, body: { enabled: true, canManage: true, available: true } });
-      expect((await w.call(VIEWER, "GET", "beacon")).body).toEqual({ enabled: true, canManage: false, available: true });
-      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: false })).toEqual({ status: 200, body: { enabled: false, canManage: true, available: true } });
+      const who = person === PROJECT_ADMIN ? "maintainer" : "admin";
+      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: true })).toEqual({ status: 200, body: view(true, who) });
+      expect((await w.call(VIEWER, "GET", "beacon")).body).toEqual(view(true, "reader"));
+      expect(await put(w, person, "beacon", { requestId: randomUUID(), on: false })).toEqual({ status: 200, body: view(false, who) });
     }
     const denied = await put(w, VIEWER, "beacon", { requestId: randomUUID(), on: true });
     expect(denied).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: "Only company owners and admins, or this project's admins, can switch nightly upkeep on or off." } } });
@@ -111,7 +120,7 @@ describe("switching: who, the strict body, the audit record first", () => {
 
   it("the body is strict: nothing but { requestId, on }; a cap or any other field is refused and nothing is written", async () => {
     const w = hosted();
-    for (const body of [{}, { on: true }, { requestId: randomUUID() }, { requestId: "nope", on: true }, { requestId: randomUUID(), on: "yes" }, { requestId: randomUUID(), on: true, monthlyCapUsd: 1_000 }, { requestId: randomUUID(), on: true, enabled: true }, [] as never]) {
+    for (const body of [{}, { on: true }, { requestId: randomUUID() }, { requestId: "nope", on: true }, { requestId: randomUUID(), on: "yes" }, { requestId: randomUUID(), on: true, monthlyCapUsd: 1_000 }, { requestId: randomUUID(), on: true, enabled: true }, { requestId: randomUUID(), on: true, allowSystemRuns: "yes" }, { requestId: randomUUID(), on: true, allowSystemRuns: false }, [] as never]) {
       expect((await put(w, OWNER, "beacon", body)).status).toBe(400);
     }
     expect(w.audited).toHaveLength(0);
@@ -187,7 +196,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
   it("a deployment with no runner says available false and refuses a change in fixed words: nothing recorded, nothing written, no schedule touched", async () => {
     const calls: string[] = [];
     const w = hosted({ available: false, schedule: () => ({ put: async () => { calls.push("put"); }, remove: async () => { calls.push("remove"); } }) });
-    expect(await w.call(OWNER, "GET", "beacon")).toEqual({ status: 200, body: { enabled: false, canManage: true, available: false } });
+    expect(await w.call(OWNER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false }) });
     const refused = await put(w, OWNER, "beacon", { requestId: randomUUID(), on: true });
     expect(refused.status).toBe(404);
     expect(refused.body).toEqual({ error: { code: "NOT_AVAILABLE_HERE", message: "Nightly upkeep isn't available on this Rovara yet" } });
@@ -197,7 +206,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
     // Who still comes first: a reader is 403 and a person with no role the uniform 404, so availability reveals nothing to them.
     expect((await put(w, VIEWER, "beacon", { requestId: randomUUID(), on: true })).status).toBe(403);
     expect(await put(w, OUTSIDER, "beacon", { requestId: randomUUID(), on: true })).toEqual(NOT_FOUND);
-    expect(await w.call(VIEWER, "GET", "beacon")).toEqual({ status: 200, body: { enabled: false, canManage: false, available: false } });
+    expect(await w.call(VIEWER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "reader", { available: false, systemRunsOn: false }) });
   });
 
   it("in the core, who comes before availability: a reader is 403 and a person with no role 404 even while nothing can run", async () => {
@@ -217,7 +226,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
       principal: { companyId: COMPANY_A, personId: OWNER, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A,
       flow: { store: w.store, projects: { latest: async () => ({ definition: { repositories: [] } }) } } as never, wiring: flaky, audit: { stage: () => [], record: async () => undefined }, now: () => T0,
     });
-    expect(JSON.parse(answer.body)).toEqual({ enabled: false, canManage: true, available: false });
+    expect(JSON.parse(answer.body)).toEqual(view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false }));
   });
 
   it("on a laptop with no local runner the answer says available false and a change is refused", async () => {
@@ -226,7 +235,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
     const upkeep = createLocalUpkeep({ flow, owner: { personId: "owner-1" } as never, audit: { stage: () => [], record: async () => undefined }, now: () => T0 });
     const owner = { principal: { roles: ["owner"], personId: "owner-1", displayName: "Owner" } } as never;
     const got = await upkeep.routes({ method: "GET", path: "/v1/app/projects/app/upkeep", headers: {}, body: "" }, owner);
-    expect(JSON.parse(got!.body)).toEqual({ enabled: false, canManage: true, available: false });
+    expect(JSON.parse(got!.body)).toEqual({ enabled: false, canManage: true, available: false, systemRunsOn: false, canEnableSystemRuns: false, cap: { monthlyUsd: null, canRaise: false } });
     const refused = await upkeep.routes({ method: "PUT", path: "/v1/app/projects/app/upkeep", headers: {}, body: JSON.stringify({ requestId: randomUUID(), on: true }) }, owner);
     expect(refused!.statusCode).toBe(404);
     expect(await upkeepIsOn({ store, companyId: IMPLICIT_COMPANY_ID }, "app")).toBe(false);
@@ -248,7 +257,7 @@ describe("isolation: every row is keyed by company AND project", () => {
     const a = hosted({ store });
     const b = hosted({ store, company: COMPANY_B });
     await put(a, OWNER, "beacon", { requestId: randomUUID(), on: true });
-    expect((await b.call("b1".repeat(32), "GET", "beacon")).body).toEqual({ enabled: false, canManage: true, available: true });
+    expect((await b.call("b1".repeat(32), "GET", "beacon")).body).toEqual(view(false, "admin"));
     // Company A's owner, asking through company B's route, has no standing there.
     expect(await b.call(OWNER, "GET", "beacon")).toEqual(NOT_FOUND);
     expect(await put(b, OWNER, "beacon", { requestId: randomUUID(), on: false })).toEqual(NOT_FOUND);
@@ -276,10 +285,11 @@ describe("on a laptop: the owner of the install only", () => {
 
   it("reads off by default, switches on and off, audits first, and keeps two projects apart", async () => {
     const w = setup();
-    expect(await w.call(w.owner, "GET", "app")).toEqual({ status: 200, body: { enabled: false, canManage: true, available: true } });
+    const laptop = (enabled: boolean) => ({ enabled, canManage: true, available: true, systemRunsOn: true, canEnableSystemRuns: false, cap: { monthlyUsd: null, canRaise: false } });
+    expect(await w.call(w.owner, "GET", "app")).toEqual({ status: 200, body: laptop(false) });
     const requestId = randomUUID();
-    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: { enabled: true, canManage: true, available: true } });
-    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: { enabled: true, canManage: true, available: true } });
+    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: laptop(true) });
+    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: laptop(true) });
     expect(w.audited).toHaveLength(1);
     expect((await w.call(w.owner, "PUT", "app", { requestId, on: false }))?.body.enabled).toBe(false);
     expect(w.audited).toHaveLength(2);
