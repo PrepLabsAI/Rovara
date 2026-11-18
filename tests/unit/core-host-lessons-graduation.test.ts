@@ -248,7 +248,7 @@ describe("graduating over the API", () => {
     const w = await setUp();
     await proven(w, A, "les_proc0001", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth." });
     const { api: target } = api(w);
-    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill", name: "add-queue" })).toMatchObject({ ok: true, body: { state: "drafted", ref: "add-queue", version: 1 } });
+    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill", name: "add-queue" })).toMatchObject({ ok: true, body: { state: "drafted", name: "add-queue", version: 1 } });
     expect(await call(target, "a-maint", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { skills: [{ name: "add-queue", approvals: 0 }] } });
     // Another deployment's library, when handed one, is the one asked.
     const seen: unknown[] = [];
@@ -263,7 +263,7 @@ describe("graduating over the API", () => {
     await proven(w, A, "les_proc0001", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth." });
     const { api: target } = api(w);
     expect(await call(target, "a-maint", "GET", `${GP}/graduation`)).toMatchObject({ ok: true, body: { card: { lessonId: "les_proc0001", target: "skill" } } });
-    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill" })).toMatchObject({ ok: true, body: { state: "drafted", ref: "add-a-queue-handler" } });
+    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill" })).toMatchObject({ ok: true, body: { state: "drafted", name: "add-a-queue-handler" } });
     expect(await call(target, "a-maint", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: true, body: { approvals: 1, live: false } });
     expect(await call(target, "a-maint", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
     const store = w.lessons.get(A)!.runtime.store;

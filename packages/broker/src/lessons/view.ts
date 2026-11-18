@@ -220,7 +220,7 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
   const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
 
   // "Make this a skill?" (L4-AK3): only for the people who decide, never on Home, and never an error: a card that cannot be worked out is not shown.
-  const offers = state.canDecide && !home && deps.documents !== undefined ? await skillOffers({ documents: deps.documents, lessons: deps.store, now: deps.now, access: deps.access, log: deps.log, signals: deps.signals }, key).catch(() => []) : [];
+  const offers = state.canDecide && !home && deps.documents !== undefined ? await skillOffers({ documents: deps.documents, lessons: deps.store, access: deps.access, now: deps.now, signals: deps.signals, ...(deps.log === undefined ? {} : { log: deps.log }) }, key).catch(() => []) : [];
   const setVersion = await deps.store.setVersion(key);
   const snapshots = state.canDecide && !home ? (await deps.store.snapshots(key)).filter((s) => s.setVersion !== setVersion).slice(-SNAPSHOTS_MAX).map((s) => ({ setVersion: s.setVersion, at: s.at, lessons: s.members.length })) : [];
   const truncated: Array<"waiting" | "active" | "removed"> = [];

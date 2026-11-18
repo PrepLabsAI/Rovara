@@ -172,8 +172,8 @@ export function provenProcedure(input: ProvenInput): boolean {
 }
 
 export interface SkillOffer { lessonId: string; title: string; tasks: number; days: number }
-/** The "Make this a skill?" cards: the project's proven procedure lessons that no skill was made from. Counts only the active procedure lessons given (so one count call is bounded), at most `max` offers. */
-export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "now" | "access" | "log" | "signals">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
+/** The "Make this a skill?" cards: the project's proven procedure lessons that no skill was made from and that the whole project may read. Counts only the active procedure lessons given (so one count call is bounded), at most `max` offers. */
+export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "access" | "now" | "signals" | "log">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
   const max = options.max ?? 20;
   const candidates = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
   if (candidates.length === 0) return [];
@@ -181,7 +181,10 @@ export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" 
   const active = await readVisible({ access: deps.access, key, viewer: undefined, lessons: candidates.slice(0, 200), where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
   if (active.length === 0) return [];
   const used = new Set((await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } })).flatMap((row) => headOf(row)?.fromLessons ?? []));
-  const open = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
+  const unused = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
+  if (unused.length === 0) return [];
+  // A card shows a lesson's title, so it is shown only for a lesson the WHOLE project may read (the same test the draft applies: read as for nobody in particular).
+  const open = await readVisible({ access: deps.access, key, viewer: undefined, lessons: unused, where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
   if (open.length === 0) return [];
   const counts = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: open.map((lesson) => lesson.id), now: deps.now() });
   const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
