@@ -20,7 +20,7 @@
 //    request repeated does too).
 //  - A record the store could not read is not "missing": it is a failure kept for retry. A task whose ids are not plain ids can never name a prefix: counted `refused`, not retried.
 //  - Not erased here (follow-ups, listed in the port's notes): the name and words kept on task records and pointers (developerName, title, the first prompt, thread notes), the task index rows, the
-//    diagnosis-by-person index, session followers and presence, and limit, rate and idempotency rows (no personal content). The route erases only a person already removed from the company, so their
+//    diagnosis-by-person index, the attention email's reverse index (notify/person-index.ts: expires in 90 days, unused once not a member), session followers and presence, and limit, rate and idempotency rows (no personal content). The route erases only a person already removed from the company, so their
 //    sign-in, sessions and script tokens are refused by membership.
 //  - Reports are counts. Log lines and errors name no person, task or key (a fault's text may carry a key).
 import { ActorRefSchema, OrgIdSchema, agentXError, orgChannelLinkKey, orgScoped, when, type AuditSink, type DocumentKey, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";

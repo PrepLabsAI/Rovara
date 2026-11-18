@@ -25,6 +25,7 @@ import { readTask } from "../../core/task-flow/reads.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { recordFeedback } from "../../lessons/counters.js";
+import type { HumanEditSink } from "../../core/merge/seams.js";
 import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import { approveLesson, retireByPerson } from "../../lessons/approve.js";
 import { readVisible } from "../../lessons/read-visible.js";
@@ -37,7 +38,8 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
 import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { createLessonsHost, pumpReflectQueue } from "../../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
+import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
@@ -61,7 +63,7 @@ export interface LocalLessonsOptions {
   metering: Metering;
   approvers: Approvers;
   /** Who a code host account is: a person's `/rovara lesson` comment is theirs, not the owner's. */
-  identity: Pick<IdentityProvider, "resolveExternalAccount">;
+  identity: Pick<IdentityProvider, "resolveExternalAccount"> & Partial<Pick<IdentityProvider, "capabilities">>;
   /** The model the install's steps use, and what the call needs (the same pieces an Ask's call has). */
   model: { choice: () => Promise<LocalModelChoice | undefined>; keys: ModelKeyStore; providers: ModelProviderBook; endpoints?: Partial<ProviderEndpoints> | undefined; fetch?: typeof fetch | undefined };
   learning?: LearningAdapter | undefined;
@@ -108,10 +110,12 @@ export interface LocalLessons {
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
   /** `/rovara lesson <n> wrong|right|retire`, from a writer's comment on a pull request of the task. */
   command: PrCommandWorld["lesson"] extends (input: infer I) => Promise<LocalActionResult> ? (input: I & { taskId: string }) => Promise<LocalActionResult> : never;
-  /** One pass of the app's timer: the reflection queue and, once a day, the nightly upkeep. Never throws. */
+  /** One pass of the app's timer: the reflection queue, every five minutes the revert watch, and, once a day, the nightly upkeep. Never throws. */
   tick(): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
-  noteReverted(taskId: string): Promise<void>;
+  noteReverted(taskId: string, revert?: RevertedChange): Promise<void>;
+  /** A person pushed to a pull request of a task (merge tracking saw a head that is not Rovara's): their commits are proved and read, and one human-edit job is queued for the head (L4-LM1c). */
+  noteHumanEdit: HumanEditSink;
   /** The owner sent the task back with their words: its correction is queued for reflection now (learn on send-back; `LessonsHost.noteSentBack`). */
   noteSentBack(taskId: string): Promise<void>;
 }
@@ -189,6 +193,19 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       if (found.length === 0) return "unknown";
       if (found.some((repository) => repository.private === false)) return "public";
       return found.every((repository) => repository.private === true) ? "private" : "unknown";
+    },
+    // L4-LM1c: a person's edit to a Rovara pull request. On a laptop the one person is the owner: an account the identity point links to the owner (the owner's own, or one they linked in the config) is a member; any other
+    // account is nobody here, so an edit by it is not learned from (nothing is guessed from a login).
+    humanEdit: {
+      repos: repositories,
+      async personOf(account, provider) {
+        const principal = await options.identity.resolveExternalAccount(companyId, { provider, tenant: "", accountId: account.hostUserId });
+        return principal !== undefined && principal.companyId === companyId ? principal.personId : undefined;
+      },
+      standing: async (_orgId, developerId) => (developerId === ownerId ? "member" : "outsider"),
+      isErased: async () => false,
+      // A laptop's identity point that says it links no accounts places nobody (an edit by anyone is then skipped, so none is read).
+      canPlaceAuthors: () => options.identity.capabilities?.externalAccounts !== false,
     },
     now, log: (event, fields) => log(event, fields),
   });
@@ -391,6 +408,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   // ---- the timer's pass
 
+  // What happened after merge: the company's merged Rovara pull requests are watched for a revert on the default branch every five minutes (one read of the newest commits per repository; a host that cannot list commits is skipped).
+  const revertWatch = createLessonsRevertWatch({ store: flow.store, registry, companyId, host, projectsOf: () => flow.projects, now, log: (event, fields) => log(event, fields) });
+  const REVERT_WATCH_EVERY_MS = 5 * 60_000;
+  let lastRevertWatch = 0;
   let lastNightly = 0;
   let running = false;
   async function tick(): Promise<void> {
@@ -402,6 +423,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
         lastNightly = now();
         await nightly().catch((error: unknown) => log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }));
       }
+      if (now() - lastRevertWatch >= REVERT_WATCH_EVERY_MS) {
+        lastRevertWatch = now();
+        await revertWatch.pass({ budgetMs: 10_000 }).catch((error: unknown) => log("revert_watch_failed", { error: error instanceof Error ? error.name : "unknown" }));
+      }
     } finally {
       running = false;
     }
@@ -411,8 +436,9 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     await host.nightly(await projectNames());
   }
 
-  const noteReverted: LocalLessons["noteReverted"] = (taskId) => host.noteReverted(taskId);
+  const noteReverted: LocalLessons["noteReverted"] = (taskId, revert) => host.noteReverted(taskId, revert);
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteSentBack };
+  const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
 }

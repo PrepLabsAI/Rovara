@@ -20,10 +20,14 @@ async function world() {
 }
 it("describes trusted records, never the task's client or session default payer", async () => {
   const w = await world();
+  // Origin nightly marks nightly upkeep AI (lead 4 N1): only a wiki build task is described with it.
+  expect(await w.describe.describe(w.scope)).toBeUndefined();
+  await w.h.store.put({ item: { ...(await w.h.store.get(w.tk))!, purpose: "wiki_build" } });
   expect(await w.describe.describe(w.scope)).toEqual({ companyId: w.h.deps.companyId, project: "payments", taskId: w.tk.pk.slice("DEVTASK#".length), step: "build", person: "a".repeat(64), payer: { kind: "project", project: "payments" }, origin: "nightly", models: ["claude-sonnet-4-5"] });
 });
 it("uses the stored model choice and omits a non-developer person", async () => {
   const w = await world(); const op = (await w.h.store.get(w.key))!;
+  await w.h.store.put({ item: { ...(await w.h.store.get(w.tk))!, purpose: "wiki_build" } });
   await w.h.store.put({ item: { ...op, requester: { personId: "local-owner", provider: "local" }, modelChoice: { route: { alias: "chosen-model", api: "openai-responses", catalog: "chosen-model" } } } });
   w.h.deps.modelAccess = { route: async () => { throw new Error("fallback must not be read"); } };
   const answer = await w.describe.describe(w.scope); expect(answer?.models).toEqual(["chosen-model"]); expect(answer).not.toHaveProperty("person");
@@ -55,7 +59,7 @@ const payerCases: Array<[WorkOrigin, Payer]> = [
 ];
 it.each(payerCases)("resolves %s with no project payer setting to its exact payer", async (origin, payer) => {
   const w = await world(); const task = (await w.h.store.get(w.tk))!;
-  await w.h.store.put({ item: { ...task, origin, client: "untrusted-payer-marker" } });
+  await w.h.store.put({ item: { ...task, origin, client: "untrusted-payer-marker", ...(origin === "nightly" ? { purpose: "wiki_build" } : {}) } });
   expect(await w.describe.describe(w.scope)).toMatchObject({ origin, payer });
 });
 

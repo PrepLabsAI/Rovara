@@ -103,3 +103,9 @@ export async function listWorkEvents(store: Pick<DocumentStore, "query">, query:
   events.sort((a, b) => (a.at === b.at ? (a.id < b.id ? -1 : 1) : a.at < b.at ? -1 : 1));
   return { events, unreadable };
 }
+
+/** The event a stored row holds, or undefined when it is not one this code can read (a version it does not know, a field it does not allow). The row's own key and expiry are not part of the event. */
+export function workEventOfRow(row: StoredDocument): WorkEvent | undefined {
+  const parsed = WorkEventSchema.safeParse(Object.fromEntries(Object.entries(row).filter(([name]) => !["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE].includes(name))));
+  return parsed.success ? parsed.data : undefined;
+}

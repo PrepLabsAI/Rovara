@@ -128,6 +128,44 @@ describe("the session levels", () => {
     expect(await levelOf(broken.store, { mia: { role: "member", grants: { web: "maintainer" } } }, person("mia"))).toBe("NOT_FOUND");
   });
 
+  // Web task channel C2 (C1 review L4, plan 4.1 rules 3 and 4): a `web` People entry (one with a sign-in method) is never trusted as stored. It grants its
+  // level only while the person, a live member of this company, holds a live developer (`contributor`) or administrator (`maintainer`) grant on the project.
+  it("the task's People list: a web entry grants its level only with a live developer or administrator grant; a web denial always applies", async () => {
+    const web = (who: string, role: string) => ({ developerId: id(person(who)), name: who, role, method: "github" });
+    const people = { schemaVersion: 1, people: [web("cam", "commenter"), web("val", "viewer"), web("oro", "owner"), web("dee", "denied")] };
+    const w = await world({ people });
+    // With the grant: the stored role counts.
+    expect(await levelOf(w.store, { cam: { role: "member", grants: { web: "contributor" } } }, person("cam"))).toMatchObject({ level: "use", mayAsk: true });
+    expect(await levelOf(w.store, { oro: { role: "member", grants: { web: "contributor" } } }, person("oro"))).toMatchObject({ level: "edit" });
+    expect(await levelOf(w.store, { val: { role: "member", grants: { web: "maintainer" } } }, person("val"))).toMatchObject({ level: "edit" });
+    // Without a grant (or with a grant that cannot use the project, or on another project), the entry gives nothing.
+    expect(await levelOf(w.store, { cam: { role: "member" } }, person("cam"))).toBe("NOT_FOUND");
+    expect(await levelOf(w.store, { oro: { role: "member", grants: { api: "maintainer" } } }, person("oro"))).toBe("NOT_FOUND");
+    expect(await levelOf(w.store, { cam: { role: "member", grants: { web: "collaborator" } } }, person("cam"))).toMatchObject({ level: "view" });
+    expect(await levelOf(w.store, { cam: { role: "member", elsewhere: { web: "contributor" } } }, person("cam"))).toMatchObject({ level: "view" });
+    // A company admin with no grant keeps only the admin's view (D3).
+    expect(await levelOf(w.store, { oro: { role: "admin" } }, person("oro"))).toMatchObject({ level: "view", orgAdmin: true });
+    // Not a member of this company: nothing, whatever the entry says.
+    expect(await levelOf(w.store, { oro: { grants: { web: "maintainer" } } }, person("oro"))).toBe("NOT_FOUND");
+    // A web denial applies with or without a grant, and overrides a share.
+    expect(await levelOf(w.store, { dee: { role: "member", grants: { web: "maintainer" } } }, person("dee"))).toBe("NOT_FOUND");
+    const shared = await world({ people, shares: [{ principal: { kind: "org" }, level: "edit" }] });
+    expect(await levelOf(shared.store, { dee: { role: "member" } }, person("dee"))).toBe("NOT_FOUND");
+  });
+
+  it("the task's People list: a malformed web entry makes the whole list unreadable; a Slack entry reads exactly as before", async () => {
+    for (const bad of [
+      { developerId: id(person("cam")), name: "cam", role: "commenter", method: "google" },
+      { developerId: id(person("cam")), name: "cam", role: "commenter", method: "slack" },
+      { developerId: id(person("cam")), slackUserId: "U0CAMSLACK", name: "cam", role: "commenter", method: "github" },
+    ]) {
+      const w = await world({ people: { schemaVersion: 1, people: [bad] } });
+      expect(await levelOf(w.store, { mia: { role: "member", grants: { web: "maintainer" } } }, person("mia"))).toBe("NOT_FOUND");
+    }
+    const slack = await world({ people: { schemaVersion: 1, people: [{ developerId: id(person("cam")), slackUserId: "U0CAMSLACK", name: "cam", role: "commenter" }] } });
+    expect(await levelOf(slack.store, { cam: { role: "member" } }, person("cam"))).toMatchObject({ level: "use", mayAsk: true });
+  });
+
   it("a take-over: the taker owns the session, the creator no longer does, and a taker that does not read gives nobody an owner's access", async () => {
     const taker = person("tia", "Tia");
     const w = await world({ task: { currentOwner: { developerId: id(taker), name: "Tia", provider: "oidc", since: T0 } } });

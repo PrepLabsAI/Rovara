@@ -110,6 +110,8 @@ export interface RiskFile {
   snapshotChanged?: true | undefined;
   /** TE-B3: the file is a fixture, mock or recorded-answer file. */
   fixtureChanged?: true | undefined;
+  /** L4-SC (DEC 254z c): a mock source the approved plan did not name (set by the broker, plan-setup.ts). The coding agent may not write mocks: high. */
+  mockUnplanned?: true | undefined;
   /** The diff changes a route declaration, a response model or a schema file (read from the diff, never from a model). */
   apiShapeChanged?: true | undefined;
 }
@@ -160,6 +162,9 @@ export function assessRisk(input: RiskInput): RiskAssessment {
     if (command.length > 0) high.push(`A fix changes the command that runs the tests (${shown(command)}), so a check may pass because the tests no longer run.`);
     if (ci.length > 0) high.push(`A fix changes CI configuration (${shown(ci)}), so a check may pass because CI changed.`);
   }
+  // L4-SC (DEC 254z c): the coding agent never writes its own mock. A mock source the approved plan did not name is high, in a fix as in a first change; the broker marks it from the plan, never the worker.
+  const unplannedMocks = [...new Set(input.changedFiles.filter((file) => file.mockUnplanned === true).flatMap(named))];
+  if (unplannedMocks.length > 0) high.push(`Adds or changes a mock source the approved plan did not name (${shown(unplannedMocks)}). The coding agent may not write mocks; read it before merging.`);
   if (input.fix !== true) {
     // Owner decision 2026-10-27: the risk is shown next to Merge for every change, so CI configuration and the tests a change removes or skips are named for an ordinary change too (a fix has its own, stronger words above).
     const ci = [...new Set(input.changedFiles.flatMap((file) => named(file).filter((path) => CI_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(normalized(path))) && !isSensitivePath(path))))];

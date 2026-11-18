@@ -3,7 +3,7 @@ import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBin
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
-import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
+import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { grantProjectAccess, listProjectMembers, projectGrant, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
+import { grantProjectAccess, listProjectMembers, projectGrant, projectMemberKey, resolveDeveloper, revokeProjectAccess } from "./admin-actions.js";
 import { appRouteOf, devRouteOf, type DevRoute } from "./dev-route-scopes.js";
 import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } from "./github-connect-routes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
@@ -106,7 +106,7 @@ import { stepUpOf } from "../developer/verify-token.js";
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
-import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
@@ -119,10 +119,15 @@ import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperR
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js"; import type { ClientProjectNaming } from "./company-project-names.js";
+import { MACHINE_SIZE_ROWS, MACHINE_STORED_ONLY_LINE } from "@agentx/contracts";
+import { freshStepUp } from "../core-host/step-up.js";
+import { machineSizeEnabled, machineCard, setMachineChoice } from "../core/test-env/machine-size.js";
+import { testEnvironmentView } from "../core/test-env/local-view.js";
+import { DynamoDocumentStore } from "@rovara/aws-adapters";
 import {
-  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
+  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, pageFeatureChoices, retryApplicationRoundOnPage, setPageFeature, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
-  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage,
+  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage, getTaskPeopleCandidatesForPage, addTaskWebPersonForPage,
   getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { createFeedbackReviewWeb } from "./feedback-review-web.js";
@@ -132,7 +137,7 @@ import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
 import type { CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
-import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
+import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInFactors, routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -780,8 +785,11 @@ export async function authenticateDeveloperSessionId(deps: DeveloperRouteDepende
   }
 }
 
+/** C4: the most grant rows one person's web proof reads (one row per project they hold). More than this is unreadable, so a refusal. */
+export const WEB_PROOF_GRANT_ROWS_MAX = 500;
+
 /** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
-async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string): Promise<T[]> {
+async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix: string, maxItems?: number): Promise<T[]> {
   const items: T[] = [];
   let start: Record<string, unknown> | undefined;
   do {
@@ -793,6 +801,7 @@ async function queryAll<T>(deps: DeveloperRouteDependencies, pk: string, prefix:
       ConsistentRead: true,
     })) as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
     items.push(...(response.Items ?? []));
+    if (maxItems !== undefined && items.length > maxItems) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     start = response.LastEvaluatedKey;
   } while (start !== undefined);
   return items;
@@ -1823,6 +1832,71 @@ export function developerTaskRouteDependencies(
     .filter((binding) => binding.projectName === project)
     .map((binding) => binding.channelId)
     .sort();
+  // C2 (plan 4.1, decisions D1, D3): the web proof's reads, none of them Slack's. The developer record and the membership are the sign-in table's
+  // own rows (the reviewed reader every sign-in uses); the grant is the project's in the TASK'S company, by grant only (no channel list, no Slack id).
+  const developerRecord = async (targetDeveloperId: string): Promise<DeveloperRecord | undefined> => {
+    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
+    return response.Item;
+  };
+  const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
+  const webProof: Pick<TaskPersonIdentityDependencies, "companyMembership" | "projectGrant" | "projectMemberIds"> = {
+    // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
+    projectMemberIds: async (project, limit) => {
+      const response = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
+        ExpressionAttributeValues: { ":pk": projectMemberKey(project, "").pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
+      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      const ids = (response.Items ?? []).map((item) => typeof item.sk === "string" && item.sk.startsWith("DEVELOPER#") ? item.sk.slice("DEVELOPER#".length) : "");
+      return { ids, complete: response.LastEvaluatedKey === undefined };
+    },
+    companyMembership: async (targetDeveloperId) => {
+      // Only an install with the company layer has live memberships; without it there is no web proof (unavailable, a refusal).
+      if ((deps.companies ?? deps.developer.companies) === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+      const key = membershipKey(targetDeveloperId);
+      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+      return strictLiveMembership(response.Item, targetDeveloperId);
+    },
+    projectGrant: async (targetDeveloperId, project, companyId) => {
+      // C4 read budget: one project definition read per request however many people are proved (the candidates list proves up to 200), and one
+      // person's own grant rows are read up to a cap; a person with more is unreadable (a refusal), never read without bound.
+      const definitionKey = `${companyId}\u0000${project}`;
+      let pending = definitionReads.get(definitionKey);
+      if (pending === undefined) {
+        pending = latestDefinition(deps, project, companyId);
+        definitionReads.set(definitionKey, pending);
+        pending.catch(() => definitionReads.delete(definitionKey));
+      }
+      const revision = await pending;
+      if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
+      const memberships = await queryAll<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, `MEMBER#${targetDeveloperId}`, "PROJECT#", WEB_PROOF_GRANT_ROWS_MAX);
+      const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
+      if (result.kind === "allowed") return result.access === "granted";
+      if (result.kind === "denied" && result.reason === "project-access") return false;
+      throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+    },
+  };
+  /**
+   * When the Slack parts cannot be built (no Slack on this install, or no workspace for the task), only a `web` identity can still be proven:
+   * a `slack` identity's check throws the very error the build threw (as before C2), and every Slack port refuses.
+   */
+  const webOnlyIdentityDependencies = (cause: unknown): TaskPersonIdentityDependencies => {
+    const slackUnavailable = cause instanceof Error ? cause : agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+    const noSlack = async (): Promise<never> => { throw slackUnavailable; };
+    return {
+      documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId: "", now: deps.now, uuid: randomUUID, slackUnavailable,
+      taskPersonProof: noSlack, developerRecord, projectChannelIds: noSlack, targetProjectAccess: noSlack, ...webProof,
+      ...(trustedCaller === null ? {} : { trustedCaller }),
+    };
+  };
+  /** A `slack` identity still refuses with the Slack build's own error; a `web` identity needs no Slack (C2). */
+  const identityDependenciesOrWebOnly = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
+    try {
+      return await identityDependencies(task, admission);
+    } catch (error) {
+      return webOnlyIdentityDependencies(error);
+    }
+  };
   const identityDependencies = async (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonIdentityDependencies> => {
     const workspace = await taskWorkspace(task);
     const slackTeamId = workspace?.teamId ?? deps.developer.slackTeamId;
@@ -1831,10 +1905,8 @@ export function developerTaskRouteDependencies(
     return {
       documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId, now: deps.now, uuid: randomUUID, taskPersonProof,
       ...(workspace === undefined ? {} : { workspace }),
-      developerRecord: async (targetDeveloperId) => {
-        const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
-        return response.Item;
-      },
+      developerRecord,
+      ...webProof,
       projectChannelIds: (project) => projectChannelIds(project, workspace),
       targetProjectAccess: async (subject, project, freshMemberOf) => {
         const revision = await latestDefinition(deps, project, workspace?.companyId);
@@ -1881,9 +1953,10 @@ export function developerTaskRouteDependencies(
     ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
     ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
-    checkTaskPerson: async (task, developerId, admission) => {
-      return checkTaskPersonIdentity(await identityDependencies(task, admission), task, developerId);
-    },
+    checkTaskPerson: async (task, developerId, admission) => checkTaskPersonIdentity(await identityDependenciesOrWebOnly(task, admission), task, developerId),
+    // C4 (plan 4.2 "Add a person from the web"): the web proof's own reads, which need no Slack.
+    registerTaskWebPerson: async (task, developerId) => registerTaskWebPerson(await identityDependenciesOrWebOnly(task), task, developerId),
+    listTaskWebCandidates: async (task, limit) => listTaskWebCandidates(await identityDependenciesOrWebOnly(task), task, caller.developerId, limit),
     resolveTaskPickerPerson: async (taskId, slackUserId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
       if (response.Item === undefined) throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
@@ -2032,7 +2105,7 @@ async function companySelfCreateRoute(deps: DeveloperRouteDependencies, request:
 }
 
 /** Lane LM8: the lessons API's paths (`core-host/lessons-api.ts` parses the same paths; a test holds the two equal). */
-export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
+export const LESSONS_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** L4-AK1H: the team knowledge reads' paths (`core-host/knowledge-api.ts` parses the same paths; a test holds the two equal). Both are POSTs (a repository's address stays out of addresses and access logs). */
 export const KNOWLEDGE_API_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/(?:areas|propose))$/u;
@@ -2110,6 +2183,8 @@ async function linearConnectRoute(deps: DeveloperRouteDependencies, request: Ada
     documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring,
     projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
     projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
+    // A project's first tracker team: where the new-hosted-project ticket-updates default is saved (once, only if none is saved), for a company whose tasks start on the core.
+    ...(deps.developer.coreIntake === undefined ? {} : { onFirstTeam: async (company: string, project: string, personId: string) => { await deps.developer.coreIntake!.seedTicketUpdates(OrgIdSchema.parse(company), project, personId); } }),
   }, caller, companyId, request, url, stepUp);
 }
 
@@ -2158,6 +2233,58 @@ async function knowledgeRoute(deps: DeveloperRouteDependencies, request: Adapted
   const { caller } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
   if (deps.knowledge === undefined) return knowledgeSwitchedOff(wire, deps.now());
   return deps.knowledge.answer(wire, { kind: "person", personId: caller.developerId });
+}
+
+const MACHINE_SIZE_ON_THE_PAGE = "Changing the machine size needs the Rovara web page with a fresh sign-in";
+const MACHINE_SIZE_ROLE_REQUIRED = "Only a company owner or admin, or this project's administrator, may choose a machine size";
+export async function requireMachineSizePage(caller: DeveloperCaller, nowMs: number, windowSeconds?: () => Promise<unknown>): Promise<void> {
+  if (caller.webApp !== true) throw agentXError("FORBIDDEN", MACHINE_SIZE_ON_THE_PAGE);
+  await freshStepUp(caller, windowSeconds, nowMs, MACHINE_SIZE_ON_THE_PAGE);
+}
+export function requireMachineSizeRole(companyAdmin: boolean, projectAdmin: boolean): void {
+  if (!companyAdmin && !projectAdmin) throw agentXError("FORBIDDEN", MACHINE_SIZE_ROLE_REQUIRED);
+}
+
+/** Hosted TE-C5 read and page-only stored choice. A selection is a project setting; it never changes a worker launch or task estimate. */
+async function checkedMachineSize(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, rawProject: string): Promise<unknown> {
+  if (!machineSizeEnabled()) throw agentXError("NOT_AVAILABLE_HERE", "Machine size suggestions are not set up here.");
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  if (request.method === "POST") {
+    const window = deps.developer.stepUpWindowSeconds;
+    await requireMachineSizePage(caller, deps.now(), window === undefined || companyId === undefined ? undefined : () => window(companyId));
+  }
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const projects = await listProjects(deps, caller, companyId);
+  if (!projects.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  const orgId = companyId ?? IMPLICIT_COMPANY_ID;
+  const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+  const testEnvDeps = { store, now: deps.now };
+  if (request.method === "POST") {
+    const membership = await deps.companies?.membershipOf?.(caller.developerId);
+    const companyAdmin = membership !== undefined && membership.companyId === companyId && (membership.role === "owner" || membership.role === "admin");
+    const own = await projectGrant(memberActions(deps), project, caller.developerId, companyId);
+    requireMachineSizeRole(companyAdmin, own?.role === "administrator");
+    const body = jsonBody(request);
+    const rowId = body !== null && typeof body === "object" ? (body as Record<string, unknown>)["rowId"] : undefined;
+    if (typeof rowId !== "string" || !MACHINE_SIZE_ROWS.some((row) => row.id === rowId)) throw agentXError("CONFIG_INVALID", "Choose one of the listed machine sizes");
+    await setMachineChoice(testEnvDeps, { orgId, project, rowId });
+    logDeveloperEvent({ event: "project.machine_size_chosen", companyId: orgId, by: caller.developerId, project, rowId });
+  }
+  const view = await testEnvironmentView(testEnvDeps, orgId, project);
+  const card = await machineCard(testEnvDeps, orgId, project, view.proposal?.digest ?? view.approved?.digest);
+  return { measuredPeakMemoryMiB: card?.measuredPeakMemoryMiB ?? null, testTimeMs: card?.testTimeMs ?? null,
+    suggestedSize: card?.suggestedRowId ?? null, currentSize: card?.chosenRowId ?? null, storedOnlyLine: MACHINE_STORED_ONLY_LINE, choices: card?.choices ?? [] };
+}
+
+/** No SDK or parser causes leave the hosted route. */
+async function routeMachineSize(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, rawProject: string): Promise<unknown> {
+  try { return await checkedMachineSize(deps, caller, request, rawProject); }
+  catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("RUNTIME_UNAVAILABLE", "Machine size settings are unavailable. Try again in a moment.");
+  }
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
@@ -2215,12 +2342,16 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
           setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
           decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
           retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
+          featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
+          setFeature: (caller, taskId, input) => setPageFeature(routeDeps(caller), caller, taskId, input),
           readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
           getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
           proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
           proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
           getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
           confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+          getPeopleCandidates: (caller, taskId) => getTaskPeopleCandidatesForPage(routeDeps(caller), caller, taskId),
+          addPeople: (caller, taskId, input) => addTaskWebPersonForPage(routeDeps(caller), caller, taskId, input),
         }),
       })(request, url);
     }
@@ -2244,6 +2375,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const { caller, stepUp } = await authenticateCallerWithStepUp(deps, request.headers.authorization, route);
+  const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
+  if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
   if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
   if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
@@ -2256,6 +2389,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   }
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
+  if (url.pathname === "/v1/dev/me/sign-in-factors") return routeSignInFactors(deps.developer.signInLinks, caller, request, url); // L4-MF4: the caller's own confirmation email (masked) and passkeys (sign-in-link-routes.ts).
   if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
   if (LESSONS_API_ROUTES.test(url.pathname)) {

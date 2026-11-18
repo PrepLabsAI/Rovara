@@ -46,7 +46,7 @@ import { notesFedUpdate, stepNotes, type NotesForStep } from "../sessions/notes.
 import { textReaderOf } from "../build-step/plan-input.js";
 import { buildOperation, assertPromptFits } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
-import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js";
+import { dispatchRowItem, dueDispatchRows, rescheduleRowItem, resolveRowItem } from "./dispatch-rows.js"; import { questionEntriesOf } from "../task-log/entries.js"; import { taskLogItems } from "../task-log/store.js";
 import { dispatchRowKey, taskKey } from "./keys.js";
 import { structuredPlanContextOf } from "../plan/context.js";
 import { planUnreadablePrompt } from "../plan/process.js";
@@ -54,7 +54,7 @@ import { readTask } from "./reads.js";
 import { fromDocument, READING_DISPATCH_KINDS, toDocument, type DispatchRowRecord, type DispatchSpec, type MaintenanceExpectation, type OperationRecord, type PublicationExpectation, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 import type { SecondReviewOperationPlan } from "../second-review/store.js";
 import { DEFAULT_PROMPTS, iso, log } from "./support.js";
-import { workflowWriteOps } from "./flow-guard.js";
+import { workflowWriteOps } from "./flow-guard.js"; import { TRANSACTION_ITEMS_MAX, flowWorkEventItems } from "../work-events/flow-events.js";
 import { UNDERSTAND_SKIPS, afterUnderstand, restoredForPlanning, smallPlanRoute, toFull } from "./stage-selection.js";
 import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
@@ -199,6 +199,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     ...(permitted.items ?? []),
     ...(input.extra ?? []),
   ];
+  // The work events of the step's own transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
+  if (input.workflow !== undefined) items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: input.workflow.current, after: input.workflow.next, room: TRANSACTION_ITEMS_MAX - items.length }));
   const applied = await deps.store.transact(items);
   if (applied.applied) {
     // Handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the step.
@@ -236,13 +238,16 @@ export async function commitWorkflow(deps: TaskFlowDeps, task: TaskRecord, next:
   const current = task.workflow;
   if (current === undefined) return false;
   const write = workflowWriteOps(current, next, { ownsFlow: true });
-  const result = await deps.store.transact([
+  const items: TransactItem[] = [
     {
       kind: "update", key: taskKey(task.taskId), ops: [...write.ops, ...taskOps, change.set("updatedAt", iso(deps))],
       condition: when.and(when.notExists("closedAt"), when.eq(["workflow", "revision"], current.revision), ...write.guard),
     },
     ...extra,
-  ]);
+  ];
+  // The work events of this transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
+  items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: current, after: next, room: TRANSACTION_ITEMS_MAX - items.length }));
+  const result = await deps.store.transact(items);
   return result.applied;
 }
 
@@ -565,7 +570,12 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
       }
       // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
       const toPlan = next.stage === "PLAN" && next.state === "READY";
-      const committed = await commitWorkflow(deps, task, next, toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []);
+      // Understand's questions go in the task log in the same commit (a person is asked: every surface that draws the log can say so).
+      const asked = next.stage === "UNDERSTAND" && next.state === "WAITING" && next.intent?.assessment?.kind === "questions" ? next.intent.assessment.questions : [];
+      // The log never stands in the way of the person's own change: an entry that cannot be made is left out.
+      const logged = (() => { try { return asked.length === 0 ? [] : taskLogItems({ orgId: task.companyId, taskId: task.taskId, entries: questionEntriesOf({ round: next.intent?.rounds ?? 0, at: now, questions: asked }) }); } catch { return []; } })();
+      const committed = await commitWorkflow(deps, task, next, [...(toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []), ...logged]);
+      if (committed && logged.length > 0) await deps.taskLog?.changed(task.taskId);
       if (committed && toPlan) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PLAN" });
       return;
     }

@@ -26,7 +26,8 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     if (loaded !== undefined) planContent = loaded.markdown.slice(0, PLAN_CONTENT_MAX_BYTES);
   }
   return JSON.parse(JSON.stringify({
-    taskId: task.taskId, title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
+    taskId: task.taskId, ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
+    ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),

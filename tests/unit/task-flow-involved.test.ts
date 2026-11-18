@@ -11,7 +11,7 @@ import type { TaskAccess } from "../../packages/broker/src/core/task-flow/deps.j
 import { handleTaskRoute } from "../../packages/broker/src/core/task-flow/routes.js";
 import { taskIndexKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import {
-  INVOLVED_EXAMINE_MAX, deleteInvolvedRow, involvedPartition, involvedRowDelete, involvedRowKey, involvedRowPut, listInvolvedTasks, writeInvolvedRow, type InvolvedRowInput,
+  INVOLVED_EXAMINE_MAX, deleteInvolvedRow, involvedTaskIds, involvedPartition, involvedRowDelete, involvedRowKey, involvedRowPut, listInvolvedTasks, writeInvolvedRow, type InvolvedRowInput,
 } from "../../packages/broker/src/core/task-flow/involved.js";
 import type { TaskRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";
@@ -459,6 +459,75 @@ describe("the re-checks and bounds, one by one (review M-1 to M-3, L-3, L-4)", (
     expect(first.nextCursor).toBeUndefined();
     const all = await list(w, COMPANY_A_ID, ALICE);
     expect(all.tasks.map((task) => task.taskId)).toEqual([taskA.taskId]);
+  });
+});
+
+describe("the involved task ids (the decision cards' second source)", () => {
+  const idsOf = (w: World, companyId: string, personId: string, principalCompany = companyId) => involvedTaskIds((companyId === COMPANY_A_ID ? w.a : w.b).deps, { companyId: principalCompany, personId });
+
+  it("is the person's own rows in this company, newest first, ids only", async () => {
+    const { w, taskA } = await world();
+    const second = await startTask(w.a, "second");
+    const third = await startTask(w.a, "third");
+    for (const row of [rowFor(taskA, ALICE), rowFor(second, ALICE), rowFor(third, BOB)]) await writeInvolvedRow({ store: w.store }, row);
+    const alice = await idsOf(w, COMPANY_A_ID, ALICE);
+    expect(alice).toHaveLength(2);
+    expect(new Set(alice)).toEqual(new Set([taskA.taskId, second.taskId]));
+    expect(alice[0]).toBe([taskA, second].sort((x, y) => y.createdAt.localeCompare(x.createdAt) || y.taskId.localeCompare(x.taskId))[0]!.taskId);
+    expect(await idsOf(w, COMPANY_A_ID, BOB)).toEqual([third.taskId]);
+    expect(await idsOf(w, COMPANY_A_ID, "carol")).toEqual([]);
+  });
+
+  it("never reads another company's rows: the same person in company B has their own partition, and a principal of another company gets nothing", async () => {
+    const { w, taskA, taskB } = await world();
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    await writeInvolvedRow({ store: w.store }, rowFor(taskB, ALICE));
+    expect(await idsOf(w, COMPANY_A_ID, ALICE)).toEqual([taskA.taskId]);
+    expect(await idsOf(w, COMPANY_B_ID, ALICE)).toEqual([taskB.taskId]);
+    expect(await idsOf(w, COMPANY_A_ID, ALICE, COMPANY_B_ID)).toEqual([]);
+  });
+
+  it("leaves out a row that is not what a writer makes (fields that do not match the key, another company or person inside the partition, a stranger kind)", async () => {
+    const { w, taskA, taskB } = await world();
+    const pk = involvedPartition(COMPANY_A_ID, ALICE);
+    const key = involvedRowKey(rowFor(taskA, ALICE));
+    const good = involvedRowPut(rowFor(taskA, ALICE), "2026-11-10T00:00:00.000Z").item;
+    await w.store.put({ item: { ...good, sk: `TASK#2026-01-01T00:00:00.000Z#${randomUUID()}`, taskId: taskB.taskId } });
+    await w.store.put({ item: { ...good, sk: `TASK#2026-01-02T00:00:00.000Z#${taskB.taskId}`, companyId: COMPANY_B_ID } });
+    await w.store.put({ item: { ...good, sk: `TASK#2026-01-03T00:00:00.000Z#${taskB.taskId}`, personId: BOB } });
+    await w.store.put({ item: { ...good, sk: `TASK#2026-01-04T00:00:00.000Z#${taskB.taskId}`, entityType: "OTHER" } });
+    await w.store.put({ item: { pk, sk: "TASK#9999-junk", entityType: "TASK_INVOLVED" } });
+    await w.store.put({ item: { ...good, ...key } });
+    expect(await idsOf(w, COMPANY_A_ID, ALICE)).toEqual([taskA.taskId]);
+  });
+
+  it("names a task once even when two rows (two creation times) point at it", async () => {
+    const { w, taskA } = await world();
+    await writeInvolvedRow({ store: w.store }, rowFor(taskA, ALICE));
+    await writeInvolvedRow({ store: w.store }, { ...rowFor(taskA, ALICE), createdAt: "2026-01-01T00:00:00.000Z" });
+    expect(await idsOf(w, COMPANY_A_ID, ALICE)).toEqual([taskA.taskId]);
+  });
+
+  it("is bounded: at most INVOLVED_EXAMINE_MAX of the newest rows, whatever the person has", async () => {
+    const { w, taskA } = await world();
+    const ids: string[] = [];
+    for (let day = 0; day < INVOLVED_EXAMINE_MAX + 20; day += 1) {
+      const id = randomUUID();
+      ids.push(id);
+      const createdAt = new Date(Date.parse("2026-01-01T00:00:00.000Z") + day * 60_000).toISOString();
+      await writeInvolvedRow({ store: w.store }, { ...rowFor(taskA, ALICE), taskId: id, createdAt });
+    }
+    const got = await idsOf(w, COMPANY_A_ID, ALICE);
+    expect(got).toHaveLength(INVOLVED_EXAMINE_MAX);
+    expect(got).toEqual(ids.slice(20).reverse());
+  });
+
+  it("refuses to guess: a person id that is not one, or a company that is not one, lists nothing, and an unreadable store throws", async () => {
+    const { w } = await world();
+    expect(await idsOf(w, COMPANY_A_ID, "a#b")).toEqual([]);
+    expect(await idsOf(w, COMPANY_A_ID, "")).toEqual([]);
+    const broken = { store: { query: async () => { throw new Error("down"); } }, companyId: COMPANY_A_ID } as never;
+    await expect(involvedTaskIds(broken, { companyId: COMPANY_A_ID, personId: ALICE })).rejects.toThrow("down");
   });
 });
 

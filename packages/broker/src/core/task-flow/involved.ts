@@ -1,8 +1,8 @@
 // Web task channel (C5): the "involved" index and the read side of "tasks I'm involved in".
 //
-// A person who was ADDED to someone else's task (a co-owner, a commenter, a viewer) must find it. When People adds a person it writes one involved row for them (`writeInvolvedRow`, called by
-// the add path of C4, not wired here) and deletes it when the person is denied or removed (`deleteInvolvedRow`). The row is only a pointer: it carries ids and the task's creation time, never a
-// title, a project or a status, so a stale row cannot show anything.
+// A person who was ADDED to someone else's task as a co-owner must find it (the list and the decision cards show what a person may act on, the live owner rule). The People change that makes a person an owner
+// puts one involved row for them in its own transaction (`involvedRowPut`, `developer/task-people.ts`) and deletes it when they stop being an owner or are denied (`involvedRowDelete`). The row is only a pointer: it
+// carries ids and the task's creation time, never a title, a project or a status, so a stale row cannot show anything.
 //
 // The read (`GET /v1/dev/tasks?involved=1`) trusts nothing the row says. For every row it reads the live task and asks the live task access (the rule the core's own task read uses for this caller,
 // People roles included) whether this caller may see it now; a person who lost access, was denied, or whose row is stale sees nothing of that task and the row is skipped, never shown. The company comes
@@ -50,25 +50,25 @@ export function involvedRowKey(input: InvolvedRowInput): DocumentKey {
   return { pk: involvedPartition(row.companyId, row.personId), sk: `${ROW_SK_PREFIX}${row.createdAt}#${row.taskId}` };
 }
 
-/** The involved row as a transaction step (a plain put, so adding the same person twice leaves one row). For C4's add path to put in its own transaction. */
+/** The involved row as a transaction step (a plain put, so adding the same person twice leaves one row). For People's commit to put in its own transaction. */
 export function involvedRowPut(input: InvolvedRowInput, addedAt: string): Extract<TransactItem, { kind: "put" }> {
   const row = checked(input);
   if (typeof addedAt !== "string" || !ISO_INSTANT.test(addedAt)) throw invalidRow();
   return { kind: "put", item: { ...involvedRowKey(row), entityType: INVOLVED_ENTITY, companyId: row.companyId, personId: row.personId, taskId: row.taskId, createdAt: row.createdAt, addedAt } };
 }
 
-/** The involved row's delete as a transaction step (deleting a row that is not there is a no-op). For C4's deny path. */
+/** The involved row's delete as a transaction step (deleting a row that is not there is a no-op). For People's commit to delete in its own transaction. */
 export function involvedRowDelete(input: InvolvedRowInput): Extract<TransactItem, { kind: "delete" }> {
   return { kind: "delete", key: involvedRowKey(input) };
 }
 
-/** Writes the person's involved row for the task. Idempotent: a second call leaves one row. Not wired into People yet (C4 calls it when it adds a person). */
+/** Writes the person's involved row for the task. Idempotent: a second call leaves one row. (People's own commit puts the row in its transaction with `involvedRowPut`.) */
 export async function writeInvolvedRow(deps: { store: Pick<DocumentStore, "put">; now?: () => Date }, input: InvolvedRowInput): Promise<void> {
   const step = involvedRowPut(input, (deps.now?.() ?? new Date()).toISOString());
   await deps.store.put({ item: step.item });
 }
 
-/** Deletes the person's involved row for the task. Idempotent: no row is no error. Not wired into People yet (C4 calls it when it denies or removes a person). */
+/** Deletes the person's involved row for the task. Idempotent: no row is no error. (People's own commit deletes the row in its transaction with `involvedRowDelete`.) */
 export async function deleteInvolvedRow(deps: { store: Pick<DocumentStore, "delete"> }, input: InvolvedRowInput): Promise<void> {
   await deps.store.delete({ key: involvedRowKey(input) });
 }
@@ -189,4 +189,29 @@ async function visibleTask(deps: TaskFlowDeps, caller: TaskCaller, pk: string, i
   const status = DeveloperTaskStatusSchema.safeParse(index?.["status"]);
   if (index === undefined || !status.success || index["taskId"] !== task.taskId || (index["orgId"] ?? IMPLICIT_COMPANY_ID) !== deps.companyId || typeof index["updatedAt"] !== "string") return undefined;
   return developerTaskListItem({ taskId: task.taskId, title: task.title, project: task.project, status: status.data, shared: task.shared, createdAt: task.createdAt, updatedAt: index["updatedAt"] });
+}
+
+/**
+ * The task ids of the caller's involved rows in this company, newest first, for a listing that judges every id itself (the decision cards, `deployedDecisionCards({ involvedTaskIds })`). Ids only, bounded
+ * (at most INVOLVED_EXAMINE_MAX rows and ten page reads) and read from the caller's own partition of this flow's company; a row that is not what a writer makes (another company, another person, a key that
+ * does not match its fields) is left out. Nothing here says the caller may see the task: that is the live access check of whoever uses the id. A read that fails throws (the caller lists its own only).
+ */
+export async function involvedTaskIds(deps: Pick<TaskFlowDeps, "store" | "companyId">, principal: { companyId: string; personId: string }): Promise<string[]> {
+  const personId = principal.personId;
+  if (!OrgIdSchema.safeParse(deps.companyId).success || principal.companyId !== deps.companyId || typeof personId !== "string" || !PERSON_ID.test(personId)) return [];
+  const pk = involvedPartition(deps.companyId, personId);
+  const ids: string[] = [];
+  let examined = 0;
+  let cursor: string | undefined;
+  for (let reads = 0; reads < 10 && examined < INVOLVED_EXAMINE_MAX; reads++) {
+    const page = await deps.store.query({ pk, sk: { op: "beginsWith", prefix: ROW_SK_PREFIX }, descending: true, limit: Math.min(PAGE_ROWS_MAX, INVOLVED_EXAMINE_MAX - examined), ...(cursor === undefined ? {} : { cursor }) });
+    for (const item of page.items) {
+      examined += 1;
+      const row = rowOf(item, pk, deps.companyId, personId);
+      if (row !== undefined && !ids.includes(row.taskId)) ids.push(row.taskId);
+    }
+    cursor = page.cursor;
+    if (cursor === undefined) break;
+  }
+  return ids;
 }

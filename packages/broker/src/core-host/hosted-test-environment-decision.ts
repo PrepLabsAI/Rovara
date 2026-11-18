@@ -6,9 +6,9 @@
 // non-member, a revoked member and a person of another company decide nothing. Every role is read LIVE at the act (never from a token or a body).
 //
 // HOW: a fresh step-up, checked by the route on the verified access token and passed in; then a proof of exactly this act from the deployment's approvers point (`TestEnvironmentProofIssuer`), presented
-// to the gate, whose Approvers seam verifies it again. The proof issuer is a SEAM: today the hosted approvers point (core-host/hosted-approvers.ts) accepts task subjects only, and L4-D
-// (pr/l4-setup-approval) is extending it to a project's setup candidate. The test environment subject joins that extension (a proof marked for `test-environment`, verified against the project and the
-// digest) once it lands; until then no issuer is wired, and the decision answers `not_wired` (fixed words): nothing is approved on AWS by any other path.
+// to the gate, whose Approvers seam verifies it again. L4-B3b wires it live: the hosted approvers point (core-host/hosted-approvers.ts) accepts the `test-environment` subject with its own marked
+// proof (`issueTestEnvironmentStepUpApproval`), and test-environment-approval.ts builds the decision over it. The same rule is read again INSIDE the gate's decision (the subject's `approval`),
+// after the proof is verified, so a role lost between the route's check and the act refuses. A host that wires no issuer answers `not_wired` (fixed words): nothing is approved on AWS by any other path.
 //
 // What is bound: the project, the proposal's digest, the revision approving it makes, and the request id the person saw. A proposal that changed, was not proved, or is not the one shown is refused
 // before any proof is issued. Answers are fixed words; nothing from the request is echoed.
@@ -23,13 +23,16 @@ import { liveGrant, liveMemberRole, type DeployedPeople } from "./deployed-decis
 /** The approval kind the test environment subject asks the approvers point about (environment.ts: `kind: "setting"`). */
 export const TEST_ENVIRONMENT_APPROVAL_KIND = "setting";
 
-/** The proof seam: the deployment's approvers point issues a proof of exactly this act (L4-D's extension of hosted-approvers.ts). Throws on an input it cannot bind. */
+/** The proof seam: the deployment's approvers point issues a proof of exactly this act (hosted-approvers.ts `issueTestEnvironmentStepUpApproval`). Throws on an input it cannot bind. */
 export interface TestEnvironmentProofIssuer {
   issue(input: {
     companyId: OrgId; personId: string; stepUp: { at: string; method: string }; requestId: string; kind: typeof TEST_ENVIRONMENT_APPROVAL_KIND;
     project: string; revision: number; artifactDigest: string; outcome: "approve"; card: ApprovalCardRef;
   }): { method: string; token: string };
 }
+
+/** The card a proposal is decided on, at the digest the person saw (the hosted approvers point checks the proof was issued for it). */
+export const testEnvironmentCardOf = (project: string, artifactDigest: string): ApprovalCardRef => ({ cardId: `test-environment:${project}`, contentVersion: artifactDigest });
 
 /** Whether a person with these live roles may approve a proposal of this risk (see the file comment). Pure. */
 export function mayApproveTestEnvironment(input: { companyRole: OrgRole | undefined; projectRole: "developer" | "administrator" | undefined; risk: DecisionRisk }): boolean {
@@ -43,12 +46,15 @@ export type HostedTestEnvironmentDecision =
   | { ok: true; message: string }
   | { ok: false; reason: "not_wired" | "off" | "not_found" | "stale" | "not_allowed" | "refused"; message: string };
 
+/** The words of a refusal for a person who may not approve this proposal (at the check, and inside the decision by the subject's rule). */
+export const TEST_ENVIRONMENT_NOT_ALLOWED = "Only a company admin, or the project's maintainer for a low or medium risk change, can approve this test environment.";
+
 const WORDS = {
   not_wired: "Approving a test environment is not on this install yet.",
   off: "The test environment is switched off on this install.",
   not_found: "That is no longer there.",
   stale: "It changed while you were looking. Open it again.",
-  not_allowed: "Only a company admin, or the project's maintainer for a low or medium risk change, can approve this test environment.",
+  not_allowed: TEST_ENVIRONMENT_NOT_ALLOWED,
   refused: "That could not be approved.",
 } as const;
 const refuse = (reason: Exclude<HostedTestEnvironmentDecision, { ok: true }>["reason"]): HostedTestEnvironmentDecision => ({ ok: false, reason, message: WORDS[reason] });
@@ -64,7 +70,7 @@ export interface HostedTestEnvironmentDecisionOptions {
   /** The decision gate over the registry's approvers point, with the test environment subject among its subjects. */
   gate: () => DecisionGate;
   people: DeployedPeople;
-  /** Absent until the approvers point can prove a test environment act (L4-D): every decision answers `not_wired`. */
+  /** Absent on a host whose approvers point cannot prove a test environment act: every decision answers `not_wired`. */
   proofs?: TestEnvironmentProofIssuer | undefined;
 }
 
@@ -103,7 +109,7 @@ export function createHostedTestEnvironmentDecision(options: HostedTestEnvironme
       try {
         credential = proofs.issue({
           companyId, personId: input.personId, stepUp: input.stepUp, requestId: approval.requestId, kind: TEST_ENVIRONMENT_APPROVAL_KIND, project,
-          revision: approval.revision, artifactDigest: approval.artifactDigest, outcome: "approve", card: { cardId: `test-environment:${project}`, contentVersion: approval.artifactDigest },
+          revision: approval.revision, artifactDigest: approval.artifactDigest, outcome: "approve", card: testEnvironmentCardOf(project, approval.artifactDigest),
         });
       } catch {
         return refuse("refused");
@@ -113,13 +119,15 @@ export function createHostedTestEnvironmentDecision(options: HostedTestEnvironme
         result = await options.gate().decide({
           companyId, kind: TEST_ENVIRONMENT_KIND, subjectId: testEnvironmentSubjectId(project, approval.artifactDigest), requestId: approval.requestId, outcome: "approve",
           seen: { revision: approval.revision, artifactDigest: approval.artifactDigest }, credentials: [credential], details: {},
-          card: { cardId: `test-environment:${project}`, contentVersion: approval.artifactDigest },
+          card: testEnvironmentCardOf(project, approval.artifactDigest),
         });
       } catch {
         return refuse("refused");
       }
       if (result.status === "decided") return { ok: true, message: "Approved. Tasks that start from now on use it." };
       if (result.status === "refused" && (result.reason === "stale" || result.reason === "not_waiting")) return refuse("stale");
+      // The subject's own live rule inside the decision (a role lost since the check above): the same fixed words as the check.
+      if (result.status === "refused" && result.reason === "not_the_approver") return refuse("not_allowed");
       return refuse("refused");
     },
   };

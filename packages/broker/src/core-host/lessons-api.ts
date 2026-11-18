@@ -12,6 +12,7 @@
 //   GET  /v1/dev/projects/{project}/tasks/{taskId}/lessons                                                   the lessons a task was given ("Lessons used")
 //   POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful   {}                       a person on the project marks a lesson the task was given as not helpful (thumbs-down)
 //   GET  /v1/dev/projects/{project}/lessons/mode                                                             the project's learning mode
+//   GET  /v1/dev/projects/{project}/lessons/measure                                                          phase 0 numbers (fit of what loaded and what was left out, clean-merge rate; counts only): a project admin or a company owner or admin
 //   PUT  /v1/dev/projects/{project}/lessons/mode                        { mode: off | suggest | auto }       a project admin (maintainer) or a company owner or admin only
 //   POST /v1/dev/projects/{project}/lessons/mode/trial-offer            { decision: accept | not_now }       the earned-trust offer (`lessons/earned-trust.ts`): who may change the mode answers it
 //   GET  /v1/dev/projects/{project}/skills                                                                   the project's Rovara skills (L4-AK3): the newest version of each, who approved it (a count and whether you did), the long-skill note
@@ -42,6 +43,7 @@ import { writeLearningMode, writeLearningModeFromSuggest } from "../lessons/docu
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { attributionNameOf } from "../lessons/people.js";
 import { DEFAULT_LEARNING_MODE, requireAudit, resolveLearning, type LearningMode } from "../lessons/policy.js";
+import { readLessonMeasure } from "../lessons/measure.js";
 import { readVisible } from "../lessons/read-visible.js";
 import { idIn } from "../lessons/types.js";
 import { countLessonUses } from "../lessons/use-count.js";
@@ -52,7 +54,7 @@ import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure)|\/([^/]+)\/(approve|reject|retire|retire-request|skill))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
@@ -63,6 +65,7 @@ export const NO_SUCH_TASK = "No such task.";
 export const NO_SUCH_LESSON = "That lesson is no longer there.";
 export const MODE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change its learning mode.";
 export const SUMMARY_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can change the weekly summary.";
+export const MEASURE_NEEDS_ADMIN = "Only an admin of this project, or an owner or admin of the company, can see how lessons are loaded.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 const SIGN_IN_AGAIN = "Sign in again.";
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -143,6 +146,8 @@ export interface LessonsApiOptions {
   people: Pick<HostedLessonPeople, "onProjectRoster" | "displayName" | "isErased">;
   /** The person's role on the project now (a project admin is a `maintainer`); undefined: none. */
   projectRole(companyId: OrgId, project: string, personId: string): Promise<ProjectRole | undefined>;
+  /** The task's own project's wiki use report; the caller never chooses the company or project. */
+  wikiTaskUse?(companyId: OrgId, project: string, taskId: string): Promise<{ given: string[]; read: string[] } | undefined>;
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -243,7 +248,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);
     const route = skillsPath ? (rawSkill === undefined ? "skills" : skillAction === undefined ? "skill-edit" : `skill-${skillAction}`)
       : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
     if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -283,7 +288,10 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), unless the task is their own.
       if (!onRoster && (task === undefined || task.developerId !== personId)) throw notFound(NO_SUCH_PROJECT);
       if (task === undefined || task.companyId !== companyId || task.project !== project) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
-      if (route === "task") return { project, taskId, ...(await buildLoadedLessons(deps, who, project, taskId)) };
+      if (route === "task") {
+        const wikiUse = onRoster ? await options.wikiTaskUse?.(companyId, project, taskId) : undefined;
+        return { project, taskId, ...(await buildLoadedLessons(deps, who, project, taskId)), ...(wikiUse === undefined ? {} : { wikiUse }) };
+      }
       // Not helpful: the one-tap thumbs-down of a person on the project, for a lesson this task was given (the library checks it was, and that they can read it). One mark per person per lesson;
       // a lesson live on trial is retired by it, any other lesson gets a "wrong here" mark that asks a person to decide.
       bodyOf(EmptyBody, request.body, "not helpful takes no fields");
@@ -356,6 +364,13 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       if (role === "owner" || role === "admin") return true;
       try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
     };
+
+    if (route === "measure") {
+      // Phase 0 (measure only, `lessons/measure.ts`): numbers about loads and merges, ids never shown. For the people who run the project's learning, never a script token.
+      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+      if (!(await mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
+      try { return await readLessonMeasure(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    }
 
     if (route === "weekly-summary") {
       if (method === "GET") {
