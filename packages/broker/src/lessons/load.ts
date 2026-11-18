@@ -290,7 +290,8 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
     const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / recencyMs);
     // A lesson with evidence rows is weighed by its rows alone; one with none by its own counters inside the window (what it had before the rows began). No signals at all: the counters.
     const rows = signals?.evidence.get(lesson.id);
-    const evidence = rows ?? (lesson.counters.helpful + lesson.counters.harmful === 0 ? NO_EVIDENCE : legacyEvidence(lesson, now, settings.evidenceWindowDays * DAY));
+    // (When the signals read was cut short, a lesson with no row may only have been cut off: no lesson is then weighed by its old counters, so no lesson is judged by a different rule from another.)
+    const evidence = rows ?? (lesson.counters.helpful + lesson.counters.harmful === 0 || signals?.truncated === true ? NO_EVIDENCE : legacyEvidence(lesson, now, settings.evidenceWindowDays * DAY));
     const strength = betaStrength(evidence, signals?.cleanMergeRate, settings);
     const questioned = signals?.underQuestion.has(lesson.id) === true;
     const w = settings.weights;

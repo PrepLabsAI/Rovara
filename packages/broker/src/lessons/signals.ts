@@ -4,6 +4,7 @@
 //
 // Only this company's rows for this project are read (each partition is keyed by company AND project and every row is checked again). Read only. Ids and numbers only.
 import { companyScoped, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { REVERT_WINDOW_MS } from "./counters.js";
 import { readAreaMarks } from "./area-check.js";
 import { readEvidenceTotals } from "./evidence.js";
 import { readUnderQuestion } from "./revert-question.js";
@@ -14,6 +15,8 @@ import type { QuestionInfo, WeeklyExtras } from "./weekly-order.js";
 
 const DAY = 86_400_000;
 const PAGE = 200;
+/** The longest one project's signals read may run before its flight is let go. */
+const FLIGHT_LIMIT_MS = 10_000;
 
 export interface ProjectSignals {
   /** Merged tasks of the clean-merge window that were not reverted, over merged tasks; null while fewer than `CLEAN_MERGE_MIN_TASKS` merged. */
@@ -48,7 +51,8 @@ export async function readCleanMergeRate(store: Pick<DocumentStore, "query">, in
     for (const row of page.items) {
       if (row["pk"] !== pk || row["entityType"] !== "LESSON_MERGE" || row["project"] !== input.project || typeof row["taskId"] !== "string" || typeof row["keepUntil"] !== "number" || row["keepUntil"] <= input.now || typeof row["at"] !== "number") continue;
       if (row["kind"] === "reverted") reverted.add(row["taskId"]);
-      else if (row["kind"] === "merged" && row["at"] >= since) merged.add(row["taskId"]);
+      // A merge younger than the 14-day revert window is not counted yet (it may still be reverted, and counting it clean would lean the prior upward).
+      else if (row["kind"] === "merged" && row["at"] >= since && row["at"] <= input.now - REVERT_WINDOW_MS) merged.add(row["taskId"]);
     }
     cursor = page.cursor;
     if (cursor === undefined) break;
@@ -87,9 +91,12 @@ export function cachedSignalsReader(store: Pick<DocumentStore, "query">, company
     const name = key.project;
     const running = flights.get(name);
     if (running !== undefined) return running;
-    const flight = readProjectSignals(store, { companyId, project: key.project, now: now(), ...(options.settings === undefined ? {} : { settings: options.settings }) })
-      .then((signals) => { cache.set(name, signals); return signals; }, () => undefined)
-      .finally(() => { flights.delete(name); });
+    // The read itself has a limit: a store that never answers does not hold the project's flight for ever.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const limit = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), FLIGHT_LIMIT_MS); timer.unref?.(); });
+    const flight = Promise.race([readProjectSignals(store, { companyId, project: key.project, now: now(), ...(options.settings === undefined ? {} : { settings: options.settings }) })
+      .then((signals) => { cache.set(name, signals); return signals; }, () => undefined), limit])
+      .finally(() => { if (timer !== undefined) clearTimeout(timer); flights.delete(name); });
     flights.set(name, flight);
     return flight;
   };
@@ -98,6 +105,8 @@ export function cachedSignalsReader(store: Pick<DocumentStore, "query">, company
       if (key.workspaceId !== companyId) return undefined;
       const cached = cache.get(key.project);
       if (cached !== undefined && now() - cached.at < ttl) return cached;
+      // A stale answer is served at once while the refresh runs in the background (a load never waits for a refresh it can do without).
+      if (cached !== undefined) { void refresh(key); return cached; }
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         const fresh = await Promise.race([refresh(key), new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), wait); timer.unref?.(); })]);

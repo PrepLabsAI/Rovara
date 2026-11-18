@@ -2,9 +2,10 @@
 // added to it would make a build that has not rolled out yet drop the whole lesson; separate rows are read by this build only, and an older build ignores them).
 //
 // Rows, under the company's own partition AND the project (`companyScoped`), written only for the company the sink was built for and read back only through the same keys:
-//   E#<lesson>#<time>#<id>   one piece of evidence: `for` (a share, 1/k, of one clean merge that settled after the 14-day revert window) or `against` (a person's direct mark, or a correction that came back although the lesson was
+//   E#<lesson>#<id>          one piece of evidence (the sort key has NO time, so the same piece written again, a redelivery of a task's end, is the same row and is written once): `for` (a share, 1/k, of one clean merge that settled after the 14-day revert window) or `against` (a person's direct mark, or a correction that came back although the lesson was
 //                            loaded). Weight 0 to 1. A REVERT is never a row here: it is not evidence against a lesson (it takes the queued mark back and may raise "under question" elsewhere, `revert-question.ts`).
 //   R#<lesson>#<task>        one task's repeat result for the lesson: the task ended with the lesson loaded (`matched`), and whether the correction `back` came although the lesson said it ("the correction stopped coming back").
+//   B#<lesson>               the baseline: the marks a lesson already had in its counters when its first evidence row was written (so the first row does not throw them away); it ages out of the window like any evidence.
 //   F#<lesson>               the fade state of a lesson that was renewed for a quiet window (`expiry.ts`): how many quiet renewals it has used and when a person was asked.
 // A row holds ids, numbers and fixed words only: no title, no words of a lesson or a task, no path, no person. A person erase has nothing to remove; the company purge removes the ORG partition; every row carries its own
 // `keepUntil` (checked by the reader, whether or not the store has swept it) and the store's own time-to-live attribute where it names one.
@@ -20,7 +21,6 @@ const PAGE = 200;
 
 /** The partition of a project's evidence rows. */
 export const evidencePk = (companyId: string, project: string): string => companyScoped(companyId, `LESSON_EVIDENCE#${project}`);
-const timeSk = (at: number): string => String(Math.max(0, Math.floor(at))).padStart(16, "0");
 const short = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 24);
 const weightOf = (weight: number): number => Math.round(Math.min(1, Math.max(0, weight)) * 10_000) / 10_000;
 
@@ -32,7 +32,10 @@ export interface FadeState { renewals: number; askedAt?: number | undefined; at:
 export interface EvidenceSink {
   note(input: EvidenceNote): Promise<boolean>;
   repeat(input: RepeatNote): Promise<boolean>;
-  readFade(key: { workspaceId: string; project: string }, lessonId: string): Promise<FadeState | undefined>;
+  /** The marks the lesson's counters held before its first evidence row; written once (the first writer decides), a no-op after. */
+  baseline(input: { workspaceId: string; project: string; lessonId: string; forW: number; againstW: number; at: number }): Promise<boolean>;
+  /** The fade state, undefined when there is none, and "unreadable" when the store could not be read (the sweep then decides nothing). */
+  readFade(key: { workspaceId: string; project: string }, lessonId: string): Promise<FadeState | undefined | "unreadable">;
   writeFade(key: { workspaceId: string; project: string }, lessonId: string, state: { renewals: number; askedAt?: number | undefined }, now: number): Promise<boolean>;
 }
 
@@ -46,11 +49,26 @@ export function documentEvidenceSink(store: Store, companyId: OrgId): EvidenceSi
     async note(input) {
       if (!mine(input) || !Number.isFinite(input.weight) || input.weight <= 0 || input.id.length === 0) return false;
       try {
+        // The key holds no time: the same piece (kind and id) is one row, however often and whenever it is delivered; the first delivery decides its time.
         await store.put({
           item: {
-            pk: evidencePk(companyId, input.project), sk: `E#${input.lessonId}#${timeSk(input.at)}#${short(`${input.kind}\u0000${input.id}`)}`, entityType: "LESSON_EVIDENCE", kind: input.kind, project: input.project, lessonId: input.lessonId,
+            pk: evidencePk(companyId, input.project), sk: `E#${input.lessonId}#${short(`${input.kind}\u0000${input.id}`)}`, entityType: "LESSON_EVIDENCE", kind: input.kind, project: input.project, lessonId: input.lessonId,
             w: weightOf(input.weight), at: input.at, keepUntil: input.at + EVIDENCE_KEEP_DAYS * DAY, ...ttl(input.at, EVIDENCE_KEEP_DAYS),
           },
+          condition: when.absent(),
+        });
+        return true;
+      } catch { return false; }
+    },
+    async baseline(input) {
+      if (!mine(input) || !Number.isFinite(input.forW) || !Number.isFinite(input.againstW) || (input.forW <= 0 && input.againstW <= 0)) return false;
+      try {
+        await store.put({
+          item: {
+            pk: evidencePk(companyId, input.project), sk: `B#${input.lessonId}`, entityType: "LESSON_EVIDENCE", kind: "baseline", project: input.project, lessonId: input.lessonId,
+            forW: Math.min(10_000, Math.max(0, Math.floor(input.forW))), againstW: Math.min(10_000, Math.max(0, Math.floor(input.againstW))), at: input.at, keepUntil: input.at + EVIDENCE_KEEP_DAYS * DAY, ...ttl(input.at, EVIDENCE_KEEP_DAYS),
+          },
+          condition: when.absent(),
         });
         return true;
       } catch { return false; }
@@ -73,9 +91,10 @@ export function documentEvidenceSink(store: Store, companyId: OrgId): EvidenceSi
       if (key.workspaceId !== companyId || !NAME.test(key.project) || !ID.test(lessonId)) return undefined;
       try {
         const row = await store.get({ pk: evidencePk(companyId, key.project), sk: `F#${lessonId}` });
-        if (row === undefined || row["entityType"] !== "LESSON_FADE" || row["lessonId"] !== lessonId || typeof row["renewals"] !== "number" || typeof row["at"] !== "number") return undefined;
+        if (row === undefined) return undefined;
+        if (row["entityType"] !== "LESSON_FADE" || row["lessonId"] !== lessonId || typeof row["renewals"] !== "number" || typeof row["at"] !== "number") return "unreadable";
         return { renewals: row["renewals"], at: row["at"], ...(typeof row["askedAt"] === "number" ? { askedAt: row["askedAt"] } : {}) };
-      } catch { return undefined; }
+      } catch { return "unreadable"; }
     },
     async writeFade(key, lessonId, state, now) {
       if (key.workspaceId !== companyId || !NAME.test(key.project) || !ID.test(lessonId) || !Number.isInteger(state.renewals) || state.renewals < 0) return false;
@@ -111,37 +130,46 @@ export async function readEvidenceTotals(store: Pick<DocumentStore, "query">, in
   const pk = evidencePk(input.companyId, input.project);
   const rowsMax = input.rowsMax ?? SIGNALS_ROWS_MAX;
   const since = input.now - input.windowMs;
-  let read = 0;
-  for (let cursor: string | undefined; ;) {
-    const take = Math.min(PAGE, rowsMax - read);
-    if (take <= 0) { out.truncated = true; break; }
-    const page = await store.query({ pk, limit: take, ...(cursor === undefined ? {} : { cursor }) });
-    read += page.items.length === 0 ? 1 : page.items.length;
-    for (const row of page.items) {
-      if (row["pk"] !== pk || row["project"] !== input.project || typeof row["lessonId"] !== "string" || !ID.test(row["lessonId"]) || typeof row["keepUntil"] !== "number" || row["keepUntil"] <= input.now) continue;
-      const lessonId = row["lessonId"];
-      const at = row["at"];
-      if (typeof at !== "number" || !Number.isFinite(at)) continue;
-      if (row["entityType"] === "LESSON_FADE") {
-        if (typeof row["askedAt"] === "number") out.asked.set(lessonId, row["askedAt"]);
-        continue;
+  const add = (lessonId: string, kind: "for" | "against", w: number): void => {
+    const entry = out.evidence.get(lessonId) ?? { forW: 0, againstW: 0 };
+    if (kind === "for") entry.forW += w; else entry.againstW += w;
+    out.evidence.set(lessonId, entry);
+  };
+  // Each kind of row is read under its own prefix and its own row budget, so a project with many pieces of evidence still shows every lesson's repeat counts and every question that waits.
+  for (const prefix of ["E#", "B#", "R#", "F#"] as const) {
+    let read = 0;
+    for (let cursor: string | undefined; ;) {
+      const take = Math.min(PAGE, rowsMax - read);
+      if (take <= 0) { out.truncated = true; break; }
+      const page = await store.query({ pk, sk: { op: "beginsWith", prefix }, limit: take, ...(cursor === undefined ? {} : { cursor }) });
+      read += Math.max(1, page.items.length);
+      for (const row of page.items) {
+        if (row["pk"] !== pk || row["project"] !== input.project || typeof row["lessonId"] !== "string" || !ID.test(row["lessonId"]) || typeof row["keepUntil"] !== "number" || row["keepUntil"] <= input.now) continue;
+        const lessonId = row["lessonId"];
+        const at = row["at"];
+        if (typeof at !== "number" || !Number.isFinite(at)) continue;
+        if (row["entityType"] === "LESSON_FADE") {
+          if (prefix === "F#" && typeof row["askedAt"] === "number") out.asked.set(lessonId, row["askedAt"]);
+          continue;
+        }
+        if (row["entityType"] !== "LESSON_EVIDENCE" || at < since) continue;
+        if (prefix === "E#" && (row["kind"] === "for" || row["kind"] === "against")) {
+          const w = row["w"];
+          if (typeof w === "number" && Number.isFinite(w) && w > 0 && w <= 1) add(lessonId, row["kind"], w);
+        } else if (prefix === "B#" && row["kind"] === "baseline") {
+          const forW = row["forW"], againstW = row["againstW"];
+          if (typeof forW === "number" && Number.isFinite(forW) && forW >= 0) add(lessonId, "for", Math.min(forW, 10_000));
+          if (typeof againstW === "number" && Number.isFinite(againstW) && againstW >= 0) add(lessonId, "against", Math.min(againstW, 10_000));
+        } else if (prefix === "R#" && row["kind"] === "repeat" && typeof row["taskId"] === "string" && row["matched"] === true && typeof row["back"] === "boolean") {
+          const entry = out.repeats.get(lessonId) ?? { matched: 0, back: 0 };
+          entry.matched += 1;
+          if (row["back"]) entry.back += 1;
+          out.repeats.set(lessonId, entry);
+        }
       }
-      if (row["entityType"] !== "LESSON_EVIDENCE" || at < since) continue;
-      if (row["kind"] === "for" || row["kind"] === "against") {
-        const w = row["w"];
-        if (typeof w !== "number" || !Number.isFinite(w) || w <= 0 || w > 1) continue;
-        const entry = out.evidence.get(lessonId) ?? { forW: 0, againstW: 0 };
-        if (row["kind"] === "for") entry.forW += w; else entry.againstW += w;
-        out.evidence.set(lessonId, entry);
-      } else if (row["kind"] === "repeat" && typeof row["taskId"] === "string" && row["matched"] === true && typeof row["back"] === "boolean") {
-        const entry = out.repeats.get(lessonId) ?? { matched: 0, back: 0 };
-        entry.matched += 1;
-        if (row["back"]) entry.back += 1;
-        out.repeats.set(lessonId, entry);
-      }
+      cursor = page.cursor;
+      if (cursor === undefined) break;
     }
-    cursor = page.cursor;
-    if (cursor === undefined) break;
   }
   return out;
 }

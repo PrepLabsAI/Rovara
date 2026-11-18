@@ -134,11 +134,11 @@ describe("isolation, bounds and the code-host ports", () => {
     expect(await p.files(KEY, "api")).toEqual(["src/a.ts"]);
     expect(calls).toEqual(["head", "tree:true"]);
     expect(await p.files(KEY, "web")).toBeUndefined();
-    const cut = codeHostAreaPorts({ projects, companyId: A, hostOf: () => ({ ...host, repositoryTree: async () => ({ complete: false, entries: [] }) }) as never });
+    const cut = codeHostAreaPorts({ projects, companyId: A, hostOf: () => ({ ...host, repositoryTree: async () => ({ complete: false, entries: [] }) }) });
     expect(await cut.files(KEY, "api")).toBeUndefined();
     const none = codeHostAreaPorts({ projects, companyId: A, hostOf: () => undefined });
     expect(await none.files(KEY, "api")).toBeUndefined();
-    const bad = codeHostAreaPorts({ projects, companyId: A, hostOf: () => ({ baseBranchHead: async () => "not a commit", repositoryTree: async () => ({ complete: true, entries: [] }) }) as never });
+    const bad = codeHostAreaPorts({ projects, companyId: A, hostOf: () => ({ baseBranchHead: async () => "not a commit", repositoryTree: async () => ({ complete: true, entries: [] }) }) });
     expect(await bad.files(KEY, "api")).toBeUndefined();
   });
 });

@@ -75,22 +75,24 @@ async function fadeVerdict(deps: LessonDeps, store: LessonStore, key: ScopeKey, 
   if (chances === undefined) return "unknown";
   // It was given to tasks and never helped (a help would have renewed it): it fades.
   if (chances > 0 || hasStaleCitation(lesson)) return "fade";
-  const state = await ports.evidence.readFade(key, lesson.id);
+  const read = await ports.evidence.readFade(key, lesson.id);
+  // A fade state that cannot be read is not "none" (that would renew a lesson again and again): nothing is decided tonight.
+  if (read === "unreadable") return "unknown";
+  const state = read;
   const renewals = state?.renewals ?? 0;
   if (renewals < FADE_QUIET_RENEWALS) {
+    // The state is written FIRST: a renewal that could not be recorded is not made (it would be made again at every window).
+    if (!(await ports.evidence.writeFade(key, lesson.id, { renewals: renewals + 1 }, now))) return "unknown";
     const renewed = await store.mutate(key, lesson.id, (l) => (l.status === "active" ? { expiresAt: Math.max(l.expiresAt, now + window) } : undefined));
-    if (renewed === undefined) return "unknown";
-    await ports.evidence.writeFade(key, lesson.id, { renewals: renewals + 1 }, now);
-    return "renewed";
+    return renewed === undefined ? "unknown" : "renewed";
   }
   // The second quiet window: a person is asked. Asked already and the grace passed with no answer: it fades.
   const grace = FADE_ASK_GRACE_DAYS * 86_400_000;
   if (state?.askedAt !== undefined && now - state.askedAt >= grace) return "fade";
   const askedAt = state?.askedAt ?? now;
+  if (state?.askedAt === undefined && !(await ports.evidence.writeFade(key, lesson.id, { renewals, askedAt }, now))) return "unknown";
   const held = await store.mutate(key, lesson.id, (l) => (l.status === "active" ? { expiresAt: Math.max(l.expiresAt, askedAt + grace) } : undefined));
-  if (held === undefined) return "unknown";
-  if (state?.askedAt === undefined) await ports.evidence.writeFade(key, lesson.id, { renewals, askedAt }, now);
-  return "asked";
+  return held === undefined ? "unknown" : "asked";
 }
 
 /** The lessons read at a time by the sweep. */

@@ -8,9 +8,10 @@ import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-d
 import { Clock, NO_FIT_FLOOR, PROJECT, WS } from "./lesson-helpers.js";
 import { A, B, DAY, fitting, ids, request, unrelated, world } from "./phase12-helpers.js";
 
+// (Merges are 20 days old: inside the 30-day window and past the 14-day revert window, so they count.)
 const mergeRows = async (docs: MemoryDocumentStore, company: string, project: string, now: number, merged: number, reverted: number) => {
   for (let i = 0; i < merged; i += 1) {
-    await docs.put({ item: { pk: mergePk(company, project), sk: `M#task-${i}`, entityType: "LESSON_MERGE", kind: "merged", project, taskId: `task-${i}`, at: now - DAY, keepUntil: now + 30 * DAY } });
+    await docs.put({ item: { pk: mergePk(company, project), sk: `M#task-${i}`, entityType: "LESSON_MERGE", kind: "merged", project, taskId: `task-${i}`, at: now - 20 * DAY, keepUntil: now + 30 * DAY } });
     if (i < reverted) await docs.put({ item: { pk: mergePk(company, project), sk: `R#task-${i}`, entityType: "LESSON_MERGE", kind: "reverted", project, taskId: `task-${i}`, at: now, keepUntil: now + 30 * DAY } });
   }
 };
@@ -24,6 +25,15 @@ describe("the clean-merge rate", () => {
     const few = new MemoryDocumentStore();
     await mergeRows(few, WS, PROJECT, clock.now(), CLEAN_MERGE_MIN_TASKS - 1, 0);
     expect(await readCleanMergeRate(few, { companyId: A, project: PROJECT, now: clock.now() })).toBeNull();
+  });
+
+  it("a merge younger than the 14-day revert window is not counted yet (it may still be reverted)", async () => {
+    const clock = new Clock();
+    const docs = new MemoryDocumentStore();
+    for (let i = 0; i < 6; i += 1) await docs.put({ item: { pk: mergePk(WS, PROJECT), sk: `M#task-${i}`, entityType: "LESSON_MERGE", kind: "merged", project: PROJECT, taskId: `task-${i}`, at: clock.now() - (i < 5 ? 20 * DAY : 2 * DAY), keepUntil: clock.now() + 30 * DAY } });
+    await docs.put({ item: { pk: mergePk(WS, PROJECT), sk: "R#task-0", entityType: "LESSON_MERGE", kind: "reverted", project: PROJECT, taskId: "task-0", at: clock.now(), keepUntil: clock.now() + 30 * DAY } });
+    // Five merges are old enough (one of them reverted); the sixth is two days old and is left out.
+    expect(await readCleanMergeRate(docs, { companyId: A, project: PROJECT, now: clock.now() })).toBeCloseTo(0.8, 10);
   });
 
   it("two companies and two projects: each rate is counted from its own rows only", async () => {
@@ -54,6 +64,27 @@ describe("the cached signals reader", () => {
     clock.advance(1001);
     await reader.read(key);
     expect(queries).toBeGreaterThan(first);
+  });
+
+  it("a stale answer is served at once while the refresh runs behind it (a load never waits for a refresh it can do without)", async () => {
+    const clock = new Clock();
+    const docs = new MemoryDocumentStore();
+    await mergeRows(docs, WS, PROJECT, clock.now(), 10, 0);
+    let gate: (() => void) | undefined;
+    const held = new Promise<void>((resolve) => { gate = resolve; });
+    let hold = false;
+    const gated = { query: async (r: Parameters<MemoryDocumentStore["query"]>[0]) => { if (hold) await held; return docs.query(r); } };
+    const reader = cachedSignalsReader(gated, A, clock.now, { ttlMs: 1000, waitMs: 5000 });
+    const key = { workspaceId: WS, project: PROJECT };
+    const first = await reader.read(key);
+    expect(first!.cleanMergeRate).toBe(1);
+    clock.advance(2000);
+    hold = true;
+    const started = Date.now();
+    const stale = await reader.read(key);
+    expect(stale).toBe(first);
+    expect(Date.now() - started).toBeLessThan(500);
+    gate!();
   });
 
   it("never throws and never waits past its limit: a store fault is no signals; a slow store gives the last answer (or none) while the read goes on", async () => {

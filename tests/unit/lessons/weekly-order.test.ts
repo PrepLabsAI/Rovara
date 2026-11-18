@@ -6,7 +6,8 @@ import { areaLabelOf, bandOf, orderWeekly, sourceKeptRates, sourceOf, wouldHaveA
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { LessonsDigestSchema } from "@agentx/contracts";
-import { buildLessonsDigest } from "../../../packages/broker/src/lessons/view.js";
+import { buildLessonsDigest, type LessonViewDeps } from "../../../packages/broker/src/lessons/view.js";
+import { A } from "./phase12-helpers.js";
 import { Clock, KEY, allowAllAccess, directory, draft, lessonRecord, seed, settings } from "./lesson-helpers.js";
 
 const NOW = 1_800_000_000_000;
@@ -126,6 +127,8 @@ describe("spread, noisy sources and the reason line", () => {
     expect(areaLabelOf({ repos: ["api"], paths: ["src/billing/**"] })).toBe("api:src/billing");
     expect(areaLabelOf({ paths: ["**/*.test.ts"] })).toBe("whole project");
     expect(areaLabelOf({})).toBe("whole project");
+    // Inside the contract's 200 characters, however long the names are.
+    expect(areaLabelOf({ repos: ["r".repeat(200)], paths: [`${"a".repeat(200)}/${"b".repeat(200)}/**`] }).length).toBeLessThanOrEqual(200);
   });
 
   it("at most 2 per source: three suggestions from one person leave one out", () => {
@@ -192,7 +195,7 @@ describe("the digest carries the weekly list, only for lessons the viewer may re
     const store = new InMemoryLessonStore();
     const clock = new Clock(NOW);
     await seed(store, pending("les_vis00001"), pending("les_hid00001", { provenance: prov({ audience: { kind: "restricted", acl: { source: "slack", scope: "slack:T/C9", principals: ["U-member"], capturedAt: "x", liveCheck: "none" } }, memberSignal: true }) }));
-    const digest = await buildWeeklyDigest(store, KEY, clock.now(), { principals: ["U-stranger"], groups: [] }, { ...allowAllAccess, mayRead: async (_org, viewer, places) => places.map((place) => viewer.principals.includes("U-member") || !place.includes("C9")) } as never);
+    const digest = await buildWeeklyDigest(store, KEY, clock.now(), { principals: ["U-stranger"], groups: [] }, { ...allowAllAccess, mayRead: async (_org, viewer, places) => places.map(() => viewer?.principals.includes("U-member") === true) });
     expect(digest.weekly.picks.map((r) => r.id)).toEqual(["les_vis00001"]);
     expect(digest.top.length).toBeGreaterThan(0);
   });
@@ -205,17 +208,17 @@ describe("the weekly list on the API", () => {
     await seed(store, pending("les_sug00001"), lessonRecord({ id: "les_rev00001", status: "active", scope: { paths: ["src/a/**"] } }));
     const dir = directory({ eligibleIds: ["owner"], ownerIds: ["owner"] });
     dir.identity = async (_ws: string, developerId: string) => ({ principals: [], groups: [], developerId });
-    const deps = {
+    const deps: LessonViewDeps = {
       store, directory: dir, settings: settings(), access: allowAllAccess, now: clock.now, names: { isErased: async () => false, memberName: async (_o: string, id: string) => id },
       weeklyExtras: async () => ({ underQuestion: new Map([["les_rev00001", { revertTasks: 1, areaGone: false, areaRewritten: false }]]), repeats: new Map([["les_rev00001", { matched: 4, back: 0 }]]) }),
     };
-    const answer = await buildLessonsDigest(deps as never, { orgId: KEY.workspaceId as never, developerId: "owner" }, KEY.project);
+    const answer = await buildLessonsDigest(deps, { orgId: A, developerId: "owner" }, KEY.project);
     expect(LessonsDigestSchema.safeParse(answer).success).toBe(true);
     expect(answer.weekly.needLook.map((r) => [r.id, r.cause, r.repeat])).toEqual([["les_rev00001", "revert_overlap", { matched: 4, back: 0 }]]);
     expect(answer.weekly.picks.map((r) => r.id)).toEqual(["les_sug00001"]);
     expect(Object.keys(answer.weekly.picks[0]!).sort()).toEqual(["area", "band", "id", "reason", "title", "type"]);
     // A failing extras reader is no extras: the list is still built.
-    const broken = await buildLessonsDigest({ ...deps, weeklyExtras: async () => { throw new Error("x"); } } as never, { orgId: KEY.workspaceId as never, developerId: "owner" }, KEY.project);
+    const broken = await buildLessonsDigest({ ...deps, weeklyExtras: async () => { throw new Error("x"); } }, { orgId: A, developerId: "owner" }, KEY.project);
     expect(broken.weekly.needLook).toEqual([]);
     expect(broken.weekly.picks).toHaveLength(1);
   });

@@ -116,7 +116,7 @@ describe("what the loader does with the strength", () => {
       const w = await world();
       await w.add(fitting("les_a0000001", same));
       for (let i = 0; i < 10; i += 1) {
-        await w.documents.put({ item: { pk: mergePk(WS, PROJECT), sk: `M#task-${i}`, entityType: "LESSON_MERGE", kind: "merged", project: PROJECT, taskId: `task-${i}`, at: w.clock.now() - DAY, keepUntil: w.clock.now() + 30 * DAY } });
+        await w.documents.put({ item: { pk: mergePk(WS, PROJECT), sk: `M#task-${i}`, entityType: "LESSON_MERGE", kind: "merged", project: PROJECT, taskId: `task-${i}`, at: w.clock.now() - 20 * DAY, keepUntil: w.clock.now() + 30 * DAY } });
         if (i < reverted) await w.documents.put({ item: { pk: mergePk(WS, PROJECT), sk: `R#task-${i}`, entityType: "LESSON_MERGE", kind: "reverted", project: PROJECT, taskId: `task-${i}`, at: w.clock.now(), keepUntil: w.clock.now() + 30 * DAY } });
       }
       scores.push((await w.load({}, { ranking: NO_FIT_FLOOR })).manifest.lessons[0]!.score);

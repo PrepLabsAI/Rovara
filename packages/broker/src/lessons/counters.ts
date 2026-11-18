@@ -108,7 +108,8 @@ export async function reverseHarm(deps: LessonDeps & { store: LessonStore }, key
 async function addHarmful(deps: CounterDeps, key: ScopeKey, lessonId: string, forceProposal: boolean, evidenceId: string): Promise<void> {
   const updated = await deps.store.mutate(key, lessonId, (l) => ({ counters: { ...l.counters, harmful: l.counters.harmful + 1 } }));
   if (updated === undefined) return;
-  // A person's direct mark is a whole "against" in the lesson's strength (never a revert: a revert is not evidence against a lesson).
+  // A person's direct mark is a whole "against" in the lesson's strength (never a revert: a revert is not evidence against a lesson). The marks it already had are kept as the lesson's baseline first.
+  await deps.evidence?.baseline({ workspaceId: key.workspaceId, project: key.project, lessonId, forW: updated.counters.helpful, againstW: updated.counters.harmful - 1, at: deps.now() });
   await deps.evidence?.note({ workspaceId: key.workspaceId, project: key.project, lessonId, kind: "against", weight: 1, at: deps.now(), id: evidenceId });
   const failing = meetsRetireRule(updated);
   // A lesson live with no person behind it (tier 0, or on trial / stable) retires itself when its marks turn against it; the others go to a person.
@@ -129,11 +130,13 @@ async function addHelpful(deps: CounterDeps, key: ScopeKey, lessonId: string, ex
   const now = deps.now();
   const updated = await deps.store.mutate(key, lessonId, (l) => ({ counters: { ...l.counters, helpful: l.counters.helpful + 1 }, lastHelpfulAt: now }));
   if (updated === undefined) return;
+  // The marks the lesson already had stand as its baseline (written once), so its first piece of evidence does not throw them away.
+  await deps.evidence?.baseline({ workspaceId: key.workspaceId, project: key.project, lessonId, forW: updated.counters.helpful - 1, againstW: updated.counters.harmful, at: now });
   await deps.evidence?.note({ workspaceId: key.workspaceId, project: key.project, lessonId, kind: "for", weight, at: now, id: evidenceId });
   await renewLesson(deps.store, key, lessonId, now, expiryDays, "helpful");
   // A lesson that helped is not quiet any more: its fade state starts again (the quiet renewal is once per quiet stretch). Only written when there is a state to clear.
   const fade = await deps.evidence?.readFade(key, lessonId);
-  if (fade !== undefined && (fade.renewals > 0 || fade.askedAt !== undefined)) await deps.evidence?.writeFade(key, lessonId, { renewals: 0 }, now);
+  if (fade !== undefined && fade !== "unreadable" && (fade.renewals > 0 || fade.askedAt !== undefined)) await deps.evidence?.writeFade(key, lessonId, { renewals: 0 }, now);
 }
 
 /**
@@ -179,8 +182,11 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
   let shares = new Map<string, number>();
   if (outcome.outcome === "merged" && outcome.sendBacks <= 1) {
     let reports: readonly UseReport[] | undefined;
-    try { reports = await deps.useReports?.(key, outcome.taskId); } catch { reports = undefined; }
-    shares = lessonCreditShares({ lessons: new Map(lessons.map((l) => [l.id, l] as const)), loaded, reports, touched: outcome.touchedPaths });
+    // A use report that cannot be read is NOT "no report" (that would send the credit down the weaker road): nothing is counted now and a later delivery counts the task (`deferred`).
+    try { reports = await deps.useReports?.(key, outcome.taskId); } catch { result.deferred = true; return result; }
+    // With no report the credit is shared among the lessons of the Build and Fix steps (the steps whose change was merged); with reports the reports name them.
+    const buildLoaded = reachedLessonIds((await deps.store.manifests(key, outcome.taskId)).filter((m) => m.stage === "IMPLEMENT" && m.memory === "live"));
+    shares = lessonCreditShares({ lessons: new Map(lessons.map((l) => [l.id, l] as const)), loaded: reports !== undefined && reports.length > 0 ? loaded : buildLoaded, reports, touched: outcome.touchedPaths });
   }
   let judgeCalls = 0;
   for (const lesson of lessons) {

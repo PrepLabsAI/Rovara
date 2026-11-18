@@ -40,7 +40,7 @@ export const CLEAN_MERGE_MIN_TASKS = 5;
 /** How long a project's signals (its clean-merge rate, its lessons' evidence totals, its lessons under question) are reused by the loader before they are read again. A load never waits for them past `SIGNALS_WAIT_MS`: it uses the last answer or the defaults. */
 export const SIGNALS_TTL_MS = 5 * 60_000;
 export const SIGNALS_WAIT_MS = 600;
-/** Most evidence rows one signals read looks at (newest first); a project with more is read from its newest rows (`truncated`). */
+/** Most rows of each kind (pieces of evidence, baselines, repeat results, fade states) one signals read looks at; a project with more is read in key order and `truncated` says so (the loader then weighs no lesson by its old counters: no lesson is judged by a different rule from another). */
 export const SIGNALS_ROWS_MAX = 4_000;
 
 /** A lesson under question (a revert overlapped its area, its area is gone or rewritten) still loads, ranked lower by this much of its score, until a person settles it. */

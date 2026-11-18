@@ -67,9 +67,10 @@ export function areaLabelOf(scope: Lesson["scope"]): string {
       if (folders.length === 2) break;
     }
     // A pattern that starts with a wildcard (`**/*.test.ts`) is about the whole repository, not a folder.
-    if (folders.length > 0) return `${(scope.repos ?? [])[0] === undefined ? "" : `${scope.repos![0]}:`}${folders.join("/")}`;
+    // (Kept inside the contract's 200 characters.)
+    if (folders.length > 0) return `${(scope.repos ?? [])[0] === undefined ? "" : `${scope.repos![0]}:`}${folders.join("/")}`.slice(0, 200);
   }
-  return (scope.repos ?? [])[0] ?? "whole project";
+  return ((scope.repos ?? [])[0] ?? "whole project").slice(0, 200);
 }
 
 /** A lesson's own source: the first source its evidence names (a person, CI, a channel), the way spike detection names it. A lesson with none is its own source ("unknown"), so it never fills a source's places for others. */

@@ -22,14 +22,15 @@ export async function recordKnowledgeUseReport(input: {
   if (delivery === undefined) return undefined;
   const checked = validateKnowledgeUseReport(input.report, delivery);
   if (checked === undefined) return undefined;
-  await input.store.put({
-    item: {
-      pk: companyScoped(input.companyId, "KNOWLEDGE_USE"), sk: input.operationId, entityType: "KNOWLEDGE_USE", taskId: delivery.taskId, project: delivery.project, stage: checked.stage,
-      reported: checked.reported,
-      units: checked.units.map((unit) => ({ id: unit.id, kind: unit.kind, given: unit.given, areaTouched: unit.areaTouched, ...(unit.version === undefined ? {} : { version: unit.version }), ...(unit.used === undefined ? {} : { used: unit.used }), ...(unit.wrong === undefined ? {} : { wrong: true }) })),
-      at: input.now(), ...input.ttl(input.ttlSeconds),
-    },
-  });
+  const row = {
+    taskId: delivery.taskId, project: delivery.project, stage: checked.stage,
+    reported: checked.reported,
+    units: checked.units.map((unit) => ({ id: unit.id, kind: unit.kind, given: unit.given, areaTouched: unit.areaTouched, ...(unit.version === undefined ? {} : { version: unit.version }), ...(unit.used === undefined ? {} : { used: unit.used }), ...(unit.wrong === undefined ? {} : { wrong: true }) })),
+    at: input.now(), ...input.ttl(input.ttlSeconds),
+  };
+  await input.store.put({ item: { pk: companyScoped(input.companyId, "KNOWLEDGE_USE"), sk: input.operationId, entityType: "KNOWLEDGE_USE", ...row } });
+  // The same row under the TASK's own partition (lessons phase 2: the clean-merge credit reads a task's reports exactly, not by scanning the company's operations). Best effort: a failure leaves the first row, and the credit then waits for a retry.
+  try { await input.store.put({ item: { pk: companyScoped(input.companyId, `KNOWLEDGE_USE_TASK#${delivery.project}#${delivery.taskId}`), sk: input.operationId, entityType: "KNOWLEDGE_USE", ...row } }); } catch { /* the operation's own row is kept */ }
   return checked;
 }
 

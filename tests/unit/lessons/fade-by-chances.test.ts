@@ -8,7 +8,7 @@ import { readEvidenceTotals } from "../../../packages/broker/src/lessons/evidenc
 import { orderWeekly } from "../../../packages/broker/src/lessons/weekly-order.js";
 import { readProjectSignals } from "../../../packages/broker/src/lessons/signals.js";
 import { KEY, PROJECT, WS, lessonRecord } from "./lesson-helpers.js";
-import { A, DAY, world } from "./phase12-helpers.js";
+import { A, B, DAY, world } from "./phase12-helpers.js";
 
 const WINDOW = expiryWindowMs("fact", undefined);
 
@@ -121,12 +121,36 @@ describe("fade by chances", () => {
   });
 });
 
+describe("a fade state that cannot be read or written decides nothing", () => {
+  it("an unreadable state is not 'none': the lesson is not renewed again and again; it is left for tomorrow", async () => {
+    const { w, fade, sweep } = await due({ chances: 0 });
+    const unreadable: FadePorts = { ...fade, evidence: { readFade: async () => "unreadable", writeFade: (k, id, state, at) => w.evidence.writeFade(k, id, state, at) } };
+    const before = (await w.store.get(KEY, "les_aaaa1111"))!.expiresAt;
+    for (let i = 0; i < 3; i += 1) expect((await sweepExpired({ ...w.counters, vectors: undefined } as never, w.store, KEY, { fade: unreadable })).expired).toEqual([]);
+    expect((await w.store.get(KEY, "les_aaaa1111"))!.expiresAt).toBe(before);
+    expect(await fadeRow(w)).toBeUndefined();
+    void sweep;
+  });
+
+  it("a state that cannot be written is not renewed on (a renewal that is not recorded would be made again at every window)", async () => {
+    const { w, fade } = await due({ chances: 0 });
+    const noWrite: FadePorts = { ...fade, evidence: { readFade: (k, id) => w.evidence.readFade(k, id), writeFade: async () => false } };
+    const before = (await w.store.get(KEY, "les_aaaa1111"))!.expiresAt;
+    expect((await sweepExpired({ ...w.counters, vectors: undefined } as never, w.store, KEY, { fade: noWrite })).expired).toEqual([]);
+    expect((await w.store.get(KEY, "les_aaaa1111"))!.expiresAt).toBe(before);
+    // The same for the question: not asked, so the lesson is not held open on an unrecorded question.
+    await w.evidence.writeFade(KEY, "les_aaaa1111", { renewals: 1 }, w.clock.now());
+    expect((await sweepExpired({ ...w.counters, vectors: undefined } as never, w.store, KEY, { fade: noWrite })).expired).toEqual([]);
+    expect((await w.store.get(KEY, "les_aaaa1111"))!.expiresAt).toBe(before);
+  });
+});
+
 describe("isolation of the fade state", () => {
   it("the fade row of one project or company is never read for another", async () => {
     const w = await world();
     await w.evidence.writeFade(KEY, "les_aaaa1111", { renewals: 1, askedAt: 5 }, w.clock.now());
     expect(await w.evidence.readFade({ workspaceId: WS, project: "proj-2" }, "les_aaaa1111")).toBeUndefined();
     expect(await w.evidence.readFade({ workspaceId: "org_bbbbbbbbbbbbbbbbbbbb", project: PROJECT }, "les_aaaa1111")).toBeUndefined();
-    expect((await readEvidenceTotals(w.documents, { companyId: "org_bbbbbbbbbbbbbbbbbbbb" as never, project: PROJECT, now: w.clock.now(), windowMs: 180 * DAY })).asked.size).toBe(0);
+    expect((await readEvidenceTotals(w.documents, { companyId: B, project: PROJECT, now: w.clock.now(), windowMs: 180 * DAY })).asked.size).toBe(0);
   });
 });
