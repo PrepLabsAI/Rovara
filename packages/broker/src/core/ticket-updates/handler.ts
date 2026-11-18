@@ -58,11 +58,13 @@ export interface TicketUpdatesDependencies {
 type Item = Record<string, unknown>;
 
 /** The words of one update: the moment, the title, the status it moved to, the pull request's link. Nothing else. */
-export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined }): string {
+export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined; verdict?: string | undefined }): string {
   const links = (input.pullRequests ?? []).flatMap((link) => plainHttpsLink(link) ?? []).slice(0, 5);
   return [
     `${TICKET_MOMENT_WORDS[input.moment]}: "${inertTicketTitle(input.title)}".`,
     ...(input.status === undefined ? [] : [`Status: ${inertTicketTitle(input.status)}.`]),
+    // L4-PRP: the pull request's verdict, the same words as its description (fixed words and counts), only for a pull request that is ready.
+    ...(input.moment !== "pr_opened" || input.verdict === undefined ? [] : [`Result: ${Array.from(input.verdict.replace(/[\p{Cc}\p{Cf}<>@[\]`*_~#|!]/gu, " ").replace(/\s+/gu, " ").trim()).slice(0, 200).join("")}.`]),
     ...links.map((link) => `Pull request: ${link}`),
   ].join("\n");
 }
@@ -154,7 +156,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     if (settings.comments) {
       if (tracker.comment === undefined) posted = "not_connected";
       else {
-        const text = ticketUpdateText({ moment, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }) });
+        const text = ticketUpdateText({ moment, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }), ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }) });
         // The comment's key is the claim's: the same update again is the same comment, never a second one. A task only its owner can see is written as an internal comment.
         posted = await tracker.comment(ref, text, deps.scope, { key: `ticket_update:${milestone.taskId}:${key}`, requirePrivate: true }).then(() => "posted", (error: unknown) => { if (isFinal(error)) return refusalOf(error); throw error; });
         if (posted === "needs_write_access") missing = true;

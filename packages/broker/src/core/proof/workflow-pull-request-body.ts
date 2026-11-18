@@ -4,9 +4,11 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import {
   attributionBodyLines,
+  prVerdictForCheck,
   workflowReviewsSawPartialDiff,
   hideEmailAddresses,
   redactText,
+  type RovaraCheckVerdict,
   type WorkflowSnapshot,
   workflowIsReviewOnly,
   planSummaryLines,
@@ -16,10 +18,10 @@ import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { documentSummaryLines } from "../../developer/workflow-messages.js";
-import { breakLinearKeys } from "./linear-close.js";
+import { breakLinearKeys, normalizeIssueKey, sealLinearText } from "./linear-close.js";
 import { inertPlanLine } from "./inert-text.js";
 import { reviewSameModelOf } from "./review-model-lines.js";
-import { ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL, lessonsUsedLines, rovaraPullRequestBody, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
+import { ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL, lessonsUsedLines, rovaraPullRequestBody, rovaraPullRequestVerdict, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
 
 /** The task as the description needs it. */
 export interface PullRequestBodyTask {
@@ -89,6 +91,26 @@ export function pullRequestTitle(taskTitle: string, rovaraV2: boolean): string {
   return `${rovaraV2 ? "Rovara" : "AgentX"}: ${rovaraV2 ? breakLinearKeys(inert) : inert}`.slice(0, 256);
 }
 
+/** The context a version 2 description is built from: the caller's, plus the proof lines and what the task record says (the one place the description and the Check's verdict take it from). */
+function rovaraContextOf(task: PullRequestBodyTask, workflow: WorkflowSnapshot, context: PullRequestBodyContext | undefined, proofLines: readonly string[]): PullRequestBodyContext {
+  const secondLines = context?.secondReviewLines ?? [];
+  return { ...(context ?? {}), ...(proofLines.length === 0 ? {} : { proofLines }), ...(reviewSameModelOf(task, workflow) ? { reviewSameModel: true } : {}), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) };
+}
+
+/**
+ * L4-PRP: the verdict of the code the description is about, as the "Rovara" Check takes it (`RovaraCheckInput.verdict`): the heading, the six lines and the list of things to check, the same lines the description's block says
+ * (`rovaraPullRequestVerdict` over the same context; the same last guards: Linear words sealed, no email address). Only a Rovara Code (version 2) task has one; any other gives undefined and the Check is what it was.
+ */
+export function workflowPullRequestCheckVerdict(task: PullRequestBodyTask, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, context?: PullRequestBodyContext, proofLines: readonly string[] = []): RovaraCheckVerdict | undefined {
+  void plan;
+  if (workflow.definitionVersion !== "1.1.0") return undefined;
+  const merged = rovaraContextOf(task, workflow, context, proofLines);
+  const verdict = rovaraPullRequestVerdict(workflow, merged, (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy));
+  const forCheck = prVerdictForCheck(verdict);
+  const sealed = sealLinearText([forCheck.heading, ...forCheck.body], normalizeIssueKey(merged.linearIssueKey)).map((line) => hideEmailAddresses(line));
+  return { resultKind: forCheck.resultKind, heading: sealed[0]!, body: sealed.slice(1) };
+}
+
 function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: WorkflowSnapshot, plan: LoadedDocument | string | undefined, pageUrl: string | undefined, context?: PullRequestBodyContext, proofLines: readonly string[] = []): string {
   // SH34: the second review of this code (none for a shadow opinion), kept beside the workflow and never part of the first review's lines. Both versions show it.
   const secondLines = context?.secondReviewLines ?? [];
@@ -96,7 +118,7 @@ function buildWorkflowPullRequestBody(task: PullRequestBodyTask, workflow: Workf
   if (workflow.definitionVersion === "1.1.0") {
     return rovaraPullRequestBody({
       summary: typeof plan === "object" && plan.format === "structured" ? planSummaryLines(plan.plan) : documentSummaryLines(typeof plan === "string" ? plan : plan?.markdown ?? ""),
-      fallbackTitle: task.title, workflow, context: { ...(context ?? {}), ...(proofLines.length === 0 ? {} : { proofLines }), ...(reviewSameModelOf(task, workflow) ? { reviewSameModel: true } : {}), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }) }, reviewLines: (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy), pageUrl,
+      fallbackTitle: task.title, workflow, context: rovaraContextOf(task, workflow, context, proofLines), reviewLines: (listed) => workflowReviewLines(workflow, listed, context?.acceptedBy), pageUrl,
     });
   }
   // A structured plan's summary is its top claims; a legacy one's is its first lines (task 18: the same as the plan's

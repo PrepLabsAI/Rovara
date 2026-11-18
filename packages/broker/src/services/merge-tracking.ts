@@ -31,6 +31,8 @@ import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingRec
 import type { MergePeople } from "../core/merge/people.js";
 import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
+import type { SummaryCheckSource } from "../core/merge/summary-check.js";
+import { createPullRequestVerdictSource } from "../core/build-step/pull-request-verdict.js";
 import type { CodeMilestones, CodeSettingsReader, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
@@ -150,6 +152,11 @@ export interface MergeTrackingServiceOptions {
   /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
   scan?: { cursor: string | undefined; complete?: boolean };
   ciMode?: MergeTrackingDependencies["ciMode"];
+  /**
+   * TE-B4: the one "Rovara" Check on each head. The host decides whether it is written and where it points (`enabled`, `facts`, `detailsUrl`, `personName`); the service adds the verdict: unless the host gives its own `verdict`, the
+   * Check's title and text carry the same verdict sentence as the pull request's description (`createPullRequestVerdictSource`, L4-PRP). Absent: no Check is written, as before.
+   */
+  summaryCheck?: SummaryCheckSource;
   /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
   repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
   /** Milliseconds since the epoch. The host's clock, so a test can move it. */
@@ -197,6 +204,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return givenResolver(project, revision, repositoryId, companyId);
   };
 
+  const verdictSource = createPullRequestVerdictSource(flow);
   const base: MergeTrackingDependencies = {
     store, now,
     ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
@@ -212,6 +220,9 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
     // Slice A4: a change this pass makes to the workflow writes its work events in the same transaction, when the flow writes them (the same switch as the flow's own).
     ...(flow.workEvents === true ? { workEvents: (task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number) => flowWorkEventItems({ enabled: true, orgId: task.orgId, project: task.project, before, after, room }) } : {}),
+    // L4-PRP: the verdict of a pull request, the words of its description: for the Check (when the host asks for one) and for the "ready for review" line.
+    verdict: verdictSource,
+    ...(options.summaryCheck === undefined ? {} : { summaryCheck: { ...options.summaryCheck, verdict: options.summaryCheck.verdict ?? verdictSource } }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
 

@@ -2817,7 +2817,8 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     expect(cr.draft).toBe(false);
     expect(cr.state).toBe("open");
     expect(await trackingItem(h, waiting.taskId)).toMatchObject({ ci: "passing", draft: false, readyAt: expect.stringMatching(/^2/) as unknown });
-    expect(await sessionLines(h, waiting.taskId)).toContain("Rovara marked demo pull request 1 ready for review.");
+    // L4-PRP: the line ends with the pull request's verdict heading (the description's words).
+    expect((await sessionLines(h, waiting.taskId)).filter((line) => line.startsWith("Rovara marked demo pull request 1 ready for review. "))).toHaveLength(1);
     // Nothing changes: each quiet pass waits longer (60 s, then 2 minutes, then 4, up to 5), so the host is asked less and less.
     const waits: number[] = [];
     for (let pass = 0; pass < 4; pass += 1) {
@@ -3427,7 +3428,7 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.runtime.tick();
     await h.runtime.tick();
     const events = (await readSessionEvents(store, IMPLICIT_COMPANY_ID, (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["sessionId"] as never)).events.map((event) => event.text ?? "");
-    expect(events).toContain("Rovara marked demo pull request " + cr.id + " ready for review.");
+    expect(events.filter((line) => line.startsWith("Rovara marked demo pull request " + cr.id + " ready for review. "))).toHaveLength(1);
     expect(events.some((line) => line.startsWith("CI is failing on unit-tests, so Rovara is fixing it"))).toBe(true);
     expect(events.some((line) => line.startsWith("Approved by dana. Ready to merge"))).toBe(true);
     // L4-C B5: the pull request was out of draft when CI went red, so the fix round is told on it once (a reviewer's earlier read may be stale); nothing else is: the passing checks and the approval are silent.
