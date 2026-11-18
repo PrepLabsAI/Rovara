@@ -178,6 +178,11 @@ export interface CoreTaskEntry {
    */
   taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
   /**
+   * Understand's round on the task list's detail: whether the core's own task read would show this caller the task (the owner, a co-owner or a reader of its People list, in their live company). `false` for anything else
+   * and for any failure. Absent: the deployment gives the list no round for core tasks.
+   */
+  taskReadable?(caller: CoreEntryCaller, taskId: string): Promise<boolean>;
+  /**
    * HW5b: a press of Approve (or the words typed for Request changes) on the plan card a core task's chat thread was given, as a request to the company's approval gate (`core-host/chat-decision.ts`): the caller is the person the broker
    * resolved from the chat account, and the core checks the account, the workspace, the card, the risk and the person's authority again. A refusal writes nothing and is an answer, not a throw; a throw means nothing was decided (the chat
    * may try again). Absent: the deployment takes no decision from a chat (the card is the sign-in card).
@@ -220,7 +225,7 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
@@ -230,7 +235,16 @@ export function coreTaskEntryFrom(
   chatDecision?: (deployed: DeployedCaller, press: ChatDecisionPress) => Promise<ChatDecisionResult>,
 ): CoreTaskEntry {
   const taskMoney = routes.taskMoney?.bind(routes);
+  const taskReadable = routes.taskReadable?.bind(routes);
   return {
+    ...(taskReadable === undefined ? {} : {
+      async taskReadable(caller: CoreEntryCaller, taskId: string) {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return false; }
+        if (deployed === undefined) return false;
+        try { return (await taskReadable(deployed, taskId)) === true; } catch { return false; }
+      },
+    }),
     ...(chatDecision === undefined ? {} : {
       async chatDecision(caller: CoreEntryCaller, press: ChatDecisionPress): Promise<ChatDecisionResult> {
         // No membership is the same refusal as a person who may not: nothing is written.

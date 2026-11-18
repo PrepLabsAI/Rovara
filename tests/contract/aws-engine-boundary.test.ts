@@ -2,10 +2,10 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 // Lane E2 (plan v3.2), step 6 part: the AWS entry points go by a task's stored engine. A workflow task (no stamp) keeps today's AWS readers; a core task is answered by the core's
 // own handlers (the core host's dev routes, company-aware) or refused exactly like a missing task, and no AWS reader returns its record, workspace or operations. A mixed stamp has one
 // owner per operation (the flow's engine). A stamp that cannot be read is an error, never the workflow.
-import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { taskKey as coreTaskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, WorkflowSnapshotSchema, createWorkflowSnapshot, endStuckUnderstand, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { readTask as readCoreTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -180,11 +180,11 @@ const ownerRule = (): TaskFlowDeps["access"] => ({
   ownerActing: async (principal, task) => (principal.personId === task.developerId || developerIdOf(principal) === task.developerId ? { actorId: task.ownerKey } : undefined),
 });
 
-async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true; understand?: true; roundCap?: () => Promise<{ limitUsd: number; spentUsd: number | undefined } | undefined> } = {}) {
+async function coreWorld(options: { access?: TaskFlowDeps["access"]; withoutReadable?: true; wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true; understand?: true; roundCap?: () => Promise<{ limitUsd: number; spentUsd: number | undefined } | undefined> } = {}) {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
-  const app = appOver(world, options.actions === true ? ownerRule() : createOwnerTaskAccess(), options.understand === true);
+  const app = appOver(world, options.access ?? (options.actions === true ? ownerRule() : createOwnerTaskAccess()), options.understand === true);
   const owner = localOwnerPrincipal({ companyId: FAKE_COMPANY });
   const runtime = await app.runtimeFor(FAKE_COMPANY);
   const { task } = await runtime.flow.start({ principal: owner, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, ...(options.understand === true ? {} : { workflowPath: "QUICK" as const }) });
@@ -194,7 +194,9 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
   if (options.unknown === "principal") principals.delete(OMAR.developerId);
   if (options.unknown === "membership") members.delete(`${owner.personId}${OTHER}`);
   const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", ...(options.actions === true ? { taskActions: { roundCap: options.roundCap ?? (async () => undefined) } } : {}) }) });
-  const entry: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
+  const wholeEntry: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
+  // `withoutReadable`: a deployment that wires the money read but not the readable check (the list must then give no round).
+  const entry: CoreTaskEntry = options.withoutReadable === true ? { route: (request, caller) => wholeEntry.route(request, caller), taskMoney: (caller, taskId) => wholeEntry.taskMoney!(caller, taskId) } : wholeEntry;
   // Step 6: a start goes to the core where the switch sends the company's NEW tasks. `newTasksOnWorkflow`: the core still holds its task, but new ones start on the workflow (a narrowed switch).
   const coreTasks: CoreTaskEntry = options.newTasksOnWorkflow !== true ? entry : { route: async (request, caller) => (request.method === "POST" && request.path.split("?")[0] === "/v1/dev/tasks" ? undefined : await entry.route(request, caller)) };
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
@@ -216,7 +218,7 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
     delete body.requestId;
     return { status: answer.status, body };
   };
-  return { ...harness, dev, world, app, routes, coreTasks, task, owner, coreRead, sent, workspaceReads };
+  return { ...harness, dev, world, app, routes, coreTasks, task, owner, coreRead, sent, workspaceReads, principals };
 }
 
 describe("a core task on the AWS developer routes", () => {
@@ -428,6 +430,104 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     expect((await readCoreTask((await app.runtimeFor(FAKE_COMPANY)).flow.deps, task.taskId))!.workflow!.intent!.answers).toHaveLength(0);
   });
 
+  // ---- GET /v1/dev/tasks?detail=1: the Understand round and the workflow's outcome on each row (the website's Work list answers Understand's questions inline)
+  it("?detail=1 gives a core task's waiting Understand round (ids, texts, options, answered false) as its owner's task read shows it, and answered true once the answers are in; nothing is written", async () => {
+    const { dev, task, world, app, db } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    await publish(world, db, task.taskId);
+    const writes: unknown[] = [];
+    db.onWrite((change) => writes.push(change));
+    const waiting = await detailRow(dev, MAYA, task.taskId);
+    expect(waiting?.round).toEqual(WAITING_ROUND);
+    expect(waiting?.outcome).toBeUndefined();
+    expect(waiting?.workflow).toMatchObject({ stage: "UNDERSTAND", state: "WAITING" });
+    // The same words as the task read's own `workflow.intent` (the list invents nothing), and the revision the answers route needs is the row's.
+    const read = (await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; intent: { rounds: number; assessment: { questions: Array<Record<string, unknown>> } } } };
+    expect(read.workflow.intent.rounds).toBe(waiting?.round?.round);
+    expect(read.workflow.intent.assessment.questions).toEqual(waiting?.round?.questions.map((question) => Object.fromEntries(Object.entries(question).filter(([key]) => key !== "answered"))));
+    expect(read.workflow.revision).toBe(waiting?.workflow?.revision);
+    // The ordinary list never has it.
+    expect(JSON.stringify((await dev(MAYA, "GET", "/v1/dev/tasks")).body)).not.toContain("Which path?");
+    expect(writes).toEqual([]);
+    // Answered through the core (the row's own revision and round), the next list says so.
+    const answer = await dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/answers`, { requestId: randomUUID(), round: waiting!.round!.round, answers: ANSWERS });
+    expect(answer.status).toBe(200);
+    await publish(world, db, task.taskId);
+    const answered = await detailRow(dev, MAYA, task.taskId);
+    expect(answered?.round).toEqual({ round: 1, questions: [{ ...WAITING_ROUND.questions[0]!, answered: true }] });
+  });
+
+  it("?detail=1 gives no round once the task is past Understand, and gives the workflow's outcome", async () => {
+    const { dev, task, world, app, db } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    const deps = (await app.runtimeFor(FAKE_COMPANY)).flow.deps;
+    // Understand never came back: the task ends CLOSED (stage CLOSED, outcome CLOSED), whatever it had asked.
+    const record = (await readCoreTask(deps, task.taskId))!;
+    const waitingAgain = { ...record.workflow!, state: "RUNNING" as const };
+    expect(await commitWorkflow(deps, record, endStuckUnderstand(waitingAgain, new Date(world.clock.now).toISOString()))).toBe(true);
+    await publish(world, db, task.taskId);
+    const row = await detailRow(dev, MAYA, task.taskId);
+    expect(row?.workflow).toMatchObject({ stage: "CLOSED", state: "COMPLETE" });
+    expect(row?.outcome).toBe("CLOSED");
+    expect(row?.round).toBeUndefined();
+  });
+
+  it("?detail=1 is the task's company only: another company's caller lists no round or question, even with an index row of their own that names the task", async () => {
+    const { dev, task, world, app, db, coreTasks } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    await publish(world, db, task.taskId);
+    expect(await detailRow(dev, MAYA, task.taskId)).toMatchObject({ round: WAITING_ROUND });
+    const own = await dev(OMAR, "GET", "/v1/dev/tasks?detail=1");
+    expect(own.status).toBe(200);
+    expect(JSON.stringify(own.body)).not.toMatch(/Which path|"round"|"outcome"/u);
+    // A row planted in OMAR's own partition that names MAYA's task: the task record is not his (its owner and company are checked on it before any detail is read), so his row has its own words only and no detail.
+    db.set(indexRowOf(task.taskId, OMAR, "Planted"));
+    const planted = await dev(OMAR, "GET", "/v1/dev/tasks?detail=1");
+    expect(planted.status).toBe(200);
+    expect(planted.body).toEqual({ tasks: [{ taskId: task.taskId, title: "Planted", project: "payments", status: "RUNNING", shared: false, createdAt: INDEX_AT, updatedAt: INDEX_AT }] });
+    expect(JSON.stringify(planted.body)).not.toContain("Which path");
+    // The core's own check says the same for him, and for a caller it does not know.
+    expect(await coreTasks.taskReadable!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toBe(true);
+    expect(await coreTasks.taskReadable!({ developerId: OMAR.developerId, sessionId: "s", name: "Omar" }, task.taskId)).toBe(false);
+    expect(await coreTasks.taskReadable!({ developerId: "nobody", sessionId: "s", name: "x" }, task.taskId)).toBe(false);
+  });
+
+  it("?detail=1 shows a round only as the task read would: a caller the core refuses has none (the read says no such task), a reader the core lets read has it; a deployment with no readable check gives none", async () => {
+    const refused = await coreWorld({ understand: true, access: { ...createOwnerTaskAccess(), canAct: async () => false } });
+    await asked(refused.world, refused.app, refused.task.taskId);
+    await publish(refused.world, refused.db, refused.task.taskId);
+    const refusedRow = await detailRow(refused.dev, MAYA, refused.task.taskId);
+    // The list's own rule (her task, her company) still lists the row and its other detail; the round is the task read's to show, and it refuses.
+    expect(refusedRow?.workflow).toMatchObject({ stage: "UNDERSTAND", state: "WAITING" });
+    expect(refusedRow?.round).toBeUndefined();
+    expect((await refused.dev(MAYA, "GET", `/v1/dev/tasks/${refused.task.taskId}`)).status).toBe(404);
+
+    const reader = await coreWorld({ understand: true, access: { ...createOwnerTaskAccess(), canAct: async () => false, canRead: async () => true } });
+    await asked(reader.world, reader.app, reader.task.taskId);
+    await publish(reader.world, reader.db, reader.task.taskId);
+    expect((await detailRow(reader.dev, MAYA, reader.task.taskId))?.round).toEqual(WAITING_ROUND);
+    expect((await reader.dev(MAYA, "GET", `/v1/dev/tasks/${reader.task.taskId}`)).status).toBe(200);
+
+    const unwired = await coreWorld({ understand: true, withoutReadable: true });
+    await asked(unwired.world, unwired.app, unwired.task.taskId);
+    await publish(unwired.world, unwired.db, unwired.task.taskId);
+    expect((await detailRow(unwired.dev, MAYA, unwired.task.taskId))?.workflow).toMatchObject({ stage: "UNDERSTAND" });
+    expect((await detailRow(unwired.dev, MAYA, unwired.task.taskId))?.round).toBeUndefined();
+  });
+
+  it("?detail=1 makes no read of the core's task for a row with no round to show, and one check for a row with one", async () => {
+    const { dev, task, world, app, db, coreTasks } = await coreWorld({ actions: true, understand: true });
+    const checks = vi.spyOn(coreTasks, "taskReadable");
+    await publish(world, db, task.taskId);
+    // Understand has not asked anything yet: nothing to show, so nothing to check.
+    expect((await detailRow(dev, MAYA, task.taskId))?.round).toBeUndefined();
+    expect(checks).not.toHaveBeenCalled();
+    await asked(world, app, task.taskId);
+    await publish(world, db, task.taskId);
+    expect((await detailRow(dev, MAYA, task.taskId))?.round).toBeDefined();
+    expect(checks).toHaveBeenCalledTimes(1);
+  });
+
   it("golden: an unstamped (workflow) task's answers route answers and writes exactly as with no core entry on the install: 'not waiting' for its owner, the missing task's answer for another company", async () => {
     const legacyAnswers = async (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => {
       const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: "22222222-2222-4222-8222-222222222222", project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
@@ -454,6 +554,22 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     expect(JSON.parse(without.answers[1]!)).toMatchObject({ status: 404 });
   });
 });
+
+// ---- helpers for the list's detail (`?detail=1`)
+const INDEX_AT = "2026-11-15T00:00:00.000Z";
+const indexRowOf = (taskId: string, developer: { developerId: string }, title = "Core work") => ({ pk: `DEVELOPER#${developer.developerId}`, sk: `TASK#${INDEX_AT}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId, title, project: "payments", status: "RUNNING", shared: false, createdAt: INDEX_AT, updatedAt: INDEX_AT });
+/** The harness lists from its own copy of the table: copy in the task's record as the core now holds it (MAYA's own) and her index row. */
+async function publish(world: FakeWorld, db: FakeDynamoDb, taskId: string): Promise<void> {
+  db.set({ ...JSON.parse(JSON.stringify(await world.store.get(coreTaskKey(taskId)))) as Record<string, unknown> & { pk: string; sk: string }, developerId: MAYA.developerId });
+  db.set(indexRowOf(taskId, MAYA));
+}
+const WAITING_ROUND = { round: 1, questions: [{ id: "q1", text: "Which path?", options: [{ id: "a", label: "/health" }, { id: "b", label: "/healthz" }], answered: false }] };
+const detailRow = async (dev: Awaited<ReturnType<typeof coreWorld>>["dev"], who: typeof MAYA, taskId: string) => {
+  const answer = await dev(who, "GET", "/v1/dev/tasks?detail=1");
+  expect(answer.status).toBe(200);
+  return DeveloperTaskDetailedListResponseSchema.parse(answer.body).tasks.find((row) => row.taskId === taskId);
+};
+
 
 describe("the AWS readers see only workflow rows", () => {
   it("the task actions (READERS.md: workspace, operations, artifacts, pull requests, failed publications) answer nothing for a core task's workspace", async () => {
@@ -542,6 +658,36 @@ describe("the AWS readers see only workflow rows", () => {
     expect(row.workflow === undefined || typeof row.workflow.stage === "string").toBe(true);
     const theirs = await dev(OMAR, "GET", "/v1/dev/tasks?detail=1");
     expect(JSON.stringify(theirs.body)).not.toContain(taskId);
+  });
+
+  it("?detail=1 on a workflow task's row carries the workflow's outcome (the task read's own word) and never a round; the ordinary list is untouched", async () => {
+    const { dev, db, coreTasks } = await coreWorld({ newTasksOnWorkflow: true });
+    // A readable check that says yes to everything: the list must still not ask it about a workflow task.
+    const checks = vi.fn(async () => true);
+    (coreTasks as { taskReadable?: CoreTaskEntry["taskReadable"] }).taskReadable = checks;
+    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code", workflow: true, workflowPath: "QUICK" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const meta = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string; workflow: Record<string, unknown> };
+    expect(meta.workflow).toBeDefined();
+    const before = await detailRow(dev, MAYA, taskId);
+    expect(before?.outcome).toBeUndefined();
+    db.set({ ...meta, workflow: JSON.parse(JSON.stringify(WorkflowSnapshotSchema.parse({ ...meta.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED" }))) as Record<string, unknown> });
+    const row = await detailRow(dev, MAYA, taskId);
+    expect(row?.outcome).toBe("CLOSED");
+    expect(row?.workflow).toMatchObject({ stage: "CLOSED", state: "COMPLETE" });
+    expect(row?.round).toBeUndefined();
+    expect(JSON.stringify((await dev(MAYA, "GET", "/v1/dev/tasks")).body)).not.toContain("outcome");
+    // Understand's questions are a core task's: even a workflow row whose record holds a waiting round lists none.
+    const now = "2026-11-15T00:00:00.000Z";
+    const understanding = createWorkflowSnapshot({ taskId, ownerId: meta.workflow["ownerId"] as string, now, path: "QUICK", definitionVersion: "1.1.0", understand: true });
+    const waiting = recordIntentAssessment(startWorkflowUnderstand(understanding, now), { expectedRevision: understanding.revision + 1, now, assessment: { kind: "questions", restatement: "Fix it.", questions: [{ id: "q1", text: "Which test?" }] } });
+    db.set({ ...meta, workflow: JSON.parse(JSON.stringify(waiting)) as Record<string, unknown> });
+    const asking = await detailRow(dev, MAYA, taskId);
+    expect(asking?.workflow).toMatchObject({ stage: "UNDERSTAND", state: "WAITING" });
+    expect(asking?.round).toBeUndefined();
+    expect(JSON.stringify(asking)).not.toContain("Which test?");
+    // The core is never asked about a workflow task.
+    expect(checks).not.toHaveBeenCalled();
   });
 
   it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {

@@ -426,6 +426,12 @@ export interface CoreDevRoutes {
    * company, another company's task, not theirs, no money wiring, a read that fails): the row then carries no money, never a guess.
    */
   taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  /**
+   * Understand's round on the task list (`GET /v1/dev/tasks?detail=1`, `round`), in process: whether the core's own task read (`GET /v1/dev/tasks/{id}`: the owner, a co-owner, or a reader of its People list) would show this
+   * caller the task. The company is the caller's live membership's; the task must be one of that company's. `false` for anything else (switch off, no member company, another company's task, a script token, a malformed or
+   * missing id, a read that fails): the row then carries no round. Nothing is returned from the task here, so the list builds the round from the task record it already read.
+   */
+  taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
 }
 
 export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
@@ -489,6 +495,20 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         return { runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
       } catch {
         return undefined;
+      }
+    },
+    async taskReadable(caller, taskId) {
+      if (!options.app.serving || !TASK_ID.test(taskId)) return false;
+      try {
+        const membership = await options.companyOf(caller);
+        if (membership === undefined || membership === null || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || caller.scriptToken !== undefined) return false;
+        const target = await mount(membership.companyId);
+        const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
+        // The task read's own rule (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
+        await loadReadableTask(target.runtime.flow.deps, taskCaller, taskId);
+        return true;
+      } catch {
+        return false;
       }
     },
     async route(request, caller) {

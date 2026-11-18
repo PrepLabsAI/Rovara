@@ -5,7 +5,8 @@ import { DeveloperTaskEventSchema, DeveloperTaskViewSchema, DeveloperTaskClientV
 import { DeveloperShareModeSchema } from "./project.js";
 import { Buffer } from "node:buffer";
 import { AgentIdSchema } from "./agent.js";
-import { WorkflowPathSchema } from "./task-workflow.js";
+import { WorkflowPathSchema, WorkflowSnapshotShapeSchema } from "./task-workflow.js";
+import { INTENT_QUESTIONS_MAX, UNDERSTAND_ROUNDS_MAX, type WorkflowIntent } from "./rovara-code.js";
 import { RunInputSchema } from "./agent-run.js";
 import { OperationStatusSchema } from "./operation.js";
 import { cleanDisplayName } from "./display-name.js";
@@ -297,13 +298,54 @@ export type DeveloperTaskListItem = z.infer<typeof DeveloperTaskListItemSchema>;
 /**
  * Core task web routes (Cloud #188 item 5): what `GET /v1/dev/tasks?detail=1` adds to each row, for a task of either engine, so a list page needs no read per task. Asked for only with `detail=1` (an older client's
  * strict list never sees it). Each part is left out when it is not known: the workflow's stage, state, revision, path and block reason (as the task read's `workflow` says them), the pull requests the workflow
- * recorded, what the task has cost in dollars, and the run limit it is held to (a core task's cap; a workflow task names none). Never a guess.
+ * recorded, what the task has cost in dollars, the run limit it is held to (a core task's cap; a workflow task names none), the Understand round (a core task's) and the workflow's outcome. Never a guess.
  */
+/**
+ * The Understand round a task waits on or has just been answered in (`GET /v1/dev/tasks?detail=1`, `round`): the round's number (the `round` the answers route takes; the `workflow.revision` beside it is its
+ * `expectedRevision`) and each question as it was asked (id, text, options and the recommended one), with whether the round's answers include it. Built by `understandRoundOf`, from the task read's own
+ * `workflow.intent`.
+ */
+export const DeveloperTaskListRoundSchema = z.object({
+  round: z.number().int().min(1).max(UNDERSTAND_ROUNDS_MAX),
+  questions: z.array(z.object({
+    id: z.string().regex(/^q[1-3]$/),
+    text: z.string().min(1).max(300),
+    options: z.array(z.object({ id: z.string().regex(/^[a-d]$/), label: z.string().min(1).max(80) }).strict()).min(2).max(4).optional(),
+    recommended: z.string().regex(/^[a-d]$/).optional(),
+    answered: z.boolean(),
+  }).strict()).min(1).max(INTENT_QUESTIONS_MAX),
+}).strict();
+export type DeveloperTaskListRound = z.infer<typeof DeveloperTaskListRoundSchema>;
+
+/**
+ * The Understand round a workflow is in, as a list row says it: only while the workflow stands at UNDERSTAND with questions as its assessment (waiting for the answers, or answered and not yet re-assessed).
+ * `answered` is true for a question the CURRENT round's answers cover (an earlier round's answers never count). Anything else (no intent, a ready or answer assessment, another stage) is no round.
+ */
+export function understandRoundOf(workflow: { stage: string; intent?: WorkflowIntent | undefined } | undefined): DeveloperTaskListRound | undefined {
+  const intent = workflow?.intent;
+  const asked = intent?.assessment;
+  if (workflow?.stage !== "UNDERSTAND" || intent === undefined || asked?.kind !== "questions" || intent.rounds < 1) return undefined;
+  const given = new Set(intent.answers.filter((set) => set.round === intent.rounds).flatMap((set) => set.answers.map((answer) => answer.questionId)));
+  return {
+    round: intent.rounds,
+    questions: asked.questions.map((question) => ({
+      id: question.id, text: question.text,
+      ...(question.options === undefined ? {} : { options: question.options.map((option) => ({ id: option.id, label: option.label })) }),
+      ...(question.recommended === undefined ? {} : { recommended: question.recommended }),
+      answered: given.has(question.id),
+    })),
+  };
+}
+
 export const DeveloperTaskListDetailSchema = z.object({
   workflow: z.object({ stage: z.string().min(1).max(40), state: z.string().min(1).max(40), revision: z.number().int().nonnegative(), path: z.string().min(1).max(40), blockReason: z.string().max(1000).optional() }).strict().optional(),
   pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048), state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]) }).strict()).max(32).optional(),
   costUsd: z.number().nonnegative().optional(),
   runLimitUsd: z.number().nonnegative().optional(),
+  /** The Understand round the task is in (a core task's; see `DeveloperTaskListRoundSchema`), so a list can answer Understand's questions inline. Left out when there is none, or the caller's task read would not show it. */
+  round: DeveloperTaskListRoundSchema.optional(),
+  /** How the workflow ended, as the task read's `workflow.outcome` says it (the same words; a core task and a workflow task alike). Absent while the task has no outcome. */
+  outcome: WorkflowSnapshotShapeSchema.shape.outcome,
 }).strict();
 export type DeveloperTaskListDetail = z.infer<typeof DeveloperTaskListDetailSchema>;
 
