@@ -115,6 +115,29 @@ describe("the answer route: two companies and two projects", () => {
   });
 });
 
+describe("the answer route: the team knowledge briefing (lead 4 L4-AK2b)", () => {
+  it("each company's answer is briefed by ITS OWN company's seam, only for a person with a role, and an absent seam leaves the answer as before", async () => {
+    const w = setup({ [`${A}/alpha/ada`]: "view", [`${B}/alpha/bob`]: "view" });
+    const asked: string[] = [];
+    const briefing: NonNullable<HostedAnswersWiring["briefing"]> = (companyId) => async (input) => { asked.push(`${companyId}/${input.project}`); return `<<team-knowledge>> notes of ${companyId} <</team-knowledge>>`; };
+    expect((await w.post(A, "ada", ask(), { briefing })).status).toBe(200);
+    expect(asked).toEqual([`${A}/alpha`]);
+    expect(w.model.turns[0]!.transcript).toContain(`notes of ${A}`);
+    expect(w.model.turns[0]!.transcript).not.toContain(B);
+    expect((await w.post(B, "bob", ask(), { briefing })).status).toBe(200);
+    expect(asked).toEqual([`${A}/alpha`, `${B}/alpha`]);
+    expect(w.model.turns.at(-1)!.transcript).toContain(`notes of ${B}`);
+    expect(w.model.turns.at(-1)!.transcript).not.toContain(A);
+    // A stranger gets the same 404 and the seam is never asked.
+    expect((await w.post(A, "stranger", ask(), { briefing })).status).toBe(404);
+    expect(asked).toHaveLength(2);
+    // No seam: no briefing block at all.
+    const before = w.model.turns.length;
+    await w.post(A, "ada", ask());
+    expect(w.model.turns[before]!.transcript).not.toContain("team-knowledge");
+  });
+});
+
 describe("the answer route: no model wired", () => {
   it("answers 200 with the fixed 'not set up' outcome, no button, and spends and records nothing", async () => {
     const w = setup({ [`${A}/alpha/ada`]: "view" });
