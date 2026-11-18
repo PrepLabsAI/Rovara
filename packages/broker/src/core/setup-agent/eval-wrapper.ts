@@ -14,7 +14,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
-  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, change, evalOutputNeedsWrapper, evalWrapperDigestOf, queryAll, when,
+  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, change, evalOutputNeedsWrapper, evalWrapperDigestOf, queryAll, when,
   type DocumentStore, type EvalWrapperLanguage, type OrgId, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import { assertGuarded, guardTarget, headOf, readOwnPr, verifyRepository, type RepoFileTarget } from "../../lessons/repo-file-host.js";
@@ -47,7 +47,7 @@ const RecordSchema = z.object({
   /** Of the shape, command and report (`evalWrapperDigestOf`): the same proposal is made once. */
   digest: z.string().regex(/^[a-f0-9]{64}$/u),
   state: z.enum(["opening", "open", "merged", "closed", "failed"]),
-  branch: z.string().max(100).optional(), baseBranch: z.string().max(200).optional(),
+  branch: z.string().regex(EVAL_WRAPPER_BRANCH_PATTERN).optional(), baseBranch: z.string().max(200).optional(),
   number: z.string().max(40).optional(), url: z.string().max(500).optional(), headRevision: z.string().max(80).optional(),
   failure: z.enum(EVAL_WRAPPER_FAILURES).optional(),
   taskId: z.string().max(160), by: z.string().max(256),
@@ -102,9 +102,9 @@ function prBody(input: { language: EvalWrapperLanguage; selection: string; custo
   return [
     "This is a proposal from Rovara. Nothing happens unless you merge it, and Rovara never merges it.",
     "",
-    `Rovara runs the eval "${input.selection.replace(/[\r\n`]+/gu, " ").slice(0, 120)}" before and after an AI change, and needs one result per question. Your eval writes its results in a form Rovara does not read as it is, so this adds one small file:`,
+    `Rovara runs the eval "${input.selection.replace(/[^A-Za-z0-9 ._/:+-]+/gu, " ").slice(0, 120)}" before and after an AI change, and needs one result per question. Your eval writes its results in a form Rovara does not read as it is, so this adds one small file:`,
     "",
-    `- \`${input.path}\` ${input.custom ? "was written by Rovara's setup agent for this repository." : "was made from a template for a file of rows."} It runs your eval command unchanged, reads \`${input.results}\`, and writes a JUnit report (one test case per question) to \`${EVAL_WRAPPER_REPORT_PATH}\`.`,
+    `- \`${input.path}\` ${input.custom ? "was written by Rovara's setup agent for this repository." : "was made from a template for a file of rows."} It runs your eval command unchanged (first removing any old \`${input.results}\` and \`${EVAL_WRAPPER_REPORT_PATH}\`), reads \`${input.results}\`, and writes a JUnit report (one test case per question) to \`${EVAL_WRAPPER_REPORT_PATH}\`.`,
     "- It reads `ROVARA_EVAL_IDS` (the questions to report), calls no network and reads no secret.",
     `- Your command, as it will run: \`${input.command.replace(/`/gu, "'").slice(0, 300)}\``,
     "",
@@ -133,9 +133,14 @@ async function fail(deps: EvalWrapperDeps, record: EvalWrapperRecord, failure: E
 }
 
 /** Deletes a branch Rovara made for a proposal that did not open (best effort; only ever a wrapper-family name, which the adapter checks again). */
-async function dropBranch(target: RepoFileTarget, branch: string | undefined): Promise<void> {
-  if (branch === undefined || target.host.deleteBranch === undefined) return;
-  try { await target.host.deleteBranch(target.repository, branch, target.scope); } catch { /* the next sweep or retry meets it again */ }
+async function dropBranch(target: RepoFileTarget, branch: string | undefined, ours: readonly string[]): Promise<void> {
+  if (branch === undefined || target.host.deleteBranch === undefined || ours.length === 0) return;
+  try {
+    // Only a branch whose head is exactly a commit Rovara knows it made (the base head it was created at, or its own wrapper commit) is dropped: a branch somebody else made or pushed to under that name is never touched.
+    const head = await headOf(target, branch);
+    if (head === undefined || !ours.includes(head)) return;
+    await target.host.deleteBranch(target.repository, branch, target.scope);
+  } catch { /* the next sweep or retry meets it again */ }
 }
 
 /** A claim left "opening" (the process ended mid-way): the pull request is found by its branch, or the proposal is marked interrupted and its branch is dropped. */
@@ -148,7 +153,7 @@ async function recover(deps: EvalWrapperDeps, target: RepoFileTarget, record: Ev
     const done = await deps.store.update({ key: keyOf(record.company, record.project, record.id), ops: [change.set("state", "open"), change.set("number", found.id), change.set("url", found.url), change.set("updatedAt", next.updatedAt)], condition: when.eq("state", "opening") });
     return done.applied ? next : record;
   }
-  await dropBranch(target, record.branch);
+  // The head Rovara left is not known here, so the branch stays (a person or the next sweep may delete it); the proposal is simply marked interrupted.
   const failed: EvalWrapperRecord = { ...record, state: "failed", failure: "interrupted", updatedAt: isoOf(deps) };
   const done = await deps.store.update({ key: keyOf(record.company, record.project, record.id), ops: [change.set("state", "failed"), change.set("failure", "interrupted"), change.set("updatedAt", failed.updatedAt)], condition: when.eq("state", "opening") });
   return done.applied ? failed : record;
@@ -243,7 +248,7 @@ async function proposeOne(deps: EvalWrapperDeps, project: string, input: { taskI
   try {
     written = await target.host.commitFiles!({ repository: target.repository, branch, baseBranch, message: `Add Rovara's eval wrapper (${need.file.path})`, files: [{ path: need.file.path, content: need.file.content }], fromBase: true, baseRevision: baseHead, previous: [{ path: need.file.path, content: null }] }, target.scope);
   } catch (error) {
-    await dropBranch(target, branch);
+    await dropBranch(target, branch, [baseHead]);
     const text = error instanceof Error ? error.message : "";
     return fail(deps, claim, text.includes(COMMIT_SYMLINK_MESSAGE) ? "file_exists" : text.includes(COMMIT_CONFLICT_MESSAGE) ? "conflict" : "refused");
   }
@@ -254,7 +259,7 @@ async function proposeOne(deps: EvalWrapperDeps, project: string, input: { taskI
       body: prBody({ language: need.language, selection: need.selection, custom: need.suite.output?.kind === "custom", command: commandText(need.suite.command), results: need.suite.report.cwd === "." ? need.suite.report.argument : `${need.suite.report.cwd}/${need.suite.report.argument}`, path: need.file.path }),
     }, target.scope);
   } catch {
-    await dropBranch(target, branch);
+    await dropBranch(target, branch, [baseHead, written.revision]);
     return fail(deps, claim, "refused");
   }
   const opened = await deps.store.update({

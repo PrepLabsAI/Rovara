@@ -1,6 +1,6 @@
 // The few host reads the publish pass and the erasure sweep share. A repository as the lessons code sees it is a `CodeHost` (the neutral port), a repository reference and a scope.
 import { randomBytes } from "node:crypto";
-import { LESSON_FILE_BRANCH_PREFIX, type ChangeRequestDetails, type CodeHost, type HostScope, type RepositoryIdentity, type RepositoryRef } from "@agentx/contracts";
+import { LESSON_FILE_BRANCH_PREFIX, ownedBranchKind, type ChangeRequestDetails, type CodeHost, type HostScope, type RepositoryIdentity, type RepositoryRef } from "@agentx/contracts";
 import type { PrRow } from "./repo-file-state.js";
 
 /** One repository of a project, with the code host that serves it and the scope to call it in. Provider-neutral: the host is the `CodeHost` port. */
@@ -109,7 +109,7 @@ export function guardTarget(target: RepoFileTarget): RepoFileTarget {
 }
 
 /** The shape of a branch name Rovara made (`freshBranchName`): its prefix and 12 hex digits. */
-const OWN_BRANCH = new RegExp(`^${LESSON_FILE_BRANCH_PREFIX.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&")}[0-9a-f]{12}$`, "u");
+const OWN_BRANCH = { test: (branch: string): boolean => ownedBranchKind(branch) !== undefined };
 
 /** The host says there is no such pull request (GitHub: HTTP 404 on the lookup). A failure of any other kind is not "gone". */
 export const isGone = (error: unknown): boolean => (error as { code?: unknown } | null)?.code === "NOT_FOUND" || /\bHTTP 404\b/u.test(error instanceof Error ? error.message : "");

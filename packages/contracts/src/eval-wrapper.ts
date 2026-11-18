@@ -45,8 +45,8 @@ export const EvalOutputShapeSchema = z.discriminatedUnion("kind", [
     kind: z.literal("custom"),
     language: EvalWrapperLanguageSchema,
     /** One plain sentence on what the wrapper reads (shown on the pull request and the setup card). */
-    summary: z.string().min(1).max(300).regex(/^[^\p{Cc}\p{Cf}]+$/u),
-    source: z.string().min(1).refine(text => new TextEncoder().encode(text).length <= EVAL_WRAPPER_CUSTOM_MAX_BYTES, "the wrapper is too long").refine(text => !text.includes("\u0000"), "no NUL"),
+    summary: z.string().min(1).max(300).regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+$/u),
+    source: z.string().min(1).refine(text => new TextEncoder().encode(text).length <= EVAL_WRAPPER_CUSTOM_MAX_BYTES, "the wrapper is too long").refine(text => !text.includes("\u0000"), "no NUL").refine(text => !/[\u202A-\u202E\u2066-\u2069]/u.test(text), "no direction controls"),
   }).strict(),
 ]);
 export type EvalOutputShape = z.infer<typeof EvalOutputShapeSchema>;
@@ -57,7 +57,7 @@ export function evalOutputNeedsWrapper(output: EvalOutputShape | undefined): out
 }
 
 /** The fixed words on the setup card and the refusals. */
-export const EVAL_OUTPUT_UNREADABLE_MESSAGE = "Rovara can't read this eval's results yet. Rovara proposed a small file so it can: review and merge that pull request, then set up again.";
+export const EVAL_OUTPUT_UNREADABLE_MESSAGE = "Rovara can't read this eval's results yet. It needs a small file in your repository: the pull request Rovara opens for it is shown here. Review and merge it, then set up again.";
 
 /** Where a wrapper of this language lives in the repository (one of the two fixed paths). */
 export const evalWrapperPathOf = (language: EvalWrapperLanguage): string => (language === "python" ? EVAL_WRAPPER_PYTHON_PATH : EVAL_WRAPPER_NODE_PATH);

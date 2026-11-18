@@ -183,7 +183,7 @@ describe("failing closed", () => {
     expect(w.audits.map((a) => a.action)).toEqual(["eval_wrapper.proposed", "eval_wrapper.retry"]);
   });
 
-  it("a claim left opening by a process that ended is recovered: the pull request is found by its branch, or the proposal is marked interrupted and its branch dropped", async () => {
+  it("a claim left opening by a process that ended is recovered: the pull request is found by its branch, or the proposal is marked interrupted", async () => {
     const w = world();
     await propose(w, reportOf(suiteOf(ROWS)));
     const [row] = await listEvalWrappers(w.deps(), PROJECT);
@@ -195,7 +195,7 @@ describe("failing closed", () => {
     w.clock.now += OPENING_STALE_MS + 1_000;
     expect((await propose(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ state: "open", replayed: true });
     expect(w.model.changeRequests).toHaveLength(1);
-    // A stale one with no pull request is interrupted, and the branch it made is dropped.
+    // A stale one with no pull request is marked interrupted (its branch is left for a person: Rovara no longer knows the head it left).
     const lost = world();
     await propose(lost, reportOf(suiteOf(ROWS)));
     const [made] = await listEvalWrappers(lost.deps(), PROJECT);
@@ -204,7 +204,41 @@ describe("failing closed", () => {
     lost.clock.now += OPENING_STALE_MS + 1_000;
     const after = await propose(lost, reportOf(suiteOf(ROWS)));
     expect(after[0]).toMatchObject({ state: "failed", failure: "interrupted" });
-    expect([...lost.model.branches.keys()]).toEqual(["main"]);
+  });
+});
+
+describe("review fixes (L4-EVW2 REVIEW-1)", () => {
+  it("never deletes a branch it did not make: a branch that appears under the chosen name is left exactly as it is", async () => {
+    const w = world();
+    const base = w.model.headOf("main");
+    // Somebody creates the branch between Rovara's check and its write: the write is a conflict, and the other person's branch stays.
+    const commit = w.host.commitFiles.bind(w.host);
+    w.host.commitFiles = async (input, scope) => { w.model.branches.set(input.branch, base); w.model.commit(input.branch, { "theirs.txt": "x" }); return commit(input, scope); };
+    const remove = vi.spyOn(w.host, "deleteBranch");
+    const [outcome] = await propose(w, reportOf(suiteOf(ROWS)));
+    expect(outcome).toMatchObject({ state: "failed", failure: "conflict" });
+    expect(remove).not.toHaveBeenCalled();
+    expect(w.model.branches.size).toBe(2);
+  });
+
+  it("a stored branch that is not a wrapper branch name is not a record at all (it can never be recovered into a delete)", async () => {
+    const w = world();
+    await propose(w, reportOf(suiteOf(ROWS)));
+    const [row] = await listEvalWrappers(w.deps(), PROJECT);
+    await w.store.update({ key: { pk: setupPartition(A, PROJECT), sk: `${EVAL_WRAPPER_SK_PREFIX}${row!.id}` }, ops: [change.set("branch", "rovara/lessons-0123456789ab"), change.set("state", "opening")] });
+    expect(await listEvalWrappers(w.deps(), PROJECT)).toEqual([]);
+    const remove = vi.spyOn(w.host, "deleteBranch");
+    w.clock.now += OPENING_STALE_MS + 1_000;
+    await propose(w, reportOf(suiteOf(ROWS)));
+    expect(remove).not.toHaveBeenCalledWith(expect.anything(), "rovara/lessons-0123456789ab", expect.anything());
+  });
+
+  it("the pull request body names what the wrapper removes, and carries no mention, link or image from the model's suite name", async () => {
+    const w = world();
+    await propose(w, reportOf(suiteOf(ROWS, { selection: "evals @acme/team [x](https://evil.example) ![p](https://evil.example/p.png) <img src=x>" })));
+    const body = w.model.changeRequests[0]!.body;
+    expect(body).not.toMatch(/@acme|\]\(|!\[|<img/u);
+    expect(body).toContain("first removing any old");
   });
 });
 

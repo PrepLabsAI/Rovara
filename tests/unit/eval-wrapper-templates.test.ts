@@ -72,6 +72,8 @@ describe("evalWrapperFor: which outputs need a wrapper", () => {
       { kind: "custom", language: "python", summary: "x", source: "x".repeat(12_001) },
       { kind: "custom", language: "python", summary: "x\ny", source: "print(1)" },
       { kind: "rows", format: "jsonl", language: "python", idField: "id", pass: { field: "ok" } },
+      { kind: "custom", language: "node", summary: "reads x\u2028process.exit(1)", source: "export {};" },
+      { kind: "custom", language: "python", summary: "x", source: "print('\u202e')" },
     ];
     for (const shape of bad) expect(EvalOutputShapeSchema.safeParse(shape).success, JSON.stringify(shape).slice(0, 60)).toBe(false);
     expect(EvalOutputShapeSchema.safeParse(rows()).success).toBe(true);
