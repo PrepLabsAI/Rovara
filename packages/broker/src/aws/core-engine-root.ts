@@ -154,8 +154,11 @@ export interface BrokerCoreRootInputs {
    * Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once).
    */
   lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
-  /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
-  lessonsLearning?: CoreLessonsOptions["learning"];
+  /**
+   * The learning model port for one company's lessons (`hostedLessonsLearning`: the gateway's learning route, on the company's own provider account and inside its learning cap). Asked only for a company
+   * the lessons switch names. Absent, or undefined for a company (or a throw): learning calls refuse and nothing is spent.
+   */
+  lessonsLearning?: (companyId: OrgId) => CoreLessonsOptions["learning"];
   /**
    * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
    * The runtime validates this reader and passes the same checked function to merge tracking.
@@ -613,6 +616,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return { gate, administers, pauses };
   };
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // L4-HW2: the company's learning port, asked for only where the lessons switch names the company (nothing is made, no token minted, for any other), and never allowed to break the runtime: a throw is "no port".
+  const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
+    if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
+    try {
+      const port = inputs.lessonsLearning(companyId);
+      // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a non-Claude agent model) learns nothing, and that is never silent.
+      if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
+      return port;
+    } catch { log({ event: "core_engine.lessons_learning_unavailable", companyId }); return undefined; }
+  };
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
@@ -672,7 +685,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         } else {
           lessons = createCoreLessons({
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
-            ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
+            ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId)),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
               try { await app.runtimeFor(other); } catch { return undefined; }
