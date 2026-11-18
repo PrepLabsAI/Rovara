@@ -233,6 +233,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" },
   // L4-B3b (DEC 254zm item 4): approving the proposal that waits (a fresh step-up, then the risk-based approver rule: a company owner or admin, or the project's maintainer for low and medium risk, an owner or admin for high).
   { method: "POST", path: "/v1/app/projects/{project}/test-environment/approve", requires: "full" },
+  // L4-MF1: a project's saved environment image panel (read only: fixed words, counts and times; off with the install's saved-environments switch). Like the test environment: full access only.
+  { method: "GET", path: "/v1/app/projects/{project}/environment-image", requires: "full" },
   // Guided onboarding L2-3: a project's setup run (it spends model money and runs the repository's commands): full access only, then a live company owner or admin, or the project's
   // administrator, to change; a project user may read it.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },

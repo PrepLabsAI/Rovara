@@ -82,6 +82,7 @@ import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { LambdaClient } from "@aws-sdk/client-lambda";
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
+import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
@@ -772,6 +773,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             store: registry.require("storage"), approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
             people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
           }),
+          // L4-MF1: the project's saved environment image panel, read only. Hosted has no image registry wired, so it stays off (404) until the install switch is on.
+          savedEnv: { enabled: savedEnvEnabled(env) },
           // Guided onboarding L2-3: the hosted setup run. Its model use is the gateway's (configured: the run is metered); citations are re-read from the company's own code host.
           setupRun: {
             standing: setupRunStanding,

@@ -62,6 +62,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
     // DEC 254z-amend3: the project's test environment state, read only.
     ["GET", "/v1/app/projects/payments/test-environment", "full"],
+    // L4-MF1: the project's saved environment image panel, read only.
+    ["GET", "/v1/app/projects/payments/environment-image", "full"],
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
     // Guided onboarding L2-3: the hosted setup run.
@@ -123,6 +125,8 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
+      // The saved environment image has no Reset or setting write here (those stay Cloud's / the laptop's): only the read.
+      ["POST", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-images"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
       // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
