@@ -446,7 +446,8 @@ describe("the route wiring (developerTaskRouteDependencies)", () => {
     if (options.membership !== null) db.set({ ...membershipRow, ...(options.membership ?? {}) });
     db.set({ pk: "PROJECT#payments", sk: "REV#000000000007", companyId: options.projectCompany ?? COMPANY_A,
       definition: { revision: 7, ...(options.channelPolicy === true ? { developerTasks: { enabled: true, channelMembersMayUse: true } } : {}) } });
-    if (options.grantRole !== "none") db.set({ pk: `MEMBER#${GALE_ID}`, sk: "PROJECT#payments", projectName: "payments", role: options.grantRole ?? "developer" });
+    // DEC 254zzz80: the task's company (A) is a named company: its grants live in its own partition.
+    if (options.grantRole !== "none") db.set({ pk: `ORG#${COMPANY_A}#MEMBER#${GALE_ID}`, sk: "PROJECT#payments", projectName: "payments", role: options.grantRole ?? "developer" });
     if (options.channelPolicy === true) db.set({ pk: `SLACK_BINDING#${TEAM}`, sk: `CHANNEL#${CHANNEL}`, teamId: TEAM, channelId: CHANNEL, projectName: "payments", updatedAt: CREATED });
     const developer = {
       signInTableName: SIGNIN, issuer: "https://code.example.test", ...(options.noCompanies === true ? {} : { companies: companyMembershipFromDynamo(db, SIGNIN) }),

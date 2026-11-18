@@ -112,7 +112,8 @@ import { DocumentLocalToolsSettings } from "../lessons/document-settings.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
-import { Membership, membershipKey } from "./company-check.js";
+import { Membership, membershipKey, ownPartitionRow } from "./company-check.js";
+import { grantKeyFor, namedCompany } from "./company-layout.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { LambdaClient } from "@aws-sdk/client-lambda";
@@ -350,15 +351,30 @@ export function membershipWithRoleFromDynamo(client: DynamoSender, tableName: st
   };
 }
 
-/** The person's project grant role (`MEMBER#<person>` / `PROJECT#<name>`, the broker's own rows, FR-013.1): `developer` or `administrator`, else undefined. */
-export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> {
-  return async (personId, project) => {
+/**
+ * The person's project grant role (the broker's own rows, FR-013.1): `developer` or `administrator`, else undefined. DEC 254zzz80: `companyId` is the company the grant is read
+ * in (the caller's LIVE membership, or the runtime's company): a NAMED company's grant is `ORG#<company>#MEMBER#<person>` / `PROJECT#<name>` only (company-layout.ts), and a row
+ * there that names another company is none; the built-in company and no company read the legacy `MEMBER#<person>` / `PROJECT#<name>` row exactly as before.
+ */
+export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: string): (personId: string, project: string, companyId?: string) => Promise<"developer" | "administrator" | undefined> {
+  return async (personId, project, companyId) => {
     if (typeof personId !== "string" || personId === "" || /[#\s]/u.test(personId) || typeof project !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return undefined;
-    const response = await client.send(new GetCommand({ TableName: tableName, Key: { pk: `MEMBER#${personId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    const key = grantKeyFor(companyId, personId, project);
+    const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
     const row = response?.Item;
-    if (row === undefined || row["pk"] !== `MEMBER#${personId}` || row["sk"] !== `PROJECT#${project}` || row["projectName"] !== project) return undefined;
+    if (row === undefined || row["pk"] !== key.pk || row["sk"] !== key.sk || row["projectName"] !== project) return undefined;
+    const company = namedCompany(companyId);
+    if (company !== undefined && !ownPartitionRow(row, company)) return undefined;
     return mayUseProject(row["role"]) ? row["role"] : undefined;
   };
+}
+
+/** DEC 254zzz80: a grant reader that reads each person's grant in the company of their LIVE membership (none: the legacy row, as before). A membership read that fails throws. */
+export function liveCompanyGrantRole(
+  membershipOf: (personId: string) => Promise<{ companyId: OrgId } | undefined>,
+  role: (personId: string, project: string, companyId?: string) => Promise<"developer" | "administrator" | undefined>,
+): (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> {
+  return async (personId, project) => role(personId, project, (await membershipOf(personId))?.companyId);
 }
 
 /**
@@ -657,7 +673,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
-  const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
+  const projectGrantRole = liveCompanyGrantRole(membershipOf, projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName));
   // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
   // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
   const engineHook = () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall, inputs.policyHookFetch);
@@ -726,7 +742,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         return found;
       },
       projectAdmins: async (project: string): Promise<string[]> =>
-        (await listProjectMembers({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, limitDefaults: { member: 1, organization: 1 }, now: () => now().getTime() }, project)).filter((member) => member.role === "administrator").map((member) => member.developerId),
+        (await listProjectMembers({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, limitDefaults: { member: 1, organization: 1 }, now: () => now().getTime() }, project, companyId)).filter((member) => member.role === "administrator").map((member) => member.developerId),
     };
     const recipients = createUpkeepRecipients(companyId, sources);
     const administers = createUpkeepAdministers(companyId, sources);

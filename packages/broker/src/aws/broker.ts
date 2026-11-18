@@ -296,7 +296,8 @@ import { GithubMergeRateLimitError, isWebhookSecretMissing, parseGitHubRepositor
 import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusal, githubDisconnectedRefusal, GithubInstallationBindings, isGithubDisconnected } from "./github-credentials.js"; import { handleGithubInstallationWebhook, isGithubInstallationEvent } from "./github-lifecycle.js"; import { GitHubAppCredentialProvider as GitHubAppClient } from "../plugins/code-host/github/client.js"; import { bulkCreate, COMMIT_DEADLINE_MS, companyProjectCreatorOf, eachLimited, LOOKUP_CONCURRENCY, nameTaken, notAvailable, onCompanyInstallations, projectRepositoryName, projectsByRepository, repositoryChoices, REPOSITORY_CHOICES_UNAVAILABLE, unavailable, uniqueRepositoryNames, type LiveRepositoryInstallation } from "./client-project-create.js"; import { brokerCoreCodeHost } from "./core-code-host.js"; import { companyNameClaimWrites, companyNameTaken, companyProjectNaming, type ClientProjectNaming } from "./company-project-names.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
-import { boundedCompanyReads, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
+import { grantKeyFor, namedCompany } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -2302,10 +2303,13 @@ async function registerProject(
    * registrant to administer the project already; an instance administrator who does not can take it over only by asking explicitly, with a reason.
    * Judged against the project as it is now, and again on every attempt, so a registrant who lost a race for the first revision is refused on the next one.
    */
+  // DEC 254zzz80: the registrant's grant lives where the project's company keeps grants (a named company's own partition, company-layout.ts): the company the stored
+  // revision names (once read on an attempt), else the caller's own.
+  let grantCompanyId = grantCompany(dependencies, companyId);
   const judgeAuthority = async (newestRevision: number): Promise<"first" | "administrator" | "takeover"> => {
     await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
     if (newestRevision === 0) return "first";
-    const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
+    const authority = await getItem<{ role?: unknown }>(dependencies, grantKeyFor(grantCompanyId, identity.ownerKey, definition.name));
     if (authority?.role === "administrator") return "administrator";
     if (takeover !== undefined) return "takeover";
     throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (agentx admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
@@ -2328,7 +2332,9 @@ async function registerProject(
     return respond(withoutKeys(existing), true, preflight);
   }
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
-  await judgeAuthority((await readCatalogSnapshot()).newestRevision);
+  const firstSnapshot = await readCatalogSnapshot();
+  grantCompanyId = grantCompany(dependencies, storedCompanyOf(firstSnapshot.newest) ?? companyId); // DEC 254zzz80: the stored revision's company, as each attempt below decides it again
+  await judgeAuthority(firstSnapshot.newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
   const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId, name: checked.nameClaim.name, projectId: definition.name, revision: definition.revision, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
   const record: RegisteredProjectRecord = {
@@ -2341,8 +2347,9 @@ async function registerProject(
     registeredAt: now,
     ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
-  const membership = membershipRecord(identity.ownerKey, definition.name, "administrator");
-  const membershipKey = { pk: membership.pk, sk: membership.sk };
+  // DEC 254zzz80: the registrant's grant row and key, set on each attempt for the company the revision is stored for.
+  let membership: MembershipRecord;
+  let membershipKey: { pk: string; sk: string };
   const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
@@ -2372,16 +2379,20 @@ async function registerProject(
     const snapshot = await readCatalogSnapshot();
     const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
     const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
-    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
-    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
-    const authority = await judgeAuthority(snapshot.newestRevision);
-    const accounts = await planAccounts();
     // Ownership may be carried forward only from the stored legacy revision (or the checked membership already used above).
     const storedCompany = snapshot.newest?.companyId;
     if (storedCompany !== undefined) {
       if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
       record.companyId = storedCompany;
     } else if (record.companyId !== undefined && companyId === undefined) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+    // DEC 254zzz80: the grant this attempt reads and writes is in the company the revision is stored for.
+    grantCompanyId = grantCompany(dependencies, record.companyId);
+    membership = membershipRecord(identity.ownerKey, definition.name, "administrator", grantCompanyId);
+    membershipKey = grantKeyFor(grantCompanyId, identity.ownerKey, definition.name);
+    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
+    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
+    const authority = await judgeAuthority(snapshot.newestRevision);
+    const accounts = await planAccounts();
     let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
     try {
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record);
@@ -2402,7 +2413,7 @@ async function registerProject(
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
         : [{ Put: { TableName: dependencies.tableName, Item: membership } },
           // Spec 065: the project's side of the membership, so its members can be listed.
-          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
+          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey, grantCompanyId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
       ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
         projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
@@ -2798,7 +2809,7 @@ async function retryProjectSetupAsAdministrator(
     setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
     originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
   const now = new Date().toISOString();
-  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data);
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data, grantCompany(dependencies, storedCompanyOf(project)));
   const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
     processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
   const priorExecutionMutation = expiredDispatchRetry
@@ -2908,7 +2919,7 @@ async function prepareWorkspace(
         { Put: { TableName: dependencies.tableName, Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#ADMIN`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id }, ConditionExpression: "attribute_not_exists(pk)" } },
       ] }));
     } catch (error) {
-      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership)) throw error;
+      if (!isConditional(error) || !await membershipMovedSince(dependencies, targetOwnerKey, project.definition.name, preparation.membership, grantCompany(dependencies, project.companyId))) throw error;
       continue;
     }
     return { operationId: preparation.operationId, workspace: publicWorkspace(preparation.workspace), alreadyReady: false };
@@ -2920,8 +2931,8 @@ async function prepareWorkspace(
 const MEMBERSHIP_PREPARATION_ATTEMPTS = 3;
 
 /** True when the membership row is no longer the one a transaction was built from: gone, created, or another role or grantId. */
-async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, observed: MembershipRecord | undefined): Promise<boolean> {
-  const current = await getMembership(dependencies, ownerKey, projectName);
+async function membershipMovedSince(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, observed: MembershipRecord | undefined, companyId: string | undefined): Promise<boolean> {
+  const current = await getMembership(dependencies, ownerKey, projectName, companyId);
   return current?.role !== observed?.role || current?.grantId !== observed?.grantId;
 }
 
@@ -2935,13 +2946,15 @@ function membershipPreparationItem(
   ownerKey: string,
   projectName: string,
   observed: MembershipRecord | undefined,
+  companyId: string | undefined,
   grantedBy?: { issuer: string; subject: string },
 ): TransactItems[number] {
+  // DEC 254zzz80: in the project's company (the stored revision's `companyId`): a named company's grant lives in its own partition (company-layout.ts).
   if (observed === undefined) {
-    const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer"), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
+    const created: MembershipRecord = { ...membershipRecord(ownerKey, projectName, "developer", companyId), ...(grantedBy === undefined ? {} : { grantedBy, grantedAt: new Date().toISOString() }) };
     return { Put: { TableName: dependencies.tableName, Item: created, ConditionExpression: "attribute_not_exists(pk)" } };
   }
-  const key = { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` };
+  const key = grantKeyFor(companyId, ownerKey, projectName);
   // A row from before grants were versioned has no grantId. It gets one here, in the same transaction, and keeps everything else it has;
   // the condition lets it happen only to the row that was read, and never replaces a grantId that exists.
   if (typeof observed.grantId !== "string") {
@@ -3021,7 +3034,7 @@ async function newWorkspacePreparation(
     },
   };
   const outbox = outboxRecord(workspace, invocation, project.runtimeBinding);
-  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName);
+  const existingMembership = await getMembership(dependencies, targetOwnerKey, projectName, grantCompany(dependencies, project.companyId));
   return {
     workspace,
     operationId,
@@ -3031,7 +3044,7 @@ async function newWorkspacePreparation(
       { Put: { TableName: dependencies.tableName, Item: { pk: `OWNER#${targetOwnerKey}`, sk: `PROJECT#${projectName}`, entityType: "DEFAULT_WORKSPACE", workspaceId }, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, options.grantedBy),
+      membershipPreparationItem(dependencies, targetOwnerKey, projectName, existingMembership, project.companyId, options.grantedBy),
     ],
   };
 }
@@ -3774,7 +3787,7 @@ async function ensureThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership)) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership, grantCompany(dependencies, project.companyId))) continue;
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) {
         return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
@@ -3815,7 +3828,7 @@ async function createUnpreparedThreadWorkspace(
   let workspace: WorkspaceInstance | undefined;
   for (let attempt = 0; attempt < MEMBERSHIP_PREPARATION_ATTEMPTS; attempt += 1) {
     const attempted = unpreparedWorkspace(project, identity.ownerKey);
-    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName);
+    const existingMembership = await getMembership(dependencies, identity.ownerKey, projectName, grantCompany(dependencies, project.companyId));
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
         { Put: { TableName: dependencies.tableName, Item: workspaceItem(attempted), ConditionExpression: "attribute_not_exists(pk)" } },
@@ -3825,7 +3838,7 @@ async function createUnpreparedThreadWorkspace(
           ConditionExpression: "attribute_not_exists(pk)",
         } },
         // Created only when absent; an existing row is required to be as it was read, never rewritten.
-        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership),
+        membershipPreparationItem(dependencies, identity.ownerKey, projectName, existingMembership, grantCompany(dependencies, project.companyId)),
         { Put: {
           TableName: dependencies.tableName,
           Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: attempted.id },
@@ -3845,7 +3858,7 @@ async function createUnpreparedThreadWorkspace(
     } catch (error) {
       if (!isConditional(error)) throw error;
       // The membership changed since it was read: decide again from the row as it now is, never over it.
-      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership)) continue;
+      if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, existingMembership, grantCompany(dependencies, project.companyId))) continue;
       // Another first message in this thread created the record.
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
@@ -7962,7 +7975,7 @@ async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string):
 async function requireProjectSetupCapability(
   dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
 ): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>;
-  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse> }> {
+  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse>; companyId: string | undefined }> {
   const token = request.headers["x-agentx-callback-capability"];
   const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
   if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
@@ -7993,7 +8006,9 @@ async function requireProjectSetupCapability(
     || approval.decision !== "approve" || approval.proposalRef !== execution.data.proposalRef || approval.policyDigest !== execution.data.policyDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "current project setup approval is no longer valid");
   }
-  const member = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${execution.data.ownerKey}`, sk: `PROJECT#${execution.data.projectName}` });
+  // DEC 254zzz80: the owner's grant in the company the project's stored revision names (a named company's own partition, company-layout.ts).
+  const companyId = grantCompany(dependencies, storedCompanyOf(project));
+  const member = await getMembership(dependencies, execution.data.ownerKey, execution.data.projectName, companyId);
   const catalogId = dependencies.projectSetupRuntimeCatalogId;
   if (member?.role !== "administrator" || !catalogId) throw agentXError("CALLBACK_FORBIDDEN", "project setup owner authority or runtime catalog is unavailable");
   const catalogItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
@@ -8006,7 +8021,7 @@ async function requireProjectSetupCapability(
     || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
     throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
   }
-  return { execution: execution.data, claims, runtime: runtime.data, session: session.data };
+  return { execution: execution.data, claims, runtime: runtime.data, session: session.data, companyId };
 }
 
 async function setupAdmissionMatchesExecution(
@@ -8071,7 +8086,7 @@ async function handleProjectSetupCallback(
       cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
       reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
       { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
         UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
         ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
@@ -8107,7 +8122,7 @@ async function handleProjectSetupCallback(
     throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
   }
   const terminalItems = [
-    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
     { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
       UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
       ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
@@ -14918,13 +14933,43 @@ async function requireMembership(
   ownerKey: string,
   projectName: string,
 ): Promise<MembershipRecord> {
-  const membership = await getMembership(dependencies, ownerKey, projectName);
+  // DEC 254zzz80: the grant is read in the company the project's stored revision names (a named company's own partition); none or the built-in company: the legacy row.
+  const membership = await getMembership(dependencies, ownerKey, projectName, grantCompany(dependencies, await storedProjectCompany(dependencies, projectName)));
   if (!membership) throw agentXError("NOT_FOUND", "project not found");
   return membership;
 }
 
-async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string) {
-  return getItem<MembershipRecord>(dependencies, { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}` });
+/** DEC 254zzz80: a person's grant row, where `companyId` keeps grants (company-layout.ts: a named company's own partition, else the legacy row). A row naming another company is none. */
+async function getMembership(dependencies: AwsBrokerDependencies, ownerKey: string, projectName: string, companyId: string | undefined) {
+  const key = grantKeyFor(companyId, ownerKey, projectName);
+  const row = await getItem<MembershipRecord>(dependencies, key);
+  const company = namedCompany(companyId);
+  return row === undefined || company === undefined || (row.pk === key.pk && row.sk === key.sk && ownPartitionRow(row as unknown as Record<string, unknown>, company)) ? row : undefined;
+}
+
+/**
+ * DEC 254zzz80: the company whose own partition holds a grant, as the developer routes read it. Only with Code's company layer (the developer or linking sign-in's live
+ * membership reader, or Slack company mode's): a broker without one keeps the legacy grant rows for every reader and writer, as before (company-layout.ts then picks the
+ * legacy key for the built-in company and none).
+ */
+function grantCompany(dependencies: AwsBrokerDependencies, companyId: string | undefined): string | undefined {
+  const layer = dependencies.developer?.companies ?? dependencies.linking?.companies ?? (dependencies.workspaces === undefined ? undefined : dependencies.companies);
+  return layer === undefined ? undefined : companyId;
+}
+
+/** The company a stored record names (`companyId`), or undefined (unstamped: the built-in company's). */
+function storedCompanyOf(record: unknown): string | undefined {
+  const company = (record as { companyId?: unknown } | undefined)?.companyId;
+  return typeof company === "string" ? company : undefined;
+}
+
+/** The company the project's newest legacy revision names (`companyId`), or undefined (none stored, or no revision): where a name-only route reads its grant. */
+async function storedProjectCompany(dependencies: AwsBrokerDependencies, projectName: string): Promise<string | undefined> {
+  const response = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: Array<{ companyId?: unknown }> };
+  return storedCompanyOf(response.Items?.[0]);
 }
 
 /**
@@ -14947,7 +14992,10 @@ async function requireAdministratorGrant(
   projectName: string,
 ): Promise<void> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const membership = await requireMembership(dependencies, identity.ownerKey, projectName);
+  // The name-keyed (legacy) grant, as DEC 254zzz6 D2 describes these name-only admin routes: a named company's own-partition grant is never read here, and a name a named
+  // company uses is refused by the collision check (requireAdministrator), never served.
+  const membership = await getMembership(dependencies, identity.ownerKey, projectName, undefined);
+  if (!membership) throw agentXError("NOT_FOUND", "project not found");
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
@@ -15047,7 +15095,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
   // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
   // is NOT_FOUND, which would read as "no such task").
-  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project, grantCompany(dependencies, storedCompanyOf(task)));
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
@@ -15103,7 +15151,7 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
   if (!TASK_ID_PATTERN.test(taskId)) throw agentXError("TASK_NOT_FOUND", "that is not a task ID");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
-  const membership = await getMembership(dependencies, identity.ownerKey, task.project);
+  const membership = await getMembership(dependencies, identity.ownerKey, task.project, grantCompany(dependencies, storedCompanyOf(task)));
   if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (method === "GET") {
@@ -15171,8 +15219,9 @@ function workspaceItem(workspace: WorkspaceInstance) {
   };
 }
 
-function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"]): MembershipRecord {
-  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
+/** DEC 254zzz80: a named company's grant row is in its own partition (company-layout.ts); otherwise the legacy key. */
+function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"], companyId?: string): MembershipRecord {
+  return { ...grantKeyFor(companyId, ownerKey, projectName), entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
 }
 
 function githubRepositoryFullName(repositoryUrl: string): string {

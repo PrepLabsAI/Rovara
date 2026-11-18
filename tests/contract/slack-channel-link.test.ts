@@ -129,7 +129,7 @@ function world(options: { installTeam?: string; tokens?: boolean } = {}) {
   const ownerB = person(BETA, "U0BEA", B, "owner");
   const memberA = person(ACME, "U0MEM", A, "member");
   const apiAdminA = person(ACME, "U0API", A, "member");
-  h.db.set({ pk: `MEMBER#${apiAdminA.personId}`, sk: "PROJECT#api", projectName: "api", role: "administrator", companyId: A });
+  h.db.set({ pk: `ORG#${A}#MEMBER#${apiAdminA.personId}`, sk: "PROJECT#api", projectName: "api", role: "administrator" });
   const adminC = person("T0CEE", "U0CEE", C, "admin");
   const jwtOf = (claims: Record<string, unknown>) => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
   const call = async (who: { personId: string }, method: string, path: string, body?: unknown) => {
@@ -220,13 +220,19 @@ describe("web: link a project's channel", () => {
 
   it("a project admin's grant must be in the caller's company", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: B });
+    // DEC 254zzz80: a row in A's own partition that names company B, one in B's partition, and a legacy row: none is A's grant.
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: B });
+    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
+    w.db.delete(`ORG#${A}#MEMBER#${w.memberA.personId}`, "PROJECT#web");
+    w.db.set({ pk: `ORG#${B}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator" });
+    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
+    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: A });
     expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
   });
 
   it("a project grant that is not administrator does not let a member link", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "developer", companyId: A });
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "developer" });
     expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
     expect(w.slack.calls).toEqual([]);
   });
@@ -492,7 +498,7 @@ describe("/rovara in Slack", () => {
 
   it("the menu never offers a project of another company, even with a stray grant stamped with this company", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.apiAdminA.personId}`, sk: "PROJECT#beta-app", projectName: "beta-app", role: "administrator", companyId: A });
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.apiAdminA.personId}`, sk: "PROJECT#beta-app", projectName: "beta-app", role: "administrator" });
     const menu = await w.slash(w.apiAdminA, "link");
     expect(JSON.stringify(menu)).toContain("*api*");
     expect(JSON.stringify(menu)).not.toContain("beta-app");

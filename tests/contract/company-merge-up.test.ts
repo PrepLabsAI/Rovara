@@ -46,10 +46,12 @@ function harness(companyId?: string) {
     h.project(company);
     const row = h.db.get("PROJECT#shared-project", "REV#000000000001")!;
     h.db.set({ ...row, definition: { name: "shared-project", revision: 1, repositories: [{ name: "api", url: "https://github.com/example/api.git", defaultBranch: "main" }] } });
-    if (administrator) h.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "administrator" });
+    if (administrator) h.db.set({ pk: grantPk(company), sk: "PROJECT#shared-project", projectName: "shared-project", role: "administrator" });
   };
   return { ...h, call, project, bearer, companyOf, signInAs };
 }
+/** DEC 254zzz80: where a person's grants live for a company: a named company's own partition, else the legacy row. */
+const grantPk = (company: unknown, id: string = PERSON) => typeof company === "string" && company !== IMPLICIT_COMPANY_ID ? `ORG#${company}#MEMBER#${id}` : `MEMBER#${id}`;
 const parsed = (response: { body: string }) => JSON.parse(response.body) as { projects: unknown[]; repositories: unknown[] };
 
 describe("merge-up membership-resolved reads", () => {
@@ -109,7 +111,7 @@ describe("merge-up membership-resolved reads", () => {
   });
   it("bounds all access-list and detail reads as one call, without a partial answer", async () => {
     const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId);
-    for (let i = 0; i < 2_001; i++) h.db.set({ pk: `MEMBER#${PERSON}`, sk: `PROJECT#p-${i}`, projectName: `p-${i}`, role: "administrator" });
+    for (let i = 0; i < 2_001; i++) h.db.set({ pk: grantPk(COMPANY_A.orgId), sk: `PROJECT#p-${i}`, projectName: `p-${i}`, role: "administrator" });
     for (const [path, method] of [[projectPath, "GET"], ["/v1/dev/access", "POST"]] as const) {
       const response = await h.call(path, method);
       expect(response.statusCode).toBe(400);
@@ -248,6 +250,8 @@ describe("merge-up 2 membership-resolved reads", () => {
   });
   it("legacy shared-reader event and reader-list bytes stay unchanged with companies absent", async () => {
     const h = reader(undefined); delete h.deps.companies;
+    // With no company layer, grants are the legacy rows (DEC 254zzz80): the reader fixture's company-partition grant is not one here.
+    h.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
     expect((await h.call(path + "/events")).body).toBe('{"events":[],"requestId":"company-test"}');
     const owner = harness(); owner.task();
     expect((await owner.call(path + "/readers")).body).toBe('{"readers":[],"requestId":"company-test"}');
@@ -259,9 +263,11 @@ describe("merge-up 2 named T-lane known gaps (not isolation claims)", () => {
     const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
     const id = "e".repeat(64);
     h.db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, displayName: "Reader" });
-    h.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
+    // DEC 254zzz80: the reader's grant is read in the reader's own live company (here every person reads as company B), so it sits in B's partition.
+    h.db.set({ pk: grantPk(COMPANY_B.orgId, id), sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
     expect((await h.call(`/v1/dev/tasks/${TASK}/readers/${id}`, method, { requestId: TASK, role: "viewer" })).statusCode).toBe(200);
-    expect(h.companyOf).not.toHaveBeenCalled();
+    // The gap: the writer still never reads the CALLER's membership (only the reader's company, to find where the reader's grant lives).
+    expect(h.companyOf.mock.calls.every(([person]) => person === id)).toBe(true);
   });
   it("T2/T3 linking workspace catalog is still bound to person rather than company", async () => {
     const h = harness(COMPANY_B.orgId);
@@ -289,17 +295,18 @@ it("known gap T2/T3: reader list returns person/project grants without recipient
   const companyOf = vi.fn(async (personId: string) => personId === PERSON ? COMPANY_A.orgId : COMPANY_B.orgId);
   h.deps.companies = { companyOf };
   h.db.set({ pk: `DEVELOPER#${other}`, sk: "META", displayName: "Foreign reader" });
-  h.db.set({ pk: `MEMBER#${other}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
+  // DEC 254zzz80: the reader's grant is read in the reader's own live company (B); the gap is that a B grant still counts on company A's task.
+  h.db.set({ pk: grantPk(COMPANY_B.orgId, other), sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
   h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${other}`, schemaVersion: 1, developerId: other, role: "viewer", grantedBy: PERSON, grantedAt: TIME });
   expect(JSON.parse((await h.call(`/v1/dev/tasks/${TASK}/readers`)).body)).toMatchObject({ readers: [{ name: "Foreign reader", projectMember: true }] });
-  expect(companyOf).toHaveBeenCalledExactlyOnceWith(PERSON);
+  expect(companyOf.mock.calls).toEqual([[PERSON], [other]]);
 });
 
 it("merge-up 2 bounds the linking catalog and reader list as whole calls", async () => {
   const h = harness(COMPANY_A.orgId); h.project(COMPANY_A.orgId); h.task(TASK, COMPANY_A.orgId);
   h.db.set({ ...h.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, fullAccess: true });
   for (let i = 0; i < 2_001; i++) {
-    h.db.set({ pk: `MEMBER#${PERSON}`, sk: `PROJECT#p-${i}`, projectName: `p-${i}`, role: "developer" });
+    h.db.set({ pk: grantPk(COMPANY_A.orgId), sk: `PROJECT#p-${i}`, projectName: `p-${i}`, role: "developer" });
     const developerId = i.toString(16).padStart(64, "0");
     h.db.set({ pk: `DEVTASK#${TASK}`, sk: `READER#${developerId}`, developerId, role: "viewer", grantedAt: TIME });
   }

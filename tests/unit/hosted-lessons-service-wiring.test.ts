@@ -60,7 +60,8 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
   const member = (personId: string, companyId: OrgId) => {
     rows.set(`signin|COMPANY_MEMBER#${personId}|COMPANY`, { pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId, companyId, role: "member", joinedAt: "2026-10-01T00:00:00.000Z" });
     rows.set(`signin|${companyScoped(companyId, "MEMBERS")}|MEMBER#${personId}`, { pk: companyScoped(companyId, "MEMBERS"), sk: `MEMBER#${personId}`, entityType: "COMPANY_MEMBER_VIEW", personId, companyId, role: "member", joinedAt: "2026-10-01T00:00:00.000Z" });
-    rows.set(`state|MEMBER#${personId}|PROJECT#payments`, { pk: `MEMBER#${personId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
+    // DEC 254zzz80: the grant sits in the member's own company's partition.
+    rows.set(`state|ORG#${companyId}#MEMBER#${personId}|PROJECT#payments`, { pk: `ORG#${companyId}#MEMBER#${personId}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" });
   };
   member(MEMBER_A, A); member(MEMBER_B, B);
   const client = { async send(command: unknown) {

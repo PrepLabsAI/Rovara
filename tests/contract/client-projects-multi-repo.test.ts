@@ -391,7 +391,9 @@ describe("company owners and admins create projects", () => {
     expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
     for (const name of [json(single).name as string, json(many).name as string, bulk[0]!.project]) {
       expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(A);
-      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
+      // DEC 254zzz80: the creator's administrator grant is in the company's own partition, and only there.
+      expect(h.db.get(`ORG#${A}#MEMBER#${PERSON}`, `PROJECT#${name}`)).toMatchObject({ role: "administrator" });
+      expect(h.db.get(`MEMBER#${PERSON}`, `PROJECT#${name}`)).toBeUndefined();
     }
     const picker = await h.call("/v1/dev/client/repositories/available");
     expect(picker.statusCode).toBe(200);

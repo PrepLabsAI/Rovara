@@ -73,7 +73,8 @@ function world() {
   };
   const projectOf = (name: string, companyId: string, grants: Array<{ personId: string; role: "administrator" | "developer" }> = []) => {
     h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
-    for (const grant of grants) h.db.set({ pk: `MEMBER#${grant.personId}`, sk: `PROJECT#${name}`, projectName: name, role: grant.role, companyId });
+    // DEC 254zzz80: a named company's grants live in its own partition.
+    for (const grant of grants) h.db.set({ pk: `ORG#${companyId}#MEMBER#${grant.personId}`, sk: `PROJECT#${name}`, projectName: name, role: grant.role, companyId });
   };
   const stored = () => JSON.stringify([...h.db.items.values()]);
   return { ...h, linear, sealer, logs, connections, as, asWeb, web, stepUp, call, start, complete, connect, projectOf, stored, setApp: (value: LinearAppSettings | undefined) => { app = value; },
