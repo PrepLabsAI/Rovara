@@ -36,6 +36,9 @@ const unitFacts = (e: LessonAuditEvent): Record<string, string> => {
   return out;
 };
 
+/** The id of the script token that asked (`stk_` and 20 characters): an id, never a secret. */
+const tokenFact = (e: LessonAuditEvent): Record<string, string> => (typeof e.facts["tokenId"] === "string" && /^stk_[0-9a-z]{20}$/u.test(e.facts["tokenId"]) ? { tokenId: e.facts["tokenId"] } : {});
+
 const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.candidate_created": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: 1 }) },
   "lesson.pending": { action: "lesson.proposed", facts: (e) => ({ lessonType: "unknown", tier: num(e.facts["tier"]) }) },
@@ -84,7 +87,7 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.replay_read": { action: "lesson.replay_read", facts: (e) => ({ operator: modelWord(e.facts["operator"]), what: word(e.facts["what"], "subject"), maxCents: num(e.facts["maxCents"]), target: modelWord(e.facts["target"]) }) },
   "lesson.snapshot_created": { action: "lesson.snapshot_created", facts: (e) => ({ lessonSetVersion: num(e.facts["lessonSetVersion"]), lessonCount: num(e.facts["lessonCount"]) }) },
   // Team knowledge read by a tool outside Rovara (the lessons route, `agentx mcp`): one event per call with the tool's fixed name, how it asked, the number of units and the unit IDS (u1..u10). Ids and numbers only, never text.
-  "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...unitFacts(e) }) },
+  "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...tokenFact(e), ...unitFacts(e) }) },
   // One person's tools were served more than the line of distinct units in a day: written once a day, numbers only.
   "lesson.knowledge_read_alert": { action: "lesson.knowledge_read_alert", facts: (e) => ({ distinct: num(e.facts["distinct"]), line: num(e.facts["line"]) }) },
   // Stable is what lets a lesson leave Rovara (to a local coding tool), so it is on the ledger.
