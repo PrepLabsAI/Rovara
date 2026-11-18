@@ -278,7 +278,7 @@ describe("the snippets the stage runs", () => {
     // A name server on a loopback port that answers every question with `rcode` (and an A record when 0), and the probe run against it; `net.connect` is replaced (through a preload file) so the test never touches a network.
     const dir = mkdtempSync(join(tmpdir(), "se-probe-"));
     const preloadFile = join(dir, "preload.cjs");
-    const run = async (input: { rcode: number; reach: "no route" | "open" }, withServer = true) => {
+    const run = async (input: { rcode: number; reach: "no route" | "open" | "refused" }, withServer = true) => {
       const server = createSocket("udp4");
       server.on("message", (message, remote) => {
         const reply = Buffer.from(message);
@@ -290,7 +290,7 @@ describe("the snippets the stage runs", () => {
       await new Promise<void>((resolve) => server.bind(0, "127.0.0.1", resolve));
       const port = server.address().port;
       if (!withServer) server.close();
-      writeFileSync(preloadFile, `const net=require("net");const events=require("events");net.connect=()=>{const s=new events.EventEmitter();setImmediate(()=>s.emit(${input.reach === "open" ? '"connect"' : '"error", new Error("unreachable")'}));return s;};`);
+      writeFileSync(preloadFile, `const net=require("net");const events=require("events");net.connect=()=>{const s=new events.EventEmitter();setImmediate(()=>s.emit(${input.reach === "open" ? '"connect"' : input.reach === "refused" ? '"error", Object.assign(new Error("refused"), {code:"ECONNREFUSED"})' : '"error", Object.assign(new Error("unreachable"), {code:"ENETUNREACH"})'}));return s;};`);
       // Asynchronous: the name server above lives in this process, so a blocking spawn would stop it from answering.
       const ran = await new Promise<{ status: number | null; out: string }>((resolve) => {
         execFile(process.execPath, ["-r", preloadFile, "-e", probe, `127.0.0.1:${String(port)}`], { encoding: "utf8", timeout: 30_000 }, (error, stdout) => resolve({ status: error === null ? 0 : typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null, out: stdout }));
@@ -305,6 +305,8 @@ describe("the snippets the stage runs", () => {
     expect(await run({ rcode: 3, reach: "open" })).toMatchObject({ status: 1 });
     expect((await run({ rcode: 3, reach: "open" })).out).toContain("a raw address was reachable");
     expect(await run({ rcode: 3, reach: "no route" }, false)).toMatchObject({ status: 1 });
+    // A refusal is not "no route": something on that network answered.
+    expect(await run({ rcode: 3, reach: "refused" })).toMatchObject({ status: 1 });
   }, 60_000);
 });
 

@@ -1,8 +1,9 @@
 // Lane L4-NETG (owner DEC 254zzz77): how an EC2 worker host's task sandboxes and devcontainers reach the internet.
 //
 //   bridge  (the default): today's behaviour. Sandboxes join the `agentx-task` bridge and devcontainers the default bridge; both are NATed out through the host, so the worker SG's 443 to anywhere is their only wall.
-//   gateway: sandboxes AND devcontainers sit on an INTERNAL Docker network with no default route. Their only way out is the egress gateway the host runs (egress-gateway-source.ts in "host" mode): it answers DNS and forwards
+//   gateway: the commands the agent runs (shell, setup, checks, install steps, the dev container's own processes) sit on an INTERNAL Docker network with no default route. Their only way out is the egress gateway the host runs (egress-gateway-source.ts in "host" mode): it answers DNS and forwards
 //            HTTPS by name, to public addresses it resolved itself, for the names the install's VPC resolver allows, minus the push-capable registries (sandbox-deny-domains.ts). The host's own Docker is unchanged.
+//            NOT covered (residual, DEC 254zzz77 review): the build steps of a dev container image (Dockerfile RUN, features) and the end-to-end verifier's build commands (`rvb*` bridges) still go out through the host.
 //
 // One stack parameter (WorkerSandboxEgress), kept across upgrades and set with `agentx config set workerSandboxEgress gateway|bridge`. The session steps read it from a plain Lambda variable and a launch carries
 // AGENTX_SANDBOX_EGRESS=gateway in its boot configuration only for `gateway`; `bridge` adds nothing, so its user data is byte-identical to before.

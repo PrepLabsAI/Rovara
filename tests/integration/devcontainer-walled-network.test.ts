@@ -47,6 +47,44 @@ function fakeCli(root: string, containers: Array<string | { network: string; sha
   return { cli, events, removed };
 }
 
+describe("a dev container left from before the host was walled (L4-NETG: bridge mode on a volume that moved to gateway mode)", () => {
+  /** A CLI whose `existing` lists containers of the target with the networks they are on; `up` records when it runs and which of them were already removed. */
+  function withExisting(root: string, existing: Record<string, string>) {
+    const events: string[] = [];
+    const gone = new Set<string>();
+    const cli: DevcontainerCli = {
+      run: async () => { events.push(`up (removed: ${[...gone].sort().join(",") || "none"})`); return { exitCode: 0, stdout: '{"outcome":"success","containerId":"new-1","remoteUser":"node","remoteWorkspaceFolder":"/workspaces/sample"}', stderr: "" }; },
+      walledNetwork: { name: "agentx-task", ensure: async () => { events.push("ensure"); } },
+      checks: {
+        fullConfiguration: async () => ({ configuration: {}, mergedConfiguration: {} }),
+        existing: async () => Object.keys(existing).filter((id) => !gone.has(id)),
+        inspect: async (id) => on(existing[id] ?? "agentx-task", root),
+        remove: async (id) => { gone.add(id); events.push(`remove ${id}`); },
+      },
+    };
+    return { cli, events, gone };
+  }
+
+  it("removes a container of the target that is on the default bridge BEFORE `up` can restart it there with the repository's lifecycle commands, and leaves a walled one alone", async () => {
+    const target = await workspace();
+    const { cli, events, gone } = withExisting(target.rootPath, { old1: "bridge", old2: "agentx-task", old3: "some-other-network" });
+    await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "new-1" });
+    expect([...gone].sort()).toEqual(["old1", "old3"]);
+    expect(events).toEqual(["ensure", "remove old1", "remove old3", "up (removed: old1,old3)"]);
+  });
+
+  it("does not look for old containers where the host walls nothing (a laptop)", async () => {
+    const target = await workspace();
+    let asked = false;
+    const cli: DevcontainerCli = {
+      run: async () => ({ exitCode: 0, stdout: '{"outcome":"success","containerId":"id-1","remoteUser":"node","remoteWorkspaceFolder":"/workspaces/sample"}', stderr: "" }),
+      checks: { fullConfiguration: async () => ({ configuration: {}, mergedConfiguration: {} }), existing: async () => { asked = true; return ["x"]; }, inspect: async () => on("bridge", target.rootPath), remove: async () => undefined },
+    };
+    await ensureDevcontainer(cli, target).catch(() => undefined);
+    expect(asked).toBe(false);
+  });
+});
+
 describe("a dev container where the host walls its network", () => {
   it("has its network made before it starts, and starts once when it is on that network alone (positive control)", async () => {
     const target = await workspace();

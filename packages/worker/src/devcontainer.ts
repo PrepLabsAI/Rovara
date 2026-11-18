@@ -21,6 +21,7 @@ import {
   WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
+  walledNetworkProblem,
   localDevcontainerRefusal,
   parseJsonc,
   hostPathResolver,
@@ -202,6 +203,11 @@ export interface DevcontainerFullConfiguration {
 export interface DevcontainerChecks {
   fullConfiguration(target: DevcontainerTarget): Promise<DevcontainerFullConfiguration>;
   inspect(containerId: string): Promise<ContainerInspection>;
+  /**
+   * L4-NETG: the ids of every container (running or stopped) the devcontainer CLI made for this target (its `devcontainer.local_folder` label). On a walled worker `ensureDevcontainer` removes one that is not on the walled network
+   * BEFORE `up`, because Docker's data root survives on the workspace volume: a container made in `bridge` mode would otherwise be restarted on the open default bridge, with the repository's lifecycle commands, before any check ran.
+   */
+  existing?(target: DevcontainerTarget): Promise<string[]>;
   /** Stops and deletes the container. */
   remove(containerId: string): Promise<void>;
   /** Deletes volumes by name, once their container is gone; one already gone or still in use is left. */
@@ -275,6 +281,13 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   let hidden = await hiddenWorkspaceDirectories(target.rootPath);
   // The network is made (or made again) before any container can join it.
   await cli.walledNetwork?.ensure();
+  // L4-NETG: a container of this target that is not on the walled network (made before the worker was walled, or in `bridge` mode on a volume that has since moved to `gateway`) is removed before `up` can restart it on a bridge with a way out.
+  if (walledNetwork !== undefined && cli.checks?.existing !== undefined) {
+    for (const id of await cli.checks.existing(target)) {
+      const found = await cli.checks.inspect(id).catch(() => undefined);
+      if (found === undefined || walledNetworkProblem(found, walledNetwork)) await removeStartedContainer(cli.checks, id);
+    }
+  }
   const started = await start(hidden);
   if (cli.checks === undefined) return started;
   let { problems, volumes } = await startedContainerProblems(cli.checks, started.containerId, target, hidden, walledNetwork);
@@ -916,6 +929,10 @@ export function createDevcontainerCli(options: { dockerPath?: string; environmen
         const parsed: unknown = JSON.parse(stdout);
         if (!Array.isArray(parsed) || parsed.length !== 1 || parsed[0] === null || typeof parsed[0] !== "object") throw new Error("docker inspect did not describe one container");
         return parsed[0] as ContainerInspection;
+      },
+      async existing(target) {
+        const { stdout } = await execFile(docker, ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=devcontainer.local_folder=${target.workspaceFolder}`], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
+        return stdout.split("\n").map((line) => line.trim()).filter((line) => /^[a-f0-9]{12,64}$/u.test(line));
       },
       async remove(containerId) {
         // With its anonymous volumes (an image's own VOLUME lines): a container AgentX refuses must not leave one behind on every start. A named volume is never removed by this.

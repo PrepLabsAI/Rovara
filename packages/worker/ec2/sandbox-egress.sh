@@ -131,7 +131,8 @@ resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"),
   const socket = net.connect({ host: "1.1.1.1", port: 443, timeout: 4000 });
   socket.on("connect", () => done(false, "a raw address was reachable"));
   socket.on("timeout", () => done(true, "no route"));
-  socket.on("error", () => done(true, "no route"));
+  // Only a real no-route answer counts: a refusal (ECONNREFUSED) means something on that network answered.
+  socket.on("error", (e) => (e.code === "ENETUNREACH" || e.code === "EHOSTUNREACH") ? done(true, "no route") : done(false, "unexpected: " + e.code));
 });'
 se_probe() {
   timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --dns "$SE_INNER_IP" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
