@@ -20,11 +20,10 @@ import { isEvalRunMark } from "../../lessons/eval-run.js";
 import { isHumanSendBack } from "../../lessons/human-send-backs.js";
 import { cleanForLearning } from "../../lessons/guards.js";
 import type { EvidenceSpan } from "../../lessons/reflect-input.js";
-import type { RepoChangeRequest } from "../../lessons/repo-reflect.js";
 import type { OutcomeRowReader, RevertedTasksReader } from "../../lessons/task-outcome-rows.js";
 import type { TaskSubjectBase, TaskSubjectSource } from "../../lessons/task-end.js";
 import type { SendBackFact } from "../../lessons/task-subject.js";
-import { narrowestAudience, type Audience, type TrustClass } from "../../lessons/types.js";
+import type { Audience, TrustClass } from "../../lessons/types.js";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
 import type { HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { queryAll } from "@agentx/contracts";
@@ -66,12 +65,6 @@ export const aclSourceOf = (provider: string): string => (provider === "github" 
 /** A person on the code host, named the way this install names an account that is not the owner's (`<host>_<account id or login>`). */
 const accountPerson = (provider: string, account: { login: string; hostUserId?: string | undefined }): string => `${provider}_${account.hostUserId ?? account.login}`.replace(/[^A-Za-z0-9_.-]/gu, "-").slice(0, 100);
 
-/** The start of every pull request link of a repository (`https://host/owner/name/pull/`), from one link and its number; undefined when the link does not end in that number. */
-function linkPrefixOf(url: string, number: number): string | undefined {
-  const suffix = String(number);
-  return url.endsWith(`/${suffix}`) ? url.slice(0, url.length - suffix.length) : undefined;
-}
-
 export interface LocalSubjectSourceOptions {
   flow: Pick<TaskFlowDeps, "store" | "projects">;
   companyId: OrgId;
@@ -109,12 +102,12 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
   /** Who a decision of the workflow was made by: its actor on a hosted install, the owner on a laptop. */
   const deciderOf = (decision: { actorId?: string | undefined }): string | undefined => (hosted === undefined ? ownerId : decision.actorId);
 
-  /** The comments of one merged pull request, as spans, and the change request they make up. */
-  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<{ spans: EvidenceSpan[]; change?: RepoChangeRequest }> {
+  /** The comments of one pull request, as spans. */
+  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<EvidenceSpan[]> {
     const host: CodeHost = repo.codeHost;
     const ref: ChangeRequestRef = changeRequestRef(repo.url, pullRequest.number);
     let feedback;
-    try { feedback = await host.feedback(ref, repo.scope); } catch { return { spans: [] }; }
+    try { feedback = await host.feedback(ref, repo.scope); } catch { return []; }
     const provider = providerOf(host);
     const audience: Audience = { kind: "restricted", acl: { source: aclSourceOf(provider), scope: repo.place, capturedAt: new Date(options.now()).toISOString(), liveCheck: "none" } };
     const standing = new Map<string, TrustClass>();
@@ -159,15 +152,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         ...(place === undefined || place === "" ? {} : { paths: [place] }),
       });
     }
-    const linkPrefix = linkPrefixOf(pullRequest.url, pullRequest.number);
-    if (pullRequest.state !== "MERGED" || linkPrefix === undefined || spans.length === 0) return { spans };
-    return {
-      spans,
-      change: {
-        place: repo.place, repository: pullRequest.repositoryId, repositoryUrl: repo.url, link: pullRequest.url, linkPrefix, revision: feedback.changeRequest.headTreeRevision,
-        merged: true, audience: narrowestAudience(spans.flatMap((span) => (span.audience === undefined ? [] : [span.audience]))), comments: spans, edits: [],
-      },
-    };
+    return spans;
   }
 
   const source: TaskSubjectSource = {
@@ -215,7 +200,6 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       const closerTrust = closerId === undefined ? undefined : await standingOf(closerId, project);
       if (closer !== undefined && closerId !== undefined && closerTrust !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: closerTrust, authorId: closerId });
 
-      const repoChanges: RepoChangeRequest[] = [];
       if (input.context !== "human_edit") {
         let taken = 0;
         for (const pullRequest of (workflow?.pullRequests ?? []).slice(0, MAX_PULL_REQUESTS)) {
@@ -223,9 +207,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
           const repo = await options.repos.ofTask(project, task.startingRevision, pullRequest.repositoryId);
           if (repo === undefined) continue;
           const read = await reviewComments(task, pullRequest, repo);
-          taken += read.spans.length;
-          spans.push(...read.spans);
-          if (read.change !== undefined) repoChanges.push(read.change);
+          taken += read.length;
+          spans.push(...read);
         }
       }
 
@@ -249,7 +232,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
             audience: { kind: "project" }, sharedTask: true, spans,
           },
         },
-        sendBackRequestIds, ...(repoChanges.length === 0 ? {} : { repoChanges }),
+        sendBackRequestIds,
       };
     },
   };

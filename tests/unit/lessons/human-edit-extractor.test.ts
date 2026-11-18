@@ -68,6 +68,20 @@ describe("the human-edit extractor", () => {
     expect(JSON.stringify(lessons)).not.toContain("for (;;)");
   });
 
+  it("a pull request with human edits and a member's review comment on it makes exactly one model call (no second, repository-only edits reflection)", async () => {
+    const comment = memberSpan("Please use withRetry here instead of a hand-rolled loop.", { kind: "pr_comment", eventId: "acme/api#pr7:review_comment11", scopes: ["github:repo/77"], audience: { kind: "project" } });
+    const base = baseOf();
+    base.facts.rest.spans = [...(base.facts.rest.spans ?? []), comment];
+    const model = new ScriptedModel([
+      reply(candidateJson({ type: "convention", evidenceSpanIds: ["S1"], citations: [{ kind: "pr", url: LINK }] })),
+      reply(candidateJson({ type: "convention", evidenceSpanIds: ["S1"], citations: [{ kind: "pr", url: LINK }] })),
+    ]);
+    const w = setup({ base, model });
+    expect(await w.extractor.extract(input())).toEqual({ candidates: 1 });
+    expect(w.model.calls).toHaveLength(1);
+    expect(model.replies).toHaveLength(1);
+  });
+
   it("The edit's failed judge calls count toward model_failed once, not once per call", async () => {
     const bodies = ["a client calls", "a service wrapper", "a gateway calls", "a batch calls"].map((tail) => `Use withRetry from src/retry/index.ts for HTTP retries in the api service ${tail}`);
     const model = new ScriptedModel([reply(...bodies.map((body) => candidateJson({ type: "convention", title: "Retries", description: "", body, evidenceSpanIds: ["S1"], citations: [{ kind: "pr", url: LINK }] })))]);

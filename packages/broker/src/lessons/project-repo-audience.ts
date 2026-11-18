@@ -44,7 +44,7 @@ export function projectRepoScopesOf(port: object | undefined): ProjectRepoScopes
   return found !== undefined && typeof found.read === "function" ? found : undefined;
 }
 
-export const REPO_PLACE = /^[a-z][a-z0-9:._-]*:repo\/[^+\s]+$/;
+const REPO_PLACE = /^[a-z][a-z0-9:._-]*:repo\/[^+\s]+$/;
 
 /** The repository places of a lesson whose restriction is exactly "readers of these repositories" (see the top of this file); `undefined` for any other lesson. Pure. */
 export function repoOnlyScopes(lesson: { provenance: { audience: Lesson["provenance"]["audience"] } }): string[] | undefined {
