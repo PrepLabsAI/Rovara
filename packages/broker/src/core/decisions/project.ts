@@ -8,8 +8,8 @@
 //   - a Full-path requirements and design pair is ONE card with two tabs that still records two approvals (owner Q1).
 // Anything an item says in words (a title, a question, a path) is flattened to plain text and cut; fixed words come from this file.
 import {
-  CI_STATE_WORDS, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, decisionFriction, canonicalJson,
-  type CardAction, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
+  CI_STATE_WORDS, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, PlanFeatureSchema, decisionFriction, canonicalJson,
+  type CardAction, type PlanFeature, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
 } from "@agentx/contracts";
 import { DECISION_SPEND_LOW_MAX_USD, riskTierOf, type DecisionLocks, type TierInputs, type TierResult } from "./risk-tier.js";
 import { reviewCoverage, type DesignCardFacts } from "./design-facts.js";
@@ -62,6 +62,8 @@ export type DecisionItem =
     kind: "approve_plan"; path: "quick" | "full"; files: readonly string[]; claims: number; untestedClaims: number; cost?: Cost | undefined; tooBig?: boolean | undefined;
     /** Slice 2: the run limit approving sets (`proposedUsd`) and the one the task has now (`currentUsd`, absent: none). The card shows it and, when it raises the limit, asks for a tick. */
     runLimit?: { currentUsd?: number | undefined; proposedUsd: number } | undefined;
+    /** Lead 4 PCF: the task's feature as one line, and whether this person may change it (`core/report/plan-feature.ts`). It is not in the digest; one that does not read is left off, never a reason to drop the card. */
+    planFeature?: PlanFeature | undefined;
     /** Slice 2 review fix: the files or the checks could not be read from the plan. The card shows neither chip and is at least medium (risk-tier). */
     unread?: boolean | undefined;
     /** OWNER DECISION 7: the plan's questions, optional checks and open comments, decided on the card (plan-cards.ts). */
@@ -414,6 +416,7 @@ export function cardOfItem(item: DecisionItem, locks: DecisionLocks = {}): { car
     actions: closed ? [] : actions,
     ...(item.kind === "approve_plan" && item.runLimit !== undefined && Number.isFinite(item.runLimit.proposedUsd)
       ? { runLimit: { proposedUsd: item.runLimit.proposedUsd, ...(item.runLimit.currentUsd === undefined || !Number.isFinite(item.runLimit.currentUsd) ? {} : { currentUsd: item.runLimit.currentUsd }) } } : {}),
+    ...(item.kind === "approve_plan" && !closed && item.planFeature !== undefined && PlanFeatureSchema.safeParse(item.planFeature).success ? { planFeature: item.planFeature } : {}),
     rejectReasons: closed || !actions.some((action) => action.kind === "reject") ? [] : [...REJECTABLE_REASONS],
     ...(answered === undefined ? {} : { answeredByRule: { ruleId: plainLine(answered.ruleId, 64), at: answered.at } }),
     status, createdAt: item.createdAt, ...(item.expiresAt === undefined ? {} : { expiresAt: item.expiresAt }),

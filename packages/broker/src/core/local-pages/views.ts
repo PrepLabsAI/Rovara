@@ -90,6 +90,8 @@ export interface PlanPageView {
   comments: CommentView[];
   /** Present while the plan waits for the owner. */
   approval?: ApprovalOffer;
+  /** Lead 4 PCF: the task's feature as one line while a coding plan waits, and (for the owner, who may change it) the open features to pick from. The line is Rovara's words (`core/report/plan-feature.ts`); a name in `choices` is a person's: draw it as untrusted. */
+  feature?: { line: string; featureId: string | null; canChange: boolean; choices: Array<{ id: string; name: string }> };
   /** Rovara's ask, the merge state and any questions (lane L12). */
   attention?: AttentionView;
   /** What a second model made of the coding plan (the plan check), one line each, in Rovara's fixed words; the points are the second model's text and are drawn as untrusted. Absent: the plan was not checked. */
@@ -562,6 +564,8 @@ export interface LocalPageActions {
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */
   attachThread?(input: { taskId: string; revision: number; repository: string; number: number }): Promise<LocalActionResult>;
+  /** Lead 4 PCF: "Change" and "No feature" on a waiting coding plan (`featureId` null: No feature). `revision` is the one the owner was looking at. Absent: the page offers no control. */
+  planFeature?(input: { taskId: string; revision: number; featureId: string | null }): Promise<LocalActionResult>;
   /** Design review: a choice at the cost hold, through the approval gate. The proof is the page's (a signed local-session proof). */
   designChoice?(input: { taskId: string; choice: "run_unpriced" | "raise_cap" | "lower_tier" | "skip"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** Design review: picks a paused review up again. */

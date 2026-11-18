@@ -205,6 +205,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/org/report/features/{featureId}/merge", requires: "full" },
   { method: "POST", path: "/v1/app/org/report/features/{featureId}/state", requires: "full" },
   { method: "POST", path: "/v1/app/tasks/{taskId}/feature", requires: "full" },
+  // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).
+  { method: "GET", path: "/v1/app/tasks/{taskId}/feature-choices", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

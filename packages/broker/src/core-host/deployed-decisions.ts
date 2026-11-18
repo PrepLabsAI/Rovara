@@ -26,6 +26,7 @@ import type { DecisionPerformer, DecisionRouteDependencies, DecisionSources, Per
 import { documentDecisionStore } from "../core/decisions/store.js";
 import { currentDocumentType } from "../core/decisions/workflow-subject.js";
 import { taskOpenPath } from "../core/decisions/open-path.js";
+import { readPlanFeature } from "../core/report/plan-feature.js";
 import { designApproveItem, designCardFactsOf } from "../core/design-review/card-source.js";
 import { designTouchesOf, isReviewedDesign } from "../core/design-review/decision.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -195,7 +196,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   };
 
   /** The card for one task, or undefined when it waits on nothing the person can see. A structured document that does not read back is not offered (the decision would refuse it too). */
-  const itemOf = async (task: TaskRecord): Promise<DecisionItem | undefined> => {
+  const itemOf = async (task: TaskRecord, viewer: { principal: DeployedDecisionCaller["principal"]; admin: boolean }): Promise<DecisionItem | undefined> => {
     const waiting = waitingDocument(task);
     if (waiting === undefined) return undefined;
     const { workflow, artifact, type } = waiting;
@@ -211,7 +212,13 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     const claims = loaded?.format === "structured" ? loaded.plan.claims.length : 0;
     if (type === "plan") {
       const estimate = (task as { runEstimate?: { highUsd?: unknown } }).runEstimate?.highUsd;
+      // Lead 4 PCF: the feature line. Only the task's own person is ever listed this card (`ownTask`), so a person who sees it may approve it; "Change" also needs the filing rule of
+      // `POST /v1/app/tasks/{id}/feature` (the starter, or a manager: an owner, an admin or the project's administrator, read live), and "create" the live company owner or admin.
+      const mayFile = await deps.access.canAct(viewer.principal, task).catch(() => false);
+      const manager = viewer.admin || (await liveGrant(people, viewer.principal.personId, task.project).catch(() => undefined)) === "administrator";
+      const planFeature = await readPlanFeature({ store: deps.store, companyId, now: nowMs }, task, { mayFile, manager, admin: viewer.admin });
       return {
+        ...(planFeature === undefined ? {} : { planFeature }),
         ...base, kind: "approve_plan", path: workflow.path === "FULL" ? "full" : "quick", files: facts.files, claims, untestedClaims: facts.untestedClaims,
         ...(facts.unread ? { unread: true } : {}), ...(typeof estimate === "number" && Number.isFinite(estimate) && estimate >= 0 ? { cost: { highUsd: estimate } } : {}),
       };
@@ -226,7 +233,9 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   const sources: DecisionSources<DeployedDecisionCaller> = {
     async list(caller) {
       const personId = personOfCaller(companyId, caller);
-      if (personId === undefined || (await liveMemberRole(people, companyId, personId)) === undefined) return [];
+      const memberRole = personId === undefined ? undefined : await liveMemberRole(people, companyId, personId);
+      if (personId === undefined || memberRole === undefined) return [];
+      const viewer = { principal: caller.principal, admin: memberRole === "owner" || memberRole === "admin" };
       const grants = new Map<string, Promise<boolean>>();
       const granted = (project: string): Promise<boolean> => {
         let found = grants.get(project);
@@ -245,7 +254,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
           const drawn = await Promise.all(page.tasks.slice(start, start + DECISION_SOURCE_PARALLEL).map(async (row) => {
             const task = await readTask(deps, row.taskId);
             if (task === undefined || task.companyId !== companyId || task.developerId !== personId || waitingDocument(task) === undefined || !(await granted(task.project))) return undefined;
-            return await itemOf(task);
+            return await itemOf(task, viewer);
           }));
           for (const item of drawn) if (item !== undefined) items.push(item);
         }

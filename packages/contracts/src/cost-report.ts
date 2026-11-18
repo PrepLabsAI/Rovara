@@ -89,6 +89,30 @@ export const TaskFeatureResponseSchema = z.object({
 }).strict();
 export type TaskFeatureResponse = z.infer<typeof TaskFeatureResponseSchema>;
 
+// ---- the plan card's feature line (lead 4, PCF)
+
+/** `GET /v1/app/tasks/{taskId}/feature-choices`: the features a plan approver may pick from. The same people may file the task (`POST .../feature`). */
+export const TASK_FEATURE_CHOICES_PATH_PATTERN = /^\/v1\/app\/tasks\/([^/]+)\/feature-choices$/u;
+/** The most features one picker lists (open ones, by name). A company with more types the name of the one it wants in the report instead. */
+export const PLAN_FEATURE_CHOICES_MAX = 50;
+/**
+ * What a coding plan's card shows about the task's feature, in ONE line the server words (Slack, the task pages and the app all show this same line): "Feature: Checkout v2 (from the Linear parent)".
+ * `feature` is what the task is filed under now (null: "No feature"). `canChange` is true only for a person who may file the task AND approve this plan; `canCreate` only for a live company owner or admin
+ * (the same rule as making a feature in the report). A person without `canChange` sees the line and no control.
+ */
+export const PlanFeatureSchema = z.object({
+  line: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}]*$/u, "one plain line"),
+  feature: z.object({ id: FeatureIdSchema, name: z.string().min(1).max(FEATURE_NAME_MAX * 4), source: FeatureSourceSchema }).strict().nullable(),
+  canChange: z.boolean(),
+  canCreate: z.boolean(),
+}).strict();
+export type PlanFeature = z.infer<typeof PlanFeatureSchema>;
+export const FeatureChoicesResponseSchema = z.object({
+  features: z.array(z.object({ id: FeatureIdSchema, name: z.string().min(1).max(FEATURE_NAME_MAX * 4) }).strict()).max(PLAN_FEATURE_CHOICES_MAX),
+  canCreate: z.boolean(),
+}).strict();
+export type FeatureChoicesResponse = z.infer<typeof FeatureChoicesResponseSchema>;
+
 // ---- the report rows
 
 /** Where a task started: Linear, Jira, Slack, the web app, an AI tool or the CLI (`tool`), or anything else (an automation, a schedule, a GitHub issue). */

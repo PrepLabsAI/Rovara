@@ -18,6 +18,7 @@ import { createDocumentMilestones } from "../../packages/broker/src/core/milesto
 import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
+import { createFeatureStore } from "../../packages/broker/src/core/report/feature-store.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -604,5 +605,49 @@ describe("a slow send keeps its claim", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---- lead 4 PCF: the feature line on the chat's plan card
+
+describe("the plan card's feature line in the chat", () => {
+  const features = (w: Awaited<ReturnType<typeof world>>, companyId: OrgId = ORG) => createFeatureStore({ store: w.store, companyId, audit: createNoopAuditSink(), now });
+  const SYSTEM = { type: "system", id: "test" } as const;
+
+  it("says the task's feature in one line under the risk, with no cost and no feature button: a task with none says No feature", async () => {
+    const w = await world({ risk: "low" });
+    const event = await card(w);
+    expect(event?.data.text.split("\n")).toContain("Feature: No feature");
+    expect(event?.data.text).not.toMatch(/\$|cost|USD/iu);
+    expect(event?.data.actions?.map((action) => action.decision)).toEqual(["APPROVE", "REQUEST_CHANGES"]);
+  });
+
+  it("names the Linear parent the tracker suggested, once, and a high risk plan carries the line too (still no button)", async () => {
+    for (const risk of ["low", "high"] as const) {
+      const w = await world({ risk });
+      const parent = await features(w).create({ name: "Checkout v2", trackerLink: { tracker: "linear", id: "PRJ-1", url: "https://linear.app/x/project/1" } }, SYSTEM);
+      await features(w).setTaskFeature({ taskId: TASK, project: "web", featureId: parent.id, source: "tracker" }, SYSTEM);
+      const event = await card(w);
+      expect(event?.data.text.split("\n").filter((line) => line.startsWith("Feature:"))).toEqual(["Feature: Checkout v2 (from the Linear parent)"]);
+      if (risk === "high") expect(event?.data.actions ?? []).toEqual([]);
+    }
+  });
+
+  it("another company's feature on the same task id never shows, and a store that fails leaves the line out without holding the card back", async () => {
+    const w = await world({ risk: "low" });
+    const theirs = await features(w, OTHER).create({ name: "Other company canary" }, SYSTEM);
+    await features(w, OTHER).setTaskFeature({ taskId: TASK, project: "web", featureId: theirs.id, source: "chosen" }, SYSTEM);
+    const first = await card(w);
+    expect(first?.data.text).toContain("Feature: No feature");
+    expect(first?.data.text).not.toContain("canary");
+    const w2 = await world({ risk: "low" });
+    const get = w2.store.get.bind(w2.store);
+    vi.spyOn(w2.store, "get").mockImplementation(async (key) => { if (key.sk.startsWith("TASKFEAT#")) throw new Error("private canary"); return get(key); });
+    const event = await card(w2);
+    expect(event).toBeDefined();
+    expect(event!.data.text).not.toContain("Feature:");
+    expect(event!.data.text).not.toContain("canary");
+    expect(event!.data.actions?.map((action) => action.decision)).toEqual(["APPROVE", "REQUEST_CHANGES"]);
+    vi.restoreAllMocks();
   });
 });

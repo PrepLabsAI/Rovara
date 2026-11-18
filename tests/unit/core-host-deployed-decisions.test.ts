@@ -466,3 +466,92 @@ it("a feature-store failure cannot turn a committed approval into an error", asy
   expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
   expect((await t.stored(taskId)).decisions.at(-1)?.decision).toBe("APPROVE");
 });
+
+// ---- lead 4 PCF: the feature line on a coding plan's card
+
+describe("the plan card's feature line (lead 4 PCF)", () => {
+  async function withFeatures() {
+    const t = await setup();
+    const { createFeatureStore } = await import("../../packages/broker/src/core/report/feature-store.js");
+    const features = (companyId: OrgId = ORG) => createFeatureStore({ store: t.world.store, companyId, audit: (companyId === ORG ? t.runtime : t.otherRuntime).flow.deps.audit, now: () => t.world.clock.now });
+    return { ...t, features };
+  }
+  const planFeature = async (t: Awaited<ReturnType<typeof withFeatures>>, personId: string, taskId: string, companyId: OrgId = ORG) => (await view(companyId === ORG ? t.deps : t.otherDeps, personId, companyId)).cards.find((card) => card.id === cardOf(taskId))?.planFeature;
+
+  it("says No feature with a Change for the starter, and the card still reads as the strict contract", async () => {
+    const t = await withFeatures();
+    const taskId = await t.waitingTask("dev-a");
+    expect(await planFeature(t, "dev-a", taskId)).toEqual({ line: "Feature: No feature", feature: null, canChange: true, canCreate: false });
+  });
+
+  it("names the Linear parent the tracker suggested; an admin may also make a feature, a member may not", async () => {
+    const t = await withFeatures();
+    const parent = await t.features().create({ name: "Checkout v2", trackerLink: { tracker: "linear", id: "PRJ-1", url: "https://linear.app/x/project/1" } }, { type: "system", id: "test" });
+    const member = await t.waitingTask("dev-a"), admin = await t.waitingTask("dev-b");
+    for (const taskId of [member, admin]) await t.features().setTaskFeature({ taskId, project: "payments", featureId: parent.id, source: "tracker" }, { type: "system", id: "tracker" });
+    expect(await planFeature(t, "dev-a", member)).toMatchObject({ line: "Feature: Checkout v2 (from the Linear parent)", feature: { id: parent.id, source: "tracker" }, canChange: true, canCreate: false });
+    expect(await planFeature(t, "dev-b", admin)).toMatchObject({ canChange: true, canCreate: true });
+  });
+
+  it("after the starter chose once, the card shows the line with no Change (the filing route's own rule); a project administrator may still change it", async () => {
+    const t = await withFeatures();
+    const one = await t.features().create({ name: "One" }, { type: "system", id: "test" });
+    const mine = await t.waitingTask("dev-a");
+    await t.features().setTaskFeature({ taskId: mine, project: "payments", featureId: one.id, source: "chosen" }, { type: "person", id: "dev-a" });
+    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ line: "Feature: One (chosen)", canChange: false, canCreate: false });
+    // the same task, as its starter who is also the project's administrator (read live at each listing)
+    t.grants.set("dev-a|payments", "administrator");
+    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ canChange: true });
+    t.grants.set("dev-a|payments", "developer");
+    expect(await planFeature(t, "dev-a", mine)).toMatchObject({ canChange: false });
+  });
+
+  it("a change is not a changed card: the digest the person was shown stays the digest", async () => {
+    const t = await withFeatures();
+    const one = await t.features().create({ name: "One" }, { type: "system", id: "test" });
+    const taskId = await t.waitingTask("dev-a");
+    const before = (await view(t.deps, "dev-a")).digests[cardOf(taskId)];
+    await t.features().setTaskFeature({ taskId, project: "payments", featureId: one.id, source: "chosen" }, { type: "person", id: "dev-a" });
+    const after = await view(t.deps, "dev-a");
+    expect(after.digests[cardOf(taskId)]).toBe(before);
+    expect(after.cards.find((card) => card.id === cardOf(taskId))!.planFeature!.line).toContain("One");
+  });
+
+  it("two companies: another company's feature on a task of the same id never shows, and each company reads its own", async () => {
+    const t = await withFeatures();
+    const mine = await t.waitingTask("dev-a");
+    const theirs = await t.waitingTask("dev-x", OTHER);
+    const secret = await t.features(OTHER).create({ name: "Other company secret" }, { type: "system", id: "test" });
+    await t.features(OTHER).setTaskFeature({ taskId: theirs, project: "payments", featureId: secret.id, source: "chosen" }, { type: "person", id: "dev-x" });
+    // a stray row under the other company's key for this company's task would be that company's: this company's card reads its own key only
+    await t.features(OTHER).setTaskFeature({ taskId: mine, project: "payments", featureId: secret.id, source: "chosen" }, { type: "person", id: "dev-x" });
+    expect((await planFeature(t, "dev-a", mine))!.feature).toBeNull();
+    expect(JSON.stringify(await view(t.deps, "dev-a"))).not.toContain("secret");
+    expect((await planFeature(t, "dev-x", theirs, OTHER))!.line).toBe("Feature: Other company secret (chosen)");
+  });
+
+  it("a feature store that fails leaves the card, without the line, and an approval still goes through", async () => {
+    const t = await withFeatures();
+    const taskId = await t.waitingTask("dev-a");
+    const get = t.world.store.get.bind(t.world.store);
+    const spy = vi.spyOn(t.world.store, "get").mockImplementation(async (key) => { if (key.sk.startsWith("TASKFEAT#")) throw new Error("private canary"); return get(key); });
+    const cards = await view(t.deps, "dev-a");
+    expect(cards.cards.find((card) => card.id === cardOf(taskId))).toBeDefined();
+    expect(cards.cards.find((card) => card.id === cardOf(taskId))!.planFeature).toBeUndefined();
+    expect(JSON.stringify(cards)).not.toContain("canary");
+    spy.mockRestore();
+    expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
+  });
+
+  it("an item whose feature line does not read is left off the card, and the card stays", () => {
+    const base = { kind: "approve_plan" as const, subjectId: randomUUID(), project: "payments", title: "t", createdAt: "2026-11-15T10:00:00.000Z", openPath: "/app/tasks/x", contentVersion: "v1", path: "quick" as const, files: [], claims: 0, untestedClaims: 0 };
+    const good = { line: "Feature: A (chosen)", feature: null, canChange: true, canCreate: false };
+    expect(projectDecisionCards([{ ...base, planFeature: good }]).cards[0]!.planFeature).toEqual(good);
+    const bad = projectDecisionCards([{ ...base, planFeature: { ...good, line: "x\u0000y" } }]);
+    expect(bad.cards).toHaveLength(1);
+    expect(bad.cards[0]!.planFeature).toBeUndefined();
+    // only a plan card carries one
+    const requirements = projectDecisionCards([{ kind: "approve_requirements", subjectId: randomUUID(), project: "payments", title: "t", createdAt: base.createdAt, openPath: "/app/tasks/x", contentVersion: "v1", claims: 0, planFeature: good } as never]);
+    expect(requirements.cards[0]!.planFeature).toBeUndefined();
+  });
+});

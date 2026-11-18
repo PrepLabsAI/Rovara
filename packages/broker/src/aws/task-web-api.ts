@@ -18,7 +18,7 @@ import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { CSRF_COOKIE, PRIVATE_HEADERS, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?|e2e/artifacts/([0-9a-f]{64}))$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|feature|feature-choices|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?|e2e/artifacts/([0-9a-f]{64}))$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -66,6 +66,12 @@ export type PageDecisionInput = z.infer<typeof PageDecisionInputSchema>;
 export const PageRetryInputSchema = z.object({ requestId: z.string().uuid(), expectedRevision: z.number().int().positive() }).strict();
 export type PageRetryInput = z.infer<typeof PageRetryInputSchema>;
 
+/** Lead 4 PCF: the owner's change of the plan's feature from the page: a feature id, or null for "No feature". Nothing else rides along. */
+export const PageFeatureInputSchema = z.object({ feature: z.string().regex(/^ft_[a-f0-9]{20}$/u).nullable() }).strict();
+export type PageFeatureInput = z.infer<typeof PageFeatureInputSchema>;
+/** What a change answers: the plan card's new line and the feature now. */
+export interface PageFeatureAnswer { line: string; featureId?: string }
+
 /** The text's length is checked by the comment store, so the page can say "Keep comments under 2,000 characters." */
 const CommentTextSchema = z.string().max(PAGE_API_BODY_MAX_BYTES);
 
@@ -100,6 +106,9 @@ export interface TaskWebApiDependencies {
   decide(caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }>;
   /** Retries a blocked application round (the owner only; any other block is refused) and answers the new revision. Without it, the retry path is not found. */
   retryApplicationRound?(caller: DeveloperCaller, taskId: string, input: PageRetryInput): Promise<{ revision: number }>;
+  /** Lead 4 PCF: the open features the owner may pick from, and the change itself. Both must refuse a caller who may not decide this task (`pageReason: "owners_only"`). Without them the paths are not found. */
+  featureChoices?(caller: DeveloperCaller, taskId: string): Promise<{ features: Array<{ id: string; name: string }> }>;
+  setFeature?(caller: DeveloperCaller, taskId: string, input: PageFeatureInput): Promise<PageFeatureAnswer>;
   /**
    * The screenshot behind a row of the task's results (M1.3 Task 3.7), by its SHA-256: undefined for a digest the task's current display does not name. It must refuse a caller
    * who may not read the task (the page's own access rule) with an error carrying the code TASK_NOT_FOUND, TASK_ACCESS_DENIED, FORBIDDEN or NOT_FOUND. Without it the path is not found.
@@ -192,7 +201,7 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     const peopleConfirm = route[6] !== undefined;
     const method = request.method.toUpperCase();
     // `state` is read, `comments` is read (GET) and written (POST), everything else is written.
-    const allowed = endpoint === "state" || endpoint === "people" || endpoint === "e2e/artifacts" || (peopleRequestId !== undefined && !peopleConfirm)
+    const allowed = endpoint === "state" || endpoint === "people" || endpoint === "feature-choices" || endpoint === "e2e/artifacts" || (peopleRequestId !== undefined && !peopleConfirm)
       ? ["GET"] : endpoint === "comments" && commentId === undefined ? ["GET", "POST"] : ["POST"];
     if (!allowed.includes(method)) {
       const refused = json(405, { error: "method_not_allowed" });
@@ -202,6 +211,10 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     try {
       if (method === "GET") {
         if (endpoint === "e2e/artifacts") return e2eArtifactResponse(deps, caller, taskId, artifactSha256!);
+        if (endpoint === "feature-choices") {
+          if (deps.featureChoices === undefined) return json(404, { error: "not_found" });
+          return json(200, await deps.featureChoices(caller, taskId));
+        }
         if (endpoint === "people") {
           if (deps.getPeople === undefined) return json(404, { error: "not_found" });
           return json(200, await deps.getPeople(caller, taskId));
@@ -288,6 +301,12 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         const parsedRetry = PageRetryInputSchema.safeParse(value);
         if (!parsedRetry.success) return invalid();
         return json(200, await deps.retryApplicationRound(caller, taskId, parsedRetry.data));
+      }
+      if (endpoint === "feature") {
+        if (deps.setFeature === undefined) return json(404, { error: "not_found" });
+        const parsedFeature = PageFeatureInputSchema.safeParse(value);
+        if (!parsedFeature.success) return invalid();
+        return json(200, await deps.setFeature(caller, taskId, parsedFeature.data));
       }
       const parsed = PageDecisionInputSchema.safeParse(value);
       if (!parsed.success) return invalid();

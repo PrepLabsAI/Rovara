@@ -23,6 +23,7 @@ import type { DecisionGate } from "../decisions/approval-gate.js";
 import { CHAT_METHOD_PREFIX } from "../decisions/strong-methods.js";
 import { WORKFLOW_DOCUMENT_KIND, waitingDocumentDigest } from "../decisions/workflow-subject.js";
 import { taskKey } from "../task-flow/keys.js";
+import { readPlanFeature } from "../report/plan-feature.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
 import { postApprovalCard } from "./cards.js";
@@ -193,7 +194,9 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         // Buttons only where the approvers take a decision made in this chat (and never for a high risk plan); otherwise the card is a pointer to the task page.
         const chatTakes = risk !== "high" && found.requirement.methods.includes(`${CHAT_METHOD_PREFIX}${conversation.channel}`);
         const taskUrl = deps.taskUrl?.(taskId);
-        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.`;
+        // Lead 4 PCF: the task's feature as one line (no cost, no controls here: "Change" is on the task page). A read that fails leaves the line out and never holds the card back.
+        const feature = await readPlanFeature({ store: deps.store, companyId: orgId, now: deps.now }, { taskId, project: typeof task["project"] === "string" ? task["project"] : "" }, { mayFile: false, manager: false, admin: false });
+        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.${feature === undefined ? "" : `\n${feature.line}`}`;
         // Request changes asks "What should change?" in a form the chat opens (an adapter that declares `forms`); a chat with none sends the person to the task page for it instead, and the card offers Approve alone.
         const asks = adapter.capabilities.forms === true;
         const extra = chatTakes

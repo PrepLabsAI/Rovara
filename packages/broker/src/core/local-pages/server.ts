@@ -69,6 +69,7 @@ const NOTICES: Record<string, string> = {
   rejected: "Rejected.",
   commented: "Comment added.",
   retried: "Rovara is running that step again.",
+  featured: "The feature is saved.",
   diagnosing: "Fix with agent is looking into this error. Reload this page in a moment.",
   attached: "That thread is attached. A writer's comment there can decide this plan.",
   answered: "Your answers were sent.",
@@ -341,6 +342,17 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
       if (!verified(request, { action: "task.retry", taskId, revision })) return redirect(`${request.base}/plan/${taskId}?n=form`);
       const result = await options.actions.retry({ taskId, revision });
       return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "retried")}`);
+    } },
+    { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/feature$`), handle: async (request, match) => {
+      const taskId = match[1] ?? "";
+      const revision = Number(request.form?.get("revision"));
+      const chosen = request.form?.get("feature") ?? "";
+      const featureId = chosen === "none" ? null : /^ft_[a-f0-9]{20}$/u.test(chosen) ? chosen : undefined;
+      if (!Number.isSafeInteger(revision) || featureId === undefined || options.actions.planFeature === undefined) return redirect(`${request.base}/plan/${taskId}?n=invalid`);
+      // The token is bound to which of the two forms was drawn ("pick" a feature, or "none"), so one form cannot be replayed as the other.
+      if (!verified(request, { action: "plan.feature", taskId, revision, subject: featureId === null ? "none" : "pick" })) return redirect(`${request.base}/plan/${taskId}?n=form`);
+      const result = await options.actions.planFeature({ taskId, revision, featureId });
+      return redirect(`${request.base}/plan/${taskId}?n=${outcomeCode(result, "featured")}`);
     } },
     { method: "POST", pattern: new RegExp(`^/plan/(${TASK_ID})/diagnose$`), handle: async (request, match) => {
       const taskId = match[1] ?? "";

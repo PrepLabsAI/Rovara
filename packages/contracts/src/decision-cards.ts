@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { forwardReader } from "./forward-reader.js";
 import { EvidenceHrefSchema } from "./evidence.js";
+import { PlanFeatureSchema } from "./cost-report.js";
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 function line(max: number, min = 1) {
@@ -167,6 +168,8 @@ export const DecisionCardSchema = z
      * tick and the approve carries `acknowledgedRunLimitUsd` (the server refuses a raise without it, whoever asks).
      */
     runLimit: z.object({ currentUsd: z.number().min(0).max(100_000).optional(), proposedUsd: z.number().min(0).max(100_000) }).strict().optional(),
+    /** A coding plan's card only (lead 4, PCF): the task's feature, in one line, and whether this person may change it. Not part of the card's digest: changing the feature never makes a card stale. */
+    planFeature: PlanFeatureSchema.optional(),
     rejectReasons: z.array(DecisionRejectReasonSchema).max(6),
     /** Set exactly when a standing rule answered the card (recorded in history; never for a high card). */
     answeredByRule: z.object({ ruleId: line(64), at: z.string().datetime() }).strict().optional(),
@@ -190,6 +193,7 @@ export const DecisionCardSchema = z
     if ((card.status === "answered_by_rule") !== (card.answeredByRule !== undefined)) problem(["answeredByRule"], "answeredByRule is there exactly when a rule answered the card");
     if (card.status !== "pending" && card.actions.length > 0) problem(["actions"], "an answered card has no actions");
     if (card.runLimit !== undefined && card.kind !== "approve_plan") problem(["runLimit"], "only a coding plan's card carries a run limit");
+    if (card.planFeature !== undefined && card.kind !== "approve_plan") problem(["planFeature"], "only a coding plan's card carries a feature line");
     if (card.actions.some((action) => action.kind === "reject") && card.rejectReasons.length === 0) problem(["rejectReasons"], "a card that can be rejected lists its reject reasons");
     if (new Set(card.rejectReasons).size !== card.rejectReasons.length) problem(["rejectReasons"], "reject reasons are unique");
   });
