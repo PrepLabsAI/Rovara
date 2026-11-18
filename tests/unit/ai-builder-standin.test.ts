@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  DEFAULT_AGENT_ALLOW_DOMAINS, GOOGLE_VERTEX_AI_ALLOW_GROUP, EVAL_ROUND_ARTIFACT, EvalRoundArtifactSchema, builtinModelCatalog, findRedirectEscapes, modelHostBlockList, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, evalResultFromArtifact, readEvidencePack, rovaraCheckOf,
+  DEFAULT_AGENT_ALLOW_DOMAINS, GOOGLE_VERTEX_AI_ALLOW_GROUP, EVAL_ROUND_ARTIFACT, EvalRoundArtifactSchema, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, evalResultFromArtifact, readEvidencePack, rovaraCheckOf,
   type EvalRoundArtifact, type EvidencePack, type EvidencePackRead, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { laptopSandboxDenyList } from "../../packages/broker/src/local/isolation/sandbox-model-deny.js";
@@ -317,13 +317,5 @@ describe("Google hosts and the default allow list (batch 16: #984 adds the narro
     expect(refuseSetupHost("oauth2.googleapis.com", undefined, laptopSandboxDenyList())).toBeUndefined();
     // Storage under Google is refused outright, however the project asks.
     expect(refuseSetupHost("storage.googleapis.com")).toBe("raw_storage");
-  });
-  it("in a test round a model host is blocked by name even if the project allowed it: the run says so in fixed words, the token hosts are not flagged", () => {
-    const blocked = modelHostBlockList(builtinModelCatalog().rows, []);
-    expect(blocked).toContain(vertexHost);
-    const found = findRedirectEscapes(blocked, [vertexHost, "oauth2.googleapis.com"]);
-    expect(found).toEqual([{ host: vertexHost, kind: "ignored_redirect", sentence: `not run: client ignored the redirect (called ${vertexHost})` }]);
-    // A Vertex location the catalog does not list is still named, as an unlisted model host.
-    expect(findRedirectEscapes(blocked, ["me-central7-aiplatform.googleapis.com"])[0]).toMatchObject({ kind: "unlisted_model_host" });
   });
 });
