@@ -377,6 +377,8 @@ else
   args+=(--env TMPDIR=/tmp)
 fi
 t=/run/agentx-test-services; ! mountpoint -q $t || args+=(--volume $t:$t --env AGENTX_TEST_SERVICES_RUN_DIR=$t)
+# L4-NETG2: the host resolvers a gateway-mode stage wrote (the daemon default name server is the egress gateway there, which this host-network container cannot reach). Before the image, which stays the last docker argument.
+while read -r r; do args+=(--dns "$r"); done < <(cat /etc/agentx/worker-dns 2>/dev/null)
 args+=(--volume "$DOCKER_SOCKET:$DOCKER_SOCKET" --group-add "$docker_gid" --log-driver awslogs --log-opt awslogs-region="$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE")" --log-opt awslogs-group="$(cat /etc/agentx/log-group)" --log-opt awslogs-stream="$(sed -n 's/^AGENTX_WORKSPACE_ID=//p' "$WORKER_ENV_FILE")/$(sed -n 's/^AGENTX_SESSION_GENERATION=//p' "$WORKER_ENV_FILE")/$(cat /etc/agentx/instance-id)" "$worker_image")
 exec "$docker" "${args[@]}"
 LAUNCHER
