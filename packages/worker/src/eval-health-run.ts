@@ -42,7 +42,7 @@ const SHA = /^[a-f0-9]{40}$/u;
 export async function runEvalHealthRider(deps: EvalHealthRiderDeps): Promise<EvalHealthResultBody | undefined> {
   const job = PrepareEvalHealthSchema.safeParse(deps.invocation?.payload?.evalHealth);
   if (deps.invocation === null || typeof deps.invocation !== "object" || deps.invocation.kind !== "prepare" || deps.invocation.payload?.evalHealth === undefined) return undefined;
-  const fixed = (reason: "invalid_questions" | "stopped" | "unavailable" | "not_connected"): EvalHealthResultBody | undefined => job.success ? { requestId: job.data.requestId, claimId: job.data.claimId, result: { status: "not_run", reason } } : undefined;
+  const fixed = (reason: "invalid_identity" | "stopped" | "unavailable" | "not_connected"): EvalHealthResultBody | undefined => job.success ? { requestId: job.data.requestId, claimId: job.data.claimId, result: { status: "not_run", reason } } : undefined;
   if (!job.success) return undefined;
   const controller = new AbortController();
   const stop = () => controller.abort();
@@ -70,7 +70,7 @@ async function measure(deps: EvalHealthRiderDeps, job: { requestId: string; clai
   // Main is exactly what the broker pinned: every repository of the preparation resolved to the pinned head (the preparation refuses otherwise), and nothing else is in the project.
   if (!Array.isArray(pins) || !Array.isArray(repositories) || repositories.length === 0 || repositories.length !== pins.length
     || repositories.some(repo => typeof repo?.name !== "string" || typeof repo.path !== "string" || !SHA.test(repo.resolvedCommit) || pins.find(pin => pin.repository === repo.name)?.commit !== repo.resolvedCommit)) {
-    return { requestId: job.requestId, claimId: job.claimId, result: { status: "not_run", reason: "invalid_questions" } };
+    return { requestId: job.requestId, claimId: job.claimId, result: { status: "not_run", reason: "invalid_identity" } };
   }
   const environment = evalEnvironmentWithGateway(deps.environment ?? process.env, invocation.payload.evalGatewayUrl);
   const ports = deps.ports !== undefined ? deps.ports(invocation) : (() => {

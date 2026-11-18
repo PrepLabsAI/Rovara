@@ -9,8 +9,11 @@ import { MEASURES_FILE_MAX_BYTES } from "./measures-file.js";
 
 /** A yes older than this is not run (a person asked a day ago; the eval, the approval or the people may all have changed since). */
 export const EVAL_HEALTH_MAX_AGE_MS = 24 * 60 * 60_000;
-/** A claimed run that has not reported in this long is over: it reads "Not run: it did not report back", and a new yes is allowed. A late result after this is not taken. */
-export const EVAL_HEALTH_RUN_MAX_MS = 2 * 60 * 60_000;
+/**
+ * A claimed run that has not reported in this long is over: it reads "Not run: it did not report back", and a new yes is allowed. A late result after this is not taken. It is SHORTER than the baseline's measuring
+ * mark (60 minutes, `createDocumentBaseScoreCache`), so a task that arrives while a health run is live always reads "measuring" and never starts a second paid measurement of the same baseline.
+ */
+export const EVAL_HEALTH_RUN_MAX_MS = 58 * 60_000;
 /** The worker feature (listed on /ping) that takes the prepare payload's `evalHealth`. A worker without it is never sent the job. */
 export const PREPARE_EVAL_HEALTH_FEATURE = "prepare.evalHealth.v1" as const;
 /** The callback actions of the health run's operation, and only its. */

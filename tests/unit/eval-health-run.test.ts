@@ -174,6 +174,22 @@ describe("a health run starts only from a yes, once", () => {
   });
 });
 
+describe("a live run keeps its place and its mark", () => {
+  it("no yes overwrites a run that is running, whatever approval it holds; a replaced approval does not free its place", async () => {
+    const w = await world(); await started(w);
+    await (await w.w.run(filesOf(2), reportOf(2, { model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001" }))).approve();
+    await expect(w.ask()).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    expect((await w.row())!.state).toBe("running");
+  });
+  it("the run's window is shorter than the baseline's measuring mark: a task arriving at the last second of a live run still reads measuring", async () => {
+    const w = await world(); await started(w);
+    expect(EVAL_HEALTH_RUN_MAX_MS).toBeLessThan(60 * 60_000);
+    w.clock.now += EVAL_HEALTH_RUN_MAX_MS - 1000;
+    expect((await readEvalHealthView({ store: w.w.store, companyId: A, members: w.w.members, now: () => w.clock.now }, project)).state).toBe("running");
+    expect(await w.cache().readMeasurement!(await partsOf(w))).toBe("measuring");
+  });
+});
+
 describe("the worker's plan and grant", () => {
   it("is the request's own approved item: the grant is the item's approved estimate through the bound adapter, never the request's estimate", async () => {
     const w = await world(); const { requestId, claimId } = await started(w);
@@ -284,7 +300,7 @@ describe("the result", () => {
     const w = await world(); const { requestId, claimId } = await started(w);
     const parts = await partsOf(w);
     const good = body(requestId, claimId, { status: "measured", record: record() });
-    for (const bad of [{ ...good, parts: { ...parts, baseCommit: "b".repeat(40) } }, { ...good, company: B }, { ...good, project: "other" }, { ...good, costMicros: 1 }, { ...good, result: { ...good.result, key: "x".repeat(64) } }, { ...good, result: { status: "not_run", reason: "expired" } }, "text", null, []]) {
+    for (const bad of [{ ...good, parts: { ...parts, baseCommit: "b".repeat(40) } }, { ...good, company: B }, { ...good, project: "other" }, { ...good, costMicros: 1 }, { ...good, result: { status: "measured", record: record(), key: "x".repeat(64) } }, { ...good, result: { status: "not_run", reason: "expired" } }, "text", null, []]) {
       expect((await recordEvalHealthResult(w.deps(), project, bad)).outcome).toBe("refused");
     }
     expect(await w.cache().read(parts)).toBeUndefined(); expect((await w.row())!.state).toBe("running");
@@ -317,11 +333,12 @@ describe("the result", () => {
     expect(await w.row()).toMatchObject({ state: "finished", result: { saved: false, reused: false } });
     expect(await w.cache().read(await partsOf(w))).toBeUndefined();
   });
-  it("a failed audit keeps nothing and leaves the run waiting for the result again", async () => {
+  it("a failed audit keeps nothing (no baseline either) and leaves the run waiting for the result again", async () => {
     const w = await world(); const { requestId, claimId } = await started(w);
     w.control.audit = false;
     expect((await recordEvalHealthResult(w.deps(), project, body(requestId, claimId, { status: "measured", record: record() }))).outcome).toBe("refused");
     expect((await w.row())!.state).toBe("running");
+    expect(await w.cache().read(await partsOf(w))).toBeUndefined();
     w.control.audit = true;
     expect((await recordEvalHealthResult(w.deps(), project, body(requestId, claimId, { status: "measured", record: record() }))).outcome).toBe("finished");
   });

@@ -100,7 +100,7 @@ describe("the rider measures main and posts the one result", () => {
     for (const m of [manifest("a".repeat(40)), { repositories: [] }, { repositories: [{ ...manifest().repositories[0]!, name: "other" }] }, { repositories: [...manifest().repositories, ...manifest().repositories] }]) {
       const t = await withPorts({ manifest: m as never });
       const answer = await runEvalHealthRider(t.base);
-      expect(answer?.result, JSON.stringify(m)).toEqual({ status: "not_run", reason: "invalid_questions" });
+      expect(answer?.result, JSON.stringify(m)).toEqual({ status: "not_run", reason: "invalid_identity" });
       expect(t.w.holds).toEqual([]); expect(t.w.calls).toEqual([]);
     }
   });

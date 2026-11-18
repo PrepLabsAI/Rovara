@@ -101,7 +101,7 @@ describe("the run's own preparation", () => {
     const workspace = (await w.h.store.get(workspaceKey(A, run.workspaceId))) as Record<string, unknown>;
     expect(workspace).toMatchObject({ status: "PREPARING", projectName: project, activeOperationId: run.operationId, fence: 1 });
     expect(workspace["workspaceProject"]).toBeUndefined();
-    const operation = (await w.h.store.get(operationKey(A, run.workspaceId, run.operationId))) as { kind: string; status: string; dispatch: { payload: Record<string, unknown>; extraActions: string[]; requires: string[] } };
+    const operation = (await w.h.store.get(operationKey(A, run.workspaceId, run.operationId))) as unknown as { kind: string; status: string; dispatch: { payload: Record<string, unknown>; extraActions: string[]; requires: string[] } };
     expect(operation).toMatchObject({ kind: "prepare", status: "ACCEPTED" });
     expect(operation.dispatch).toMatchObject({ extraActions: [EVAL_PLAN_DELIVERY_ACTION, EVAL_HEALTH_RESULT_PATH], requires: [PREPARE_EVAL_HEALTH_FEATURE] });
     expect(operation.dispatch.payload).toEqual({ readOnly: true, pins: [{ repository: "web", commit: HEAD }], evalHealth: { requestId: run.requestId, claimId: run.claimId } });
@@ -258,7 +258,7 @@ describe("the run's model access", () => {
     const plain = await world(); const d = await plain.started();
     const key2 = operationKey(A, d.workspaceId, d.operationId); const op2 = (await plain.h.store.get(key2))!;
     const dispatch2 = op2["dispatch"] as { payload: Record<string, unknown> };
-    await plain.h.store.put({ item: { ...op2, dispatch: { ...dispatch2, payload: { readOnly: true, pins: dispatch2.payload["pins"] } } } });
+    await plain.h.store.put({ item: { ...op2, dispatch: { ...dispatch2, payload: { readOnly: true, pins: dispatch2.payload["pins"] } } as never } });
     expect((await plain.modelAccess(plain.token(d))).statusCode).toBeGreaterThanOrEqual(400);
   });
   it("is refused to a person whose yes no longer holds is not needed (the claim is the authority), but never to another company's layer or without the action", async () => {

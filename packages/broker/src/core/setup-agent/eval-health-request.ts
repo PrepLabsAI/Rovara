@@ -113,7 +113,8 @@ export async function requestEvalHealthCheck(deps: EvalHealthRequestDeps, projec
   // One check at a time for one approval. A yes older than a day, or a run that never reported back, no longer holds a place (the row says why when it is read).
   const at = deps.now();
   if (before !== undefined && before.spendDigest === found.spend.digest && before.state === "requested" && !evalHealthRequestExpired(before, at)) return refuse("CHANGE_STALE", "An eval check is already waiting to run.");
-  if (before !== undefined && before.spendDigest === found.spend.digest && before.state === "running" && !evalHealthRunExpired(before, at)) return refuse("CHANGE_STALE", "An eval check is already running.");
+  // A live claim holds the place whatever approval it was made under: a new yes never overwrites a run that is spending (its mark and its worker would be orphaned).
+  if (before !== undefined && before.state === "running" && !evalHealthRunExpired(before, at)) return refuse("CHANGE_STALE", "An eval check is already running.");
   const row: EvalHealthRequestRecord = RecordSchema.parse({ entityType: EVAL_HEALTH_REQUEST_ENTITY, schemaVersion: 1, company: deps.companyId, project, requestId: body.requestId, spendDigest: found.spend.digest, estimateMicros: estimate,
     requestedBy: { personId: principal.personId, provider: principal.provider, role, at: new Date(deps.now()).toISOString() }, state: "requested" });
   const condition = raw === undefined ? when.absent() : when.and(...Object.entries(raw).map(([name, value]) => when.eq([name], value)));

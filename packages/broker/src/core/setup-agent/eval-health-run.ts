@@ -201,10 +201,11 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     const ids = found.plan.questions.map(q => q.id);
     const rows = record.success ? record.data.questions : undefined;
     if (!record.success || rows === undefined || rows.length !== ids.length || record.data.caseCount !== ids.length || new Set(rows.map(q => q.id)).size !== rows.length || !rows.every(q => ids.includes(q.id) && q.samples.length === 3)) return await end("invalid_results");
+    // The move is audited first; a failed audit keeps nothing (no baseline either) and leaves the run waiting for the result again.
+    try { await deps.audit({ action: "eval.health_finished", project, requestId: row.requestId }); } catch { return { outcome: "refused" }; }
     const written = await (async () => { try { return await cache.write(parts, record.data, { writer: "rovara_base_round", baseCommit: parts.baseCommit }); } catch { return "refused" as const; } })();
     const summary = evalHealthSummaryOf(record.data, { saved: written === "stored", reused: false }, deps.now());
     if (summary === undefined) return await end("invalid_results");
-    try { await deps.audit({ action: "eval.health_finished", project, requestId: row.requestId }); } catch { return { outcome: "refused" }; }
     const done = await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { claimId: claim.claimId, result: summary });
     await finish(deps, cache, parts, claim.mark);
     return done ? { outcome: "finished" } : { outcome: "refused" };
