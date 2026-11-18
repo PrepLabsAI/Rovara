@@ -372,7 +372,7 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
         workspaceId: key.workspaceId, project: key.project, taskId: request.taskId, stage, round: request.round, at: now, budgetLessons: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }).lessons,
         activeCount: active.length, eligibleCount: selected.ranking.length,
         loaded: entries.map((entry) => sample(entry.id)), leftOut: selected.ranking.filter((entry) => !picked.has(entry.id)).slice(0, MEASURE_LEFT_OUT).map((entry) => sample(entry.id)),
-      }).catch(() => deps.metrics?.count("learning_measure_failed"));
+      }).catch(() => { try { deps.metrics?.count("learning_measure_failed"); } catch { /* information only */ } });
     } catch { deps.metrics?.count("learning_measure_failed"); }
   }
   // `loaded` is counted when the worker reports the lesson reached the prompt (applyLoadReport), not here: a lesson the worker dropped was never loaded.
