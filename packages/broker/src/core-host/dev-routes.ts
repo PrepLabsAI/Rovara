@@ -16,6 +16,9 @@
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
 //     only for a person the company lets read that project; proposing and approving are not on the core here (no hosted approval path for a test environment yet);
+//   - the project's saved environment image (`GET /v1/app/projects/<p>/environment-image`, L4-MF1): read only, the Environment panel's own view (`savedEnvPanel`, fixed words, counts and times) from the company's
+//     saved-environment row for that project, for a person the company lets read that project (any project role; `canReset` is always false here). Saved environments are off on a hosted install until the
+//     install switch is on: then it answers a plain 404 "Saved environments are off for this install", never made-up data. Reset and the setting are not on the core here;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
 //   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
@@ -32,7 +35,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
+import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, SavedEnvPanelSchema, agentXError, checkApprovalSignIn, type AuditSink, type ObjectStorage, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import { loadOwnedTask, taskViewOf } from "../core/task-flow/reads.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
@@ -54,6 +57,8 @@ import type { TestEnvDeps } from "../core/test-env/deps.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
 import { testEnvironmentView } from "../core/test-env/local-view.js";
 import { testServicesSwitchedOn } from "../core/test-env/test-services-switch.js";
+import { savedEnvPanel } from "../core/test-env/saved-env-panel.js";
+import { documentSavedEnvStore } from "../core/test-env/saved-env-store.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import { AGENT_MODELS_PATH, agentModelRoute } from "./agent-model-routes.js";
 import type { AgentModelChoice } from "./gateway-model-selection.js";
@@ -74,8 +79,10 @@ const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const TASK_ANSWERS = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
+const SAVED_ENV_IMAGE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/environment-image$/u;
 const TEST_ENVIRONMENT = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment$/u;
 
+export const SAVED_ENV_OFF = "Saved environments are off for this install";
 export const NOT_ON_THE_CORE_YET = "That is not on the core engine on this install yet.";
 export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made right after you confirm it's you on the sign-in page: it is a long-lived credential, so a tool that holds an API token cannot make one. Confirm it's you, then try again within a few minutes.";
 export const SIGN_IN_AGAIN = "Sign in again.";
@@ -138,6 +145,11 @@ export interface CoreDevWiring {
    * pin dependencies from (hosted: the owner starter list, `hostedServiceCatalog`), `catalogName` how the answer names it. Served only with `canReadProject`.
    */
   testEnvironment?: { env: NodeJS.ProcessEnv; serviceCatalog?: ServiceCatalogSource | undefined; catalogName: "owner-starter-list" };
+  /**
+   * L4-MF1: the project's saved environment image, read only (`GET /v1/app/projects/<p>/environment-image`). `enabled` is the install's saved-environments switch (`savedEnvEnabled(env)`); off, the read answers
+   * `SAVED_ENV_OFF` (404), never invented data. Served only with `canReadProject`. Absent: "not on the core yet".
+   */
+  savedEnv?: { enabled: boolean };
   /** Script tokens' list and revoke (the token store is the core's; the audit sink is the registry's). */
   scriptTokens?: { enabled?: () => boolean };
   /**
@@ -181,7 +193,7 @@ function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
   if (TASK_ANSWERS.test(path)) return method === "POST";
-  if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path)) return method === "GET";
+  if (TASK_READ.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return path.endsWith("/read") ? method === "POST" : method === "GET";
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isWikiMapPath(path, method)) return true;
@@ -444,6 +456,19 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): { route(requ
           // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
           if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           return json(200, await testEnvironmentAnswer(target, wired, project));
+        }
+        const savedEnvImage = SAVED_ENV_IMAGE.exec(path);
+        if (savedEnvImage !== null) {
+          const wired = target.wiring.savedEnv;
+          if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          const project = savedEnvImage[1]!;
+          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
+          if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          // The company is the membership's (the runtime's), never the request's. Role "viewer": a reader never gets Reset or the setting control, whatever their grant (the writes are not on the core here).
+          const deps = { store: documentSavedEnvStore({ store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit }), session: { config: { enabled: wired.enabled === true } }, now: () => nowOf(target) };
+          const panel = await savedEnvPanel(deps, { orgId: target.runtime.companyId, projectId: project }, { projectRole: "viewer" });
+          if (!panel.ok) throw agentXError("NOT_FOUND", SAVED_ENV_OFF);
+          return json(200, SavedEnvPanelSchema.parse(panel.panel));
         }
         const tokens = SCRIPT_TOKENS.exec(path);
         if (tokens !== null) {
