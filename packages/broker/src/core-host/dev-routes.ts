@@ -41,6 +41,7 @@
 //     deployment's).
 import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, SavedEnvPanelSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
+import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
@@ -233,7 +234,11 @@ export interface CoreDevWiring {
    * (aws/core-task-rule-routes.ts). The task is read here from the caller's own company first; anyone else reads no such task. Absent: those routes are not the core's here (the engine boundary then says so to
    * someone who may read the task, and gives anyone else the missing task's answer).
    */
-  taskRules?: { route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query"> }): Promise<BrokerResponse> };
+  taskRules?: {
+    route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query"> }): Promise<BrokerResponse>;
+    /** DEC 254zzz44 (a): whether this person is a reader the task's owner shared it with (spec 067) who is still a member of its project, read live. A read that fails is "no". */
+    readsAsReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
+  };
   /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
 }
@@ -334,6 +339,16 @@ async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs:
   const age = nowMs - Date.parse(stepUp.at);
   if (age > seconds * 1000 || -age > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, seconds) * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
   return { at: stepUp.at, method: stepUp.method as ScriptTokenSignIn["amr"] };
+}
+
+/** DEC 254zzz44 (a): the task, when the caller is a reader its owner shared it with (the old rule, through the deployment's wiring) and it is a task of the caller's own company; otherwise undefined. */
+async function sharedReaderTask(target: Mounted, companyId: string, caller: DeployedCaller, taskId: string): Promise<TaskRecord | undefined> {
+  const rules = target.wiring.taskRules;
+  if (rules === undefined) return undefined;
+  const record = await readTask(target.runtime.flow.deps, taskId);
+  if (record === undefined || record.companyId !== companyId) return undefined;
+  const reads = await rules.readsAsReader({ person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId, task: record }).catch(() => false);
+  return reads === true ? record : undefined;
 }
 
 const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
@@ -529,7 +544,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Another company's task, or none, answers the same "not found" (the flow's read checks the company). A person's own read also lets the People list's commenters and viewers read it (C6, the same
           // live rule); a script token reads exactly as before (its own closed list), never through People.
           const record = caller.scriptToken === undefined
-            ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!)
+            ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!).catch(async (error: unknown) => {
+              // DEC 254zzz44 (a): the old task read's reader rule too (spec 067): someone the owner shared the task with, still a member of its project, reads it. Only after the core's own rule said no,
+              // only for a task of the caller's OWN company, and only where the deployment wires the old rules; anyone else keeps the missing task's answer.
+              const shared = error instanceof AgentXError && error.code === "TASK_NOT_FOUND" ? await sharedReaderTask(target, companyId, caller, task[1]!) : undefined;
+              if (shared === undefined) throw error;
+              return shared;
+            })
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
           return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
         }
