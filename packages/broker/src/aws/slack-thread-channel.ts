@@ -41,6 +41,7 @@ export function hostedSlackThreads(options: HostedSlackThreadsOptions): ChatThre
     return found;
   };
   return {
+    channels: [SLACK_CHANNEL],
     async companyOf({ channel, tenant }) {
       if (channel !== SLACK_CHANNEL) return undefined;
       try { return await workspaces.requireCompany(tenant); } catch { return undefined; }

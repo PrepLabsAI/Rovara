@@ -8,4 +8,6 @@ import type { ChannelCompanyOf } from "../core/channel/company.js";
 export interface ChatThreads {
   companyOf: ChannelCompanyOf;
   adapterFor(companyId: OrgId, channel: string): ChannelAdapter | undefined;
+  /** HW5: the names of the chats this seam serves (what `registry.names("channel")` says), so the notice service sees them as the company's chats. */
+  channels: readonly string[];
 }

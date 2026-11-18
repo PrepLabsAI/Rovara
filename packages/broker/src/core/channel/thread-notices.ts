@@ -57,8 +57,8 @@ export interface ThreadNoticeDeps {
   isMember?: ChannelMemberRule | undefined;
   /** The three milestone lines, on or off (read at each use). Default on. */
   milestones?: boolean | (() => boolean) | undefined;
-  /** The task's page, when the host has an https address for it (a hosted install). Absent: the words tell where to open it. */
-  taskUrl?: ((taskId: string) => string | undefined) | undefined;
+  /** The task's page, when the host has an https address for it (a hosted install). Absent: the words tell where to open it. HW5: it is given the task's recorded session id and project too (the page is the session's, or the project's when the task has no session), when the handler knows them. */
+  taskUrl?: ((taskId: string, task?: { sessionId?: string; project?: string }) => string | undefined) | undefined;
   /** What tells a person where to open a task when the host has no address to link (fixed words, set by the install). */
   footer?: string | undefined;
   /** L4-U5: the project's setup page, when the host has an https address for it (a hosted install). Absent: the words tell the person to open it in Rovara. */
@@ -143,8 +143,8 @@ export function threadFollows(deps: { store: Pick<DocumentStore, "get"> }): (org
 export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
   const log: Log = deps.log ?? (() => undefined);
   const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
-  const open = (taskId: string): string => {
-    const link = deps.taskUrl?.(taskId);
+  const open = (taskId: string, where?: { sessionId?: string; project?: string }): string => {
+    const link = deps.taskUrl?.(taskId, where);
     return link !== undefined ? link : deps.footer ?? "";
   };
 
@@ -195,11 +195,13 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
       if (thread === undefined) return;
       const adapter = await reach(orgId, thread);
       if (adapter === undefined) return;
+      // The task's own page: its recorded session (a task without one has none), else its project's.
+      const taskWhere = { ...(typeof task["sessionId"] === "string" ? { sessionId: task["sessionId"] } : {}), ...(typeof task["project"] === "string" ? { project: task["project"] } : {}) };
       const title = inertTicketTitle(typeof task["title"] === "string" ? task["title"] : "");
       const { conversation } = thread;
       const base = (key: string) => ({ version: 1 as const, id: eventIdOf(orgId, sessionId, key), channel: conversation.channel, conversation, createdAt: new Date(deps.now()).toISOString() });
       const tell = (event: ChannelEvent): Promise<void> => adapter.deliver(event);
-      const where = open(taskId);
+      const where = open(taskId, taskWhere);
 
       if (moment === "setup_paused") {
         // The words come from the project's own re-check rows (never from the milestone's text), and only while the task's re-check says the setup is broken.
@@ -227,7 +229,7 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const key = planCardKey(found.revision, found.artifactDigest);
         // Buttons only where the approvers take a decision made in this chat (and never for a high risk plan); otherwise the card is a pointer to the task page.
         const chatTakes = risk !== "high" && found.requirement.methods.includes(`${CHAT_METHOD_PREFIX}${conversation.channel}`);
-        const taskUrl = deps.taskUrl?.(taskId);
+        const taskUrl = deps.taskUrl?.(taskId, taskWhere);
         const words = `The plan for "${title}" is ready for review. Risk: ${risk}.`;
         // Request changes asks "What should change?" in a form the chat opens (an adapter that declares `forms`); a chat with none sends the person to the task page for it instead, and the card offers Approve alone.
         const asks = adapter.capabilities.forms === true;
