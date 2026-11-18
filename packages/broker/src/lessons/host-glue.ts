@@ -186,7 +186,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
           }
         }
         // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.
-        if (knowledgeContext !== undefined) {
+        if (knowledgeContext !== undefined && !abandoned) {
           const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: (loaded.learnedContext?.lessons ?? []).map((lesson) => lesson.id), knowledge: knowledgeContext });
           await flow.store.put({ item: { pk: companyScoped(companyId, "KNOWLEDGE_GIVEN"), sk: request.operationId, entityType: "KNOWLEDGE_GIVEN", ...record, ...ttl(LOAD_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
         }

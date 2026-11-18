@@ -170,14 +170,17 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && KNOWLEDGE_STAGE_PARTS[stage].pull && Date.now() < pullDeadline) {
         pulling = true;
         try {
-          const wider = await selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
+          const widerRun = selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
             key: { workspaceId: company, project: task.project }, stage, resolved,
             active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
             intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
             repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
             reader: { running: { taskId: task.taskId } }, where: "load", budget: { lessons: Math.min(KNOWLEDGE_PULL_MAX_UNITS, DISPATCHER_LESSONS_LIMITS.lessons), bytes: 256 * 1024 }, prefilter: async (eligible) => eligible.filter(pullable),
           });
-          if (wider.ok && wider.complete) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
+          // A read already in flight is raced against the look-up's own clock too: the look-up ends at its limit whatever a slow read is doing, and the lessons are never waiting on it.
+          let pullTimer: ReturnType<typeof setTimeout> | undefined;
+          const wider = await Promise.race([widerRun, new Promise<undefined>((resolve) => { pullTimer = setTimeout(() => { resolve(undefined); }, Math.max(1, pullDeadline - Date.now())); pullTimer.unref?.(); })]).finally(() => { if (pullTimer !== undefined) clearTimeout(pullTimer); });
+          if (wider !== undefined && wider.ok && wider.complete) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
         } catch { knowledgeContext = undefined; } finally { pulling = false; }
       }
       return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
