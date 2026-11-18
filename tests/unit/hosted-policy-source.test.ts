@@ -23,11 +23,11 @@ function world(options: { locks?: (cid: string, pid: string | undefined) => Reco
   } };
   const install = makeKey("install"); const hookKey = makeKey("hook");
   const service = fakeService({ key: hookKey, now: () => at, ...(options.lifetime === undefined ? {} : { lifetime: options.lifetime }), answer: (asked) => {
-    const locks = (options.locks ?? (() => ({})))(String(asked.q["cid"]), asked.q["pid"] === undefined ? undefined : String(asked.q["pid"]));
+    const locks = (options.locks ?? (() => ({})))(String(asked.q["cid"]), typeof asked.q["pid"] === "string" ? asked.q["pid"] : undefined);
     return locks instanceof Error ? locks : { locks };
   } });
   const hookFor = () => (options.withHook === false ? undefined : { settings: settingsFor(hookKey), install: { issuer: ISSUER, signer: signerOf(install) }, fetch: service.fetch });
-  const source = hostedPolicySource({ documentClient: client as never, tableName: "state", now: () => at }, hookFor, { ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }), ...(options.maxEntries === undefined ? {} : { maxEntries: options.maxEntries }) });
+  const source = hostedPolicySource({ documentClient: client, tableName: "state", now: () => at }, hookFor, { ...(options.ttlMs === undefined ? {} : { ttlMs: options.ttlMs }), ...(options.maxEntries === undefined ? {} : { maxEntries: options.maxEntries }) });
   const reporting = policyCiReporting(source);
   const row = (companyId: string, project: string, overrides: Record<string, unknown>, extra: Record<string, unknown> = {}) => db.set({
     pk: companyScoped(companyId, `PROJECT_SETTINGS#${project}`), sk: "META", entityType: "PROJECT_SETTINGS", companyId, projectName: project, overrides, revision: 1, updatedAt: new Date(at).toISOString(), updatedBy: "d".repeat(64), ...extra,
@@ -99,7 +99,7 @@ describe("unreadable fails closed: never a default, never looser", () => {
     await unreadable(w);
   });
   it("a table that fails", async () => {
-    const down = hostedPolicySource({ documentClient: { async send() { throw new Error("private-canary"); } } as never, tableName: "state", now: () => T0 }, () => undefined);
+    const down = hostedPolicySource({ documentClient: { async send() { throw new Error("private-canary"); } }, tableName: "state", now: () => T0 }, () => undefined);
     await expect(policyCiReporting(down).ciMode({ orgId: A, project: "web" } as never)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
   });
   it("a scope that is not the root's own company/project form refuses without reading anything", async () => {
@@ -158,7 +158,7 @@ describe("the cache bounds the calls of one pass", () => {
   it("tasks asked at the same moment share one read", async () => {
     const w = world({ withHook: false });
     w.row(A, "web", { real_check: "sandbox_only" });
-    expect(await Promise.all(Array.from({ length: 10 }, () => w.mode(A, "web")))).toEqual(Array(10).fill("sandbox_only"));
+    expect(await Promise.all(Array.from({ length: 10 }, async () => await w.mode(A, "web")))).toEqual(Array(10).fill("sandbox_only"));
     expect(w.reads).toHaveLength(1);
   });
   it("a change is read after the short TTL, not before", async () => {
