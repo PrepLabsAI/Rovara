@@ -7,10 +7,10 @@ import { describe, expect, it } from "vitest";
 import {
   ImageRegistryError,
   SAVED_ENV_MANAGE_ROLE_ARN_VARIABLE, SAVED_ENV_PULL_ROLE_ARN_VARIABLE, SAVED_ENV_PUSH_ROLE_ARN_VARIABLE, SAVED_ENV_REPO_PREFIX_VARIABLE,
-  savedEnvManageSessionPolicy, savedEnvPullSessionPolicy, savedEnvPushSessionPolicy, savedEnvRepositoryArn, savedEnvRepositoryName,
+  savedEnvCompanyRepositoriesArn, savedEnvCompanyRepositoryPrefix, savedEnvManageListSessionPolicy, savedEnvManageSessionPolicy, savedEnvPullSessionPolicy, savedEnvPushSessionPolicy, savedEnvRepositoryArn, savedEnvRepositoryName,
 } from "@agentx/contracts";
 import {
-  createSavedEnvRoleSessions, savedEnvRoleSessionSettings, savedEnvRoleSessionsFromEnvironment, type SavedEnvAccess, type SavedEnvAssumeRoleRequest,
+  SAVED_ENV_LIST_MAX_PAGES, SAVED_ENV_LIST_PAGE_SIZE, createSavedEnvRoleSessions, savedEnvRoleSessionSettings, savedEnvRoleSessionsFromEnvironment, type SavedEnvAccess, type SavedEnvAssumeRoleRequest, type SavedEnvDescribeRepositoriesRequest,
 } from "../../packages/broker/src/aws/saved-env-role-sessions.js";
 
 const ACCOUNT = "123456789012";
@@ -208,5 +208,164 @@ describe("the install's settings", () => {
     expect(sessions).toBeDefined();
     await sessions!.assume({ access: "pull", companyId: A, repository: repositoryOf(A) });
     expect(sent[0]!.roleArn).toBe(roleArn("pull"));
+  });
+});
+
+// ---- L4-SE6b (owner-approved 2026-11-18): company erase lists ONE company's repositories, with a manage session whose policy names that company's prefix and one action.
+describe("listCompanyRepositories (company erase)", () => {
+  const scope = { partition: "aws", region: REGION, account: ACCOUNT };
+  const nameOf = (company: string, project: string) => repositoryOf(company, project);
+  const SESSION = { Credentials: { AccessKeyId: "AKIALIST", SecretAccessKey: "secret", SessionToken: "token", Expiration: FUTURE() } };
+
+  /** A fake ECR holding repositories of several companies, paged by `pageSize` (ECR itself, with a session policy, would return only the company's; the fake returns EVERYTHING to prove the code's own filter). */
+  function listing(all: string[], pageSize = SAVED_ENV_LIST_PAGE_SIZE) {
+    const pages: SavedEnvDescribeRepositoriesRequest[] = [];
+    const assumed: SavedEnvAssumeRoleRequest[] = [];
+    const settings = savedEnvRoleSessionSettings(environment(), REGION)!;
+    const sessions = createSavedEnvRoleSessions({
+      settings,
+      assumeRole: async (request) => { assumed.push(request); return SESSION; },
+      describeRepositories: async (request) => {
+        pages.push(request);
+        const start = request.nextToken === undefined ? 0 : Number(request.nextToken);
+        const slice = all.slice(start, start + pageSize);
+        return { repositories: slice.map((repositoryName) => ({ repositoryName })), ...(start + pageSize < all.length ? { nextToken: String(start + pageSize) } : {}) };
+      },
+    });
+    return { sessions, pages, assumed };
+  }
+
+  it("the listing session policy is exactly one action on exactly one company prefix (the manage role, nothing wider)", async () => {
+    const { sessions, assumed } = listing([]);
+    await sessions.listCompanyRepositories({ companyId: A });
+    expect(assumed).toHaveLength(1);
+    const sent = JSON.parse(assumed[0]!.policy) as { Statement: Array<Record<string, unknown>> };
+    expect(sent).toEqual(savedEnvManageListSessionPolicy(scope, { env: "staging", orgId: A }));
+    expect(sent.Statement).toEqual([{
+      Sid: "ListThisCompanysRepositories", Effect: "Allow", Action: ["ecr:DescribeRepositories"],
+      Resource: `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${savedEnvCompanyRepositoryPrefix({ env: "staging", orgId: A })}/*`,
+    }]);
+    for (const project of ["project-1", "p2", "x".repeat(150)]) expect(repositoryOf(A, project).startsWith(`${savedEnvCompanyRepositoryPrefix({ env: "staging", orgId: A })}/`)).toBe(true);
+    expect(savedEnvCompanyRepositoriesArn(scope, { env: "staging", orgId: A })).toBe(sent.Statement[0]!.Resource);
+    const orgSegment = repositoryOf(A).split("/")[2]!;
+    expect(sent.Statement[0]!.Resource).toMatch(new RegExp(`:repository/rovara-env/staging/${orgSegment}/\\*$`, "u"));
+    // no env-wide pattern, no token call, no other company, no other action
+    expect(assumed[0]!.policy).not.toContain(repositoryOf(B).split("/")[2]!);
+    expect(assumed[0]!.policy).not.toMatch(/rovara-env\/staging\/\*|GetAuthorizationToken|BatchDeleteImage|"\*"/u);
+    expect(assumed[0]!.roleArn).toBe(roleArn("manage"));
+    expect(assumed[0]!.durationSeconds).toBe(900);
+    expect(assumed[0]!.sessionName).toMatch(/^rovara-img-list-o[0-9a-f]{24}$/u);
+    expect(assumed[0]!.sessionName).not.toContain(A);
+  });
+
+  it("two companies: lists only company A's repositories when B's exist, and B's session names only B's prefix", async () => {
+    const all = [nameOf(A, "p1"), nameOf(B, "p1"), nameOf(A, "p2"), nameOf(B, "p9"), nameOf(A, "p3")];
+    const { sessions, assumed } = listing(all);
+    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([nameOf(A, "p1"), nameOf(A, "p2"), nameOf(A, "p3")].sort());
+    expect(await sessions.listCompanyRepositories({ companyId: B })).toEqual([nameOf(B, "p1"), nameOf(B, "p9")].sort());
+    expect(assumed[0]!.policy).toContain(repositoryOf(A).split("/")[2]!);
+    expect(assumed[0]!.policy).not.toContain(repositoryOf(B).split("/")[2]!);
+    expect(assumed[1]!.policy).toContain(repositoryOf(B).split("/")[2]!);
+    expect(assumed[1]!.policy).not.toContain(repositoryOf(A).split("/")[2]!);
+  });
+
+  it("drops names outside the company's prefix even when ECR returns them (another company, another environment, the bare prefix, a sibling that only shares a prefix of the hash, wildcards)", async () => {
+    const own = nameOf(A, "p1");
+    const [root, env, org] = own.split("/");
+    const foreign = [nameOf(B, "p1"), repositoryOf(A, "p1", "prod"), `${root}/${env}/${org}`, `${root}/${env}/${org}/`, `${root}/${env}/${org}x/p${"a".repeat(32)}`, `${root}/${env}/${org!.slice(0, 20)}/p1`, `${root}/${env}/${org}/*`, "unrelated/repo", ""];
+    const { sessions } = listing([...foreign, own]);
+    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([own]);
+  });
+
+  it("keeps a name under the company's prefix even when it is not one of ours (erase must see it and fail to delete it, never skip it)", async () => {
+    const odd = `${repositoryOf(A).split("/").slice(0, 3).join("/")}/something-else`;
+    const { sessions } = listing([odd]);
+    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([odd]);
+  });
+
+  it("a company with none gets an empty list", async () => {
+    const { sessions } = listing([nameOf(B, "p1")]);
+    expect(await sessions.listCompanyRepositories({ companyId: A })).toEqual([]);
+  });
+
+  it("walks every page (page size and token passed on) and de-duplicates", async () => {
+    const all = Array.from({ length: 250 }, (_, index) => nameOf(A, `project-${String(index)}`));
+    const { sessions, pages } = listing([...all, all[0]!], 100);
+    const found = await sessions.listCompanyRepositories({ companyId: A });
+    expect(found).toEqual([...all].sort());
+    expect(pages.map((page) => [page.nextToken, page.maxResults])).toEqual([[undefined, SAVED_ENV_LIST_PAGE_SIZE], ["100", SAVED_ENV_LIST_PAGE_SIZE], ["200", SAVED_ENV_LIST_PAGE_SIZE]]);
+    expect(pages.every((page) => page.credentials.accessKeyId === "AKIALIST")).toBe(true);
+  });
+
+  it("the bound is 20 pages of 100 (2,000 repositories of one company)", () => {
+    expect([SAVED_ENV_LIST_PAGE_SIZE, SAVED_ENV_LIST_MAX_PAGES]).toEqual([100, 20]);
+  });
+
+  it("a session that ends in the middle of the walk is `unavailable`, never the part read so far", async () => {
+    const settings = savedEnvRoleSessionSettings(environment(), REGION)!;
+    let clock = Date.now();
+    let calls = 0;
+    const sessions = createSavedEnvRoleSessions({
+      settings, now: () => clock, assumeRole: async () => ({ Credentials: { ...SESSION.Credentials, Expiration: new Date(clock + 60_000) } }),
+      describeRepositories: async () => { calls += 1; clock += 120_000; return { repositories: [{ repositoryName: nameOf(A, "p1") }], nextToken: "more" }; },
+    });
+    await expect(sessions.listCompanyRepositories({ companyId: A })).rejects.toMatchObject({ code: "unavailable" });
+    expect(calls).toBe(1);
+  });
+
+  it("is bounded: a list that does not end within the page bound is `unavailable`, never a partial list", async () => {
+    const all = Array.from({ length: SAVED_ENV_LIST_MAX_PAGES * 10 + 1 }, (_, index) => nameOf(A, `project-${String(index)}`));
+    const { sessions, pages } = listing(all, 10);
+    await expect(sessions.listCompanyRepositories({ companyId: A })).rejects.toMatchObject({ code: "unavailable" });
+    expect(pages).toHaveLength(SAVED_ENV_LIST_MAX_PAGES);
+    // exactly the bound is fine
+    const exact = listing(all.slice(0, SAVED_ENV_LIST_MAX_PAGES * 10), 10);
+    expect(await exact.sessions.listCompanyRepositories({ companyId: A })).toHaveLength(SAVED_ENV_LIST_MAX_PAGES * 10);
+  });
+
+  it("a repeated or non-text token, a malformed page, an ECR error and an expired session are `unavailable` (fixed words)", async () => {
+    const settings = savedEnvRoleSessionSettings(environment(), REGION)!;
+    const make = (describeRepositories: (request: SavedEnvDescribeRepositoriesRequest) => Promise<unknown>, now?: () => number) => createSavedEnvRoleSessions({ settings, assumeRole: async () => SESSION, describeRepositories, ...(now === undefined ? {} : { now }) });
+    let repeated = 0;
+    let numeric = 0;
+    const cases: Array<[string, ReturnType<typeof make>]> = [
+      ["a repeated token", make(async () => { repeated += 1; return { repositories: [], nextToken: "same" }; })],
+      ["a numeric token", make(async () => { numeric += 1; return { repositories: [], nextToken: 7 }; })],
+      ["a non-array list", make(async () => ({ repositories: "x" }))],
+      ["no answer", make(async () => undefined)],
+      ["an ECR error", make(async () => { throw new Error(`AccessDeniedException: arn:aws:iam::${ACCOUNT}:role/x is not authorized to perform ecr:DescribeRepositories (request id 99)`); })],
+      ["a session that ends before the first page", make(async () => ({ repositories: [] }), () => Date.now() + 10_000_000)],
+    ];
+    for (const [label, sessions] of cases) {
+      const failure = await sessions.listCompanyRepositories({ companyId: A }).catch((error: unknown) => error) as ImageRegistryError;
+      expect(failure, label).toBeInstanceOf(ImageRegistryError);
+      expect(failure.code, label).toBe("unavailable");
+      expect(failure.message, label).not.toMatch(new RegExp(`${ACCOUNT}|arn:|request id|AccessDenied`, "u"));
+    }
+    // stopped at once, not at the page bound
+    expect([repeated, numeric]).toEqual([2, 1]);
+  });
+
+  it("an STS failure is `unavailable` and no ECR call is made; a bad company id is refused before STS", async () => {
+    const settings = savedEnvRoleSessionSettings(environment(), REGION)!;
+    let ecr = 0;
+    const failing = createSavedEnvRoleSessions({ settings, assumeRole: async () => { throw new Error("AccessDenied"); }, describeRepositories: async () => { ecr += 1; return {}; } });
+    await expect(failing.listCompanyRepositories({ companyId: A })).rejects.toMatchObject({ code: "unavailable" });
+    expect(ecr).toBe(0);
+    const { sessions, assumed, pages } = listing([]);
+    for (const bad of ["", "a".repeat(201), "x\u0000y", 7 as never]) await expect(sessions.listCompanyRepositories({ companyId: bad }), String(bad)).rejects.toMatchObject({ code: "refused" });
+    expect(assumed).toEqual([]);
+    expect(pages).toEqual([]);
+    // an id is hashed into the prefix, so a wildcard or a path trick as a company id can never reach the policy as one
+    for (const odd of ["*", "../x", "o*", "${aws:username}"]) await sessions.listCompanyRepositories({ companyId: odd });
+    expect(assumed.map((call) => (JSON.parse(call.policy) as { Statement: Array<{ Resource: string }> }).Statement[0]!.Resource)).toSatisfy((resources: string[]) => resources.every((resource) => /:repository\/rovara-env\/staging\/o[0-9a-f]{32}\/\*$/u.test(resource)));
+  });
+
+  it("the seam built from the install's variables carries the listing too", async () => {
+    const sessions = savedEnvRoleSessionsFromEnvironment(environment(), {
+      assumeRole: async () => SESSION,
+      describeRepositories: async () => ({ repositories: [{ repositoryName: nameOf(A, "p1") }] }),
+    });
+    expect(await sessions!.listCompanyRepositories({ companyId: A })).toEqual([nameOf(A, "p1")]);
   });
 });

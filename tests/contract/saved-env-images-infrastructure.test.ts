@@ -11,7 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultBoundaryStatements, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
+import { defaultBoundaryStatements, savedEnvManageListSessionPolicy, savedEnvRepositoryName, serviceRoleStatements, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import {
@@ -364,6 +364,61 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
         expect(boundarySize, `${env} boundary`).toBeLessThanOrEqual(6144 - 1024);
         expect(deploySize, `${env} deploy`).toBeLessThanOrEqual(10240 - 1024);
       }
+    });
+  });
+
+  // L4-SE6b (owner-approved 2026-11-18): company erase lists ONE company's repositories. The manage role ALREADY holds ecr:DescribeRepositories on `rovara-env/<env>/*` (asserted here), so this adds NO role,
+  // boundary, template or deploy-role change: only a session policy (contracts savedEnvManageListSessionPolicy). Effective permission of such a session = the role's policy AND the session policy AND the boundary.
+  describe("the company listing session (L4-SE6b): effective permission, simulated from the template's manage role and the session policy", () => {
+    const scope = { partition: "aws", region: REGION, account: ACCOUNT };
+    const A = "org_aaaaaaaaaaaaaaaaaaaa";
+    const B = "org_bbbbbbbbbbbbbbbbbbbb";
+    const repoArn = (company: string, project: string, env = ENV) => `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/${savedEnvRepositoryName({ env, orgId: company, projectId: project })}`;
+    const session = savedEnvManageListSessionPolicy(scope, { env: ENV, orgId: A }).Statement as unknown as PolicyStatementJson[];
+    const managePolicy = (template: TemplateJson) => roleStatements(template, idsOf(template).roles.Manage);
+    /** Role policy AND session policy (IAM intersects a session policy with the role's identity policy; the helper's "boundary" slot is exactly that second intersection). */
+    const effective = (template: TemplateJson, action: string, resource: string): boolean => allowedUnderBoundary(managePolicy(template), session, { action, resource });
+
+    it("the manage role already allows ecr:DescribeRepositories on rovara-env/<env>/* (so no role, template, boundary or deploy-role change is needed)", () => {
+      const statement = managePolicy(named).find((candidate) => candidate.Sid === "ThisEnvironmentsImages")!;
+      expect(list(statement.Action)).toContain("ecr:DescribeRepositories");
+      expect(JSON.stringify(statement.Resource)).toContain("rovara-env/staging/*");
+    });
+
+    it("describes company A's repositories, any project, and nothing else of A's session", () => {
+      for (const project of ["project-1", "project-2", "x"]) expect(effective(named, "ecr:DescribeRepositories", repoArn(A, project)), project).toBe(true);
+      for (const action of ["ecr:ListImages", "ecr:DescribeImages", "ecr:BatchDeleteImage", "ecr:DeleteRepository", "ecr:GetRepositoryPolicy", "ecr:GetAuthorizationToken", "ecr:BatchGetImage", "ecr:PutImage", "ecr:CreateRepository", "ecr:*", "*"]) {
+        expect(effective(named, action, repoArn(A, "project-1")), action).toBe(false);
+      }
+    });
+
+    it("cannot describe company B's repositories, another environment's, or the environment as a whole", () => {
+      expect(effective(named, "ecr:DescribeRepositories", repoArn(B, "project-1"))).toBe(false);
+      expect(effective(named, "ecr:DescribeRepositories", repoArn(A, "project-1", "prod"))).toBe(false);
+      expect(effective(named, "ecr:DescribeRepositories", `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/rovara-env/staging/*`)).toBe(false);
+      expect(effective(named, "ecr:DescribeRepositories", `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/*`)).toBe(false);
+      expect(effective(named, "ecr:DescribeRepositories", `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/other/repo`)).toBe(false);
+    });
+
+    it("the widening mutants of the session policy are caught: env-wide listing, another company's prefix, extra actions, a `*` resource", () => {
+      const wide = (statement: Record<string, unknown>) => [{ ...(session[0] as unknown as Record<string, unknown>), ...statement }] as unknown as PolicyStatementJson[];
+      const bOnly = savedEnvManageListSessionPolicy(scope, { env: ENV, orgId: B }).Statement as unknown as PolicyStatementJson[];
+      const allowed = (policy: PolicyStatementJson[], action: string, resource: string) => allowedUnderBoundary(managePolicy(named), policy, { action, resource });
+      // the real policy passes the checks the mutants must fail
+      const checks: Array<[string, string, boolean]> = [["ecr:DescribeRepositories", repoArn(A, "p"), true], ["ecr:DescribeRepositories", repoArn(B, "p"), false], ["ecr:ListImages", repoArn(A, "p"), false], ["ecr:BatchDeleteImage", repoArn(A, "p"), false]];
+      const verdicts = (policy: PolicyStatementJson[]) => checks.map(([action, resource]) => allowed(policy, action, resource));
+      const expected = checks.map(([, , want]) => want);
+      expect(verdicts(session)).toEqual(expected);
+      const mutants: Array<[string, PolicyStatementJson[]]> = [
+        ["env-wide listing", wide({ Resource: `arn:aws:ecr:${REGION}:${ACCOUNT}:repository/rovara-env/staging/*` })],
+        ["another company's prefix", bOnly],
+        ["both companies", wide({ Resource: [repoArn(A, "p").replace(/\/p[0-9a-f]{32}$/u, "/*"), repoArn(B, "p").replace(/\/p[0-9a-f]{32}$/u, "/*")] })],
+        ["an extra action (ListImages)", wide({ Action: ["ecr:DescribeRepositories", "ecr:ListImages"] })],
+        ["an extra action (BatchDeleteImage)", wide({ Action: ["ecr:DescribeRepositories", "ecr:BatchDeleteImage"] })],
+        ["every ECR action", wide({ Action: ["ecr:*"] })],
+        ["a * resource", wide({ Resource: "*" })],
+      ];
+      for (const [label, mutant] of mutants) expect(verdicts(mutant), label).not.toEqual(expected);
     });
   });
 
