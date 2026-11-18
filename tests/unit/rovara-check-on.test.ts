@@ -14,6 +14,7 @@ import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/gith
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
 import { rovaraCheckSource } from "../../packages/broker/src/services/index.js";
+import { writeEvalCheckSetting } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
 import { GITHUB_ORG_SCOPE, GITHUB_REPO_URL, GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 import { host as serviceHost } from "../support/service-host.js";
@@ -48,6 +49,26 @@ describe("the hosted job services", () => {
     // A pass again, with nothing changed: the same run, not a second.
     await services["merge-tracking"].pass({ budgetMs: 1000 });
     expect(w.world.prs[0]!.model.summaryChecks).toHaveLength(1);
+  });
+
+  // L4-EVCI2 mutant W1: the hosted job services do not pass the confirmed eval check's port (ciEvidence).
+  it("read the company's confirmed eval check (the setup card's) on a merge-tracking pass, and only that company's project's", async () => {
+    const w = await serviceHost();
+    const pr = w.world.prs[0]!;
+    pr.model.setChecks(pr.head, [{ name: "evals", state: "completed", conclusion: "success", required: false, url: "https://github.com/acme/app/actions/runs/5/job/77", runId: "77", source: "15368" }]);
+    const services = createHostedBrokerCoreServices(optionsOf(w));
+    await services["merge-tracking"].pass({ budgetMs: 1000 });
+    expect(await w.world.trackingOf(pr)).not.toHaveProperty("ciEval");
+    // Another company's confirmation, and another project's of this company, name nothing here.
+    const store = w.h.flow.store;
+    await writeEvalCheckSetting({ store, companyId: B }, { project: "web", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: NOW });
+    await writeEvalCheckSetting({ store, companyId: ORG }, { project: "docs", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334455", now: NOW });
+    await services["merge-tracking"].pass({ budgetMs: 1000 });
+    expect(await w.world.trackingOf(pr)).not.toHaveProperty("ciEval");
+    // This company's own project's confirmation does.
+    await writeEvalCheckSetting({ store, companyId: ORG }, { project: "web", check: { name: "evals", source: "15368" }, requestId: "6f9d0c1e-2b3a-4c5d-8e7f-001122334456", now: NOW });
+    await services["merge-tracking"].pass({ budgetMs: 1000 });
+    expect(await w.world.trackingOf(pr)).toMatchObject({ ciEval: { name: "evals" } });
   });
 
   it("the plain composition, with no summaryCheck, still writes nothing (the option is the only way in)", async () => {
