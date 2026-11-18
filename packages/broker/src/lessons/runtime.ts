@@ -15,6 +15,7 @@ import { createCodeFacts, type CodeFactsReader } from "./code-facts.js";
 import type { CounterDeps } from "./counters.js";
 import type { CurateDeps } from "./curate.js";
 import { lessonDeletionPort, type LessonDeletionPort } from "./deletion.js";
+import { graduatedCleanup } from "./graduated-cleanup.js";
 import { DocumentLessonStore } from "./document-store.js";
 import { documentLearningSettings, DocumentLocalToolsSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
 import type { LocalToolsSettingsStore } from "./local-tools.js";
@@ -166,7 +167,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
     judge: outcomeJudge,
     presets: { settings: presetStore, changes: presetStore, audit, now: input.now, authority: hosted?.tier0Authority ?? createLocalTier0Authority(owner.id), soleOwnerLoosening: (workspaceId) => soleOwner.read(workspaceId) },
   } as LessonRouteDeps;
-  const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now });
+  const deletion = lessonDeletionPort({ store, vectors, audit, now: input.now, onGone: graduatedCleanup(input.store, input.now) });
   const localTools = new DocumentLocalToolsSettings(input.store);
   return { store, documents: input.store, settings, access, directory, audit, pause, vectors, deletion, localTools, load, counters, routes, process, judgeModel, spend, edition };
 }

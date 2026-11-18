@@ -126,7 +126,8 @@ const ROUTES: Array<[string, string, unknown?]> = [
 describe("the paths", () => {
   it("the dev router and the API recognise exactly the same paths, and each lessons row of the route table is one of them (full access only)", () => {
     // The repeats rows are their own API (core-host-lessons-repeats-api.test.ts).
-    const rows = DEV_ROUTES.filter((route) => route.path.includes("/lessons") && !route.path.endsWith("/repeats"));
+    // The phase 4 rows (graduation, Tidy, draft checks, both-places) are held by core-host-lessons-graduation.test.ts.
+    const rows = DEV_ROUTES.filter((route) => route.path.includes("/lessons") && !route.path.endsWith("/repeats") && !/\/lessons\/(?:graduation$|tidy\/|check-drafts\/|rules\/|\{lessonId\}\/(?:graduate|graduate-later|both-places)$)/u.test(route.path));
     expect(rows.map((route) => `${route.method} ${route.path}`).sort()).toEqual([...[
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",

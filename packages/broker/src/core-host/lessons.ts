@@ -26,7 +26,7 @@ import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
 import type { LearningSpend, PipelineModel } from "../lessons/ports.js";
 import { createLessonsRuntime, type LessonsRuntime } from "../lessons/runtime.js";
-import { lessonDeletionPort } from "../lessons/deletion.js";
+import { lessonDeletionPort } from "../lessons/deletion.js"; import { graduatedCleanup } from "../lessons/graduated-cleanup.js";
 import { DocumentLessonStore } from "../lessons/document-store.js";
 import { documentLessonVectors } from "../lessons/document-vectors.js";
 import { lessonAuditSink } from "../lessons/audit-sink.js";
@@ -255,7 +255,7 @@ export interface ErasePersonLessonsReport {
 export async function erasePersonLessons(input: { store: DocumentStore; audit: AuditSink; companyId: OrgId; personId: string; now: () => number; vectors?: LessonVectors; log?: (entry: Record<string, unknown>) => void }): Promise<ErasePersonLessonsReport> {
   const { store, companyId, personId, now } = input;
   const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
-  const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now });
+  const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now, onGone: graduatedCleanup(store, now) });
   const projects = await companyProjects(store, companyId);
   let purged = 0;
   let scrubbed = 0;

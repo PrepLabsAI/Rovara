@@ -43,13 +43,15 @@ import { snoozeTrialOffer, tallyTrialOffer, trialOfferEarned, trialOfferSnoozed,
 import { readDigestSettingStrict, writeDigestSetting } from "../lessons/digest-notice.js";
 import { LESSON_PAGE_LISTS, buildLessonsPage, buildLoadedLessons, type LessonPageCursor, type LessonPageList } from "../lessons/view.js";
 import type { CoreLessons } from "./lessons.js";
+import { LESSONS_GRADUATION_API, answerGraduation } from "./lessons-graduation.js";
+import type { SkillGraduation } from "../lessons/graduate.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
 const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions)|\/([^/]+)\/(approve|reject|retire|retire-request))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
-export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path);
+export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path) || LESSONS_GRADUATION_API.test(path);
 
 export const LESSONS_OFF = "Lessons are off.";
 export const NO_SUCH_PROJECT = "No such project.";
@@ -129,6 +131,8 @@ export interface LessonsApiOptions {
   lessonsOf(companyId: OrgId): Promise<LessonsApiCompany | undefined>;
   /** The same people port the company's lessons were built with (roster and names, for this company only). */
   people: Pick<HostedLessonPeople, "onProjectRoster" | "displayName" | "isErased">;
+  /** The skills library of one company (L4-AK3), for graduating a proven procedure into a skill. Absent: the skill target answers "not available yet". */
+  skillsOf?: (companyId: OrgId) => SkillGraduation | undefined;
   /** The person's role on the project now (a project admin is a `maintainer`); undefined: none. */
   projectRole(companyId: OrgId, project: string, personId: string): Promise<ProjectRole | undefined>;
   now: () => number;
@@ -200,13 +204,15 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   }
 
   async function answer(request: LessonsApiRequest, caller: LessonsApiCaller): Promise<unknown> {
-    const match = LESSONS_API.exec(request.path);
+    // Lessons phase 4 (`lessons-graduation.ts`): its paths are tried first (`tidy` and `check-drafts` would otherwise read as a lesson id); it shares everything below up to the roster check.
+    const graduation = LESSONS_GRADUATION_API.exec(request.path);
+    const match = graduation ?? LESSONS_API.exec(request.path);
     if (match === null) throw notFound(ROUTE_NOT_FOUND);
-    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = match;
+    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson] = graduation === null ? match : [match[0], match[1]] as unknown as typeof match;
     const method = request.method;
-    const route = rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
+    const route = graduation !== null ? "graduation" : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
     const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", "not-helpful": "POST" };
-    if (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method) throw notFound(ROUTE_NOT_FOUND);
+    if (graduation === null && (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method)) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
     if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
@@ -261,6 +267,8 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       return { project, taskId, lessonId, marked: "not_helpful" };
     }
     if (!onRoster) throw notFound(NO_SUCH_PROJECT);
+
+    if (graduation !== null) return await answerGraduation(request, graduation, { companyId, project, personId, lessons, skills: options.skillsOf?.(companyId), now: options.now, log }, caller);
 
     if (route === "list") {
       const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
