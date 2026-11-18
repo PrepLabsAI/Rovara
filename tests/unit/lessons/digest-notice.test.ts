@@ -391,6 +391,11 @@ describe("the pilot default (lane L4-WK): on for a pilot company's projects that
     const odd = await busyWorld();
     await odd.world.store.put({ item: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING", entityType: "LESSON_DIGEST", on: "yes" } });
     expect(await resolveDigestSettingStrict(odd.world.store, A, "payments", pilotA)).toEqual({ on: false, source: "chosen" });
+    // The same for a row of another entity type under the setting's key: present means chosen, and it does not say on.
+    const other = await busyWorld();
+    await other.world.store.put({ item: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING", entityType: "SOMETHING_ELSE", on: true } });
+    expect(await resolveDigestSettingStrict(other.world.store, A, "payments", pilotA)).toEqual({ on: false, source: "chosen" });
+    expect(await readDigestChoiceStrict(other.world.store, A, "payments")).toBe(false);
   });
 
   it("the source says why: chosen, the pilot default or the plain default", async () => {

@@ -352,6 +352,15 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
     await expect(root.lessons!.answer({ method: "GET", path: "/v1/dev/projects/payments/lessons", query: new URLSearchParams() }, { personId: "dev-nobody" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
   });
 
+  it("one pilot list serves the weekly summary's sender and its settings API: a host may give it, else the lessons switch names it (L4-WK)", () => {
+    const tables = fakeTables();
+    const pilot = vi.fn((companyId: string) => companyId === ORG);
+    const env = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" };
+    expect(createBrokerCoreRoot(rootInputs(env, tables.client, { lessonsPeople: people, lessonsDigestPilot: pilot })).lessons).toBeDefined();
+    expect(createBrokerCoreRoot(rootInputs({ ...env, ROVARA_CORE_LESSONS: `on:${ORG}` }, tables.client, { lessonsPeople: people })).lessons).toBeDefined();
+    expect(tables.reads).toEqual([]);
+  });
+
   it("reads a project role from the broker's own grant: administrator is a maintainer, developer a contributor, anything else none", () => {
     expect(projectRoleOf("administrator")).toBe("maintainer");
     expect(projectRoleOf("developer")).toBe("contributor");
