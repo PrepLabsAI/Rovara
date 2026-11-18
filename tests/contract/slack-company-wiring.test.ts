@@ -64,6 +64,43 @@ describe("the factory", () => {
     expect(names.at(-1)).toBe(`agentx/staging/slack-workspaces/${IMPLICIT_COMPANY_ID}/${INSTALL}`);
   });
 
+  it("DEC 254zzz35: with installToken, the install's own team in the built-in company reads the install's Slack app secret; no other team or company ever does", async () => {
+    const names: string[] = [];
+    const binding = (team: string, companyId: string) => ({ Item: { pk: `SLACK_TEAM#${team}`, sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId: team, companyId, boundAt: "2026-11-17T00:00:00.000Z", boundBy: "operator" } });
+    const send = vi.fn(async (command: { input: Record<string, unknown> }): Promise<unknown> => {
+      const input = command.input;
+      if (typeof input.SecretId === "string") {
+        names.push(input.SecretId);
+        if (input.SecretId === "agentx/staging/slack") return { SecretString: JSON.stringify({ signingSecret: "s", botToken: slackTokens("install").bot }) };
+        throw Object.assign(new Error("missing"), { name: "ResourceNotFoundException" });
+      }
+      const key = input.Key as { pk: string } | undefined;
+      if (key?.pk === `SLACK_TEAM#${INSTALL}`) return binding(INSTALL, IMPLICIT_COMPANY_ID);
+      if (key?.pk === `SLACK_TEAM#${OTHER}`) return binding(OTHER, B);
+      return {};
+    });
+    const wiring = slackCompanyDependenciesFromEnvironment(ON, { ...clients(send), installToken: true })!;
+    expect(await wiring.workspaces.tokenForCompany(IMPLICIT_COMPANY_ID, INSTALL)).toBe(slackTokens("install").bot);
+    expect(names).toEqual([`agentx/staging/slack-workspaces/${IMPLICIT_COMPANY_ID}/${INSTALL}`, "agentx/staging/slack"]);
+    // Another company's team (no company secret here) never falls back to the install token; nor does a company asking for the install's team.
+    names.length = 0;
+    expect(await wiring.workspaces.tokenForCompany(B, OTHER)).toBeUndefined();
+    expect(await wiring.workspaces.tokenForCompany(B, INSTALL)).toBeUndefined();
+    expect(names).not.toContain("agentx/staging/slack");
+    // Without installToken (every other consumer): no install-token read at all.
+    names.length = 0;
+    expect(await slackCompanyDependenciesFromEnvironment(ON, clients(send))!.workspaces.tokenForCompany(IMPLICIT_COMPANY_ID, INSTALL)).toBeUndefined();
+    expect(names).not.toContain("agentx/staging/slack");
+  });
+
+  it("the broker's Slack company wiring asks for the install token (root wiring)", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
+    const calls = source.match(/slackCompanyDependenciesFromEnvironment\(process\.env, \{[^}]*\}/gu) ?? [];
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("installToken: true");
+  });
+
   it("builds link URLs only from the given origin, and hands a no-write consumer's notice to the broker", async () => {
     const linkNotice = vi.fn(async () => "link your account: Open in Rovara: https://x");
     const wiring = slackCompanyDependenciesFromEnvironment(ON, { ...clients(), linkOrigin: "https://api.example.test/v1/auth", linkNotice })!;
