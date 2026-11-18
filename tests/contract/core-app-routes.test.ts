@@ -91,6 +91,9 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/wiki-build/refresh", "full"], ["POST", "/v1/app/projects/payments/wiki-build/agents", "full"], ["POST", "/v1/app/projects/payments/wiki-build/delete", "full"],
     // L4-SC: the Update setup offers, making a candidate from one, and "Not now".
     ["GET", "/v1/app/projects/payments/setup-agent/updates", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/prepare", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/dismiss", "full"],
+    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
+    // Lead 4 J3: the start box's path suggestion.
+    ["POST", "/v1/app/projects/payments/code/suggest", "full"],
     // Lead 4 J1: the smart Just answer.
     ["POST", "/v1/app/projects/payments/answers", "full"],
   ];
@@ -120,6 +123,8 @@ describe("the /v1/app route table", () => {
       ["GET", "/v1/app/org/report/people"], ["GET", "/v1/app/tasks/t1/feature"], ["POST", "/v1/app/tasks/t1/feature/extra"], ["POST", "/v1/app/tasks/feature"],
       // The wiki build controls: no other methods, no other tails.
       ["PUT", "/v1/app/projects/payments/wiki-build"], ["DELETE", "/v1/app/projects/payments/wiki-build"], ["GET", "/v1/app/projects/payments/wiki-build/stop"], ["GET", "/v1/app/projects/payments/wiki-build/delete"], ["POST", "/v1/app/projects/payments/wiki-build/extra"], ["GET", "/v1/app/projects/payments/wiki-builds"],
+      // The start box's suggestion is a POST on its own path; starting work itself (`/code`) is Cloud's route, and nothing else sits under it.
+      ["GET", "/v1/app/projects/payments/code/suggest"], ["PUT", "/v1/app/projects/payments/code/suggest"], ["POST", "/v1/app/projects/payments/code"], ["POST", "/v1/app/projects/payments/code/suggest/x"], ["POST", "/v1/app/projects/payments/code/start"],
       // The answer route is one POST: no read of answers, no other writes, no deeper paths.
       ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],

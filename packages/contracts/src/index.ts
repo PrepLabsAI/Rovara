@@ -390,6 +390,8 @@ export * from "./wiki-corrections.js";
 export * from "./answers.js";
 export * from "./answer-keys.js";
 export * from "./slack-answers.js";
+// Lead 4 J3: the web start box's path suggestion (the Slack intake's first look and classifier, for the web).
+export * from "./start-suggest.js";
 export * from "./spec-target.js";
 
 // Wiki W0: the free file map and forecast.

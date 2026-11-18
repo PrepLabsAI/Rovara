@@ -720,6 +720,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Lead 4 A1/A2: the cost and time report. A task is filed or moved by its starter or a project maintainer: the standing is the setup run's own live read.
           report: { standing: setupRunStanding },
+          // Lead 4 J3: the web start box's path suggestion. Any live role on the project asks (the setup run's standing). NO classifier yet: the gateway's "answers" purpose is Cloud lane L4-E, so until it lands every
+          // suggestion says the classifier is unavailable (small talk is still answered, free). Pass `route` here when it does.
+          startSuggest: { standing: setupRunStanding },
           // Lead 4 J1: the smart Just answer. Any live role on the project asks (the setup run's standing); the code is the project's own repositories on the company's code host. The model is the gateway's
           // "answers" purpose (Cloud lane L4-E; L4-AG): the company's own key, its own monthly limit, a fresh answers token per call. No gateway configured (or a Bedrock-only agent model, or no task-token key):
           // every answer is the fixed "answers are not set up here yet" outcome.
