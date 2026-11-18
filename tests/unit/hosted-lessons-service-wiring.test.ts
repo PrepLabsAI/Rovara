@@ -7,11 +7,12 @@ import { readFileSync } from "node:fs";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { codeMilestoneKey, companyScoped, orgProjectCatalogKey, projectRevisionKey, queryAll, type CodeMilestone, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { CORE_LEARNING_MODEL_DEFAULT, CORE_LEARNING_MODEL_VARIABLE, codeMilestoneKey, companyScoped, orgProjectCatalogKey, projectRevisionKey, queryAll, type CodeMilestone, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createHostedLessonsPeople } from "../../packages/broker/src/aws/hosted-lessons-people.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { hostedLessonsLearning } from "../../packages/broker/src/core-host/hosted-learning.js";
+import { COMPANY_LEARNING_MODEL_ENTITY, companyLearningModelKey } from "../../packages/broker/src/core-host/company-learning-model.js";
 import { LEARNING_MESSAGES_PATH, LEARNING_PAUSE_HEADER } from "../../packages/broker/src/lessons/gateway-learning.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { codeMilestoneItems, type DocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -48,12 +49,13 @@ const bareKey = (): TokenSigner => ({
   publicJwk: async () => ({ kty: "RSA", n: exported.n, e: exported.e, kid: KID, alg: "RS256", use: "sig" }) as never,
   sign: async (input) => sign("sha256", input, pair.privateKey),
 });
-const GATEWAY_ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
+// DEC 254zzz58: the learning model is its own setting; these cases set it to the Claude model (the agent model's own cases are in "(c)").
+const GATEWAY_ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL, [CORE_LEARNING_MODEL_VARIABLE]: MODEL };
 const claimsOf = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as Record<string, unknown>;
 
 interface Seen { url: string; token: string; body: { messages?: Array<{ content?: string }> } }
 
-async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n: number, seen: Seen) => Response | Promise<Response>; learning?: boolean; custom?: (companyId: OrgId) => unknown; log?: (entry: Record<string, unknown>) => void } = {}) {
+async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n: number, seen: Seen) => Response | Promise<Response>; learning?: boolean; custom?: (companyId: OrgId) => unknown; log?: (entry: Record<string, unknown>) => void; learningEnv?: NodeJS.ProcessEnv } = {}) {
   const world = createFakeWorld();
   adapters.modules = world.modules;
   const rows = new Map<string, Record<string, unknown>>();
@@ -90,7 +92,7 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     services: () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }])),
     lessonsPeople: createHostedLessonsPeople({ documentClient: client, stateTableName: "state", signInTableName: "signin", now: () => world.clock.now }),
-    ...(options.custom !== undefined ? { lessonsLearning: options.custom as NonNullable<Parameters<typeof createBrokerCoreRoot>[0]["lessonsLearning"]> } : options.learning === false ? {} : { lessonsLearning: hostedLessonsLearning(options.gateway === false ? {} : GATEWAY_ENV, () => ({ signer: taskKeySigner(bareKey()), issuer: ISSUER }), { fetch: fetchImpl, now: () => world.clock.now, timeoutMs: 1_000 }) }),
+    ...(options.custom !== undefined ? { lessonsLearning: options.custom as NonNullable<Parameters<typeof createBrokerCoreRoot>[0]["lessonsLearning"]> } : options.learning === false ? {} : { lessonsLearning: hostedLessonsLearning(options.gateway === false ? {} : options.learningEnv ?? GATEWAY_ENV, () => ({ signer: taskKeySigner(bareKey()), issuer: ISSUER }), { fetch: fetchImpl, now: () => world.clock.now, timeoutMs: 1_000 }) }),
   });
   return { root, world, seen, fetchImpl };
 }
@@ -240,6 +242,66 @@ describe("(b) the learning model is the gateway's, on the company's own account"
     await mergedTask(off, A, MEMBER_A, sentBack);
     await lessonsJob(off.root);
     expect(off.seen).toEqual([]);
+  });
+});
+
+// DEC 254zzz58/63: learning has its OWN model: the company's choice (read from its own core store), else the install's, else Claude Haiku 5.5. Staging runs its agents on zai.glm-5
+// (not a Claude model); before, that switched learning off (`lessons_learning_not_set_up`) and nothing was learned.
+describe("(c) the learning model is its own, never the agent model", () => {
+  const sentBack = "Use the shared retry helper withRetry, not a hand-written loop.";
+  const GLM = "zai.glm-5";
+  const answer = () => new Response(JSON.stringify({ model: MODEL, content: [{ type: "text", text: reply(candidateJson({ citations: [], scope: {}, evidenceSpanIds: ["S1"] })) }] }), { status: 200, headers: { "content-type": "application/json" } });
+  const glmEnv = (learning?: string): NodeJS.ProcessEnv => ({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: GLM, ...(learning === undefined ? {} : { [CORE_LEARNING_MODEL_VARIABLE]: learning }) });
+  const choose = async (s: Setup, companyId: OrgId, model: string) => s.world.store.put({ item: { ...companyLearningModelKey(companyId), entityType: COMPANY_LEARNING_MODEL_ENTITY, orgId: companyId, version: 1, model, updatedAt: "2026-11-18T00:00:00.000Z", updatedBy: MEMBER_A } });
+  const models = (s: Setup) => s.seen.map((seen) => [claimsOf(seen.token).cid, claimsOf(seen.token).mdl, (seen.body as { model?: string }).model]);
+
+  it("agent model zai.glm-5 with the learning model set: the task is reflected on the LEARNING model (the token's one model and the request's), and nothing says 'not set up'", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(MODEL), log: (entry) => { logs.push(entry); } });
+    await mergedTask(s, A, MEMBER_A, sentBack);
+    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
+    expect(s.seen.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, [MODEL], MODEL])]));
+    expect(JSON.stringify(s.seen)).not.toContain(GLM);
+    expect(logs.filter((entry) => entry.event === "core_engine.lessons_learning_not_set_up")).toEqual([]);
+  });
+
+  it("agent model zai.glm-5, nothing chosen anywhere: Claude Haiku 5.5 learns", async () => {
+    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv() });
+    await mergedTask(s, A, MEMBER_A, sentBack);
+    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
+    expect(s.seen.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, [CORE_LEARNING_MODEL_DEFAULT], CORE_LEARNING_MODEL_DEFAULT])]));
+  });
+
+  it("the company's own choice, read from its own core store by the root, wins over the install's", async () => {
+    const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(MODEL) });
+    await choose(s, A, "claude-haiku-4-5");
+    await mergedTask(s, A, MEMBER_A, sentBack);
+    expect(reflectedIn(await lessonsJob(s.root))).toBe(1);
+    expect(s.seen.length).toBeGreaterThanOrEqual(1);
+    expect(new Set(models(s).map(String))).toEqual(new Set([String([A, ["claude-haiku-4-5"], "claude-haiku-4-5"])]));
+  });
+
+  it("an install learning model set to a model other than Claude is refused: no port, the same 'not set up' line as before, and no call", async () => {
+    for (const learning of [GLM, "us.anthropic.claude-sonnet-4-6-v1:0", "Claude-Sonnet-5"]) {
+      const logs: Array<Record<string, unknown>> = [];
+      const s = await setup({ lessons: "on", answer, learningEnv: glmEnv(learning), log: (entry) => { logs.push(entry); } });
+      await mergedTask(s, A, MEMBER_A, sentBack);
+      await lessonsJob(s.root);
+      expect(s.seen, learning).toEqual([]);
+      expect(logs, learning).toContainEqual({ event: "core_engine.lessons_learning_not_set_up", companyId: A });
+    }
+  });
+
+  it("two companies: each learns on its own choice (or the default) with its own token, and one company's choice never reaches the other", async () => {
+    const s = await setup({ lessons: `on:${A}:${B}`, answer, learningEnv: glmEnv() });
+    await choose(s, A, "claude-haiku-4-5");
+    await mergedTask(s, A, MEMBER_A, sentBack);
+    await mergedTask(s, B, MEMBER_B, "Name the route /healthz like the others.");
+    await lessonsJob(s.root);
+    const seen = new Set(models(s).map(String));
+    expect(seen).toEqual(new Set([String([A, ["claude-haiku-4-5"], "claude-haiku-4-5"]), String([B, [CORE_LEARNING_MODEL_DEFAULT], CORE_LEARNING_MODEL_DEFAULT])]));
   });
 });
 

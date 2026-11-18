@@ -19,6 +19,8 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/company/linear", "POST /v1/dev/company/linear/connect", "POST /v1/dev/company/linear/complete", "DELETE /v1/dev/company/linear",
   "GET /v1/dev/company/linear/projects/{id}", "PUT /v1/dev/company/linear/projects/{id}", "DELETE /v1/dev/company/linear/projects/{id}",
   "GET /v1/dev/company/engine-model", "PUT /v1/dev/company/engine-model",
+  // DEC 254zzz63: two-company cases in tests/contract/company-learning-model-routes.test.ts.
+  "GET /v1/dev/company/learning-model", "PUT /v1/dev/company/learning-model",
   // L4-EGR: two-company cases in tests/contract/company-egress-routes.test.ts.
   "GET /v1/dev/company/egress-addresses",
   "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",

@@ -91,6 +91,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
     "CoreAnswersModel",
+    // DEC 254zzz58: the hosted lessons learning model (agentx config set coreEngine.learningModel), empty = claude-haiku-5-5 (DEC 254zzz63; a company may choose its own).
+    "CoreLearningModel",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).

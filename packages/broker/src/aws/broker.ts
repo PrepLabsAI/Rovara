@@ -335,7 +335,7 @@ import { companyReadsFromEnvironment, policyHookInstallFromEnvironment, type Com
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
-import { installEngineModel } from "../core-host/company-engine-model.js";
+import { installEngineModel } from "../core-host/company-engine-model.js"; import { installLearningModel } from "../core-host/company-learning-model.js";
 import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import { hostedLessonsSlack } from "./hosted-slack-thread.js";
 import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
@@ -15536,7 +15536,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       // Guided onboarding PR 7: the Linear connect routes (linear-connect-routes.ts), where the token key is given.
       ...(linear === undefined ? {} : { linearConnect: linear.connect }),
       // Guided onboarding PR 14: the company engine model route, only where the model gateway is configured (its live list is the authority).
-      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine } }),
+      ...(companyEngineModelOffered === undefined ? {} : { companyEngineModel: { offered: companyEngineModelOffered, installModel: () => installEngineModel(process.env), log: brokerLogLine }, companyLearningModel: { offered: companyEngineModelOffered, installModel: () => installLearningModel(process.env), log: brokerLogLine } }),
       // L4-EGR: Rovara's outbound addresses (the stack parameter NatEgressAddresses); an empty or absent value reads as an empty list.
       companyEgress: { addresses: () => process.env[EGRESS_ADDRESSES_VARIABLE] },
       // DEC 254w: connected sign-ins, through the same sign-in Lambda (it owns the sign-in table).
@@ -15655,6 +15655,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     }),
     // L4-HW2: the lessons' learning calls (the reflector, the curator's judge, the outcome judge) go through the model gateway's learning route on the COMPANY's own provider account and learning cap
     // (core-host/hosted-learning.ts); asked only for a company the lessons switch names. No gateway settings or no task-token key: no port, so learning calls refuse and nothing is spent.
+    // DEC 254zzz58: on its OWN model (ROVARA_CORE_LEARNING_MODEL, else claude-haiku-5-5; a company's own choice wins, read per call from its store by the root), never the agent model.
     lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration))),
     // L4-HW8: the lessons' Slack source reads a task's own thread through the signed `thread_messages` command of the deployment's Slack adapter (aws/hosted-slack-thread.ts); no adapter env, no source.
     ...((slack) => (slack === undefined ? {} : { lessonsSlack: slack }))(hostedLessonsSlack({ env: process.env, secretsManager, workspaces: slackCompany?.workspaces, legacyTeamId: process.env.SLACK_TEAM_ID || process.env.SLACK_ADAPTER_TEAM_ID })),
