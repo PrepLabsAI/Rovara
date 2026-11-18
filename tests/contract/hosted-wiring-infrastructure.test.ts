@@ -122,24 +122,38 @@ describe("(c) the policy hook's question key", () => {
     expect(JSON.stringify(legacy)).not.toContain("POLICY_HOOK_KEY_ARN");
   });
 
-  it("only the broker may sign; only the broker and the sign-in function read the public key", () => {
+  it("only the broker and the dispatcher may sign; only they and the sign-in function read the public key", () => {
     const { id, statements } = keyPolicy(named, "DeveloperSignInPolicyHookKey");
     const broker = { "Fn::GetAtt": [roleOf(named, "BrokerServiceRole"), "Arn"] };
     const signIn = { "Fn::GetAtt": [roleOf(named, "DeveloperSignInFunctionServiceRole"), "Arn"] };
+    const dispatcher = { "Fn::GetAtt": [roleOf(named, "DispatcherServiceRole"), "Arn"] };
     expect(statements.find((statement) => statement.Sid === "BrokerSignsPolicyQuestions")).toEqual({ Sid: "BrokerSignsPolicyQuestions", Effect: "Allow", Principal: { AWS: broker }, Action: ["kms:Sign", "kms:GetPublicKey"], Resource: "*" });
-    expect(statements.find((statement) => statement.Sid === "SignOnlyAsBroker")).toEqual({ Sid: "SignOnlyAsBroker", Effect: "Deny", Principal: { AWS: "*" }, Action: "kms:Sign", Resource: "*", Condition: { ArnNotEquals: { "aws:PrincipalArn": broker } } });
-    expect(statements.find((statement) => statement.Sid === "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity")).toEqual({ Sid: "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity", Effect: "Deny", Principal: { AWS: "*" }, Action: "kms:GetPublicKey", Resource: "*", Condition: { ArnNotEquals: { "aws:PrincipalArn": [broker, signIn] } } });
+    // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher signs only as the question signer does (RS256 over the raw input) and reads the public key (the question's kid).
+    expect(statements.find((statement) => statement.Sid === "DispatcherSignsPolicyQuestions")).toEqual({
+      Sid: "DispatcherSignsPolicyQuestions", Effect: "Allow", Principal: { AWS: dispatcher }, Action: "kms:Sign", Resource: "*",
+      Condition: { StringEquals: { "kms:SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256", "kms:MessageType": "RAW" } },
+    });
+    expect(statements.find((statement) => statement.Sid === "DispatcherReadsPolicyQuestionKey")).toEqual({ Sid: "DispatcherReadsPolicyQuestionKey", Effect: "Allow", Principal: { AWS: dispatcher }, Action: "kms:GetPublicKey", Resource: "*" });
+    expect(statements.find((statement) => statement.Sid === "SignOnlyAsBroker")).toEqual({ Sid: "SignOnlyAsBroker", Effect: "Deny", Principal: { AWS: "*" }, Action: "kms:Sign", Resource: "*", Condition: { ArnNotEquals: { "aws:PrincipalArn": [broker, dispatcher] } } });
+    expect(statements.find((statement) => statement.Sid === "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity")).toEqual({ Sid: "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity", Effect: "Deny", Principal: { AWS: "*" }, Action: "kms:GetPublicKey", Resource: "*", Condition: { ArnNotEquals: { "aws:PrincipalArn": [broker, signIn, dispatcher] } } });
     // No other Allow names a principal other than the account root (CDK's default admin statement).
-    const allows = statements.filter((statement) => statement.Effect === "Allow" && statement.Sid !== "BrokerSignsPolicyQuestions");
+    const allows = statements.filter((statement) => statement.Effect === "Allow" && !["BrokerSignsPolicyQuestions", "DispatcherSignsPolicyQuestions", "DispatcherReadsPolicyQuestionKey"].includes(String(statement.Sid)));
     for (const allow of allows) expect(JSON.stringify(allow.Principal)).toContain(":root");
     // The sign-in function reads the public key; it is never given Sign.
     const fnKms = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => JSON.stringify(statement.Resource).includes(id));
     expect(fnKms.map((statement) => statement.Action)).toEqual(["kms:GetPublicKey"]);
-    // The broker's own inline policy does not grow for this key.
+    // Neither the broker's nor the dispatcher's own role policy grows for this key: key-policy grants only.
     expect(JSON.stringify(statementsOfRole(named, "BrokerServiceRole"))).not.toContain(id);
+    expect(JSON.stringify(statementsOfRole(named, "DispatcherServiceRole"))).not.toContain(id);
     expect(envOf(named, "DeveloperSignInFunction").POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [id, "Arn"] });
     // ENV-ROOM: the broker is given the key's id packed (AGENTX_NAMES) and builds the same ARN (tests/contract/broker-environment.test.ts).
     expect(envOf(named, "Broker").POLICY_HOOK_KEY_ARN).toEqual({ Ref: id });
+    // The dispatcher's question signer: the key's ARN and the install's issuer, the sign-in function's own value (hosted-wiring.ts policyHookInstallFromEnvironment).
+    expect(envOf(named, "Dispatcher").POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [id, "Arn"] });
+    expect(envOf(named, "Dispatcher").DEVELOPER_TOKEN_ISSUER).toEqual(envOf(named, "DeveloperSignInFunction").DEVELOPER_TOKEN_ISSUER);
+    // The legacy deployment has no question key: its dispatcher is given neither.
+    expect(envOf(legacy, "Dispatcher")).not.toHaveProperty("POLICY_HOOK_KEY_ARN");
+    expect(envOf(legacy, "Dispatcher")).not.toHaveProperty("DEVELOPER_TOKEN_ISSUER");
   });
 });
 

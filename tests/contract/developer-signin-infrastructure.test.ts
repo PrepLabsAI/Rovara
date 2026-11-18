@@ -569,6 +569,35 @@ function signingKey(template: TemplateJson, prefix: string): [string, Resource] 
   return entries[0]!;
 }
 
+/**
+ * CORE-DISPATCH-HOOK-SIGNER-20261117 (DEC 254zzz6 D1, rule D proof): the dispatcher's question signer is exactly two key-policy Allows on the policy hook key (Sign with the signer's
+ * algorithm and message type; GetPublicKey), the dispatcher's role added to the key's two existing Denies, and the key's ARN and the install's issuer in the dispatcher's environment.
+ * Each is asserted, then taken out (the Denies restored to their earlier principals), so the digest below still pins every other byte as before.
+ */
+function withoutDispatcherHookSigner(template: TemplateJson): void {
+  const [, key] = signingKey(template, "DeveloperSignInPolicyHookKey");
+  const broker = { "Fn::GetAtt": [ofType(template, "AWS::IAM::Role").map(([id]) => id).find((id) => withoutHash(id) === "BrokerServiceRole")!, "Arn"] };
+  const signIn = { "Fn::GetAtt": [ofType(template, "AWS::IAM::Role").map(([id]) => id).find((id) => withoutHash(id) === "DeveloperSignInFunctionServiceRole")!, "Arn"] };
+  const dispatcher = { "Fn::GetAtt": [ofType(template, "AWS::IAM::Role").map(([id]) => id).find((id) => withoutHash(id) === "DispatcherServiceRole")!, "Arn"] };
+  const document = key.Properties.KeyPolicy as { Statement: Statement[] };
+  const sid = (name: string) => document.Statement.filter((statement) => statement.Sid === name);
+  expect(sid("DispatcherSignsPolicyQuestions")).toEqual([{ Sid: "DispatcherSignsPolicyQuestions", Effect: "Allow", Principal: { AWS: dispatcher }, Action: "kms:Sign", Resource: "*", Condition: { StringEquals: { "kms:SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256", "kms:MessageType": "RAW" } } }]);
+  expect(sid("DispatcherReadsPolicyQuestionKey")).toEqual([{ Sid: "DispatcherReadsPolicyQuestionKey", Effect: "Allow", Principal: { AWS: dispatcher }, Action: "kms:GetPublicKey", Resource: "*" }]);
+  document.Statement = document.Statement.filter((statement) => statement.Sid !== "DispatcherSignsPolicyQuestions" && statement.Sid !== "DispatcherReadsPolicyQuestionKey");
+  const [sign] = sid("SignOnlyAsBroker");
+  expect(sign?.Condition).toEqual({ ArnNotEquals: { "aws:PrincipalArn": [broker, dispatcher] } });
+  sign!.Condition = { ArnNotEquals: { "aws:PrincipalArn": broker } };
+  const [read] = sid("GetPublicKeyOnlyAsBrokerAndDeveloperIdentity");
+  expect(read?.Condition).toEqual({ ArnNotEquals: { "aws:PrincipalArn": [broker, signIn, dispatcher] } });
+  read!.Condition = { ArnNotEquals: { "aws:PrincipalArn": [broker, signIn] } };
+  const variables = (template.Resources[functionId(template, "Dispatcher")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  const signInVariables = (template.Resources[functionId(template, "DeveloperSignInFunction")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  expect(variables.POLICY_HOOK_KEY_ARN).toEqual({ "Fn::GetAtt": [signingKey(template, "DeveloperSignInPolicyHookKey")[0], "Arn"] });
+  expect(variables.DEVELOPER_TOKEN_ISSUER).toEqual(signInVariables.DEVELOPER_TOKEN_ISSUER);
+  delete variables.POLICY_HOOK_KEY_ARN;
+  delete variables.DEVELOPER_TOKEN_ISSUER;
+}
+
 describe("task-token key and membership IAM", () => {
   it("creates the named task key before gateway enablement, with no key in legacy", () => {
     const [id, key] = signingKey(named, "DeveloperSignInTaskTokenKey");
@@ -652,6 +681,8 @@ describe("task-token key and membership IAM", () => {
     expect(companyImportPolicies(remainder)).toHaveLength(1);
     withoutCompanyImportReads(remainder);
     expect(companyImportPolicies(remainder)).toEqual([]);
+    // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer, asserted and taken out (rule D: the digest is unchanged, so nothing else in the template moved).
+    withoutDispatcherHookSigner(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -743,6 +774,28 @@ function policyAllows(policy: PolicyStatementJson[], action: string, resource: s
     })));
   return matches.some((s) => s.Effect === "Allow") && !matches.some((s) => s.Effect === "Deny");
 }
+
+describe("the dispatcher's policy question signer (CORE-DISPATCH-HOOK-SIGNER-20261117) under the deploy role and the permissions boundary", () => {
+  // Simulated with the repo's own policy helpers (no AWS call). Template diffs miss the boundary (0.5.15), so each action this change needs is checked against both documents.
+  const key = "arn:aws:kms:us-east-1:111122223333:key/00000000-0000-4000-8000-000000000001";
+  const dispatcherFunction = "arn:aws:lambda:us-east-1:111122223333:function:agentx-staging-control-plane-Dispatcher-AbCdEf";
+  it("the deploy role may change the key's policy and the dispatcher's environment, and the boundary allows both", () => {
+    for (const [action, resource] of [["kms:PutKeyPolicy", key], ["kms:GetKeyPolicy", key], ["kms:DescribeKey", key], ["lambda:UpdateFunctionConfiguration", dispatcherFunction], ["lambda:GetFunctionConfiguration", dispatcherFunction]] as const) {
+      expect(policyAllows(deploy, action, resource), `deploy ${action}`).toBe(true);
+      expect(policyAllows(boundary, action, resource), `boundary ${action}`).toBe(true);
+    }
+  });
+  it("the dispatcher's bounded role may call Sign and GetPublicKey (the key policy grants them; the boundary must not cut them off)", () => {
+    for (const action of ["kms:Sign", "kms:GetPublicKey"]) expect(policyAllows(boundary, action, key), `boundary ${action}`).toBe(true);
+  });
+  it("needs no IAM role policy change, no managed policy and no new key: the template's keys and the dispatcher's role policies are as before", () => {
+    expect(ofType(named, "AWS::KMS::Key").map(([id]) => withoutHash(id)).sort()).toEqual(["ChatGptConnectionKey", "DeveloperSignInPolicyHookKey", "DeveloperSignInTaskTokenKey", "DeveloperSignInTokenKey", "InvokeSigningKey"]);
+    expect(ofType(named, "AWS::IAM::ManagedPolicy")).toHaveLength(0);
+    const [policyHookKeyId] = signingKey(named, "DeveloperSignInPolicyHookKey");
+    expect(JSON.stringify(statementsOfRole(named, "DispatcherServiceRole"))).not.toContain(policyHookKeyId);
+    expect(JSON.stringify(statementsOfRole(named, "DispatcherServiceRole"))).not.toMatch(/kms:(Sign|GetPublicKey)"/u);
+  });
+});
 
 describe("task key deployment boundary coverage", () => {
   it("maps every rendered resource type to an allowed deploy service, with existing scoped IAM and Budget exceptions", () => {
@@ -1700,11 +1753,27 @@ const attentionEmailTuples: AccessTuple[] = [
   ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTelemetryRecords", "*", "{}"],
   ["role:CoreEngineJobsAttentionEmailSenderServiceRole", "Allow", "xray:PutTraceSegments", "*", "{}"],
 ];
+/**
+ * CORE-DISPATCH-HOOK-SIGNER-20261117 (DEC 254zzz6 D1, the full fix as its own IAM lane): the dispatcher signs its own policy questions (the engine's per-task limit before each model run)
+ * with the policy hook key, by key-policy grants only. Two new Allow tuples (Sign under the signer's algorithm and message type; GetPublicKey for the question's kid), and the key's two
+ * Denies each gain the dispatcher's role: those two hostedWiringTuples rows are REPLACED (before, in hostedWiringTuples: Sign Deny unless [Broker]; GetPublicKey Deny unless [Broker,
+ * DeveloperSignInFunction]). No other tuple changes.
+ */
+const dispatcherHookSignerReplaced = new Set([
+  JSON.stringify(["*","Deny","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\"]}}"]),
+  JSON.stringify(["*","Deny","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"]),
+]);
+const dispatcherHookSignerTuples: AccessTuple[] = [
+  ["*","Deny","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DeveloperSignInFunctionServiceRole\",\"role:DispatcherServiceRole\"]}}"],
+  ["*","Deny","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\",\"role:DispatcherServiceRole\"]}}"],
+  ["role:DispatcherServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
+  ["role:DispatcherServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"StringEquals\":{\"kms:MessageType\":[\"RAW\"],\"kms:SigningAlgorithm\":[\"RSASSA_PKCS1_V1_5_SHA_256\"]}}"],
+];
 const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
-].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple))).concat(envRoom2Added).sort(byText);
+].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples).sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {

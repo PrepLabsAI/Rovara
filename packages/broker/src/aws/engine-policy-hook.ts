@@ -1,8 +1,10 @@
-// The company rules service (the hosted policy hook) as the core engine's per-task limit reads it, for the broker's core root (aws/core-engine-root.ts). Kept apart from the root so
-// another function can read it without taking the broker's whole composition root.
+// The company rules service (the hosted policy hook) as the core engine's per-task limit reads it, shared by the broker's core root (aws/core-engine-root.ts) and the dispatcher
+// (aws/dispatcher.ts). Kept apart from the root so the dispatcher's bundle does not take the broker's whole composition root.
 import { HostedPolicyHookSettingsSchema, type HostedPolicyHookSettings } from "@agentx/contracts";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
-import type { ProjectSettingsHook } from "./project-settings.js";
+import type { ProjectTaskCap } from "../core-host/hosted-modules.js";
+import { policyHookInstallFromEnvironment } from "./hosted-wiring.js";
+import { projectTaskCapReader, type ProjectSettingsHook } from "./project-settings.js";
 
 /** The variable that holds the install's policy hook settings (JSON: `{ address, jwks, thumbprints }`). Absent or empty: no hook. */
 export const CORE_POLICY_HOOK_VARIABLE = "ROVARA_POLICY_HOOK";
@@ -29,4 +31,20 @@ export function enginePolicyHook(settings: HostedPolicyHookSettings | undefined,
   const signer = install?.();
   if (settings === undefined || signer === undefined) throw new Error("the policy hook is not usable");
   return { settings, install: signer, ...(fetch === undefined ? {} : { fetch }) };
+}
+
+type KmsSender = Parameters<typeof policyHookInstallFromEnvironment>[1];
+
+/**
+ * CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's reader of a project's per-task limit, resolved as the broker's root resolves it (the project's stored choice, then the company's
+ * rules service when the install has one), so a model run is never dispatched past a company limit the broker's booking stop would apply. The install's question signer is the
+ * dispatcher's own KMS signer over POLICY_HOOK_KEY_ARN (with DEVELOPER_TOKEN_ISSUER), built once. Settings that do not read, a missing signer, a signer that fails, or a rules service
+ * that does not answer: the reader throws, and the run is refused (spend unknown), never let through on the project's limit alone.
+ */
+export function dispatcherProjectTaskCap(env: NodeJS.ProcessEnv, deps: Parameters<typeof projectTaskCapReader>[0], kms: KmsSender, fetch?: typeof globalThis.fetch): ProjectTaskCap {
+  let settings: HostedPolicyHookSettings | undefined;
+  let problem = false;
+  try { settings = policyHookSettingsFromEnvironment(env); } catch { problem = true; }
+  const install = settings === undefined && !problem ? undefined : policyHookInstallFromEnvironment(env, kms);
+  return projectTaskCapReader(deps, () => enginePolicyHook(settings, problem, () => install, fetch));
 }
