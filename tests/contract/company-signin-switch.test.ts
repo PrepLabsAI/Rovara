@@ -224,8 +224,9 @@ describe("per-company Slack bots (SlackCompanyWorkspaces, DEC 254zk) need compan
       expect(variables.SLACK_TEAM_ID ?? variables.SLACK_ADAPTER_TEAM_ID, reader).toBe("T0INSTALL0");
     }
     expect(variablesOf(on, onlyId(on, "Broker"))).toMatchObject({ SLACK_COMPANY_WORKSPACES: "enabled", COMPANY_SIGNIN: "enabled" });
+    // DEC 254zzz32/35: the broker's (company token family and the install's Slack secret, read-only).
     expect(slackPolicies(on).map((policy) => policy.Properties.PolicyName).sort()).toEqual([
-      "slack-company-workspaces-channelapi", "slack-company-workspaces-channelapimembers", "slack-company-workspaces-developeridentity", "slack-company-workspaces-developertasknotifier",
+      "slack-company-workspaces-broker", "slack-company-workspaces-channelapi", "slack-company-workspaces-channelapimembers", "slack-company-workspaces-developeridentity", "slack-company-workspaces-developertasknotifier",
       "slack-company-workspaces-sessionreconciler", "slack-company-workspaces-slackingress", "slack-company-workspaces-slackingressmembers", "slack-company-workspaces-slackorchestrator",
     ]);
     // The Slack service's inputs are output whatever the switches, so config set can turn the service on without an upgrade.
