@@ -209,7 +209,7 @@ export interface BrokerCoreRootInputs {
    * The learning model port for one company's lessons (`hostedLessonsLearning`: the gateway's learning route, on the company's own provider account and inside its learning cap). Asked only for a company
    * the lessons switch names. Absent, or undefined for a company (or a throw): learning calls refuse and nothing is spent.
    */
-  lessonsLearning?: (companyId: OrgId) => CoreLessonsOptions["learning"];
+  lessonsLearning?: (companyId: OrgId, context?: { log: (entry: Record<string, unknown>) => void }) => CoreLessonsOptions["learning"];
   /**
    * The lessons' Slack source for one company (`hostedLessonsSlack`, aws/hosted-slack-thread.ts, L4-HW8): which company a Slack workspace is (the reader never takes "every tenant is yours" on an install of many
    * companies) and the one signed `thread_messages` command to the deployment's Slack adapter. Absent: no Slack source, as before.
@@ -741,7 +741,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
     if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
     try {
-      const port = inputs.lessonsLearning(companyId);
+      const port = inputs.lessonsLearning(companyId, { log });
       // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a SET learning model that is not Claude; DEC 254zzz58: never the agent model) learns nothing, and that is never silent.
       if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
       return port;

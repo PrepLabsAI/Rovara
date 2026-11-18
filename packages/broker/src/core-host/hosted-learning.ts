@@ -69,7 +69,10 @@ export function hostedLearningModelSetting(env: NodeJS.ProcessEnv): { fixed: str
 
 /** The first model of the company's offered list that the learning route can use and Code can price (a Claude engine name with list prices), or undefined when there is none. */
 export function firstOfferedLearningModel(offered: OfferedAgentModels): string | undefined {
-  for (const { model } of offered.models) {
+  // Where the gateway says which offered models sit on the company's own connected Anthropic account (`reviewerAccess`), those come first, in the gateway's order; then the rest.
+  const onAnthropic = new Set((offered.reviewerAccess?.models ?? []).filter((entry) => entry.provider === "anthropic").map((entry) => entry.model));
+  const ordered = [...offered.models.filter((entry) => onAnthropic.has(entry.model)), ...offered.models.filter((entry) => !onAnthropic.has(entry.model))];
+  for (const { model } of ordered) {
     if (!isCoreLearningModelId(model) || !CORE_CLAUDE_AGENT_MODEL.test(model)) continue;
     const prices = listPricesPerMillion({ provider: "anthropic", modelId: model });
     if (prices !== undefined && prices.input > 0 && prices.output > 0) return model;
@@ -83,7 +86,7 @@ export interface HostedLearningOptions {
   timeoutMs?: number;
   /** The company's offered models (tests). Absent: the gateway's own offered-models read, signed with the task key. */
   offered?: (companyId: OrgId) => Promise<unknown>;
-  /** Where the one "no Claude model" line goes. */
+  /** Where the one "no Claude model" line goes when the caller gives no log of its own (the core root gives its log per company). */
   log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -91,8 +94,9 @@ export function hostedLessonsLearning(
   env: NodeJS.ProcessEnv,
   taskTokens: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined,
   options: HostedLearningOptions = {},
-): (companyId: OrgId) => HostedLearning | undefined {
-  return (companyId) => {
+): (companyId: OrgId, context?: { log: (entry: Record<string, unknown>) => void }) => HostedLearning | undefined {
+  return (companyId, context) => {
+    const log = context?.log ?? options.log;
     if (!OrgIdSchema.safeParse(companyId).success) return undefined;
     const settings = readGatewayModelAccess(env);
     if (settings === undefined || "problem" in settings) return undefined;
@@ -109,16 +113,24 @@ export function hostedLessonsLearning(
     // The company's chosen model, kept for LEARNING_MODEL_READ_MS (null: the gateway offers it none). A failed read is never kept and throws fixed words: the call is a failure, never a guess.
     let chosen: { model: string | null; at: number } | undefined;
     let toldNone = false;
+    let reading: Promise<void> | undefined;
     const modelNow = async (): Promise<string | undefined> => {
       if ("fixed" in setting) return setting.fixed;
       const at = now();
       if (chosen === undefined || !(at - chosen.at < LEARNING_MODEL_READ_MS) || at < chosen.at) {
-        let offered: OfferedAgentModels;
-        try { offered = OfferedAgentModelsSchema.parse(await readOffered(companyId)); } catch { throw new Error(READ_FAILED_WORDS); }
-        chosen = { model: firstOfferedLearningModel(offered) ?? null, at };
+        // One read in flight per port: calls that arrive during it share its answer, so an older, slower answer can never overwrite a newer one.
+        reading ??= (async () => {
+          try {
+            let offered: OfferedAgentModels;
+            try { offered = OfferedAgentModelsSchema.parse(await readOffered(companyId)); } catch { throw new Error(READ_FAILED_WORDS); }
+            chosen = { model: firstOfferedLearningModel(offered) ?? null, at };
+          } finally { reading = undefined; }
+        })();
+        await reading;
       }
+      if (chosen === undefined) throw new Error(READ_FAILED_WORDS);
       if (chosen.model === null) {
-        if (!toldNone) { toldNone = true; options.log?.({ event: "core_engine.lessons_learning_not_set_up", companyId, reason: "no_claude_model", notice: LEARNING_NO_CLAUDE_NOTICE }); }
+        if (!toldNone) { toldNone = true; log?.({ event: "core_engine.lessons_learning_not_set_up", companyId, reason: "no_claude_model", notice: LEARNING_NO_CLAUDE_NOTICE }); }
         return undefined;
       }
       toldNone = false;

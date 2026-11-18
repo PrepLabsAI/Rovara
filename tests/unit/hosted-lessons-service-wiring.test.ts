@@ -91,7 +91,7 @@ async function setup(options: { lessons?: string; gateway?: boolean; answer?: (n
     now: () => new Date(world.clock.now), ciReporting: { honest: true, ciMode: async () => "sandbox_only" as const },
     services: () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }])),
     lessonsPeople: createHostedLessonsPeople({ documentClient: client, stateTableName: "state", signInTableName: "signin", now: () => world.clock.now }),
-    ...(options.custom !== undefined ? { lessonsLearning: options.custom as NonNullable<Parameters<typeof createBrokerCoreRoot>[0]["lessonsLearning"]> } : options.learning === false ? {} : { lessonsLearning: hostedLessonsLearning(options.gateway === false ? {} : options.learningEnv ?? GATEWAY_ENV, () => ({ signer: taskKeySigner(bareKey()), issuer: ISSUER }), { fetch: fetchImpl, now: () => world.clock.now, timeoutMs: 1_000, ...(options.offered === undefined ? {} : { offered: options.offered }), ...(options.log === undefined ? {} : { log: options.log }) }) }),
+    ...(options.custom !== undefined ? { lessonsLearning: options.custom as NonNullable<Parameters<typeof createBrokerCoreRoot>[0]["lessonsLearning"]> } : options.learning === false ? {} : { lessonsLearning: hostedLessonsLearning(options.gateway === false ? {} : options.learningEnv ?? GATEWAY_ENV, () => ({ signer: taskKeySigner(bareKey()), issuer: ISSUER }), { fetch: fetchImpl, now: () => world.clock.now, timeoutMs: 1_000, ...(options.offered === undefined ? {} : { offered: options.offered }) }) }),
   });
   return { root, world, seen, fetchImpl };
 }
@@ -347,6 +347,6 @@ describe("the broker hands the core root the learning port", () => {
   const body = call.slice(0, call.indexOf("builtCoreRoot = coreRoot;"));
 
   it("passes lessonsLearning built by hostedLessonsLearning over the process environment and the install's own task-token signer", () => {
-    expect(body).toMatch(/lessonsLearning:\s*hostedLessonsLearning\(process\.env,\s*\(\) => taskTokensFromEnvironment\(process\.env, new KMSClient\(awsClientConfiguration\)\), \{ log: \(entry\) => console\.log\(JSON\.stringify\(\{ component: "core-engine", \.\.\.entry \}\)\) \}\)/u);
+    expect(body).toMatch(/lessonsLearning:\s*hostedLessonsLearning\(process\.env,\s*\(\) => taskTokensFromEnvironment\(process\.env, new KMSClient\(awsClientConfiguration\)\)\)/u);
   });
 });

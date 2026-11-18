@@ -15655,8 +15655,8 @@ function buildBrokerHandler(callbackSigningKey: string) {
     }),
     // L4-HW2: the lessons' learning calls (the reflector, the curator's judge, the outcome judge) go through the model gateway's learning route on the COMPANY's own provider account and learning cap
     // (core-host/hosted-learning.ts); asked only for a company the lessons switch names. No gateway settings or no task-token key: no port, so learning calls refuse and nothing is spent.
-    // DEC 254zzz58: on its OWN model (ROVARA_CORE_LEARNING_MODEL, else the first Claude model the gateway offers the company), never the agent model; no Claude model offered is said once in the log.
-    lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), { log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })) }),
+    // DEC 254zzz58: on its OWN model (ROVARA_CORE_LEARNING_MODEL, else the first Claude model the gateway offers the company), never the agent model; no Claude model offered is said once in the root's log.
+    lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration))),
     // L4-HW8: the lessons' Slack source reads a task's own thread through the signed `thread_messages` command of the deployment's Slack adapter (aws/hosted-slack-thread.ts); no adapter env, no source.
     ...((slack) => (slack === undefined ? {} : { lessonsSlack: slack }))(hostedLessonsSlack({ env: process.env, secretsManager, workspaces: slackCompany?.workspaces, legacyTeamId: process.env.SLACK_TEAM_ID || process.env.SLACK_ADAPTER_TEAM_ID })),
     // L4-HW3d: the project's stored CI mode (real_check) and the company's rules lock decide merge tracking's CI mode, as on the settings page; cached per company and project, unreadable refuses.

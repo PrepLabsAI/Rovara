@@ -255,6 +255,28 @@ describe("the learning model", () => {
     expect(firstOfferedLearningModel(offering(GLM, "claude-not-a-model-9"))).toBeUndefined();
   });
 
+  it("the company's own connected Anthropic models come first when the gateway says which they are", () => {
+    const list = { ...offering(GLM, "claude-haiku-4-5", MODEL), reviewerAccess: { companyId: ORG_A, companyLimitUsd: 10, models: [{ model: MODEL, provider: "anthropic" }, { model: "claude-haiku-4-5", provider: "amazon-bedrock" }] } };
+    expect(firstOfferedLearningModel(list)).toBe(MODEL);
+    expect(firstOfferedLearningModel({ ...list, reviewerAccess: { ...list.reviewerAccess, models: [] } })).toBe("claude-haiku-4-5");
+  });
+
+  it("calls that arrive together share one read; a clock that goes backwards reads again", async () => {
+    const r = recording();
+    let clock = NOW;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const read = reads(async () => { await gate; return offering(MODEL); });
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => clock, offered: read.offered })(ORG_A)!;
+    const both = Promise.all([port.model.quote!(call(ORG_A)), port.model.quote!(call(ORG_A))]);
+    release();
+    expect((await both).map((quoted) => quoted.ok)).toEqual([true, true]);
+    expect(read.asked).toEqual([ORG_A]);
+    clock -= 1;
+    await port.model.quote!(call(ORG_A));
+    expect(read.asked).toEqual([ORG_A, ORG_A]);
+  });
+
   it("agent model zai.glm-5, learning model set: the port exists and learns on the learning model; the offered list is never read", async () => {
     const r = recording();
     const read = reads(() => offering(GLM));
