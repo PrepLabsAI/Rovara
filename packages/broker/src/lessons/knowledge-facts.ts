@@ -11,7 +11,7 @@ const FACTS_MAX = 5;
 export function flakyFactsOf(names: readonly string[]): KnowledgeFact[] {
   return [...new Set(names.map((name) => cleanLessonText(name, NAME_MAX).replace(/\s+/gu, " ").trim()).filter((name) => name !== ""))].sort().slice(0, FACTS_MAX).map((name) => ({
     id: `flaky${createHash("sha256").update(name).digest("hex").slice(0, 10)}`,
-    statement: `Known flaky on the base: ${name}. Do not chase it unless your change touches what it tests.`,
+    statement: `Known flaky on the base, test name in quotes: "${name.replace(/["\\]/gu, "'")}". Do not chase it unless your change touches what it tests.`,
     paths: [],
   }));
 }

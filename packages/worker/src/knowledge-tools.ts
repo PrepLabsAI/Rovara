@@ -13,6 +13,8 @@ import { answerKnowledgeFor, cleanQueryPath, renderKnowledgeBlock, unitMatchesPa
 
 export const KNOWLEDGE_FOR_TOOL = "knowledge_for";
 export const KNOWLEDGE_REPORT_TOOL = "knowledge_report";
+/** A report is one answer at the end of a step; a few calls cover a correction. */
+const KNOWLEDGE_REPORT_MAX_CALLS = 3;
 const LIMIT_LINE = "Limit reached. Continue with what you have.";
 const FILE_CHANGE_TOOLS = new Set(["edit", "write"]);
 
@@ -39,6 +41,7 @@ export class KnowledgeStep {
   private calls = 0;
   private bytesGiven = 0;
   private reportCalled = false;
+  private reportCalls = 0;
   private used = new Set<string>();
   private wrong = new Set<string>();
 
@@ -114,6 +117,8 @@ export class KnowledgeStep {
 
   /** The agent's own report. Ids that were not given in this step are ignored; a second report replaces the first. */
   report(input: { used?: readonly string[] | undefined; wrong?: ReadonlyArray<{ id: string }> | undefined }): string {
+    if (this.reportCalls >= KNOWLEDGE_REPORT_MAX_CALLS) return "Report already recorded.";
+    this.reportCalls += 1;
     const known = (id: string): boolean => this.given.has(id);
     const used = (input.used ?? []).filter((id) => typeof id === "string").slice(0, 20);
     const wrong = (input.wrong ?? []).map((entry) => entry.id).filter((id) => typeof id === "string").slice(0, 5);

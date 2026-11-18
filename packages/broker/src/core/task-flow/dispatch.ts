@@ -419,6 +419,13 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     return slim.success ? slim.data : parsed.data;
   }
   // Lessons and the wiki never block a step: a learned or wiki context the worker's schema does not take is dropped, and the step is built without it.
+  // The knowledge context goes first on its own: the lessons and the wiki are not lost to it.
+  if (draft.payload["knowledgeContext"] !== undefined) {
+    const { knowledgeContext: _knowledgeOnly, ...withoutKnowledgeOnly } = draft.payload;
+    void _knowledgeOnly;
+    const retriedKnowledge = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutKnowledgeOnly });
+    if (retriedKnowledge.success) return retriedKnowledge.data;
+  }
   if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined) {
     const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, ...withoutMemory } = draft.payload;
     void _dropped; void _droppedWiki; void _droppedKnowledge;
