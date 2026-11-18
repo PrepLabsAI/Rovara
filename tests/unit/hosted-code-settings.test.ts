@@ -88,7 +88,7 @@ describe("the hosted broker's core root and how we work", () => {
       await world.store.put({ item: { ...projectRevisionKey(company, name, 1), entityType: "PROJECT", definition: JSON.parse(JSON.stringify({ ...PROJECT, name })) as JsonValue } });
       await world.store.put({ item: { ...orgProjectCatalogKey(company, name), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
     }
-    const t = tables([member("dev-a", A), member("dev-b", B), grant("dev-a", "payments"), grant("dev-b", "payments"), grant("dev-b", "b-only"),
+    const t = tables([member("dev-a", A), member("dev-b", B), grant("dev-a", "payments"), grant("dev-b", "payments"), grant("dev-b", "b-only"), grant("dev-a", "b-only"),
       saved(A, "payments", A_RULES), saved(B, "payments", { ...DEFAULT_CODE_SETTINGS, allowSelfApproval: false, mergeMethod: "squash", codeReviewers: ["only-b-reviewer"], revision: 1 })]);
     const root = createBrokerCoreRoot({
       env: { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" },
@@ -118,7 +118,7 @@ describe("the hosted broker's core root and how we work", () => {
     expect(b!.body).not.toContain("alice-reviewer");
   });
 
-  it("refuses a project of another company (and one the person has no grant for) in the same words as a missing one, reading no settings for it", async () => {
+  it("refuses a project that is only in another company's catalog (even with a grant row for it) in the same words as a missing one, reading no settings for it", async () => {
     const { get, t } = await setup({ codeSettings: true });
     const before = t.reads.length;
     const refused = await get("dev-a", "/v1/app/projects/b-only/how-we-work");
