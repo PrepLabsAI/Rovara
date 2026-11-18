@@ -123,6 +123,10 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },
+  // Lead 4 L4-LP3W: the approved lessons by code area, and "Where Rovara learns from" with its Pause (who may set the mode may pause).
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/areas", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/learning-sources", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/lessons/learning-sources/{source}", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/weekly-summary", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/weekly-summary", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/approve", requires: "full" },
@@ -234,6 +238,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // Lead 4 L4-LP3W: the team's approved lessons an agent is told in the page's code area (any live role on the project; nothing is written).
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/lessons", requires: "full" },
   // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
   // medium risk, a company owner or admin for high).
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },

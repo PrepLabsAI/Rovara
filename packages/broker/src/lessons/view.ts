@@ -1,7 +1,8 @@
 // What the Lessons tab, the Sources tab and the task page's lessons list read (design 1.2). Everything a viewer is told goes through `readVisible` (the frozen
 // snapshot AND the access records now), so a lesson from a source the viewer cannot see is counted for a person who decides and otherwise not mentioned. People are named the way the
 // rest of Rovara names them (`attributionNameOf`; an erased or unreadable person is "a former member"). Nothing here writes: the writes are in routes.ts, through the lesson library.
-import { agentXError, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
+import { agentXError, type LessonAreasAnswer, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
+import { buildAreaIndex, lessonsAnchoredIn, type AreaSelection } from "./area-index.js";
 import { attributionNameOf, type AttributionReader } from "./people.js";
 import type { AccessCheckPort } from "./access-port.js";
 import { approversRequired, resolveLearning, stricterMode, LearningModeSchema, type LearningSettingsReader } from "./policy.js";
@@ -313,4 +314,39 @@ export async function buildLoadedLessons(deps: LessonViewDeps, caller: LessonCal
   const viewer = await deps.directory.identity(key.workspaceId, caller.developerId);
   const rows = await lessonPanelRows(deps.store, key, taskId, viewer, deps.access, deps.log);
   return { lessons: rows.slice(0, 500).map((r) => ({ stage: r.stage, round: r.round, lessonId: r.lessonId, version: r.version, why: r.why, citation: r.citation, visible: r.visible, ...(r.title === undefined ? {} : { title: r.title }), ...(r.type === undefined ? {} : { type: r.type }), ...(r.helpful === undefined ? {} : { helpful: r.helpful }), ...(r.harmful === undefined ? {} : { harmful: r.harmful }), canMark: r.canMark, ...(r.trial === undefined ? {} : { trial: r.trial }) })) };
+}
+
+/** The most lessons the area index counts and the most one area lists (the Lessons tab's own list cap for the active lessons is `ACTIVE_MAX`). */
+export const AREA_INDEX_MAX = 400;
+export const AREA_LESSONS_MAX = 50;
+
+/**
+ * Lead 4 L4-LP3W: the approved lessons of one project by code area, for the Learned page. The tree counts the lessons this person may read now (`readVisibleRanked`: the frozen snapshot and the access records, the same
+ * check as the Lessons tab), anchored where their scope says (`area-index.ts`); an optional selection lists the lessons anchored at one node or below it, in the tab's order (`lessonValue`). Anyone on the project may read
+ * it, like the approved list. Counts what was read: `partial` says the project holds more than the limit or the time ran out. No model call.
+ */
+export async function buildLessonsByArea(deps: LessonViewDeps, caller: LessonCaller, project: string, input: { selection?: AreaSelection; deadlineMs?: number } = {}): Promise<LessonAreasAnswer> {
+  const key = keyOf(caller, project);
+  const [resolved, state] = await Promise.all([resolveLearning(deps.settings, key.workspaceId, key.project), deciderState(deps, key, caller)]);
+  const byValue = (a: Lesson, b: Lesson): number => lessonValue(b) - lessonValue(a) || b.createdAt - a.createdAt || a.id.localeCompare(b.id);
+  const all = (await deps.store.list(key, { statuses: ["active", "stale"] })).sort(byValue);
+  const ranked = all.slice(0, AREA_INDEX_MAX);
+  const deadlineAt = Date.now() + (input.deadlineMs ?? TAB_DEADLINE_MS);
+  const live = createLessonLiveReader({ port: deps.access.taskVisibility, key, where: "view", log: deps.log, timeoutMs: () => Math.max(1, Math.min(LESSON_LIVE_TIMEOUT_MS, deadlineAt - Date.now())) });
+  const read = await readVisibleRanked({ access: deps.access, key, viewer: state.viewer, where: "view", log: deps.log, live, ranked, pageSize: 50, enough: () => false, deadlineAt });
+  const index = buildAreaIndex(read.kept);
+  const partial = all.length > ranked.length || !read.complete || index.partial === true;
+  let selection: LessonAreasAnswer["selection"];
+  if (input.selection !== undefined) {
+    const sel = input.selection;
+    const matching = lessonsAnchoredIn(read.kept, sel);
+    const shown = matching.slice(0, AREA_LESSONS_MAX);
+    const person = await namePeople(deps, caller.orgId, caller.developerId, shown.flatMap(personIdsOf));
+    const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
+    selection = {
+      ...(sel.whole === true ? { whole: true as const } : { repo: sel.repo, folder: sel.folder }),
+      lessons: shown.map((lesson) => toView(lesson, ctx)), ...(matching.length > shown.length ? { moreLessons: matching.length - shown.length } : {}),
+    };
+  }
+  return { project, total: index.total, wholeProject: index.wholeProject, repos: index.repos, ...(partial ? { partial: true as const } : {}), ...(selection === undefined ? {} : { selection }) };
 }
