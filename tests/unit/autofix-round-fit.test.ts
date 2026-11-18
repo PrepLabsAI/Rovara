@@ -48,4 +48,21 @@ describe("fitRoundEstimateUsd (L4-TA6b)", () => {
       expect(refusal(spent, cap), `${String(spent)}/${String(cap)}`).toBe("inputs-missing");
     }
   });
+
+  it("never refuses a round that fits through float error, and never misses exactly $0.25 left (reviewer's brute-force cases and a sweep)", () => {
+    const cases: Array<[number, number]> = [[0.000008, 0.29], [0.04, 0.29], [0.1, 0.35], [0.16, 0.41]];
+    for (const [spent, cap] of cases) {
+      expect(refusal(spent, cap), `${String(spent)}/${String(cap)}`).toBeUndefined();
+      expect(spent + fitRoundEstimateUsd(3, spent, cap)).toBeLessThanOrEqual(cap);
+    }
+    // a sweep over caps in cents and spends in whole micros, with at least $0.25 left: always tried; with less: always asked
+    for (let capCents = 25; capCents <= 400; capCents += 7) {
+      const cap = capCents / 100;
+      for (let spentMicros = 0; spentMicros <= capCents * 10_000; spentMicros += 13_337) {
+        const spent = spentMicros / 1e6;
+        const leftMicros = capCents * 10_000 - spentMicros;
+        expect(refusal(spent, cap) === undefined, `${String(spent)}/${String(cap)}`).toBe(leftMicros >= 250_000);
+      }
+    }
+  });
 });

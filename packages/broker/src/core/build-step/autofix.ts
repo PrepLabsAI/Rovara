@@ -117,9 +117,16 @@ async function autofixCapUsd(deps: TaskFlowDeps, task: TaskRecord, configured: n
  */
 export function fitRoundEstimateUsd(estimateUsd: number, spentUsd: number, capUsd: number): number {
   if (![estimateUsd, spentUsd, capUsd].every((value) => Number.isFinite(value) && value >= 0)) return estimateUsd;
-  const left = capUsd - spentUsd;
-  if (left < AUTOFIX_MIN_ROUND_USD) return Math.max(estimateUsd, AUTOFIX_MIN_ROUND_USD);
-  return left >= estimateUsd ? estimateUsd : Math.floor(left * 1_000_000) / 1_000_000;
+  // Whole micro-dollars, so the floor and the fit are exact: the cap is rounded to the nearest micro, the spend (a ledger's micros / 1e6, or a laptop float) is cleaned of float noise at the nano and rounded UP to a micro.
+  const capMicros = Math.round(capUsd * 1e6);
+  const spentMicros = Math.ceil(Math.round(spentUsd * 1e9) / 1e3);
+  const leftMicros = capMicros - spentMicros;
+  const floorMicros = Math.round(AUTOFIX_MIN_ROUND_USD * 1e6);
+  if (leftMicros < floorMicros) return Math.max(estimateUsd, AUTOFIX_MIN_ROUND_USD);
+  let fittedMicros = Math.min(Math.floor(estimateUsd * 1e6), leftMicros);
+  // The policy and both guards add the two as floats: step down until that sum reads at most the cap (at most a micro or two).
+  while (fittedMicros > 0 && spentUsd + fittedMicros / 1e6 > capUsd) fittedMicros -= 1;
+  return fittedMicros / 1e6;
 }
 
 /** Looks at one blocked VERIFY or REVIEW once, and acts or asks. Never throws for a task that moved on. */
