@@ -13,15 +13,15 @@ import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
-import { EVAL_QUESTION_LIMIT, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { EVAL_QUESTION_LIMIT, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import { createModelBridge } from "../model-bridge.js";
 import { createModelBridgeLedger } from "../model-bridge-ledger.js";
 import { MODEL_HELPER_DEFAULT_PORT, MODEL_HELPER_LEDGER_PATH, MODEL_HELPER_REPLIES_PATH, MODEL_HELPER_ROWS_PATH, MODEL_HELPER_RUN_DIR, modelHelperArgs } from "../model-helper-args.js";
-import { modelHostAddHostArgs, type ModelHostBlock } from "../model-helper-block.js";
+import { isModelHelperAddress, modelHostAddHostArgs, type ModelHostBlock } from "../model-helper-block.js";
 import { modelHelperOffer, startModelHelper, type StartedModelHelper } from "../model-helper-network.js";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "../model-reply-bundle.js";
-import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL } from "../model-sandbox-env.js";
+import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT } from "../model-sandbox-env.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../swebench/containers.js";
 import { SANDBOX_INIT } from "../task-sandbox.js";
@@ -136,8 +136,8 @@ export function createBridgedEvalExec(options: BridgedEvalExecOptions): EvalSand
           egress: runEgress(request.egress, options, state),
           egressScope: request.scope,
           roundKind: "check_unsealed",
-          // The product route serves one family; the frame parser has already refused a row that is not a plain catalog word.
-          familyOf: () => "gemini",
+          // The product route serves two shapes: the Gemini API and, for the `vertex` row, Vertex AI (same error bodies). The frame parser has already refused a row that is not a plain catalog word; the worker's own pin (`modelAllowed`) decides which row may call.
+          familyOf: (row) => (row === EVAL_VERTEX_ROW ? "vertex" : "gemini"),
           ledger: createModelBridgeLedger({ now }),
           now,
           limits: { calls: EVAL_BRIDGE_CALLS_MAX, concurrent: EVAL_BRIDGE_CONCURRENT_MAX, connections: EVAL_BRIDGE_CONNECTIONS_MAX },
@@ -198,6 +198,9 @@ export const FRESH_EVAL_IDS_VARIABLE = "ROVARA_EVAL_IDS";
 /** The one family the product route serves: the Gemini client's base URL and key variables. */
 const GEMINI_BASE_URL_VARIABLE = "GOOGLE_GEMINI_BASE_URL";
 const GEMINI_KEY_VARIABLES = ["GEMINI_API_KEY", "GOOGLE_API_KEY"] as const;
+/** The `vertex` row's client variables (the catalog row's verified set for google-genai in Vertex mode, without its key). Python needs both metadata variables, JS the host only. */
+const VERTEX_BASE_URL_VARIABLE = "GOOGLE_VERTEX_BASE_URL";
+const VERTEX_METADATA_VARIABLES = ["GCE_METADATA_HOST", "GCE_METADATA_IP"] as const;
 const FRESH_EVAL_USER = "1000:1000";
 const NO_UPSTREAM_DNS = "127.0.0.1";
 const FRESH_EVAL_TMPFS = "/tmp:rw,nosuid,nodev,size=512m,uid=1000,gid=1000";
@@ -420,11 +423,21 @@ function realOrSelf(path: string): string {
   try { return realpathSync(path); } catch { return path; }
 }
 
-/** The env file's text: the model client's base URL (with the run's token) and dummy keys, the side, the runs and the ids. One `NAME=value` a line; every value is a plain word (no line break can add a variable). */
-export function freshEvalEnvironment(input: { rowId: string; token: string; side: "old" | "new"; runs: 1 | 2 | 3; ids: readonly string[] }): string {
+/** The env file's text: the model client's base URL (with the run's token) and dummy keys, the side, the runs and the ids. One `NAME=value` a line; every value is a plain word (no line break can add a variable).
+ * The `vertex` row (L4-EVV) gets the Vertex client's variables instead of the Gemini ones, the same ones the catalog row lists as verified for google-genai in Vertex mode: its base URL, Rovara's placeholder project and location (the gateway maps
+ * them to the connected ones), and the metadata-server pair that lets Application Default Credentials find a dummy token at the helper (`helperIp:8081`). No API key of any kind: a key next to a project makes the client use the express
+ * form, which has no project in its path and which the gateway does not serve. A `gemini` row's lines are exactly as before. */
+export function freshEvalEnvironment(input: { rowId: string; token: string; side: "old" | "new"; runs: 1 | 2 | 3; ids: readonly string[]; helperIp?: string }): string {
+  const base = `${MODEL_HELPER_BASE_URL}/p/${input.rowId}/x/${input.token}`;
+  const model: [string, string][] = input.rowId === EVAL_VERTEX_ROW
+    ? [
+      [VERTEX_BASE_URL_VARIABLE, base],
+      ["GOOGLE_CLOUD_PROJECT", EVAL_VERTEX_PLACEHOLDER.projectId], ["GOOGLE_CLOUD_LOCATION", EVAL_VERTEX_PLACEHOLDER.location],
+      ...VERTEX_METADATA_VARIABLES.map((name): [string, string] => [name, `${vertexMetadataAddress(input.helperIp)}`]),
+    ]
+    : [[GEMINI_BASE_URL_VARIABLE, base], ...GEMINI_KEY_VARIABLES.map((name): [string, string] => [name, MODEL_DUMMY_KEY])];
   const lines: [string, string][] = [
-    [GEMINI_BASE_URL_VARIABLE, `${MODEL_HELPER_BASE_URL}/p/${input.rowId}/x/${input.token}`],
-    ...GEMINI_KEY_VARIABLES.map((name): [string, string] => [name, MODEL_DUMMY_KEY]),
+    ...model,
     ["HOME", "/tmp"],
     [FRESH_EVAL_SIDE_VARIABLE, input.side],
     [FRESH_EVAL_RUNS_VARIABLE, String(input.runs)],
@@ -432,6 +445,11 @@ export function freshEvalEnvironment(input: { rowId: string; token: string; side
   ];
   if (lines.some(([, value]) => !/^[\x21-\x7e]{1,40000}$/u.test(value))) throw new Error("the fresh eval environment is not plain");
   return `${lines.map(([name, value]) => `${name}=${value}`).join("\n")}\n`;
+}
+/** The helper's metadata address for a Vertex row: its own address (.9 of the round network) and the metadata port; any other address is refused. */
+function vertexMetadataAddress(helperIp: string | undefined): string {
+  if (typeof helperIp !== "string" || !isModelHelperAddress(helperIp)) throw new Error("the fresh eval environment needs the helper's address");
+  return `${helperIp}:${String(MODEL_METADATA_PORT)}`;
 }
 
 /** Whether this worker offers the model helper's walls a fresh eval sandbox needs (`modelHelperOffer`), for a host that builds the sandbox later (DEC 253n(2)). Never throws. */
@@ -456,6 +474,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
       const now = config.now ?? Date.now;
       const round = ++rounds;
       const bridgeDir = dirname(input.model.socketPath);
+      const vertexRow = config.rowId === EVAL_VERTEX_ROW;
       const commit = input.side === "old" ? config.repository.baseCommit : config.repository.candidateCommit;
       await mkdir(config.scratchDir, { recursive: true, mode: 0o700 });
       const runDir = await mkdtemp(join(config.scratchDir, "run-"));
@@ -488,14 +507,14 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // 2. The helper's run files beside the socket (its one mount): the row it serves and an empty reply bundle (mode real answers from the bridge only).
         const bundle = buildModelReplyBundle([]);
-        await writeFile(join(bridgeDir, "rows.json"), JSON.stringify([{ id: config.rowId, family: "gemini" }]), { mode: 0o644 });
+        await writeFile(join(bridgeDir, "rows.json"), JSON.stringify([{ id: config.rowId, family: vertexRow ? "vertex" : "gemini" }]), { mode: 0o644 });
         await writeFile(join(bridgeDir, "replies.json"), modelReplyBundleBytes(bundle), { mode: 0o644 });
         // 3. The round network and the helper on it (.9), serving only the sandbox's address (.4), real mode over the bridge socket.
         helper = await startModelHelper(docker, {
           kind: "round", id: `${config.taskId}#${randomBytes(8).toString("hex")}`, round, workspace: config.workspace, roundBudgetMs: config.roundBudgetMs, image: config.image, runDir: bridgeDir,
           helperArgs: ({ listen, caller }) => modelHelperArgs({
-            listen, port: MODEL_HELPER_DEFAULT_PORT, metaPort: undefined, caller, mode: "real", rows: MODEL_HELPER_ROWS_PATH, replies: MODEL_HELPER_REPLIES_PATH, digest: modelReplyBundleDigest(bundle),
-            ledger: MODEL_HELPER_LEDGER_PATH, blockState: "by_name", projectId: undefined, recordEscapes: false, bridgeSocket: `${MODEL_HELPER_RUN_DIR}/${EVAL_BRIDGE_SOCKET_NAME}`,
+            listen, port: MODEL_HELPER_DEFAULT_PORT, metaPort: vertexRow ? MODEL_METADATA_PORT : undefined, caller, mode: "real", rows: MODEL_HELPER_ROWS_PATH, replies: MODEL_HELPER_REPLIES_PATH, digest: modelReplyBundleDigest(bundle),
+            ledger: MODEL_HELPER_LEDGER_PATH, blockState: "by_name", projectId: vertexRow ? EVAL_VERTEX_PLACEHOLDER.projectId : undefined, recordEscapes: false, bridgeSocket: `${MODEL_HELPER_RUN_DIR}/${EVAL_BRIDGE_SOCKET_NAME}`,
           }),
           ...(config.environment === undefined ? {} : { environment: config.environment }), ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }),
         });
@@ -503,7 +522,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         const block = helper.sandboxBlock({});
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // 5. The sandbox: the env file (0600, read by the docker CLI only), then the container on the round network only, then the daemon's own view of both containers' mounts.
-        await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: input.model.token, side: input.side, runs: input.runs, ids: input.ids }), { mode: 0o600 });
+        await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: input.model.token, side: input.side, runs: input.runs, ids: input.ids, helperIp: helper.helperIp }), { mode: 0o600 });
         const name = `${helper.network.name}-eval`;
         const args = freshEvalSandboxRunArgs({ net: helper.network, image: config.image, name, checkout, envFile, block: block.block, command: config.command }, { bridgeDir });
         const notBeforeMs = now();

@@ -7,12 +7,13 @@
 //   - every question file must sit inside an eval suite F4 found (`discoverEvals`: an `evals`/`evaluations` folder, a known eval config or a question report) in the same repository, so a draft
 //     cannot point the eval at arbitrary files;
 //   - every question file and the judge's scoring file must be TRACKED at the run's resolved commit (the broker reads them there on confirm);
-//   - what the draft does not decide is the worker's own: the catalog row and route (the eval product route's), the image (the worker's own pinned image, `AGENTX_WORKER_IMAGE`; a tag gives no
-//     report) and the command fingerprint (computed here); judge pins are never sent (the broker computes them, DEC 253q);
+//   - what the draft does not decide is the worker's own: the route (the eval product route's), the image (the worker's own pinned image, `AGENTX_WORKER_IMAGE`; a tag gives no
+//     report) and the command fingerprint (computed here); judge pins are never sent (the broker computes them, DEC 253q). The catalog row is `gemini` unless the draft names `provider: "vertex"` (L4-EVV);
+//     a person confirms it, and it is part of the spend approval;
 //   - suites are ordered by selection and questions by id, so the same draft and repository give the same report bytes.
 // Nothing here runs a command, reads a file's content or logs repository text; refusals are fixed words.
 import {
-  EVAL_DISCOVERY_CALLS_PER_QUESTION_MAX, EVAL_DISCOVERY_COST_PER_QUESTION_MAX_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_DISCOVERY_SUITES_MAX, EVAL_PINNED_IMAGE, EVAL_PRODUCT_ROUTE, EVAL_PRODUCT_ROW, EVAL_QUESTION_LIMIT,
+  EVAL_DISCOVERY_CALLS_PER_QUESTION_MAX, EVAL_DISCOVERY_COST_PER_QUESTION_MAX_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_DISCOVERY_SUITES_MAX, EVAL_DRAFT_PROVIDERS, EVAL_PINNED_IMAGE, EVAL_PRODUCT_ROUTE, EVAL_PRODUCT_ROW, EVAL_QUESTION_LIMIT,
   EvalCommandSchema, EvalDiscoveryQuestionSchema, EvalJudgeSchema, EvalReportPathSchema, SetupEvalDiscoveryReportSchema, canonicalJson, evalCommandFingerprintOf, type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -26,6 +27,8 @@ const DraftSuiteSchema = z.object({
   questions: z.array(EvalDiscoveryQuestionSchema).min(1).max(EVAL_QUESTION_LIMIT),
   command: EvalCommandSchema,
   report: EvalReportPathSchema,
+  /** Which API shape the project's client speaks: the Gemini API (absent, as before) or Vertex AI. A person confirms it; it is part of the approval. */
+  provider: z.enum(EVAL_DRAFT_PROVIDERS).optional(),
   model: name,
   modelVersion: name,
   judge: EvalJudgeSchema,
@@ -98,7 +101,7 @@ export async function produceEvalDiscoveryReport(input: EvalDiscoveryProducerInp
       selection: draft.selection, ...(draft.repository === undefined ? {} : { repository: draft.repository }),
       questions: [...draft.questions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
       command: draft.command, report: draft.report, commandFingerprint, judge: draft.judge, subsetSupported: draft.subsetSupported,
-      catalogRowId: EVAL_PRODUCT_ROW, model: draft.model, modelVersion: draft.modelVersion, image, route: EVAL_PRODUCT_ROUTE,
+      catalogRowId: draft.provider ?? EVAL_PRODUCT_ROW, model: draft.model, modelVersion: draft.modelVersion, image, route: EVAL_PRODUCT_ROUTE,
       maxCallsPerQuestion: draft.maxCallsPerQuestion, maxCostMicrosPerQuestion: draft.maxCostMicrosPerQuestion,
     });
   }

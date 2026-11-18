@@ -7,7 +7,9 @@
                                                with every answer's pass or fail. Always exits 0 unless a model call failed.
 
 Which model client is used (first match):
-  GOOGLE_GEMINI_BASE_URL   the Gemini API shape: what Rovara's eval sandbox provides (a base URL and a placeholder key)
+  GOOGLE_GEMINI_BASE_URL   the Gemini API shape: what Rovara's eval sandbox provides for a Gemini API project (a base URL and a placeholder key)
+  GOOGLE_VERTEX_BASE_URL   the Vertex AI shape, as google-genai in Vertex mode reads it: what Rovara's eval sandbox provides for a Vertex project
+                           (with GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION and a metadata server in GCE_METADATA_HOST that hands out the token)
   VERTEX_API_ENDPOINT      Vertex AI REST shape against another endpoint (a local fake, a proxy)
   DESKBOT_FAKE_VERTEX=1    start the in-repo fake Vertex on a local port and use the Vertex shape against it
   otherwise                real Vertex AI (needs GOOGLE_CLOUD_PROJECT, GOOGLE_CLOUD_LOCATION and an access token)
@@ -24,7 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from deskbot.agent import DeskAgent  # noqa: E402
-from deskbot.vertex_client import GeminiApiClient, ModelError, VertexClient  # noqa: E402
+from deskbot.vertex_client import GeminiApiClient, ModelError, VertexClient, metadata_token_provider  # noqa: E402
 from evals.support.scoring import judge  # noqa: E402
 
 CASES_DIR = ROOT / "evals" / "support" / "cases"
@@ -41,6 +43,9 @@ def make_client(env: dict):
         return GeminiApiClient(env["GOOGLE_GEMINI_BASE_URL"], MODEL, env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY", "")), None
     project = env.get("GOOGLE_CLOUD_PROJECT", "sample-project-1")
     location = env.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+    if env.get("GOOGLE_VERTEX_BASE_URL"):
+        # Vertex mode with project and location: the version google-genai sends (v1beta1), and the token from the metadata server (Application Default Credentials).
+        return VertexClient(project, location, MODEL, env["GOOGLE_VERTEX_BASE_URL"], token_provider=metadata_token_provider(env.get("GCE_METADATA_HOST", "")), api_version="v1beta1"), None
     if env.get("VERTEX_API_ENDPOINT"):
         return VertexClient(project, location, MODEL, env["VERTEX_API_ENDPOINT"], token_provider=lambda: "placeholder-token"), None
     if env.get("DESKBOT_FAKE_VERTEX") == "1":

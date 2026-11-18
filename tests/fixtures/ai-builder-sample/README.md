@@ -33,8 +33,11 @@ Rovara runs `python3 evals/run.py --out rovara-measures.json` in a fresh check s
 for the candidate. It sets `ROVARA_EVAL_SIDE` (old or new), `ROVARA_EVAL_RUNS` and `ROVARA_EVAL_IDS` (case ids, comma
 separated), and for the model it sets `GOOGLE_GEMINI_BASE_URL` to its own metered route plus a placeholder key. The command
 writes `rovara-measures.json` with every answer's pass or fail (`schemaVersion`, `measures`, `questions[].samples[]`).
-A client built only for Vertex AI never sees that route, so `evals/run.py` picks the Gemini API shape when
-`GOOGLE_GEMINI_BASE_URL` is set: same model name, same prompts, same body.
+A client built only for Vertex AI never sees that route, so for a Gemini API project `evals/run.py` picks the Gemini API shape
+when `GOOGLE_GEMINI_BASE_URL` is set: same model name, same prompts, same body. For a project whose eval row is `vertex`, Rovara
+sets `GOOGLE_VERTEX_BASE_URL` (what google-genai reads in Vertex mode), a placeholder `GOOGLE_CLOUD_PROJECT` and
+`GOOGLE_CLOUD_LOCATION`, and `GCE_METADATA_HOST` and `GCE_METADATA_IP` (a metadata stand-in that hands out a dummy token), and
+the same Vertex-shaped client calls Rovara's route with no change to its code.
 
 ## Making a private copy for a rehearsal
 

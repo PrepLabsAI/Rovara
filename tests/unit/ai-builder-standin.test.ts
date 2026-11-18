@@ -1,7 +1,7 @@
 // L4-VX: Rovara's real check and eval path over a stand-in for an AI builder's project (tests/fixtures/ai-builder-sample: a Gemini-on-Vertex agent with unit tests, a scored eval set and a fake Vertex).
 // Real here: the git repository, the project's own eval command (a child process), the plan, the metered stage, the egress route check, the baseline measurement, the question-level comparison, the
 // changed-prompt classifier, the broker's eval-round reader, the evidence pack and the pull request description. Stand-ins: the model (a local stub), the money (a scripted meter), the sandbox (a checkout).
-// Tests named "KNOWN GAP" pin what Rovara does TODAY where a customer would expect more; each is listed in briefs/lead4/L4-VX-SCOPE.md. When a gap is closed, its test is changed on purpose.
+// Tests named "KNOWN GAP" pin what Rovara does TODAY (G1, the Vertex-shaped client, was closed by L4-EVV: see the Vertex describe below) where a customer would expect more; each is listed in briefs/lead4/L4-VX-SCOPE.md. When a gap is closed, its test is changed on purpose.
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -252,22 +252,109 @@ describe("the check: a change that regresses one eval case", () => {
   });
 });
 
-describe("what happens when the eval cannot run (never a pass, never a fake Worse)", () => {
-  it("KNOWN GAP (G1): a client built for Vertex AI only is refused by the eval route, so the eval is Not run", async () => {
-    const w = await world({ patch: GREEN, transport: "vertex" });
-    const artifact = await check(w);
-    const result = evalResultFromArtifact(artifact);
-    // The eval's product row is the Gemini API ("gemini"); Rovara's sandbox sets only GOOGLE_GEMINI_BASE_URL. A Vertex-shaped path under that row fails the real route check.
-    expect(w.frames[0]).toMatchObject({ row: "gemini", routed: false, refusal: "not_allowed" });
-    expect(w.frames[0]!.path).toMatch(/^\/v1\/projects\/[a-z0-9-]+\/locations\/[a-z0-9-]+\/publishers\/google\/models\/[\w.-]+:generateContent$/u);
-    expect(result).toMatchObject({ outcome: "not_run", label: "Not run" });
-    expect(artifact.notRunReason).toBe("no_base_score");
-    const { body } = await pullRequest(w, artifact);
+describe("a project whose client speaks Vertex AI (L4-EVV; closes G1)", () => {
+  // The confirmed plan names the `vertex` row. The sandbox gets the variables google-genai in Vertex mode reads (the production `freshEvalEnvironment`), the stage's access is the real gateway adapter over an in-process Cloud gateway, and the
+  // project's own Vertex-shaped client (project and location in the path, a token from the metadata server) reaches it with no change to its code.
+  let w: StandInWorld; let artifact: EvalRoundArtifact;
+  beforeAll(async () => { w = await world({ patch: GREEN, transport: "vertex" }); artifact = await check(w); }, TIMEOUT);
+
+  it("the Vertex-shaped client now gets through: No regression measured, with the same calls and counts as the Gemini shape", () => {
+    expect(evalResultFromArtifact(artifact)).toMatchObject({ outcome: "ran", label: "No regression measured (eval)", casesRun: 10, casesTotal: 10, fixRequested: false });
+    expect(w.sides.map(s => `${s.side}x${s.runs}`)).toEqual(["oldx1", "oldx1", "oldx1", "newx1"]);
+    expect(w.sides.every(s => s.exitCode === 0)).toBe(true);
+    expect(artifact.options?.changedPromptCalls).toBe(10);
+    expect(artifact.usage).toMatchObject({ calls: 40, costMicros: 800 });
+    expect(artifact.notRunReason).toBeUndefined();
+  });
+  it("every call took the Vertex product route in the shape google-genai sends, with Rovara's placeholder project and location, and passed the real route check", () => {
+    expect(w.frames).toHaveLength(40);
+    for (const f of w.frames) {
+      expect(f).toMatchObject({ row: "vertex", routed: true });
+      expect(f.path).toBe("/v1beta1/projects/rovara-eval-project/locations/rovara-eval1/publishers/google/models/gemini-2.5-flash:generateContent");
+    }
+  });
+  it("holds each stage whole (the baseline's, then the comparison's), releases each once at its counted spend, and the client took its token from the metadata stand-in, never from a Google host", () => {
+    expect(w.gateway!.holds).toHaveLength(2);
+    expect(w.gateway!.releases).toHaveLength(2);
+    expect(w.gateway!.releases.every(r => r["unknown"] === false)).toBe(true);
+    expect(w.gateway!.releases.reduce((n, r) => n + (r["calls"] as number), 0)).toBe(40);
+    expect(w.gateway!.releases.reduce((n, r) => n + (r["costMicros"] as number), 0)).toBe(800);
+    expect(w.metadataTokenRequests()).toBeGreaterThan(0);
+  });
+  it("the plan, the judge pin and the approval's inputs name the vertex row, so an approval for the Gemini row does not carry over", async () => {
+    const gemini = await world({ patch: GREEN });
+    expect(w.plan.key.catalogRowId).toBe("vertex");
+    expect(w.plan.inputs.catalogRowId).toBe("vertex");
+    expect(w.plan.judgePin).not.toBe(gemini.plan.judgePin);
+    expect(w.grant.inputsDigest).not.toBe(gemini.grant.inputsDigest);
+  });
+  it("reaches the pull request description like the Gemini shape", async () => {
+    const { body, block } = await pullRequest(w, artifact);
+    expect(heading(block)).toMatch(/· nothing extra to check$/u);
+    expect(body).toContain("Eval: No regression measured (eval)");
+    expect(body).toContain("Eval counts: 10 questions; 0 broke");
+    expect(body).not.toContain("Eval: Not run");
+  });
+  it("a regressing change reads Worse on eval through the Vertex shape too, and the privacy case is the one that broke", async () => {
+    const bad = await world({ patch: REGRESSION, transport: "vertex" });
+    const regressed = await check(bad);
+    const result = evalResultFromArtifact(regressed);
+    expect(result).toMatchObject({ outcome: "ran", label: "Worse on eval", fixRequested: true });
+    expect(result.questions.map(q => `${q.id}:${q.change}`)).toEqual(["privacy-email:broke"]);
+    expect(regressed.usage).toMatchObject({ calls: 46, costMicros: 920 });
+    expect(bad.frames.every(f => f.routed && f.row === "vertex")).toBe(true);
+    const { body } = await pullRequest(bad, regressed);
+    expect(body).toContain("**The AI evaluation got worse.**");
+    expect(body).toContain("Worse on eval: 1 question broke");
+  }, TIMEOUT);
+  it("code that hardcodes another project is refused by the gateway before any send: Not run, no cost, never a pass", async () => {
+    const other = await world({ patch: GREEN, transport: "vertex", clientProject: "other-project-99" });
+    const refused = await check(other);
+    expect(evalResultFromArtifact(refused)).toMatchObject({ outcome: "not_run", label: "Not run" });
+    expect(other.frames.length).toBeGreaterThan(0);
+    expect(other.frames.every(f => !f.routed && f.refusal === "not_allowed")).toBe(true);
+    expect(other.cache.records.size).toBe(0);
+    expect(other.gateway!.releases.every(r => r["costMicros"] === 0)).toBe(true);
+    const { body } = await pullRequest(other, refused);
     expect(body).toContain("Eval: Not run");
-    expect(body).not.toContain("Worse on eval");
     expect(body).not.toContain("No regression measured");
   }, TIMEOUT);
+  it("a project with no Vertex connection in Cloud gets no hold: no model call, Not run", async () => {
+    const none = await world({ patch: GREEN, transport: "vertex", vertexConnected: false });
+    const outcome = await check(none);
+    expect(evalResultFromArtifact(outcome)).toMatchObject({ outcome: "not_run" });
+    expect(none.frames).toHaveLength(0);
+    expect(none.sides).toHaveLength(0);
+  }, TIMEOUT);
+  it("a rate limit from Vertex is Not run with its own words, nothing is measured as a pass", async () => {
+    const limited = await world({ patch: GREEN, transport: "vertex", providerClass: "rate_limit" });
+    expect(evalResultFromArtifact(await check(limited))).toMatchObject({ outcome: "not_run", label: "Not run" });
+    expect(limited.cache.records.size).toBe(0);
+  }, TIMEOUT);
+  it("the setup draft names the row: provider vertex is confirmed as the vertex row, absent stays gemini, anything else is refused whole", async () => {
+    const base = await world();
+    const files = (await readdir(`${base.baseDir}/${CASES_DIR}`)).filter(n => n.endsWith(".json")).sort();
+    const questions = await Promise.all(files.map(async file => {
+      const parsed = JSON.parse(await readFile(`${base.baseDir}/${CASES_DIR}/${file}`, "utf8")) as { id: string; category: "ordinary" | "safety" | "refusal" };
+      return { id: parsed.id, category: parsed.category, path: `${CASES_DIR}/${file}` };
+    }));
+    const tracked = new Map([["app", new Set([...questions.map(q => q.path), SCORING_PATH])]]);
+    const suite = {
+      selection: "support desk", questions, command: { ...EVAL_COMMAND, args: [...EVAL_COMMAND.args] }, report: EVAL_REPORT, model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001",
+      judge: { kind: "rule" as const, scoringPath: SCORING_PATH }, subsetSupported: true, maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 100,
+    };
+    const image = `registry.example/worker@sha256:${"2".repeat(64)}`;
+    const produce = (extra: Record<string, unknown>) => produceEvalDiscoveryReport({ draft: { suites: [{ ...suite, ...extra }] }, repositories: [{ name: "app", directory: base.baseDir }], tracked, image });
+    const vertex = await produce({ provider: "vertex" });
+    expect("report" in vertex && vertex.report.suites[0]!.catalogRowId).toBe("vertex");
+    const gemini = await produce({ provider: "gemini" });
+    expect("report" in gemini && gemini.report.suites[0]!.catalogRowId).toBe("gemini");
+    expect(await produce({ provider: "bedrock" })).toEqual({ refused: "unreadable" });
+    expect(await produce({ provider: "" })).toEqual({ refused: "unreadable" });
+  }, TIMEOUT);
+});
 
+describe("what happens when the eval cannot run (never a pass, never a fake Worse)", () => {
   it("a rate limit from the provider is Not run with its own words, and nothing is measured as a pass", async () => {
     const w = await world({ patch: GREEN, providerClass: "rate_limit" });
     const artifact = await check(w);
