@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  DEFAULT_AGENT_ALLOW_DOMAINS, EVAL_ROUND_ARTIFACT, EvalRoundArtifactSchema, builtinModelCatalog, findRedirectEscapes, modelHostBlockList, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, evalResultFromArtifact, readEvidencePack, rovaraCheckOf,
+  DEFAULT_AGENT_ALLOW_DOMAINS, GOOGLE_VERTEX_AI_ALLOW_GROUP, EVAL_ROUND_ARTIFACT, EvalRoundArtifactSchema, builtinModelCatalog, findRedirectEscapes, modelHostBlockList, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, evalResultFromArtifact, readEvidencePack, rovaraCheckOf,
   type EvalRoundArtifact, type EvidencePack, type EvidencePackRead, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { laptopSandboxDenyList } from "../../packages/broker/src/local/isolation/sandbox-model-deny.js";
@@ -296,20 +296,21 @@ describe("what happens when the eval cannot run (never a pass, never a fake Wors
   });
 });
 
-describe("a real Google host called without an allow-list entry (what Influur's own tests would meet)", () => {
+describe("Google hosts and the default allow list (batch 16: #984 adds the narrow Google Vertex AI group, owner decision 2026-11-17)", () => {
   const vertexHost = "us-central1-aiplatform.googleapis.com";
-  const tokenHosts = ["oauth2.googleapis.com", "www.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
-  it("the default DNS allow list has no Google host, so every name below is NXDOMAIN in a hosted sandbox until the project adds it", () => {
-    expect(DEFAULT_AGENT_ALLOW_DOMAINS.filter(host => host.includes("google"))).toEqual([]);
-    for (const host of [vertexHost, "aiplatform.googleapis.com", ...tokenHosts]) expect(hostAlreadyAllowed(host, [])).toBe(false);
+  const groupHosts = GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.map((entry) => entry.host);
+  it("the default DNS allow list holds exactly the Google Vertex AI group's Google hosts; *.googleapis.com, storage and www stay absent", () => {
+    expect(DEFAULT_AGENT_ALLOW_DOMAINS.filter(host => host.includes("google"))).toEqual(groupHosts);
+    for (const host of [vertexHost, "aiplatform.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"]) expect(hostAlreadyAllowed(host, []), host).toBe(true);
+    for (const host of ["*.googleapis.com", "googleapis.com", "storage.googleapis.com", "www.googleapis.com", "accounts.google.com"]) expect(DEFAULT_AGENT_ALLOW_DOMAINS, host).not.toContain(host);
+    for (const host of ["storage.googleapis.com", "www.googleapis.com", "me-central7-aiplatform.googleapis.com", "evil.googleapis.com"]) expect(hostAlreadyAllowed(host, []), host).toBe(false);
   });
-  it("a project adds a host by exact name through a setup host ask (an owner or admin approves it); only then is it covered", () => {
-    const project = [vertexHost, "oauth2.googleapis.com"];
-    expect(hostAlreadyAllowed(vertexHost, project)).toBe(true);
-    expect(hostAlreadyAllowed("oauth2.googleapis.com", project)).toBe(true);
-    // A wildcard is not implied: another region and another Google host stay blocked.
-    expect(hostAlreadyAllowed("europe-west1-aiplatform.googleapis.com", project)).toBe(false);
-    expect(hostAlreadyAllowed("www.googleapis.com", project)).toBe(false);
+  it("a Google host outside the group is covered only when a project adds it by exact name (an owner or admin approves it)", () => {
+    const project = ["www.googleapis.com"];
+    expect(hostAlreadyAllowed("www.googleapis.com", project)).toBe(true);
+    // A wildcard is not implied: an unlisted region and another Google host stay blocked.
+    expect(hostAlreadyAllowed("me-central7-aiplatform.googleapis.com", project)).toBe(false);
+    expect(hostAlreadyAllowed("storage.googleapis.com", project)).toBe(false);
     // A hosted install can be asked for these names (no card is refused); a laptop's deny list refuses the model host with fixed words and leaves the token hosts askable.
     expect(refuseSetupHost(vertexHost)).toBeUndefined();
     expect(refuseSetupHost(vertexHost, undefined, laptopSandboxDenyList())).toBe("model_host");
