@@ -74,6 +74,17 @@ function decisionFields(view: PlanPageView): string {
     + `<br><span class="muted">${untrusted(option.consequence)}</span></label>`).join("")}</fieldset>`).join("");
 }
 
+/** Lead 4 PCF: the feature line of a waiting coding plan, and the owner's "Change" and "No feature". A name is a person's word: drawn as untrusted. */
+function featureHtml(context: PageContext, view: PlanPageView): string {
+  const feature = view.feature;
+  if (feature === undefined) return "";
+  const form = (subject: string, fields: string, button: string) => `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/feature">${hidden("revision", view.revision)}${hidden("ft", context.formToken({ action: "plan.feature", taskId: view.taskId, revision: view.revision, subject }))}${fields}${button}</form>`;
+  const change = !feature.canChange ? "" : (feature.choices.length === 0 ? "<p class=\"muted\">This company has no open features yet.</p>"
+    : form("pick", `<label>Feature<br><select name="feature">${feature.choices.map((choice) => `<option value="${esc(choice.id)}"${choice.id === feature.featureId ? " selected" : ""}>${untrusted(choice.name)}</option>`).join("")}</select></label>`, "<div class=\"row\"><button type=\"submit\">Change</button></div>"))
+    + (feature.featureId === null ? "" : form("none", hidden("feature", "none"), "<div class=\"row\"><button type=\"submit\">No feature</button></div>"));
+  return `<section class="panel" id="plan-feature"><p>${untrusted(feature.line)}</p>${change}</section>`;
+}
+
 function decideHtml(context: PageContext, view: PlanPageView): string {
   const offer = view.approval;
   if (offer === undefined) return "";
@@ -216,7 +227,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${costAndModelsHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${costAndModelsHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${featureHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 

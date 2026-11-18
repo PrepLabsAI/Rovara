@@ -234,6 +234,12 @@ export const TASK_PAGE_DECIDING_COPY = {
   retrying: "Retrying…",
   retried: "Retried. AgentX is checking the plan against the runtime again.",
   retryOwnerOnly: "Only the task owner can retry these checks.",
+  featureSaving: "Saving…",
+  featureNone: "No feature is set.",
+  featureNoChoices: "This company has no open features yet.",
+  featureLoad: "The features couldn't be loaded. Try again.",
+  featureSaved: "Saved.",
+  featureOwnerOnly: "Only the task owner can change the feature.",
   sending: "Sending…",
   sent: "Sent. AgentX is on the next step.",
   changed: "This task changed. Refresh the page and try again.",
@@ -376,7 +382,7 @@ function uuid(){
 }
 function openAround(node){for(var up=node;up;up=up.parentElement){if(up.tagName==="DETAILS")up.open=true;}}
 function applyCurrentAccess(){
-  var controls=document.querySelectorAll(".comment-open,.reply-open,.comment-edit,.comment-delete,.suggest,#decide-next,#decide-approve,#decide-request-changes,#decide-submit");
+  var controls=document.querySelectorAll(".comment-open,.reply-open,.comment-edit,.comment-delete,.suggest,#decide-next,#decide-approve,#decide-request-changes,#decide-submit,#decide-feature-change,#decide-feature-none,#decide-feature-save,#decide-feature-select");
   var radios=document.querySelectorAll("input");
   var retryNode=document.getElementById("retry-application");
   if(retryNode&&!canRead){retryNode.disabled=true;retryNode.hidden=true;}
@@ -431,6 +437,7 @@ function canPost(path,body){
   if(stopped||!canRead)return false;
   if(path==="decision")return canDecide;
   if(path==="retry")return canRetry;
+  if(path==="feature")return canDecide&&data.canFeature===true;
   if(path==="suggestions")return canSuggest;
   if(path==="comments"||path.indexOf("comments/")===0)return canComment&&!(body&&body.ask===true&&!canAsk);
   if(path==="people/role"||path==="people/add")return canManagePeople;
@@ -454,7 +461,7 @@ function call(method,path,body,retried){
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
         return readState().then(function(state){return state&&requestGeneration===accessGeneration&&canPost(path,body)?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
       }
-      if((peoplePath(path)||path==="retry")&&((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)&&!retried){
+      if((peoplePath(path)||path==="retry"||path==="feature"||path==="feature-choices")&&((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)&&!retried){
         return readState().then(function(){return answer;});
       }
       if((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)stopAccess(false);
@@ -1235,6 +1242,48 @@ if(retryButton&&canRetry){
       retryFail(said(answer));
     },function(){if(generation!==accessGeneration){retrying=false;return;}retryFail(COPY.unavailable);});
   });
+}
+
+/* ---------- The plan's feature: Change and No feature (lead 4 PCF) ---------- */
+var featureChange=el("decide-feature-change"),featureNone=el("decide-feature-none"),featureSave=el("decide-feature-save"),featureSelect=el("decide-feature-select"),featureBusy=false,featureNow=data.featureNow===undefined?null:data.featureNow;
+function featureSay(text,bad){var s=el("plan-feature-status"),e=el("plan-feature-error");if(bad){if(e){e.textContent=text;e.hidden=false;}if(s)s.textContent="";}else{if(e)e.hidden=true;if(s)s.textContent=text===""?"":" "+text;}}
+function featureShow(){if(featureNone)featureNone.hidden=featureNow===null||!canDecide;if(featureChange)featureChange.hidden=!canDecide;}
+function featureDone(answer){
+  featureBusy=false;if(featureSave)featureSave.disabled=false;if(featureNone)featureNone.disabled=false;if(featureChange)featureChange.disabled=false;
+  if(answer.status===200&&typeof answer.body.line==="string"&&answer.body.line.length<=200){
+    var line=el("plan-feature-line");if(line)line.textContent=answer.body.line;
+    featureNow=answer.body.featureId===undefined?null:answer.body.featureId;
+    var pick=el("plan-feature-pick");if(pick)pick.hidden=true;
+    featureShow();featureSay(COPY.featureSaved,false);return;
+  }
+  featureSay(answer.status===403&&answer.body.error==="owners_only"?COPY.featureOwnerOnly:said(answer),true);
+}
+function featureSend(featureId){
+  if(featureBusy||stopped||!canRead||!canDecide)return;
+  featureBusy=true;if(featureSave)featureSave.disabled=true;if(featureNone)featureNone.disabled=true;if(featureChange)featureChange.disabled=true;
+  featureSay(COPY.featureSaving,false);var generation=accessGeneration;
+  call("POST","feature",{feature:featureId}).then(function(answer){if(generation!==accessGeneration){featureBusy=false;return;}featureDone(answer);},function(){featureBusy=false;if(featureSave)featureSave.disabled=false;if(featureNone)featureNone.disabled=false;if(featureChange)featureChange.disabled=false;featureSay(COPY.unavailable,true);});
+}
+if(featureChange&&data.canFeature===true){
+  featureShow();
+  featureChange.addEventListener("click",function(){
+    if(featureBusy||stopped||!canRead||!canDecide)return;
+    featureSay("",false);
+    call("GET","feature-choices").then(function(answer){
+      var list=answer.body&&Array.isArray(answer.body.features)?answer.body.features:null;
+      if(answer.status!==200||list===null){featureSay(said(answer)===COPY.unavailable?COPY.featureLoad:said(answer),true);return;}
+      var pick=el("plan-feature-pick");if(!pick||!featureSelect)return;
+      while(featureSelect.firstChild)featureSelect.removeChild(featureSelect.firstChild);
+      for(var i=0;i<list.length;i++){
+        var item=list[i];if(!item||typeof item.id!=="string"||typeof item.name!=="string")continue;
+        var option=document.createElement("option");option.value=item.id;option.textContent=item.name;if(item.id===featureNow)option.selected=true;featureSelect.appendChild(option);
+      }
+      if(!featureSelect.firstChild){featureSay(COPY.featureNoChoices,true);return;}
+      pick.hidden=false;featureSelect.focus();
+    },function(){featureSay(COPY.featureLoad,true);});
+  });
+  if(featureSave)featureSave.addEventListener("click",function(){if(featureSelect&&featureSelect.value!=="")featureSend(featureSelect.value);});
+  if(featureNone)featureNone.addEventListener("click",function(){featureSend(null);});
 }
 
 /* ---------- People changes: server-made proposals and explicit confirmation ---------- */

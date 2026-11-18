@@ -7,6 +7,7 @@
 //   POST /v1/app/org/report/features/{id}/merge    merge it into another feature                                       company owner or admin
 //   POST /v1/app/org/report/features/{id}/state    mark it open or done                                                company owner or admin
 //   POST /v1/app/tasks/{taskId}/feature            file a task under a feature, or move it (null: No feature)          the task's starter files it; a maintainer, owner or admin moves it
+//   GET  /v1/app/tasks/{taskId}/feature-choices    the open features a person may file the task under (the plan card's "Change")   the same people as the filing above
 //
 // Rules:
 //  - The company is the caller's LIVE membership (the dev routes check it and mount that company's runtime), never a header, query, body or token claim; the role is membership's live role, not a claim.
@@ -17,13 +18,14 @@
 //  - Every change writes its audit record in the same transaction (who and when are there; the rows name nobody). Refusals are fixed words: nothing a caller sent is echoed.
 import {
   AgentXError, CreateFeatureBodySchema, FEATURE_ADMIN_ONLY, FeatureStateBodySchema, MergeFeatureBodySchema, OrgRoleSchema, REPORT_ADMIN_ONLY, REPORT_UNAVAILABLE, RenameFeatureBodySchema,
-  TASK_FEATURE_NEEDS_MAINTAINER, TASK_FEATURE_NOT_FOUND, TASK_FEATURE_PATH_PATTERN, TaskFeatureBodySchema, agentXError,
-  type AuditSink, type OrgId, type OrgRole, type FeatureResponse, type FeaturesResponse, type TaskFeatureResponse,
+  TASK_FEATURE_CHOICES_PATH_PATTERN, TASK_FEATURE_NEEDS_MAINTAINER, TASK_FEATURE_NOT_FOUND, TASK_FEATURE_PATH_PATTERN, TaskFeatureBodySchema, agentXError,
+  type AuditSink, type OrgId, type OrgRole, type FeatureChoicesResponse, type FeatureResponse, type FeaturesResponse, type TaskFeatureResponse,
 } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { createFeatureStore, featureView, type FeatureActor, type FeatureRecord } from "../core/report/feature-store.js";
+import { mayReplaceTaskFeature, planFeatureChoices } from "../core/report/plan-feature.js";
 import { readCompanyReportTasks } from "../core/report/read.js";
 import type { SetupRunStanding } from "./setup-run-routes.js";
 
@@ -56,6 +58,7 @@ const BODY_REFUSED = "The request is not valid.";
 /** Whether this method and path is one of the report's. */
 export function isReportPath(path: string, method: string): boolean {
   if (REPORT_READ.test(path)) return path.endsWith("/tasks") ? method === "GET" : method === "GET" || method === "POST";
+  if (TASK_FEATURE_CHOICES_PATH_PATTERN.test(path)) return method === "GET";
   return method === "POST" && (FEATURE_ACTION.test(path) || TASK_FEATURE_PATH_PATTERN.test(path));
 }
 
@@ -87,6 +90,23 @@ const viewOf = (record: FeatureRecord) => {
   if (view === undefined) throw unavailable();
   return view;
 };
+
+/**
+ * The task a person may file under a feature, read in the caller's company first: another company's task and a missing one answer alike, whatever the body said. A setup run and a replay are not feature work (the
+ * report never lists them): they read as missing tasks here too. A live company owner or admin (membership's role) manages every project; anyone else manages the project only by their live standing on it. The task's
+ * starter may file it too. Anyone else gets the same 404.
+ */
+async function mayFile(input: HostedReportInput, admin: boolean, taskId: string): Promise<{ task: NonNullable<Awaited<ReturnType<typeof readTask>>>; manager: boolean }> {
+  const task = await readTask(input.flow, taskId).catch(() => { throw unavailable(); });
+  if (task === undefined || task.companyId !== input.companyId || input.principal.companyId !== input.companyId || task.purpose !== undefined || task.origin === "test_run") throw agentXError("NOT_FOUND", TASK_FEATURE_NOT_FOUND);
+  let manager = admin;
+  if (!manager) {
+    try { manager = (await input.wiring.standing(input.principal.personId, input.companyId, task.project))?.access === "manage"; } catch { throw unavailable(); }
+  }
+  const starter = await input.flow.access.canAct(input.principal, task).catch(() => { throw unavailable(); });
+  if (!manager && !starter) throw agentXError("NOT_FOUND", TASK_FEATURE_NOT_FOUND);
+  return { task, manager };
+}
 
 /** One request on a report path (`isReportPath`), after the dev routes checked the company from membership. Always answers. */
 export async function routeHostedReport(input: HostedReportInput): Promise<BrokerResponse> {
@@ -127,26 +147,23 @@ export async function routeHostedReport(input: HostedReportInput): Promise<Broke
       return json(200, { feature: viewOf(record) } satisfies FeatureResponse);
     }
 
+    const choices = TASK_FEATURE_CHOICES_PATH_PATTERN.exec(input.path);
+    if (choices !== null && input.request.method === "GET") {
+      // The same gate as the filing (`mayFile`): a task of another company, a missing one and a person who may not file it all answer alike, and nothing is listed.
+      await mayFile(input, admin, choices[1]!);
+      const body: FeatureChoicesResponse = { features: await planFeatureChoices({ store: input.flow.store, companyId: input.companyId, now: input.now }), canCreate: admin };
+      return json(200, body);
+    }
+
     const move = TASK_FEATURE_PATH_PATTERN.exec(input.path);
     if (move !== null) {
       const taskId = move[1]!;
       const { feature } = parsed(TaskFeatureBodySchema, bodyOf(input.request));
-      // The task is read first, in the caller's company: another company's task and a missing one answer alike, whatever the body said.
-      const task = await readTask(input.flow, taskId).catch(() => { throw unavailable(); });
-      // A setup run and a replay are not feature work (the report never lists them): they read as missing tasks here too.
-      if (task === undefined || task.companyId !== input.companyId || input.principal.companyId !== input.companyId || task.purpose !== undefined || task.origin === "test_run") throw agentXError("NOT_FOUND", TASK_FEATURE_NOT_FOUND);
-      // A live company owner or admin (membership's role) manages every project; anyone else manages the project only by their live standing on it.
-      let manager = admin;
-      if (!manager) {
-        try { manager = (await input.wiring.standing(input.principal.personId, input.companyId, task.project))?.access === "manage"; } catch { throw unavailable(); }
-      }
-      let starter = false;
-      try { starter = await input.flow.access.canAct(input.principal, task); } catch { throw unavailable(); }
-      if (!manager && !starter) throw agentXError("NOT_FOUND", TASK_FEATURE_NOT_FOUND);
+      const { task, manager } = await mayFile(input, admin, taskId);
       const existing = await features.taskFeature(taskId);
       // A starter/plan approver may replace a suggestion, including one confirmed at plan approval.
       // A deliberate filing is moved by a manager; their `moved` source remains the highest rule.
-      if (!manager && existing !== undefined && existing.source !== "tracker" && existing.source !== "confirmed_at_plan") throw agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER);
+      if (!mayReplaceTaskFeature(manager, existing?.source)) throw agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER);
       const source = manager ? "moved" as const : "chosen" as const;
       const set = await features.setTaskFeature({ taskId, project: task.project, featureId: feature, source }, actor);
       const filed = set.record.featureId === null ? null : { id: set.record.featureId, source: set.record.source };

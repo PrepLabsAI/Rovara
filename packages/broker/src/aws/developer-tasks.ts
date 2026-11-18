@@ -13,6 +13,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { DynamoDocumentStore } from "@rovara/aws-adapters";
 import { DocumentAuditSink } from "@agentx/local-adapters";
 import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
+import { createFeatureStore, type FeatureStoreDeps } from "../core/report/feature-store.js";
+import { mayReplaceTaskFeature, planFeatureChoices, planFeatureLine, readPlanFeature } from "../core/report/plan-feature.js";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CHANNEL_PRIVACY_NOT_SET_UP,
@@ -51,7 +53,7 @@ import {
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
-  agentXError, IMPLICIT_COMPANY_ID, INTENT_NOT_WAITING_MESSAGE,
+  agentXError, IMPLICIT_COMPANY_ID, INTENT_NOT_WAITING_MESSAGE, TASK_FEATURE_NEEDS_MAINTAINER, type PlanFeature,
   cleanClientName,
   developerTaskPolicy,
   diffStat,
@@ -3954,6 +3956,45 @@ export async function retryApplicationRoundOnPage(deps: DeveloperTaskRouteDepend
   return { revision: stored.Item?.workflow?.revision ?? input.expectedRevision };
 }
 
+/** The feature store over this deployment's task table, in the task's company (the same store the plan approval confirms into). */
+function pageFeatureDeps(deps: DeveloperTaskRouteDependencies): FeatureStoreDeps {
+  const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+  return { store, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, audit: new DocumentAuditSink({ store: () => store }), now: () => deps.now() };
+}
+
+/** Lead 4 PCF: the plan card's feature line for the task page. Only the owner who decides gets `canChange` (the page's own decide permission); anyone else reads the line alone. A read that fails gives no line. */
+async function pagePlanFeature(deps: DeveloperTaskRouteDependencies, access: TaskAccess): Promise<PlanFeature | undefined> {
+  return await readPlanFeature(pageFeatureDeps(deps), { taskId: access.task.taskId, project: access.task.project }, { mayFile: pageAccess(access).canDecide, manager: false, admin: false });
+}
+
+/** The person who decides this task's documents: the page's existing decide permission, checked again on every call. */
+async function featureDecider(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskAccess> {
+  const access = await resolveTaskAccess(deps, caller, taskId);
+  if (!pageAccess(access).canDecide) throw Object.assign(agentXError("FORBIDDEN", "Only owners decide."), { pageReason: "owners_only" });
+  return access;
+}
+
+/** The open features the task's owner may pick from (the page's "Change"). */
+export async function pageFeatureChoices(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ features: Array<{ id: string; name: string }> }> {
+  await featureDecider(deps, caller, taskId);
+  return { features: await planFeatureChoices(pageFeatureDeps(deps)) };
+}
+
+/**
+ * "Change" and "No feature" from the task page: the same filing `POST /v1/app/tasks/{id}/feature` makes (source `chosen`, the starter's rule: a first filing or a suggestion is replaced, a deliberate filing is a
+ * maintainer's), by the person who may decide the task. Answers the new line the page shows.
+ */
+export async function setPageFeature(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: { feature: string | null }): Promise<{ line: string; featureId?: string }> {
+  const access = await featureDecider(deps, caller, taskId);
+  const featureDeps = pageFeatureDeps(deps);
+  const store = createFeatureStore(featureDeps);
+  const existing = await store.taskFeature(taskId);
+  if (!mayReplaceTaskFeature(false, existing?.source)) throw Object.assign(agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER), { pageReason: "not_allowed" });
+  await store.setTaskFeature({ taskId, project: access.task.project, featureId: input.feature, source: "chosen" }, { type: "person", id: caller.developerId });
+  const now = await readPlanFeature(featureDeps, { taskId, project: access.task.project }, { mayFile: true, manager: false, admin: false });
+  return { line: now?.line ?? planFeatureLine(null), ...(now?.feature == null ? {} : { featureId: now.feature.id }) };
+}
+
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
 export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
   const { task } = await resolveTaskAccess(deps, caller, taskId);
@@ -4222,6 +4263,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
     ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations, claimIds }),
+    ...await (async () => { const planFeature = await pagePlanFeature(deps, access); return planFeature === undefined ? {} : { planFeature }; })(),
   };
 }
 

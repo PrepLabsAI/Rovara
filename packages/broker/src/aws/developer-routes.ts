@@ -125,7 +125,7 @@ import { machineSizeEnabled, machineCard, setMachineChoice } from "../core/test-
 import { testEnvironmentView } from "../core/test-env/local-view.js";
 import { DynamoDocumentStore } from "@rovara/aws-adapters";
 import {
-  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
+  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, pageFeatureChoices, retryApplicationRoundOnPage, setPageFeature, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
   proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage, getTaskPeopleCandidatesForPage, addTaskWebPersonForPage,
   getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
@@ -2324,6 +2324,8 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
           setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
           decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
           retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
+          featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
+          setFeature: (caller, taskId, input) => setPageFeature(routeDeps(caller), caller, taskId, input),
           readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
           getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
           proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),

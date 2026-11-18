@@ -90,6 +90,18 @@ export const TaskFeatureResponseSchema = z.object({
 }).strict();
 export type TaskFeatureResponse = z.infer<typeof TaskFeatureResponseSchema>;
 
+// ---- the plan card's feature line (lead 4, PCF)
+
+/** `GET /v1/app/tasks/{taskId}/feature-choices`: the features a plan approver may pick from. The same people may file the task (`POST .../feature`). */
+export const TASK_FEATURE_CHOICES_PATH_PATTERN = /^\/v1\/app\/tasks\/([^/]+)\/feature-choices$/u;
+/** The most features one picker lists (open ones, by name). A company with more types the name of the one it wants in the report instead. */
+export const PLAN_FEATURE_CHOICES_MAX = 50;
+export const FeatureChoicesResponseSchema = z.object({
+  features: z.array(z.object({ id: FeatureIdSchema, name: z.string().min(1).max(FEATURE_NAME_MAX * 4) }).strict()).max(PLAN_FEATURE_CHOICES_MAX),
+  canCreate: z.boolean(),
+}).strict();
+export type FeatureChoicesResponse = z.infer<typeof FeatureChoicesResponseSchema>;
+
 // ---- the report rows
 
 /** Where a task started: Linear, Jira, Slack, the web app, an AI tool or the CLI (`tool`), or anything else (an automation, a schedule, a GitHub issue). */
