@@ -216,6 +216,19 @@ describe("team_propose: a suggestion, the only write, never applied by itself", 
     expect(structured(await direct.callTool({ name: "team_propose", arguments: { ...body, project: "billing" } })).status).toBe("received");
     expect(proposed.at(-1)).toEqual(["billing", body]);
   });
+  it("when the project is found by the read and the company keeps knowledge inside Rovara, says the fixed sentence and posts nothing", async () => {
+    const proposed: unknown[] = [];
+    const off = { kind: "answer", response: { status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE, project: "payments", repos: [], more: 0, complete: true } } as never;
+    const mcp = await connect({
+      projects: projects("payments"),
+      knowledgeAreas: async () => off,
+      knowledgePropose: async (project, request) => { proposed.push([project, request]); return received; },
+    }, { checkoutRemote: async () => "git@github.com:acme/api.git" });
+    const result = await mcp.callTool({ name: "team_propose", arguments: body });
+    expect(structured(result)).toEqual({ status: "off", message: KNOWLEDGE_STAYS_SENTENCE });
+    expect(text(result)).toBe(KNOWLEDGE_STAYS_SENTENCE);
+    expect(proposed).toEqual([]);
+  });
   it("says each refusal in the broker's fixed words, is never an error, and shows 'none' for a project or repository it cannot find", async () => {
     const refused = (reason: keyof typeof KNOWLEDGE_PROPOSE_MESSAGES) => ({ kind: "answer", response: { status: "refused", reason, message: KNOWLEDGE_PROPOSE_MESSAGES[reason] } }) as const;
     for (const reason of ["asks_for_change", "has_command_or_link", "day_limit", "learning_off", "not_valid", "task_limit", "unavailable"] as const) {

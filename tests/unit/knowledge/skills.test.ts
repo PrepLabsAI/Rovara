@@ -165,7 +165,7 @@ describe("the draft is made by code from the lesson's own words", () => {
     const lesson = procedure(w, { provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: ["task-hidden"], measured: false, audience: { kind: "project" } } });
     await put(w, lesson);
     await used(w, lesson.id, 10);
-    const hidden = withLessonAudiences({ read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org, ids) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set(["bob"]) })])) });
+    const hidden = withLessonAudiences({ read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set(["bob"]) })])) });
     const deps: SkillDeps = { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
     expect(await draftSkillFromLesson(deps, KEY, { lessonId: lesson.id, by: "ann" })).toEqual({ ok: false, code: "not_project_wide" });
     expect(await listSkills(w.deps, KEY)).toHaveLength(0);
@@ -478,6 +478,17 @@ describe('the "Make this a skill?" card', () => {
     expect(await skillOffers(w.deps, KEY)).toEqual([]);
     const after = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: w.lessons.owner.id }, "payments");
     expect(after.skillOffers).toBeUndefined();
+  });
+  it("is not offered for a procedure learned from a task a person on the project may not open", async () => {
+    const w = await world();
+    const lesson = procedure(w, { provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: ["task-hidden"], measured: false, audience: { kind: "project" } } });
+    await put(w, lesson);
+    await used(w, lesson.id, 10);
+    const open = withLessonAudiences({ read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set<string>() })])) });
+    expect(await skillOffers({ ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: open } }, KEY)).toHaveLength(1);
+    const hidden = withLessonAudiences({ read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set(["bob"]) })])) });
+    const deps: SkillDeps = { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
+    expect(await skillOffers(deps, KEY)).toEqual([]);
   });
   it("is not offered for another company's lesson", async () => {
     const w = await world();
