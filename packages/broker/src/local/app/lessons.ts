@@ -49,6 +49,7 @@ import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
 import type { Lesson } from "../../lessons/types.js";
+import type { compareLessonReplay } from "../../lessons/replay.js";
 
 /** The longest a step's dispatch waits for the loader: a slow load sends nothing, and the step runs as it would without lessons. */
 export { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
@@ -90,6 +91,8 @@ export interface LocalLessonView extends PageLessonView {
 
 export interface LocalLessons {
   readonly runtime: LessonsRuntime;
+  /** Read-only replay of recent finished tasks through the current lesson selector. */
+  replay(project: string, limit: number): Promise<ReturnType<typeof compareLessonReplay>>;
   /** The install's person: the one approver, and a name no lesson that leaves Rovara may hold. */
   readonly owner: { id: string; name: string };
   readonly repositories: LessonRepositories;
@@ -430,6 +433,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   const noteReverted: LocalLessons["noteReverted"] = (taskId, revert) => host.noteReverted(taskId, revert);
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
+  const replay: LocalLessons["replay"] = async (project, limit) => {
+    const { replayProjectLessons } = await import("../../lessons/replay-project.js");
+    return replayProjectLessons({ companyId, project, limit, store: flow.store, projects: flow.projects, runtime, now });
+  };
 
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteSentBack };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, replay, command, tick, noteReverted, noteSentBack };
 }

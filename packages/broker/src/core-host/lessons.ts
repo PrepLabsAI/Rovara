@@ -33,6 +33,7 @@ import { lessonDeletionPort } from "../lessons/deletion.js";
 import { DocumentLessonStore } from "../lessons/document-store.js";
 import { documentLessonVectors } from "../lessons/document-vectors.js";
 import { lessonAuditSink } from "../lessons/audit-sink.js";
+import type { compareLessonReplay } from "../lessons/replay.js";
 import { eraseLoggedCorrections } from "../lessons/correction-log.js";
 import type { CodeFactsReader } from "../lessons/code-facts.js";
 import type { TaskSubjectSource } from "../lessons/task-end.js";
@@ -98,6 +99,8 @@ export interface CoreLessons {
   readTask(taskId: string): Promise<{ companyId: string; project: string; developerId: string } | undefined>;
   /** Whether the company has this project (its latest revision can be read). */
   projectExists(project: string): Promise<boolean>;
+  /** Replays the last finished tasks using the current selector. It only reads the task and lesson stores. */
+  replay(project: string, limit: number): Promise<ReturnType<typeof compareLessonReplay>>;
   /** Fills the task flow's lessons slots (`learned`, `lessonsUsed`, `lessonsSentBack`, `milestones`). Call once, before the first task of the company is started or dispatched. */
   attach(): void;
   /** The scheduled pass: milestones due, the shared reflection queue, and once a day the upkeep of the company's projects. */
@@ -237,7 +240,10 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
 
   const projectExists = async (project: string): Promise<boolean> => (await deps.projects.latest(project)) !== undefined;
 
-  return { companyId, runtime, host, milestones, sources: { source: sources.source, rows: sources.rows }, readTask: readOwnTask, projectExists, attach, service };
+  const replay = async (project: string, limit: number): Promise<ReturnType<typeof compareLessonReplay>> =>
+    (await import("../lessons/replay-project.js")).replayProjectLessons({ companyId, project, limit, store: deps.store, projects: deps.projects, runtime, now });
+
+  return { companyId, runtime, host, milestones, sources: { source: sources.source, rows: sources.rows }, readTask: readOwnTask, projectExists, replay, attach, service };
 }
 
 /** Every project of the company, from its catalog, every page. Throws when the catalog cannot be read. */
