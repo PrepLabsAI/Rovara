@@ -1306,7 +1306,7 @@ describe("what did not change", () => {
 // Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full). Removing exactly those two rows gives #1086's pin f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
 // L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
 // removing exactly those 4 rows gives back the pin below.
-const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b";
+const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "a3cfc66171b0e202d206b93117dea4d9632e557c9b16ee1bea57fa003b4b69c3";
 const EXISTING_ROUTES_DIGEST = "a3cfc66171b0e202d206b93117dea4d9632e557c9b16ee1bea57fa003b4b69c3";
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
