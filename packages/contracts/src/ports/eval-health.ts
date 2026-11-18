@@ -64,4 +64,9 @@ export interface EvalReservationAdapter {
    * Optional: an adapter without it, undefined, or a fault means no cap source, and an eval confirmation is refused.
    */
   monthlyCapMicros?(input: { readonly company: string; readonly project: string }): Promise<number | undefined>;
+  /**
+   * L4-T3: whether the project's own AI provider (the customer's key the evals call) is connected right now: true, false, or undefined when this adapter cannot say (no source, a fault, a refusal).
+   * Optional: an adapter without it, or one that answers undefined, leaves "connected" unknown, and nothing then claims either.
+   */
+  providerConnected?(input: { readonly company: string; readonly project: string }): Promise<boolean | undefined>;
 }

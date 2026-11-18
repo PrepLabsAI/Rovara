@@ -356,3 +356,55 @@ describe("the health run is opt-in (D5)", () => {
     expect(await ask(w)).toMatchObject({ requested: true, duplicate: false });
   });
 });
+
+// L4-T3 (G2, G3): the card names the AI provider the evals call, from what discovery found, and says whether the company's own connection to it stands (the bound adapter's answer, the one the spend gate's
+// authority rests on). Unknown (a laptop, a gateway that does not say) says neither. Mutants: briefs/lead4/l4-t3/MUTANTS.md.
+describe("the eval card names the provider and its connection (L4-T3)", () => {
+  const read = (w: ReturnType<typeof company>, providerConnected: ((scope: { company: string; project: string }) => Promise<boolean | undefined>) | undefined, role = "admin", companyId: string = A) =>
+    readEvalCard({ store: w.store, companyId, members: w.members, monthlyCap: async () => CAP, ...(providerConnected === undefined ? {} : { providerConnected }) }, project, person(companyId, role));
+  it.each([["gemini", "Google Gemini"], ["vertex", "Vertex AI"]])("a reported %s eval says it calls %s, before and after the approval", async (row, label) => {
+    const w = company(A); const run = await w.run(filesOf(2), reportOf(2, { catalogRowId: row }));
+    const before = await read(w, async () => false);
+    expect(before).toMatchObject({ state: "propose", provider: label, connected: false }); expect(before.suites[0]).toMatchObject({ provider: label });
+    await run.approve();
+    expect(await read(w, async () => false)).toMatchObject({ state: "approved", provider: label, connected: false });
+    expect(await read(w, async () => true)).toMatchObject({ state: "approved", provider: label, connected: true });
+  });
+  it("flipping the connection flips `connected` and nothing else about the card (the mutation of the reading)", async () => {
+    const w = company(A); await w.run(filesOf(2), reportOf(2));
+    const off = await read(w, async () => false); const on = await read(w, async () => true);
+    expect(off.connected).toBe(false); expect(on.connected).toBe(true);
+    expect({ ...off, connected: undefined }).toEqual({ ...on, connected: undefined });
+  });
+  it.each([["no source (a laptop)", undefined], ["no answer", async () => undefined], ["a fault", async () => { throw new Error("private gateway detail"); }], ["a non-boolean", async () => "yes" as never]])("%s: `connected` is absent, the provider is still named, and nothing leaks", async (_name, source) => {
+    const w = company(A); await w.run(filesOf(2), reportOf(2));
+    const card = await read(w, source);
+    expect(card.provider).toBe("Google Gemini"); expect(card).not.toHaveProperty("connected"); expect(JSON.stringify(card)).not.toContain("private gateway detail");
+  });
+  it("asks the source about exactly this company and project, once per read", async () => {
+    const w = company(A); await w.run(filesOf(2), reportOf(2)); const asked: unknown[] = [];
+    await read(w, async scope => { asked.push(scope); return true; });
+    expect(asked).toEqual([{ company: A, project }]);
+  });
+  it("no eval found: the card says nothing about a provider or a connection", async () => {
+    const w = company(A); const card = await read(w, async () => false);
+    expect(card.state).toBe("none"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
+  });
+  it("a rejected eval says nothing about a provider or a connection (there is nothing to connect for)", async () => {
+    const w = company(A); const run = await w.run(filesOf(2), reportOf(2)); await run.approve();
+    const raw = (await w.store.get(evalSpendKey(A, project)))!; const { approvedBy: _gone, ...rest } = raw as Record<string, unknown>; void _gone;
+    await w.store.put({ item: { ...rest, state: "rejected" } as never });
+    const card = await read(w, async () => false);
+    expect(card.state).toBe("rejected"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
+  });
+  it("two companies: B's card shows nothing of A's provider, and B's own connection answer is B's", async () => {
+    const store = new MemoryDocumentStore();
+    const a = company(A, { ...ROLES }, store); const b = company(B, { ...ROLES }, store);
+    await a.run(filesOf(2), reportOf(2, { catalogRowId: "vertex" }));
+    const asked: unknown[] = [];
+    const card = await read(b, async scope => { asked.push(scope); return true; }, "admin", B);
+    expect(card.state).toBe("none"); expect(card).not.toHaveProperty("provider"); expect(card).not.toHaveProperty("connected");
+    expect(asked.every(scope => (scope as { company: string }).company === B)).toBe(true);
+    expect(await read(a, async () => false)).toMatchObject({ provider: "Vertex AI", connected: false });
+  });
+});

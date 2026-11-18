@@ -389,3 +389,63 @@ it.each([undefined, "unknown", "auditor"])("refuses an invalid company role even
   const w = world(); const row = await w.propose(); w.members.companyRole = () => role as "auditor" | undefined;
   expect((await w.gate.decide(w.attempt(row))).status).toBe("refused"); await refused(w);
 });
+
+// L4-T3 (G2): an approved eval whose AI provider is not connected reads as that (the person's next step), never as "spend not approved".
+describe("an approved eval with no AI provider connected (L4-T3)", () => {
+  const NOT_CONNECTED_WORDS = "Not run: the AI your evals call is not connected for this project.";
+  const APPROVAL_WORDS = "Not run: an owner, maintainer or admin must confirm the connected customer's call estimate.";
+  const ask = async (w: ReturnType<typeof world>) => { const result = await runEvalHealth(w.input()); return result.status === "not_run" ? { reason: result.reason, message: result.message } : undefined; };
+  const noAnswer = (w: ReturnType<typeof world>) => { w.adapter.authority = async () => undefined; };
+
+  it("the gateway's own 'connected: false' answer gives a grant that says so, and the health check reads provider_not_connected with nothing held or spent", async () => {
+    const w = world(); await w.approve(); w.state.connected = false;
+    expect(await w.capabilities().approval.read()).toMatchObject({ company, project, provider: "customer", connected: false });
+    expect(await ask(w)).toEqual({ reason: "provider_not_connected", message: NOT_CONNECTED_WORDS });
+    expect(w.ledger).toEqual([]); expect(w.holds).toEqual([]);
+  });
+  it("the mutation: the same approval with the provider connected runs, and with it not connected gives the other reason (flipping `connected` changes the reason)", async () => {
+    const w = world(); await w.approve();
+    expect((await runEvalHealth(w.input())).status).toBe("measured");
+    const v = world(); await v.approve(); v.state.connected = false;
+    expect(await ask(v)).toMatchObject({ reason: "provider_not_connected" });
+    const x = world(); await x.approve(); x.state.connected = true; x.state.provider = "rovara";
+    expect(await ask(x)).toMatchObject({ reason: "not_confirmed" });
+  });
+  it("a gateway that answers 'no' the same way for every refusal: only an adapter that says the provider is NOT connected turns it into 'not connected'", async () => {
+    const w = world(); await w.approve(); noAnswer(w);
+    const asked: unknown[] = []; w.adapter.providerConnected = async scope => { asked.push(scope); return false; };
+    expect(await w.capabilities().approval.read()).toMatchObject({ connected: false, role: "maintainer", company, project });
+    expect(await ask(w)).toEqual({ reason: "provider_not_connected", message: NOT_CONNECTED_WORDS });
+    expect(asked.length).toBeGreaterThan(0); expect(asked.every(scope => JSON.stringify(scope) === JSON.stringify({ company, project }))).toBe(true);
+  });
+  it.each(["connected", "no answer", "a fault", "no such method"])("authority refused and the provider %s stays 'not approved' (no grant)", async mode => {
+    const w = world(); await w.approve(); noAnswer(w);
+    if (mode === "connected") w.adapter.providerConnected = async () => true;
+    if (mode === "no answer") w.adapter.providerConnected = async () => undefined;
+    if (mode === "a fault") w.adapter.providerConnected = async () => { throw new Error("private gateway detail"); };
+    expect(await w.capabilities().approval.read()).toBeUndefined();
+    expect(await ask(w)).toEqual({ reason: "not_confirmed", message: APPROVAL_WORDS });
+    expect(JSON.stringify(await ask(w))).not.toContain("private gateway detail");
+  });
+  it("an approver who no longer holds the right is 'not approved' even when the provider is not connected (the approval is read live)", async () => {
+    const w = world(); await w.approve(); noAnswer(w); w.adapter.providerConnected = async () => false;
+    w.state.principal = person("member"); w.state.grants.clear();
+    expect(await w.capabilities().approval.read()).toBeUndefined();
+    expect(await ask(w)).toMatchObject({ reason: "not_confirmed" });
+  });
+  it("no approved item: the provider is not even asked, and nothing reads as connected or not (another company's item is no item)", async () => {
+    const w = world(); noAnswer(w); let asked = 0; w.adapter.providerConnected = async () => { asked++; return false; };
+    expect(await w.capabilities().approval.read()).toBeUndefined(); expect(asked).toBe(0);
+    await w.approve();
+    const foreign = createEvalSpendCapabilities({ ...w.deps, companyId: other, project, current: async () => w.state.current, adapter: w.adapter });
+    expect(await foreign.approval.read()).toBeUndefined(); expect(asked).toBe(0);
+  });
+  it("a grant that says 'not connected' is never issued: the meter holds nothing under it, even if the provider connects a moment later", async () => {
+    const w = world(); await w.approve(); w.state.connected = false;
+    const caps = w.capabilities(); const grant = (await caps.approval.read())!;
+    expect(grant.connected).toBe(false);
+    w.state.connected = true;
+    expect(await caps.meter.reserve({ approval: grant, calls: 6, costMicros: 60 })).toBeUndefined(); expect(w.holds).toEqual([]);
+    expect(await caps.meter.reserve({ approval: { ...grant, connected: true }, calls: 6, costMicros: 60 })).toBeUndefined(); expect(w.holds).toEqual([]);
+  });
+});

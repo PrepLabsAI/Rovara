@@ -43,7 +43,7 @@ const planSchema = z.object({
   questions: z.array(z.object({ id: z.string().min(1).max(160), category: z.enum(["ordinary", "safety", "refusal"]), baseHash: hash, headHash: hash }).strict()).max(EVAL_QUESTION_LIMIT),
   maxCallsPerQuestion: whole.min(1), maxCostMicrosPerQuestion: whole.min(1),
 }).strict();
-const grantSchema = z.object({ company: z.string(), project: z.string(), selection: z.string(), role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.literal(true), maxCalls: whole.min(1).optional(), maxCostMicros: whole.min(1).optional() });
+const grantSchema = z.object({ company: z.string(), project: z.string(), selection: z.string(), role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.boolean(), maxCalls: whole.min(1).optional(), maxCostMicros: whole.min(1).optional() });
 export function validPlan(input: unknown): EvalFinalCheckPlan | undefined {
   // Bound arrays before schema traversal. All other arrays are rejected by the schema.
   if (typeof input !== "object" || input === null || !Array.isArray((input as EvalFinalCheckPlan).questions) || (input as EvalFinalCheckPlan).questions.length > EVAL_QUESTION_LIMIT) return undefined;
@@ -122,6 +122,8 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     const read = grantSchema.safeParse(await ports.approval.read());
     if (!read.success || read.data.company !== p.company || read.data.project !== p.project || read.data.selection !== p.selection || read.data.inputsDigest !== evalSpendInputsDigest(p.inputs)) return refuse("spend_not_approved");
     grant = { ...read.data, maxCalls: read.data.maxCalls ?? EVAL_DEFAULT_CALL_BUDGET, maxCostMicros: read.data.maxCostMicros ?? EVAL_DEFAULT_COST_BUDGET_MICROS };
+    // L4-T3: an approval that stands for this eval but whose AI provider is not connected reads as that, never as "not approved" (the broker's grant carries the company's real connection).
+    if (!grant.connected) return refuse("provider_not_connected");
   } catch { return refuse("spend_not_approved"); }
   const account = (stage: Awaited<ReturnType<typeof openMeteredStage>>) => {
     if (stage === undefined) return;
@@ -175,7 +177,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     },
   };
   try {
-    const output = await runEvalRound({ ...input, questionPlan: { company: p.company, provider: "customer", connected: true, previousPasses: req.evalPass - 1,
+    const output = await runEvalRound({ ...input, questionPlan: { company: p.company, provider: "customer", connected: grant.connected, previousPasses: req.evalPass - 1,
       judgePin: p.judgePin, baselineJudgePin: p.baselineJudgePin, ...(p.baseEvalSetHash === undefined ? {} : { baseEvalSetHash: p.baseEvalSetHash }), ...(p.sameJudgeFamily === undefined ? {} : { sameJudgeFamily: p.sameJudgeFamily }), subsetSupported: p.subsetSupported,
       questions: p.questions, maxCallsPerQuestion: p.maxCallsPerQuestion, maxCostMicrosPerQuestion: p.maxCostMicrosPerQuestion, limits: { maxCalls: grant.maxCalls, maxCostMicros: grant.maxCostMicros },
       get callsAlreadyUsed() { return req.callsAlreadyUsed + baselineCalls; }, get costAlreadyUsedMicros() { return req.costAlreadyUsedMicros + baselineCost; }, run },

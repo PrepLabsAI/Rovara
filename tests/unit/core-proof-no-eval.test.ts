@@ -31,6 +31,11 @@ describe("noEvalOf", () => {
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run", "made up <b>"), true)).toEqual({ reason: "other" });
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run"), true)).toEqual({ reason: "other" });
   });
+  it("L4-T3: an approved eval whose AI provider is not connected says so in its own words, never the 'not connected on this install, or its spend is not approved' reading", () => {
+    const got = noEvalOf(flowWith("eval_hint"), ai("Not run", "provider_not_connected"), true);
+    expect(got).toEqual({ reason: "other", detail: "the AI your evals call is not connected for this project (connect it in Company settings, AI keys)" });
+    expect(got).not.toEqual({ reason: "not_connected" });
+  });
   it("leaves the existing 'prompt changed and no evaluation ran' case to its own item", () => {
     expect(noEvalOf(flowWith("eval_hint"), ai("Not run", "no_eval_configured", true), true)).toBeUndefined();
   });

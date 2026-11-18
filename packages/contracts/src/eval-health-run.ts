@@ -34,14 +34,14 @@ export type PrepareEvalHealth = z.infer<typeof PrepareEvalHealthSchema>;
  * refuses before a worker is asked: "expired", "requester_not_allowed", "approval_changed", "main_unreadable", "already_measuring", "could_not_start" and "no_report" (a claim that never reported).
  */
 export const EVAL_HEALTH_NOT_RUN_REASONS = [
-  "not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped",
+  "not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "provider_not_connected", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped",
   "expired", "requester_not_allowed", "approval_changed", "main_unreadable", "already_measuring", "could_not_start", "no_report",
 ] as const;
 export type EvalHealthNotRunReason = (typeof EVAL_HEALTH_NOT_RUN_REASONS)[number];
 export const EvalHealthNotRunReasonSchema = z.enum(EVAL_HEALTH_NOT_RUN_REASONS);
 
 /** The reasons a WORKER may report (the rest are the broker's own: a worker cannot say a request expired or a claim never reported). */
-export const EVAL_HEALTH_WORKER_REASONS = ["not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped"] as const satisfies readonly EvalHealthNotRunReason[];
+export const EVAL_HEALTH_WORKER_REASONS = ["not_connected", "invalid_questions", "over_cap", "invalid_identity", "not_confirmed", "provider_not_connected", "monthly_cap", "provider_incomplete", "invalid_results", "incomplete_questions", "unavailable", "questions_changed", "stopped"] as const satisfies readonly EvalHealthNotRunReason[];
 
 /** What the worker posts. `measured` carries the baseline the three runs made, exactly as the cache would hold it; the broker checks it against its own plan before it keeps anything. */
 export const EvalHealthResultBodySchema = z.object({
@@ -60,6 +60,7 @@ const WORDS: Readonly<Record<EvalHealthNotRunReason, string>> = {
   over_cap: "Not run: the three runs would cost more than the approved limit.",
   invalid_identity: "Not run: the eval could not be matched to your code.",
   not_confirmed: "Not run: the eval's spend is not approved by someone who can approve it now.",
+  provider_not_connected: "Not run: the AI your evals call is not connected for this project. Connect it in Company settings, then check again.",
   monthly_cap: "Not run: the monthly AI spending limit cannot fit these runs.",
   provider_incomplete: "Not run: the AI provider did not answer every question.",
   invalid_results: "Not run: your eval's results could not be read in full.",

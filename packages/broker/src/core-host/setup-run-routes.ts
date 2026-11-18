@@ -96,7 +96,9 @@ export interface HostedSetupRunWiring {
    * L4-EVC: the eval card (DEC 254zzz20). The company's monthly eval cap (the bound `eval-reservation` adapter's source; absent: no eval can be confirmed here) and the code host's file read for the
    * broker's own hashing of the confirmed files. Served only together with `approval` (whose gate decides the eval spend item and whose members read the live roles).
    */
-  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"];
+  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"];
+    /** L4-T3: whether the project's own AI provider is connected (the bound adapter's answer). Absent: the card says neither, as before. */
+    providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined>; readFile?: EvalDiscoveryConfirmDeps["readFile"];
     /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
     healthRuns?: boolean;
     /** L4-EVH: starts the health run for the project's waiting yes (the broker claims it and hands it to a worker). Best effort; never throws, and the person's answer does not wait on the worker. Absent: nothing starts here (the card shows no button). */
@@ -383,7 +385,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     if (input.request.method === "GET" && tail === "eval") {
       const approval = input.wiring.approval;
       if (approval === undefined || input.wiring.eval === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, providerConnected: input.wiring.eval.providerConnected, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);

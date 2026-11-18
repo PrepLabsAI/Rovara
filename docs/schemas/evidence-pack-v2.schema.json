@@ -1006,6 +1006,7 @@
                 "no_product_key",
                 "no_eval_configured",
                 "not_connected",
+                "provider_not_connected",
                 "spend_not_approved",
                 "needs_fresh_sandbox",
                 "checks_failed",
