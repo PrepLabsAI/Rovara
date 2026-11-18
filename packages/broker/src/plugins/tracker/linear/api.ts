@@ -9,7 +9,7 @@
 //     notes Rovara keeps of what it writes.
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { TrackerSearchError, TrackerWriteRefusedError, agentXError, type TrackerAskedItem } from "@agentx/contracts";
+import { TrackerSearchError, TrackerWriteRefusedError, TrackerParentSchema, agentXError, type TrackerAskedItem } from "@agentx/contracts";
 import { normalizeIssueKey } from "./webhook.js";
 import type { LinearIssueRead, LinearReplyPort, LinearStateType, LinearTrackerAccess } from "./index.js";
 
@@ -76,8 +76,8 @@ export interface LinearApiOptions {
 }
 
 const STATE_TYPES: readonly string[] = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
-const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url creator { displayName }
- labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
+const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url project { id name url } parent { id identifier title url }
+creator { displayName } labels { nodes { id name } } history(first: 25) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } } }`;
 const HISTORY_PAGE_QUERY = `query($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { createdAt actor { id } botActor { id } addedLabelIds removedLabelIds toAssigneeId fromAssigneeId } } } }`;
 /** The most further pages of one issue's history read to see all of it (100 entries each). An issue with more is not read to the end, so nobody is credited for it. */
 export const LINEAR_HISTORY_PAGES_MAX = 5;
@@ -229,7 +229,7 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
   };
 
   const readIssue: NonNullable<LinearTrackerAccess["readIssue"]> = async (_orgId, key) => {
-    const answer = await call("query($id: String!) { issue(id: $id) { identifier title description url updatedAt state { type } assignee { displayName } labels { nodes { name } } } }", { id: key });
+    const answer = await call("query($id: String!) { issue(id: $id) { identifier title description url updatedAt state { type } assignee { displayName } labels { nodes { name } } project { id name url } parent { id identifier title url } } }", { id: key });
     if ("errors" in answer) {
       if (isNotFoundAnswer(answer.errors)) return undefined;
       throw unavailable();
@@ -244,6 +244,8 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
       labels: arr(rec(issue["labels"])["nodes"]).map((node) => str(rec(node)["name"])).filter((name): name is string => name !== undefined),
       ...(str(rec(issue["assignee"])["displayName"]) === undefined ? {} : { assignee: str(rec(issue["assignee"])["displayName"])! }),
       ...(str(issue["updatedAt"]) === undefined ? {} : { updatedAt: str(issue["updatedAt"])! }),
+      ...(str(rec(issue["project"])["id"]) !== undefined ? { project: { id: str(rec(issue["project"])["id"])!, name: cut(str(rec(issue["project"])["name"]) ?? "", 200), ...(str(rec(issue["project"])["url"]) === undefined ? {} : { url: str(rec(issue["project"])["url"])! }) } } : {}),
+      ...(str(rec(issue["parent"])["id"]) !== undefined ? { parent: { id: str(rec(issue["parent"])["id"])!, title: cut(str(rec(issue["parent"])["title"]) ?? "", 200), ...(str(rec(issue["parent"])["url"]) === undefined ? {} : { url: str(rec(issue["parent"])["url"])! }) } } : {}),
     };
     return read;
   };
@@ -297,6 +299,14 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
         ...(str(rec(issue["creator"])["displayName"]) === undefined ? {} : { reporter: str(rec(issue["creator"])["displayName"])! }),
         ...(actor === undefined ? {} : { actor }),
         ...(found === undefined ? {} : { occurredAt: found.at }),
+        ...(() => {
+          const project = rec(issue["project"]), parentIssue = rec(issue["parent"]);
+          const raw = str(project["id"]) === undefined
+            ? { kind: "parent_issue", id: str(parentIssue["id"]), title: cut(str(parentIssue["title"]) ?? "", 200), url: str(parentIssue["url"]) }
+            : { kind: "project", id: str(project["id"]), title: cut(str(project["name"]) ?? "", 200), url: str(project["url"]) };
+          const parsed = TrackerParentSchema.safeParse(raw);
+          return parsed.success ? { parent: parsed.data } : {};
+        })(),
       });
     }
     return items;

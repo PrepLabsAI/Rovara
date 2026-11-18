@@ -275,19 +275,28 @@ describe("filing and moving a task", () => {
     expect((await w.read())!.feature).toEqual({ id: w.three, source: "moved" });
   });
 
-  it("a starter cannot file over a feature the tracker or an inheritance gave the task, nor over 'No feature' chosen on purpose", async () => {
+  it.each(["tracker", "confirmed_at_plan"] as const)("the starter replaces a %s suggestion with Change or No feature", async (source) => {
+    for (const empty of [false, true]) {
+      const w = await filed();
+      const { createFeatureStore } = await import("../../packages/broker/src/core/report/feature-store.js");
+      const store = createFeatureStore({ store: w.world.store, companyId: FAKE_COMPANY, audit: { stage: () => [] }, now: () => Date.now() });
+      await store.setTaskFeature({ taskId: w.taskId, project: "payments", featureId: w.one, source }, { type: "system", id: "tracker" });
+      const starter = w.as(FAKE_COMPANY, "member", "starter-1");
+      const answer = await w.move(starter, w.taskId, empty ? null : w.two);
+      expect(answer?.statusCode).toBe(200);
+      expect(await store.taskFeature(w.taskId)).toMatchObject({ featureId: empty ? null : w.two, source: "chosen" });
+    }
+  });
+
+  it("the starter cannot replace an inheritance or a maintainer's deliberate No feature", async () => {
     const w = await filed();
-    const runtimeStore = w.world.store;
     const { createFeatureStore } = await import("../../packages/broker/src/core/report/feature-store.js");
-    const store = createFeatureStore({ store: runtimeStore, companyId: FAKE_COMPANY, audit: { stage: () => [] }, now: () => Date.now() });
-    await store.setTaskFeature({ taskId: w.taskId, project: "payments", featureId: w.one, source: "tracker" }, { type: "system", id: "tracker" });
+    const store = createFeatureStore({ store: w.world.store, companyId: FAKE_COMPANY, audit: { stage: () => [] }, now: () => Date.now() });
+    await store.setTaskFeature({ taskId: w.taskId, project: "payments", featureId: w.one, source: "inherited" }, { type: "system", id: "tracker" });
     const starter = w.as(FAKE_COMPANY, "member", "starter-1");
     expect((await w.move(starter, w.taskId, w.two))?.statusCode).toBe(403);
-    expect((await w.read())!.feature).toEqual({ id: w.one, source: "tracker" });
-    // a maintainer's move replaces the tracker's, and is then above every lower rule
     await w.move(w.as(FAKE_COMPANY, "member", "maint-pay"), w.taskId, null);
     expect((await w.move(starter, w.taskId, w.two))?.statusCode).toBe(403);
-    expect(await w.read()).not.toHaveProperty("feature");
   });
 
   it("an owner, an admin, and the project's maintainer move it; 'No feature' is a move too, and shows as no feature", async () => {

@@ -105,6 +105,7 @@ export const DeveloperTaskViewSchema = z.object({
   /** Actual audited fallback history; absent only on older servers. Current broker emits [] when none. */
   modelFallbacks:ModelFallbacksSchema.optional(),
   taskId: z.string().uuid(),
+  feature: z.object({ id: z.string().min(1), name: z.string().max(320), source: z.enum(["moved", "chosen", "tracker", "inherited", "confirmed_at_plan"]) }).strict().nullable().optional(),
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,

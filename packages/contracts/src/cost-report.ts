@@ -35,12 +35,12 @@ export const REPORT_PR_LINKS_MAX = 32;
 export const FeatureIdSchema = z.string().regex(/^ft_[a-f0-9]{20}$/u);
 export type FeatureId = z.infer<typeof FeatureIdSchema>;
 
-/** How a task got its feature, highest rule first in the design: a person moved it, a person chose it, the tracker's parent, it inherited, a person confirmed Rovara's suggestion at plan review. */
-export const FEATURE_SOURCES = ["moved", "chosen", "tracker", "inherited", "confirmed_at_plan"] as const;
+/** How a task got its feature, highest rule first: a person moved it, chose it, or confirmed the tracker's suggestion at plan review, then the tracker parent, then inheritance. */
+export const FEATURE_SOURCES = ["moved", "chosen", "confirmed_at_plan", "tracker", "inherited"] as const;
 export const FeatureSourceSchema = z.enum(FEATURE_SOURCES);
 export type FeatureSource = z.infer<typeof FeatureSourceSchema>;
 /** Higher wins: a lower rule never replaces a higher one. */
-export const FEATURE_SOURCE_RANK: Readonly<Record<FeatureSource, number>> = { moved: 5, chosen: 4, tracker: 3, inherited: 2, confirmed_at_plan: 1 };
+export const FEATURE_SOURCE_RANK: Readonly<Record<FeatureSource, number>> = { moved: 5, chosen: 4, confirmed_at_plan: 3, tracker: 2, inherited: 1 };
 /** The sources a person's own act makes: only these may replace a source of the same rank. */
 export const PERSON_FEATURE_SOURCES: readonly FeatureSource[] = ["moved", "chosen", "confirmed_at_plan"];
 

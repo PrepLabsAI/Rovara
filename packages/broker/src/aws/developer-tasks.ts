@@ -8,6 +8,9 @@ import { CompanyReadItemLimit, recordInCompany } from "./company-check.js";
 import { WORKFLOW_ACTIONABLE_REFUSALS } from "../developer/workflow-actions.js";
 import { taskOwnerView } from "../developer/task-owner-view.js";
 import { createHash, randomUUID } from "node:crypto";
+import { DynamoDocumentStore } from "@rovara/aws-adapters";
+import { DocumentAuditSink } from "@agentx/local-adapters";
+import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CHANNEL_PRIVACY_NOT_SET_UP,
@@ -2216,6 +2219,10 @@ export async function decideTaskWorkflow(
       throw Object.assign(agentXError("IDEMPOTENCY_CONFLICT", COMMENT_CHANGED_MESSAGE), { pageReason: "comment_changed" });
     }
     return busyOrClosing(deps, task, error);
+  }
+  if (request.decision === "APPROVE" && documentType === "plan") {
+    const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
+    await confirmPlanFeature({ store, companyId: deps.companyId ?? IMPLICIT_COMPANY_ID, audit: new DocumentAuditSink({ store: () => store }), now: () => deps.now(), log: (entry) => log(deps, entry) }, taskId, caller.developerId);
   }
   const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
   // M1.3 Task 3.7 (owner decision D2): the approved application plan asks for its informational baseline round. Best effort and after the approval is committed: whatever

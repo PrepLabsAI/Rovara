@@ -112,6 +112,7 @@ export interface FeatureStore {
   /** Merges `from` into `into`: the tasks of `from` read as `into`'s from now on. Neither may be merged away already; not into itself. */
   merge(fromId: string, intoId: string, actor: FeatureActor): Promise<FeatureRecord>;
   taskFeature(taskId: string): Promise<TaskFeatureRecord | undefined>;
+  confirmTaskFeatureAtPlan(taskId: string, actor?: FeatureActor): Promise<void>;
   /**
    * Files a task under a feature (or under no feature, `featureId: null`). A lower rule never replaces a higher one: the answer is `kept` with the stored record. The same rank replaces only for a person's own
    * act. The feature must be open (not done, not merged away).
@@ -256,6 +257,21 @@ export function createFeatureStore(deps: FeatureStoreDeps): FeatureStore {
     async taskFeature(taskId) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(taskId)) return undefined;
       return taskFeatureOf(await deps.store.get(reportTaskFeatureKey(companyId, taskId)), companyId);
+    },
+
+    async confirmTaskFeatureAtPlan(taskId, actor = { type: "system", id: "plan-approval" }) {
+      const key = reportTaskFeatureKey(companyId, taskId);
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const existing = taskFeatureOf(await deps.store.get(key), companyId);
+        if (existing === undefined || existing.source !== "tracker") return;
+        const next: TaskFeatureRecord = { ...existing, source: "confirmed_at_plan", setAt: iso(deps), version: existing.version + 1 };
+        const result = await deps.store.transact([
+          { kind: "put", item: plain({ ...key, entityType: "REPORT_TASK_FEATURE", companyId, taskId, project: existing.project, featureId: existing.featureId, source: next.source, setAt: next.setAt, version: next.version }), condition: when.and(when.present(), when.eq("version", existing.version), when.eq("source", "tracker"), when.eq("companyId", companyId)) },
+          ...audit(actor, "report.task_feature_set", { type: "task", id: taskId }, next.version, { featureId: next.featureId, source: next.source, project: next.project }),
+        ]);
+        if (result.applied) return;
+      }
+      throw conflict();
     },
 
     async setTaskFeature(input, actor) {

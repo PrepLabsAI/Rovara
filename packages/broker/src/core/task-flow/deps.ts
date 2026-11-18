@@ -55,7 +55,7 @@ export interface TaskCaller {
   /**
    * Set only by intake, never by a request body: the task starts from this ticket, so the request text is the ticket's (the plan's "why" credits it to the ticket, not to the person who started the task).
    */
-  ticket?: { system: string; id: string; url: string } | undefined;
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /**
    * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
@@ -159,7 +159,7 @@ export interface StartExtrasInput {
   client: string;
   receivedAt: string;
   /** The ticket the task starts from (intake only): the session is bound to it in the same transaction, so the task and its ticket follow each other or the start does not commit. */
-  ticket?: { system: string; id: string; url: string } | undefined;
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /** Where the task started (the surface that asked for it). */
   origin?: WorkOrigin | undefined;
   /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */

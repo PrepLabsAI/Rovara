@@ -18,6 +18,7 @@ import { dispatchRowItem } from "../core/task-flow/dispatch-rows.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { planFeedbackKey } from "../core/task-flow/stage-machine.js";
 import { breakdownForApproval } from "../core/work-breakdown/plan-graph.js";
+import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
 import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { TRANSACTION_ITEMS_MAX, flowWorkEventItems } from "../core/work-events/flow-events.js";
 
@@ -97,11 +98,15 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   // A decision on a task's document wrote its entry in the task log in its own transaction; the surfaces that draw the log are told once it is committed (a repeat of a decision writes nothing, so tells nothing).
-  const gate: DecisionGate = flow.taskLog === undefined ? innerGate : {
+  // C-A5: an approved plan confirms the task's suggested feature.
+  const gate: DecisionGate = {
     ...innerGate,
     async decide(attempt) {
       const result = await innerGate.decide(attempt);
-      if (result.status === "decided" && attempt.kind === WORKFLOW_DOCUMENT_KIND) await flow.taskLog?.changed(attempt.subjectId);
+      if (flow.taskLog !== undefined && result.status === "decided" && attempt.kind === WORKFLOW_DOCUMENT_KIND) await flow.taskLog.changed(attempt.subjectId);
+      if (result.status === "decided" && result.record.kind === "workflow-document" && result.record.approvalKind === "plan" && result.record.outcome === "approve") {
+        await confirmPlanFeature({ store, audit: options.audit, companyId: options.companyId, now: () => (options.now?.() ?? new Date()).getTime(), ...(flow.log === undefined ? {} : { log: flow.log }) }, result.record.subjectId, result.approver.personId);
+      }
       return result;
     },
   };

@@ -29,6 +29,7 @@ export type NeutralStatus = z.infer<typeof NeutralStatusSchema>;
 /** An item (a ticket, an issue or a task in the customer's tracker) as its tracker names it. */
 export const TrackerItemRefSchema = z.object({ tracker: PluginKindSchema, id: ExternalIdSchema, url: HttpsUrlOrEmptySchema.optional() }).strict();
 export type TrackerItemRef = z.infer<typeof TrackerItemRefSchema>;
+export const TrackerParentSchema = z.object({ kind: z.enum(["project", "parent_issue", "epic"]), id: ExternalIdSchema.max(120).refine((value) => !/[\p{Cc}\p{Cf}]/u.test(value)), title: z.string().min(1).max(200).refine((value) => value.trim() !== "" && !/[\p{Cc}\p{Cf}]/u.test(value)), url: HttpsUrlOrEmptySchema.optional() }).strict();
 
 export const TrackerItemSchema = z.object({
   ref: TrackerItemRefSchema,
@@ -39,6 +40,7 @@ export const TrackerItemSchema = z.object({
   assignee: z.string().min(1).max(200).optional(),
   labels: z.array(z.string().min(1).max(200)).max(100),
   updatedAt: ISO_TIME.optional(),
+  parent: TrackerParentSchema.optional(),
 }).strict();
 export type TrackerItem = z.infer<typeof TrackerItemSchema>;
 
@@ -98,6 +100,7 @@ export interface TrackerAskedItem {
   change?: { id: string; act: { kind: "label" | "assignee"; value: string } } | undefined;
   /** Other spellings of the item's id (a Jira issue has a key and a numeric id). */
   alternateIds?: readonly string[] | undefined;
+  parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } | undefined;
 }
 
 /** The fixed codes a failing read is recorded under (`INTAKE_SOURCE_ERROR_WORDS` says them in words). Never the tracker's own words. */
