@@ -48,8 +48,8 @@ describe("the nightly re-reflection", () => {
     w.revert("task-a", hoursAgo(3));
     w.revert("task-z", hoursAgo(3), "api");
     const lessonStore = new InMemoryLessonStore();
-    await lessonStore.setFlags({ workspaceId: ORG_A as never, project: "web" }, { stoppedKinds: { outcome: { at: 1 } } });
-    const { deps, sent } = jobDeps(w, { maintain: { store: lessonStore } as never });
+    await lessonStore.setFlags({ workspaceId: ORG_A, project: "web" }, { stoppedKinds: { outcome: { at: 1 } } });
+    const { deps, sent } = jobDeps(w, { maintain: { store: lessonStore } });
     expect(await lessonsRevertJob(deps, ORG_A, ["web", "api"], 10_000)).toMatchObject({ revertsEnqueued: 1 });
     expect((sent as Array<{ taskId: string }>).map((m) => m.taskId)).toEqual(["task-z"]);
   });

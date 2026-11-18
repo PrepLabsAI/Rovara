@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { LEARNING_SOURCE_KEYS } from "../../../packages/contracts/src/index.js";
 import type { CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
 import { curateDraft } from "../../../packages/broker/src/lessons/curate.js";
-import { createHumanEditExtractor, type HumanEditExtractorDeps } from "../../../packages/broker/src/lessons/human-edit.js";
+import { createHumanEditExtractor, learnFromHumanEdit, type HumanEditExtractorDeps } from "../../../packages/broker/src/lessons/human-edit.js";
 import type { HumanEditInput } from "../../../packages/broker/src/lessons/capture-types.js";
 import { setLearningSourcePause, SOURCE_KINDS } from "../../../packages/broker/src/lessons/learning-sources.js";
 import { ALL_PAUSABLE_KINDS, pausedKindsFor, pausedKindsOfFlags } from "../../../packages/broker/src/lessons/paused-kinds.js";
@@ -291,6 +291,21 @@ describe("the human-edit extractor", () => {
     w.clock.advance(1000);
     expect(await w.extractor.extract(input())).toEqual({ candidates: 1 });
     expect(w.model.calls).toHaveLength(1);
+  });
+});
+
+describe("the human-edit job", () => {
+  it("edits stopped: the code host's compare is never read (run is not called); not stopped: it is", async () => {
+    const store = new InMemoryLessonStore();
+    let ran = 0;
+    const deps = { run: async () => { ran += 1; return "handed_on" as const; }, settings: settings({ mode: "On" }), store };
+    const job = { repo: { host: "github", id: "1", fullName: "acme/api", isPrivate: true, workspaceId: WS, project: PROJECT }, project: PROJECT, taskId: "task-1", pullRequest: { number: 7, url: LINK }, candidateHeadSha: "a".repeat(40), headSha: "b".repeat(40) };
+    await store.setFlags(KEY, { stoppedKinds: { human_edit: { at: 1 } } });
+    expect(await learnFromHumanEdit(deps, job)).toEqual({ status: "off", retry: false });
+    expect(ran).toBe(0);
+    await store.setFlags(KEY, {});
+    expect(await learnFromHumanEdit(deps, job)).toMatchObject({ status: "reflected" });
+    expect(ran).toBe(1);
   });
 });
 
