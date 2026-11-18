@@ -39,8 +39,10 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   await redeemChannelLinkCode({ store, orgId: company, now: Date.now }, PERSON, code.code);
   const calls: Array<{ caller: unknown; input: Record<string, unknown> }> = [];
   const answerWith: { value: ChatThreadInputResult | Error } = { value: { outcome: "captured", notice: "note_saved" } };
+  const decisions: unknown[] = [];
   const entry: CoreTaskEntry = {
     route: vi.fn(async () => undefined),
+    chatDecision: vi.fn(async (caller: CoreEntryCaller) => { decisions.push(caller); return { outcome: "decided" as const }; }),
     ...(options.entry === "no-thread-input" ? {} : {
       threadInput: vi.fn(async (caller: CoreEntryCaller, input: ChatThreadInput) => {
         calls.push({ caller, input: { ...input } });
@@ -64,7 +66,12 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   const note = (extra: Record<string, unknown> = {}) => handler({
     source: "agentx.slack-ingress", action: "thread-note", taskId: TASK, userId: USER, thread, eventId: "EvNote0001", messageTs: "1700000001.000100", text: "Also cover the 404 case.", ...extra,
   });
-  return { ...h, handler, entry, calls, answerWith, note, store, workspaces };
+  /** A core plan press (the interactivity Lambda's invoke), APPROVE in this thread. */
+  const press = (actorTenant = SLACK_TEAM) => handler({ source: "agentx.slack-ingress", action: "core-plan-press", press: {
+    conversation: { channel: SLACK, tenant: SLACK_TEAM, space: SLACK_CHANNEL, thread: thread.threadTs }, actor: { channel: SLACK, tenant: actorTenant, userId: USER },
+    eventId: "EvPress0001", requestId: randomUUID(), expectedRevision: 1, artifactDigest: "c".repeat(64), decision: "APPROVE", reason: "",
+  } });
+  return { ...h, handler, entry, calls, answerWith, note, press, decisions, store, workspaces };
 }
 
 describe("DEC 254zzz95: the install team of a NAMED company runs its thread follow-ups as that company", () => {
@@ -77,18 +84,39 @@ describe("DEC 254zzz95: the install team of a NAMED company runs its thread foll
     expect(w.calls[0]!.caller).toMatchObject({ developerId: PERSON });
   });
 
+  it("a core plan press in the install team's thread reaches the core's decision as the linked person", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.press();
+    expect(result.statusCode, result.body).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ status: "decided" });
+    expect(w.decisions).toEqual([expect.objectContaining({ developerId: PERSON })]);
+  });
+
+  it("a core plan press whose actor names another workspace is not switched, and is refused before the core", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.press("T0ELSEWHERE");
+    expect(JSON.parse(result.body)).toEqual({ status: "refused", reason: "not_allowed" });
+    expect(w.decisions).toEqual([]);
+  });
+
   it("an install team whose company cannot be read answers a retryable error and reaches nothing (never the legacy view's guess)", async () => {
     const w = await world({ installTeam: true });
     w.workspaces.requireCompany = async () => { throw new Error("refused"); };
     const result = await w.note({ mention: true });
     expect(result.statusCode).toBe(503);
     expect(w.calls).toEqual([]);
+    expect((await w.press()).statusCode).toBe(503);
+    expect(w.decisions).toEqual([]);
   });
 
   it("the built-in company's install team keeps the legacy view: the core's input is never reached as a linked person", async () => {
     const w = await world({ installTeam: true, company: IMPLICIT_COMPANY_ID });
     await w.note({ mention: true });
     expect(w.calls.filter((call) => (call.caller as { developerId?: string }).developerId === PERSON)).toEqual([]);
+    // The legacy view did run: a core press there is decided as the Slack account's own (legacy) caller, never the linked person.
+    expect((await w.press()).statusCode).toBe(200);
+    expect(w.decisions).toHaveLength(1);
+    expect(w.decisions).not.toEqual([expect.objectContaining({ developerId: PERSON })]);
   });
 });
 

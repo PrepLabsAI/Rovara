@@ -6461,13 +6461,22 @@ async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperT
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
 }
 
-/** The Slack team of a Slack Lambda direct invoke (`source: agentx.slack-ingress`, never an HTTP request) that names a thread; undefined for anything else. */
+/**
+ * The Slack team of a Slack Lambda direct invoke (`source: agentx.slack-ingress`, never an HTTP request): its thread's team, or a core plan press's conversation tenant when the
+ * press's actor names the same tenant (slackCorePress refuses any other press). Undefined for anything else.
+ */
 function slackIngressThreadTeam(event: unknown): string | undefined {
   if (event === null || typeof event !== "object" || Array.isArray(event)) return undefined;
-  const value = event as { source?: unknown; requestContext?: unknown; thread?: unknown };
-  if (value.source !== "agentx.slack-ingress" || value.requestContext !== undefined || value.thread === null || typeof value.thread !== "object") return undefined;
-  const team = (value.thread as { teamId?: unknown }).teamId;
-  return typeof team === "string" ? team : undefined;
+  const value = event as { source?: unknown; requestContext?: unknown; thread?: unknown; press?: unknown };
+  if (value.source !== "agentx.slack-ingress" || value.requestContext !== undefined) return undefined;
+  if (value.thread !== null && typeof value.thread === "object") {
+    const team = (value.thread as { teamId?: unknown }).teamId;
+    return typeof team === "string" ? team : undefined;
+  }
+  if (value.press === null || typeof value.press !== "object") return undefined;
+  const press = value.press as { conversation?: { tenant?: unknown } | null; actor?: { tenant?: unknown } | null };
+  const tenant = press.conversation?.tenant;
+  return typeof tenant === "string" && press.actor?.tenant === tenant ? tenant : undefined;
 }
 
 /**
