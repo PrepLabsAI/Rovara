@@ -75,7 +75,7 @@ export interface KnowledgeApiOptions {
    * Authenticates a request that carries a script token: throws the token refusals (fixed words), or answers who it is. Absent: a script token is refused (script tokens are not served on this install).
    */
   authenticateToken?: ((request: KnowledgeRequest) => Promise<KnowledgeTokenCaller>) | undefined;
-  /** The people to tell, once a day, that one person's tools were served an unusual amount (the company's owners and admins now, as the ids notices are addressed by). Absent or a throw: the audit record alone says it. */
+  /** The people to tell, once a day, that one person's tools were served an unusual amount (the company's owners now, as the ids notices are addressed by). Absent or a throw: the audit record alone says it. */
   adminsOf?: ((companyId: OrgId) => Promise<readonly string[]>) | undefined;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
