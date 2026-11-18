@@ -213,6 +213,8 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   if (listDirectoryAtCommit !== undefined) scoped.listDirectoryAtCommit = async (url, path, commit, scope, dirOptions) => listDirectoryAtCommit(url, path, commit, await companyScope(url, scope), dirOptions);
   const listCommitActivity = client.listCommitActivity?.bind(client);
   if (listCommitActivity !== undefined) scoped.listCommitActivity = async (url, commit, scope, activityOptions) => listCommitActivity(url, commit, await companyScope(url, scope), activityOptions);
+  const listRecentCommits = client.listRecentCommits?.bind(client);
+  if (listRecentCommits !== undefined) scoped.listRecentCommits = async (url, branch, max, scope, beforeRequest) => listRecentCommits(url, branch, max, await companyScope(url, scope), beforeRequest);
   const fileDetailsError = client.fileDetailsError?.bind(client);
   if (fileDetailsError !== undefined) scoped.fileDetailsError = (error) => fileDetailsError(error);
   const getPullRequestFileRevisions = client.getPullRequestFileRevisions?.bind(client);

@@ -163,6 +163,11 @@ export interface GitHubCodeHostProvider {
   getCompareChanges?(repositoryUrl: string, baseSha: string, headSha: string, scope: GitHubTokenScope, beforePage?: () => void): Promise<{ files: Array<GitHubPullRequestChangedFile & { previous_filename?: string }>; complete: boolean }>;
   /** Optional (M7 slice 2, decision 252b): the latest state of each deployment of a commit, read only and bounded, with a token that asks for `deployments: read`. A client without it leaves the adapter without `deploymentStatuses`. */
   getDeploymentStatuses?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ statuses: Array<{ environment: string; state: "success" | "failure" | "in_progress" }>; complete: boolean }>;
+  /**
+   * Optional (lane L4-LM1b, revert detection): the newest commits of a branch with what a revert check needs, from ONE request, with a contents-read token. `isWebFlow` is true only for the host's own web committer, decided from
+   * its account id. An entry GitHub gave without a usable sha is left out and `complete` is false. A client without it leaves the adapter without `recentCommits`.
+   */
+  listRecentCommits?(repositoryUrl: string, branch: string, max: number, scope: GitHubTokenScope, beforeRequest?: () => void): Promise<{ commits: Array<{ sha: string; message: string; parents: number; verified: boolean; author?: { login: string; id?: string; isBot: boolean }; committer?: { login: string; id?: string; isWebFlow: boolean }; }>; complete: boolean }>;
   getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string>;
   getPullRequestMergeObservation(repositoryUrl: string, number: number, budget: ReadBudget, scope: GitHubTokenScope): Promise<GitHubPullRequestDetails & { headTreeSha: string }>;
   installationForRepository(owner: string, name: string, options?: { fresh?: boolean }): Promise<{ installationId: number } | undefined>;

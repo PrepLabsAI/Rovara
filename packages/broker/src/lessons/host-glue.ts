@@ -1,4 +1,5 @@
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { markLessonsUnderQuestion } from "./revert-question.js";
 // The parts of joining the lessons library to the task flow that every host does the same way, whether one person on a laptop (`local/app/lessons.ts`) or a company on a deployed install
 // (`core-host/lessons.ts`). Each is built for ONE company: a task, a load record or a queue message of another company is not this company's, and is ignored.
 //   loading     at the dispatch of a step: the lessons that fit the task, the load record (so the worker's report is applied to this stage only) and which tasks used which lessons;
@@ -67,6 +68,9 @@ export interface LessonsHostInput {
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
+/** What a revert says of its change: the commit that reverted it and the files it touched (undefined: not known). */
+export interface RevertedChange { via: string; files: readonly string[] | undefined }
+
 export interface LessonsHost {
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }): Promise<{ learnedContext?: LearnedContext }>;
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
@@ -79,8 +83,11 @@ export interface LessonsHost {
   reflectOne(body: string, visibility?: ReflectWorkerDeps["visibility"], deadlineMs?: number): Promise<ReflectOutcome>;
   /** The daily upkeep of these projects. */
   nightly(projects: readonly string[]): Promise<void>;
-  /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
-  noteReverted(taskId: string): Promise<void>;
+  /**
+   * A pull request of the task was reverted: the task is reflected on again, as a reverted one. With `revert` (the reverting commit and the files it touched, undefined when they could not be read whole) the lessons the task loaded
+   * are put UNDER QUESTION where a touched file is in the lesson's own code area (`revert-question.ts`): evidence only, no lesson is changed or scored.
+   */
+  noteReverted(taskId: string, revert?: RevertedChange): Promise<void>;
   /**
    * Learn on send-back: a person just sent this task back with their words. One message of ids (`sent_back`, its round) is queued, so the correction is reflected on while the task is still open. Nothing is queued
    * while lessons are off for the company, where the project's mode does not reflect, for another company's task, a closed task, a send-back with no words of the person's (for a findings answer: no per-finding notes), or past
@@ -261,13 +268,17 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     await lessonsRepoFilePublishJob(repoFile, companyId, projects, 120_000, day).catch(() => undefined);
   }
 
-  async function noteReverted(taskId: string): Promise<void> {
+  async function noteReverted(taskId: string, revert?: RevertedChange): Promise<void> {
     if (!enabled()) return;
     const task = await ownTask(taskId).catch(() => undefined);
     if (task === undefined) return;
     // Phase 0 (measure only): the revert is one row of the project's clean-merge count (`measure.ts`), under the same rule as the merged row (the project's mode reflects); the sink never throws.
     try {
-      if (modeAllows((await resolveLearning(runtime.settings, companyId, task.project)).mode, "reflect")) await runtime.load.measure?.reverted({ workspaceId: companyId, project: task.project, taskId: task.taskId, at: now() });
+      if (modeAllows((await resolveLearning(runtime.settings, companyId, task.project)).mode, "reflect")) {
+        await runtime.load.measure?.reverted({ workspaceId: companyId, project: task.project, taskId: task.taskId, at: now() });
+        // The lessons the task loaded go "under question" only where the revert's files are in the lesson's own code area: a separate evidence row, no lesson is changed or scored (`revert-question.ts`).
+        if (revert !== undefined) await markLessonsUnderQuestion({ lessons: runtime.store, docs: flow.store, companyId, now }, { project: task.project, taskId: task.taskId, via: revert.via, files: revert.files });
+      }
     } catch { /* information only */ }
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }

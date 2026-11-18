@@ -463,6 +463,28 @@ export const DeploymentStatusReadSchema = z.object({
 }).strict();
 export type DeploymentStatusRead = z.infer<typeof DeploymentStatusReadSchema>;
 
+/** The most commits one `recentCommits` read answers, and the most characters of a commit message it keeps (a revert's subject and its "This reverts commit" line are at the top). */
+export const RECENT_COMMITS_MAX = 100;
+export const RECENT_COMMIT_MESSAGE_MAX = 4_000;
+/**
+ * One commit of a branch as the host shows it (lane L4-LM1b, revert detection): enough to tell a git revert and to prove who stands behind it. `parents` is the NUMBER of parents (a merge commit never counts as a revert).
+ * `webFlow` is the host's own web committer (squash and web edits), set by the adapter from the host's account id and never from a login or the message. The message is untrusted text.
+ */
+export const RecentCommitSchema = z.object({
+  sha: RevisionSchema,
+  message: z.string().max(RECENT_COMMIT_MESSAGE_MAX),
+  parents: z.number().int().min(0).max(100),
+  verified: z.boolean(),
+  author: HostAccountSchema.optional(),
+  committer: HostAccountSchema.optional(),
+  webFlow: z.boolean().optional(),
+  authorIsBot: z.boolean().optional(),
+}).strict();
+export type RecentCommit = z.infer<typeof RecentCommitSchema>;
+/** What `CodeHost.recentCommits` answers: the newest commits of one branch, newest first, and whether that is every commit asked for (`complete` false when the host cut the list or an entry was unusable). */
+export const RecentCommitsReadSchema = z.object({ commits: z.array(RecentCommitSchema).max(RECENT_COMMITS_MAX), complete: z.boolean() }).strict();
+export type RecentCommitsRead = z.infer<typeof RecentCommitsReadSchema>;
+
 const EventBase = { eventId: ExternalIdSchema, host: PluginKindSchema, occurredAt: ISO_TIME.optional() } as const;
 /**
  * What happened at the host, in neutral words. Every adapter maps its own webhooks (or its poller's findings) to these. `eventId` is the host's delivery id
@@ -596,6 +618,11 @@ export interface CodeHost {
    * hears of deploys by event only; a host that cannot answer THROWS (a refused read is never "no deployments").
    */
   deploymentStatuses?(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead>;
+  /**
+   * Lane L4-LM1b (revert detection, add-only, optional, read-only): the newest `max` (1 to RECENT_COMMITS_MAX) commits of `branch`, newest first, from ONE request, with what a revert check needs (message, parent count, verification, author and committer
+   * accounts). `budget`, when given, is called before the request. A host that cannot answer THROWS (a refused read is never "no commits"). A host without it is never watched for reverts by polling.
+   */
+  recentCommits?(repository: RepositoryRef, branch: string, scope: HostScope, options: { max: number }, budget?: PageBudget): Promise<RecentCommitsRead>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.

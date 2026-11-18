@@ -318,7 +318,7 @@ describe("phase 0: the measurement never holds a load, and its remaining guards"
     const rows = [fit(B, "payments"), fit(A, "billing"), merge(B, "payments", "task-b"), merge(A, "billing", "task-c")];
     const store = { query: async () => ({ items: rows as never }) };
     const read = await readLessonMeasure(store, { companyId: A, project: "payments", now: T });
-    expect(read).toMatchObject({ loads: 0, cleanMerge: { merged: 0 }, revertDetection: "not_wired" });
+    expect(read).toMatchObject({ loads: 0, cleanMerge: { merged: 0 }, revertDetection: "wired" });
     expect(read.unreadable).toBeGreaterThanOrEqual(2);
   });
 });

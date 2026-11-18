@@ -37,7 +37,8 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
 import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { createLessonsHost, pumpReflectQueue } from "../../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
+import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
@@ -108,10 +109,10 @@ export interface LocalLessons {
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
   /** `/rovara lesson <n> wrong|right|retire`, from a writer's comment on a pull request of the task. */
   command: PrCommandWorld["lesson"] extends (input: infer I) => Promise<LocalActionResult> ? (input: I & { taskId: string }) => Promise<LocalActionResult> : never;
-  /** One pass of the app's timer: the reflection queue and, once a day, the nightly upkeep. Never throws. */
+  /** One pass of the app's timer: the reflection queue, every five minutes the revert watch, and, once a day, the nightly upkeep. Never throws. */
   tick(): Promise<void>;
   /** A pull request of the task was reverted: the task is reflected on again, as a reverted one. */
-  noteReverted(taskId: string): Promise<void>;
+  noteReverted(taskId: string, revert?: RevertedChange): Promise<void>;
   /** The owner sent the task back with their words: its correction is queued for reflection now (learn on send-back; `LessonsHost.noteSentBack`). */
   noteSentBack(taskId: string): Promise<void>;
 }
@@ -391,6 +392,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   // ---- the timer's pass
 
+  // What happened after merge: the company's merged Rovara pull requests are watched for a revert on the default branch every five minutes (one read of the newest commits per repository; a host that cannot list commits is skipped).
+  const revertWatch = createLessonsRevertWatch({ store: flow.store, registry, companyId, host, projectsOf: () => flow.projects, now, log: (event, fields) => log(event, fields) });
+  const REVERT_WATCH_EVERY_MS = 5 * 60_000;
+  let lastRevertWatch = 0;
   let lastNightly = 0;
   let running = false;
   async function tick(): Promise<void> {
@@ -402,6 +407,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
         lastNightly = now();
         await nightly().catch((error: unknown) => log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }));
       }
+      if (now() - lastRevertWatch >= REVERT_WATCH_EVERY_MS) {
+        lastRevertWatch = now();
+        await revertWatch.pass({ budgetMs: 10_000 }).catch((error: unknown) => log("revert_watch_failed", { error: error instanceof Error ? error.name : "unknown" }));
+      }
     } finally {
       running = false;
     }
@@ -411,7 +420,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     await host.nightly(await projectNames());
   }
 
-  const noteReverted: LocalLessons["noteReverted"] = (taskId) => host.noteReverted(taskId);
+  const noteReverted: LocalLessons["noteReverted"] = (taskId, revert) => host.noteReverted(taskId, revert);
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
   return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteSentBack };
