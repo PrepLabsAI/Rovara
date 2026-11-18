@@ -30,6 +30,8 @@ import { createHostedSetupRepair, createHostedSetupRepairStarter, type HostedSet
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
 import { upkeepSettingsKey } from "../../packages/broker/src/core/upkeep/keys.js";
 import { upkeepIsOn } from "../../packages/broker/src/core/upkeep/settings.js";
+import { upkeepRoomCentsOf, type UpkeepCapReader } from "../../packages/broker/src/core/upkeep/cap.js";
+import { capAnswer, capReader, type CapKind } from "../support/upkeep-cap-fixtures.js";
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { effectiveSystemRunsGate, systemRunsConsentKey, type SystemRunsGate } from "../../packages/broker/src/core/system-runs/consent.js";
 import { fixedAutomationSwitch } from "../../packages/broker/src/core/automation/switch.js";
@@ -1089,9 +1091,9 @@ describe("L4-SR2: only a starter that declares it starts a repair draft (closes 
 
 // ---- L4-SR2 hosted: the real access rule, the real starter, the real gate (ceiling AND consent), the real upkeep switch row, the progress pass
 
-interface Hosted { gate: { enabled(): Promise<boolean> }; w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean } }
+interface Hosted { gate: { enabled(): Promise<boolean> }; w: World; hosted: HostedSetupRepair; ceiling: { on: boolean }; room: { cents: number | undefined | "throw" }; paused: Array<[string, string]>; admission: Admission; configured: { on: boolean }; reader: ReturnType<typeof capReader> }
 
-async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce?: boolean; room?: number | undefined; reader?: boolean; world?: World } = {}): Promise<Hosted> {
+async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce?: boolean; room?: number | undefined; reader?: boolean; world?: World; cap?: CapKind; capWith?: UpkeepCapReader } = {}): Promise<Hosted> {
   const w = options.world ?? await world();
   const orgId = w.h.deps.companyId;
   const ceiling = { on: true };
@@ -1101,6 +1103,10 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
   if (options.consent !== false) await w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: true } });
   if (options.upkeep !== false) await w.h.store.put({ item: { ...upkeepSettingsKey({ orgId, project: "payments" }), entityType: "UPKEEP_SETTINGS", orgId, project: "payments", enabled: true, changedAt: "2026-11-17T08:00:00.000Z" } });
   const gate = effectiveSystemRunsGate({ ceiling: () => ceiling.on, store: w.h.store, companyId: orgId });
+  // L4-SR2b: with `cap`, the room is the gateway's own answer through the production reader function (the SAME reader as the night's), never a number the test hands over.
+  const reader = options.cap === undefined ? undefined : capReader(options.cap, () => w.h.clock.now, orgId);
+  const capSource: UpkeepCapReader | undefined = options.capWith ?? reader;
+  const capRoom = options.cap === undefined && options.capWith === undefined ? undefined : (project: string): Promise<number | undefined> => upkeepRoomCentsOf(capSource, project, w.h.clock.now, orgId);
   // The REAL hosted access rule over the same store: the system owner is accepted for a setup run only with its marks.
   w.h.deps.access = hostedTaskAccess({
     companyId: orgId, storage: async () => w.h.store, systemRunsOn: () => gate.enabled(), upkeepOn: (project) => upkeepIsOn({ store: w.h.store, companyId: orgId }, project),
@@ -1111,11 +1117,13 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
   const hosted = createHostedSetupRepair({
     flow: w.h.deps, companyId: orgId, now: () => w.h.clock.now, gate, admission, modelAccessConfigured: () => configured.on,
     readFile: async (repository, path, commit) => (await w.host.fileAtRevision({ url: repository.url }, path, commit, { orgId }, { maxBytes: 262_144 })) ?? undefined,
-    ...(options.reader === false ? {} : { room: async () => { if (room.cents === "throw") throw new Error("gateway down"); return room.cents; } }),
+    ...(options.reader === false ? {} : { room: capRoom ?? (async () => { if (room.cents === "throw") throw new Error("gateway down"); return room.cents; }) }),
     onUpkeepPaused: async (scope, reason) => { paused.push([scope.project, reason]); },
   });
   w.h.deps.afterSetupBroken = hosted.hook;
-  return { gate, w, hosted, ceiling, room, paused, admission, configured };
+  // L4-SR2b: what the broker root puts on the flow beside the hook (the model token reads the same room at every mint).
+  if (capRoom !== undefined) w.h.deps.upkeepRoomCents = capRoom;
+  return { gate, w, hosted, ceiling, room, paused, admission, configured, reader };
 }
 const taskRow = async (h: Hosted, taskId: string) => (await h.w.h.store.get(taskKey(taskId)))!;
 
@@ -1337,6 +1345,7 @@ describe("L4-SR2: the model token for a repair draft (spend is the project's, ki
     h.w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
     // What the hosted runtime always puts on its flow (hostedSystemRunsFor): the effective gate, which the describer reads at every mint.
     h.w.h.deps.systemRuns = h.gate;
+    h.w.h.deps.upkeepRoomCents = async () => 2400;
     expect(await describeRepair(h, row.taskId!)).toMatchObject({ origin: "nightly", payer: { kind: "project", project: "payments" }, step: "repair_draft", project: "payments", companyId: orgId });
     // Each lock is read at every mint: the company's consent withdrawn, the ceiling off, the project's upkeep off, or no gate on the flow at all: no token.
     await h.w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled: false } });
@@ -1453,5 +1462,163 @@ describe("L4-SR2: review fixes (a start whose answer is unknown, the stale give-
     expect(root).toContain("flow.deps.afterSetupBroken = repair.hook");
     expect(root).toContain("repairs: repair }");
     expect(root).toMatch(/upkeepOn: \(project\) => upkeepIsOn\(\{ store: registry\.require\("storage"\), companyId \}, project\)/u);
+  });
+});
+
+// ---- L4-SR2b: the project's remaining upkeep room is the GATEWAY's answer (the same reader as the night's cap signal), read fresh at the start and at every model token's mint
+
+describe("L4-SR2b: the repair draft's room comes from the gateway's own cap read", () => {
+  const orgOf = (h: Hosted): OrgId => h.w.h.deps.companyId;
+  const fixed = (h: () => Hosted, over: Record<string, unknown>): UpkeepCapReader & { calls: string[] } => {
+    const calls: string[] = [];
+    return { calls, read: async (project) => { calls.push(project); const hosted = h(); return capAnswer(project, hosted.w.h.clock.now, over, orgOf(hosted)); } };
+  };
+  async function nothingStarted(h: Hosted, recheckKey: string): Promise<void> {
+    const orgId = orgOf(h);
+    expect(await repairsOf(h.w.h.store, orgId, "payments")).toEqual([]);
+    expect(h.w.h.audit.filter((event) => event.action === "system_run.requested")).toEqual([]);
+    expect(await h.w.h.store.get(repairCurrentKey(orgId, "payments"))).toBeUndefined();
+    expect(await h.w.h.store.get(repairRevisionKey(orgId, "payments", 1))).toBeUndefined();
+    expect(await h.w.h.store.get(setupAgentKey(orgId, "payments"))).toBeUndefined();
+    expect(h.admission.enforcesCost).toBe(true);
+    expect(await readRepairView(h.hosted.depsFor("payments"), "payments")).toMatchObject({ state: "no_fix", actions: [{ id: "fix_setup" }, { id: "edit_commands" }] });
+    expect(recheckKey).toBeTruthy();
+  }
+
+  // MUTANT: the draft starts without reading the gateway (or reads it and ignores a good answer): the room present case no longer starts a draft.
+  it("room present (the gateway says $24.00 of $25.00 is free): the draft starts, and the reader was asked for THIS project", async () => {
+    const h = await hostedRig({ cap: "enforced" });
+    await breakSetup(h.w);
+    const [row] = await repairsOf(h.w.h.store, orgOf(h), "payments");
+    expect(row).toMatchObject({ state: "drafting", budgetCents: 400 });
+    expect(h.reader!.calls).toEqual(["payments"]);
+  });
+
+  // MUTANT: `>=` becomes `>` in the start's room test, or the floor becomes a round (399 cents, 399.99 cents).
+  it.each([
+    ["exactly the run's whole budget (400 cents) starts", { limitMicros: 5_000_000, spentMicros: 1_000_000 }, true],
+    ["one cent short (399) does not", { limitMicros: 5_000_000, spentMicros: 1_010_000 }, false],
+    ["a fraction of a cent over the budget floors to it and starts (400.99 -> 400)", { limitMicros: 5_000_000, spentMicros: 999_999 }, true],
+    ["a fraction below the budget floors under it and does not (399.99 -> 399)", { limitMicros: 5_000_000, spentMicros: 1_000_001 }, false],
+  ])("the room is floor((limit - spent) / 10,000) whole cents against the run's $4 budget: %s", async (_name, over, starts) => {
+    const holder: { h?: Hosted } = {};
+    const reader = fixed(() => holder.h!, over);
+    holder.h = await hostedRig({ capWith: reader });
+    await breakSetup(holder.h.w);
+    expect(await repairsOf(holder.h.w.h.store, orgOf(holder.h), "payments")).toHaveLength(starts ? 1 : 0);
+  });
+
+  // MUTANT: the zero/negative/unknown guard is dropped (a used-up cap, a cap over its limit, a $0 cap or a gateway that cannot answer counts as room).
+  it.each<[string, CapKind | { limitMicros: number; spentMicros: number }]>([
+    ["the cap is $0", "no_budget"],
+    ["the cap is used up exactly", "used_up"],
+    ["the cap is overspent (negative room)", { limitMicros: 1_000_000, spentMicros: 3_000_000 }],
+    ["the gateway cannot be reached", "throws"],
+    ["no gateway reader exists", "none"],
+    ["the answer is for another month (stale)", "stale"],
+    ["the answer is for another project", "other_project"],
+    ["the answer is for another company", "other_company"],
+    ["the answer says the cap is not enforced", "not_enforced"],
+    ["the answer is not the contract", "garbage"],
+    ["the answer has an extra field", "extra_field"],
+  ])("no automatic draft and nothing written when %s", async (_name, how) => {
+    const holder: { h?: Hosted } = {};
+    const h = await hostedRig(typeof how === "string" ? { cap: how } : { capWith: fixed(() => holder.h!, how) });
+    holder.h = h;
+    const { recheck } = await breakSetup(h.w);
+    await nothingStarted(h, recheck.key);
+    expect(await startRepairDraft(h.hosted.depsFor("payments"), "payments", recheck.key)).toMatchObject({ status: "skipped", why: "no_room" });
+  });
+
+  // MUTANT: the answer is kept (a cache): a later, better answer is never seen, or a later worse one is ignored.
+  it("every start reads the gateway again (no cache): no room now, room later starts the draft; room then gone again starts nothing more", async () => {
+    const h = await hostedRig({ cap: "used_up" });
+    const reader = h.reader!;
+    const { recheck } = await breakSetup(h.w);
+    expect(await repairsOf(h.w.h.store, orgOf(h), "payments")).toEqual([]);
+    const asked = reader.calls.length;
+    expect(asked).toBeGreaterThan(0);
+    reader.kind = "enforced";
+    expect(await startRepairDraft(h.hosted.depsFor("payments"), "payments", recheck.key)).toMatchObject({ status: "started" });
+    expect(reader.calls.length).toBe(asked + 1);
+  });
+
+  // MUTANT: another company's answer (a reader built for A asked by B) is accepted for B.
+  it("two companies: the answer must name THIS company; a reader that answers for another company opens nothing, the company's own reader does", async () => {
+    const shared = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES, nowSeconds: () => Math.floor(Date.parse("2026-11-09T10:00:00.000Z") / 1_000) });
+    const backend = (): { store: DocumentStore; queues: MemoryQueueService } => ({ store: shared, queues: new MemoryQueueService({ now: () => Date.parse("2026-11-09T10:00:00.000Z") }) });
+    const a = await world({ backend });
+    const b = await world({ backend, companyId: COMPANY_B });
+    const hostedA = await hostedRig({ world: a, cap: "enforced" });
+    // B is fully open on every lock, but its reader answers for A's company only.
+    const foreign: UpkeepCapReader = { read: async (project) => capAnswer(project, b.h.clock.now, {}, orgOf(hostedA)) };
+    const hostedB = await hostedRig({ world: b, capWith: foreign });
+    await breakSetup(b);
+    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
+    expect(b.h.audit.filter((event) => event.action === "system_run.requested")).toEqual([]);
+    await breakSetup(a);
+    expect(await repairsOf(shared, orgOf(hostedA), "payments")).toHaveLength(1);
+    expect(await repairsOf(shared, COMPANY_B, "payments")).toEqual([]);
+    expect(hostedB.hosted).toBeDefined();
+  });
+
+  // MUTANT: the mint skips the room read, reads it only once per draft, or treats zero, negative, an unreadable answer or an absent reader as room.
+  it("before each AI step: the repair draft's model token is minted only while the gateway still says there is room (read at EVERY mint: zero, negative, unreadable, stale, foreign or absent = no token)", async () => {
+    const h = await hostedRig({ cap: "enforced" });
+    const reader = h.reader!;
+    await breakSetup(h.w);
+    const row = (await repairsOf(h.w.h.store, orgOf(h), "payments"))[0]!;
+    h.w.h.deps.modelAccess = { route: async () => ({ alias: "claude-sonnet-4-5", api: "anthropic-messages", catalog: "claude-sonnet-4-5" }) };
+    h.w.h.deps.systemRuns = h.gate;
+    const mint = async () => {
+      const task = (await h.w.h.store.get(taskKey(row.taskId!)))!;
+      const workspaceId = task["workspaceId"] as string;
+      const workspace = (await h.w.h.store.get(workspaceKey(orgOf(h), workspaceId)))!;
+      const scope = { workspaceId, operationId: workspace["activeOperationId"] as string, fence: 1 };
+      const operation = (await h.w.h.store.get(operationKey(orgOf(h), workspaceId, scope.operationId)))!;
+      await h.w.h.store.put({ item: { ...operation, kind: "task", status: "RUNNING", dispatch: { kind: "task", payload: {} } } });
+      return createTaskTokenDescriber(h.w.h.deps).describe(scope);
+    };
+    const before = reader.calls.length;
+    expect(await mint()).toMatchObject({ origin: "nightly", step: "repair_draft", payer: { kind: "project", project: "payments" } });
+    expect(reader.calls.length).toBe(before + 1);
+    expect(await mint()).toMatchObject({ step: "repair_draft" });
+    expect(reader.calls.length).toBe(before + 2);
+    for (const kind of ["used_up", "no_budget", "throws", "stale", "other_company", "other_project", "garbage", "extra_field", "not_enforced"] as const) {
+      reader.kind = kind;
+      expect(await mint(), kind).toBeUndefined();
+    }
+    reader.kind = "enforced";
+    expect(await mint()).toMatchObject({ step: "repair_draft" });
+    // Overspent (negative room) and a fraction of a cent left (floors to 0) are not room either.
+    const holder = { over: { limitMicros: 1_000_000, spentMicros: 2_000_000 } as Record<string, unknown> };
+    reader.read = async (project) => capAnswer(project, h.w.h.clock.now, holder.over, orgOf(h));
+    expect(await mint()).toBeUndefined();
+    holder.over = { limitMicros: 1_000_000, spentMicros: 995_000 };
+    expect(await mint()).toBeUndefined();
+    holder.over = { limitMicros: 1_000_000, spentMicros: 990_000 };
+    expect(await mint()).toMatchObject({ step: "repair_draft" });
+    // A room reader that itself throws, or answers something that is not a whole number of cents: no token (fail closed).
+    const wired = h.w.h.deps.upkeepRoomCents!;
+    h.w.h.deps.upkeepRoomCents = async () => { throw new Error("reader down"); };
+    expect(await mint()).toBeUndefined();
+    for (const bad of [Number.NaN, 1.5, Number.POSITIVE_INFINITY, "5" as unknown as number]) {
+      h.w.h.deps.upkeepRoomCents = async () => bad;
+      expect(await mint(), String(bad)).toBeUndefined();
+    }
+    h.w.h.deps.upkeepRoomCents = wired;
+    // No room reader on the flow at all (an install that never wired one): no token.
+    delete h.w.h.deps.upkeepRoomCents;
+    expect(await mint()).toBeUndefined();
+  });
+
+  // MUTANT: the production wiring builds the room from anything but the night's cap reader, forgets the flow's mint reader, or keeps a second root input beside the reader.
+  it("the broker root reads the room from the SAME cap reader as the night, fresh, for the start and the mint (a guard on the source, beside the behaviour above)", () => {
+    const root = readFileSync(new URL("../../packages/broker/src/aws/core-engine-root.ts", import.meta.url), "utf8");
+    expect(root).toContain("const upkeepRoom = (project: string): Promise<number | undefined> => upkeepRoomCentsOf(upkeepCapFor(companyId), project, now().getTime(), companyId);");
+    expect(root).toMatch(/\n\s+room: upkeepRoom,\n/u);
+    expect(root).toContain("flow.deps.upkeepRoomCents = upkeepRoom;");
+    expect(root).not.toContain("upkeepRoomCents?:");
+    expect(root).not.toContain("inputs.upkeepRoomCents");
   });
 });
