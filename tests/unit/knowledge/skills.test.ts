@@ -18,6 +18,7 @@ import type { ApproverDirectory } from "../../../packages/broker/src/lessons/por
 import {
   approveSkill, checkSkillText, draftSkillFromLesson, editSkill, listSkills, liveSkillsForStep, provenProcedure, renderSkill, retireSkill, skillOffers, slugOf, stepsOfBody, type SkillDeps,
 } from "../../../packages/broker/src/lessons/skills.js";
+import type { TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { COMPANY, createHarness, definition, type Harness } from "../../support/task-flow-harness.js";
 import { draft, lessonRecord, wideAudience } from "../lessons/lesson-helpers.js";
@@ -178,7 +179,10 @@ describe("the draft is made by code from the lesson's own words", () => {
     const lesson = procedure(w, { provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: ["task-hidden"], measured: false, audience: { kind: "project" } } });
     await put(w, lesson);
     await used(w, lesson.id, 10);
-    const through = (denied: Set<string>): SkillDeps => ({ ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: withLessonAudiences({ read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org, ids) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied })])) }) } });
+    const through = (denied: Set<string>): SkillDeps => {
+      const hidden = withLessonAudiences({ read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) } satisfies TaskVisibilityPort, { read: async (_org, ids) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied })])) });
+      return { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
+    };
     expect((await skillOffers(through(new Set()), KEY)).map((offer) => offer.lessonId)).toEqual([lesson.id]);
     expect(await skillOffers(through(new Set(["bob"])), KEY)).toEqual([]);
   });
