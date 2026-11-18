@@ -3,10 +3,10 @@
 // Who is signed in is read from Slack's verified ID token exactly as before; the hint never reaches `complete`.
 import { describe, expect, it } from "vitest";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
-import { SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, newCompanyInviteCode } from "@agentx/contracts";
 import { slackSignInProvider, slackWorkspaceHint } from "../../packages/broker/src/developer/providers.js";
 import { API, authorizeQuery, fakeSlack, httpEvent, routeFetch, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, T0 } from "../support/developer-fakes.js";
-import { B, sharedSignInWorld, WEB } from "../support/company-shared-signin-world.js";
+import { B, SECRET, sharedSignInWorld, WEB } from "../support/company-shared-signin-world.js";
 import { githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, fakeGithub } from "../support/fake-github.js";
 
@@ -190,6 +190,21 @@ describe("what the web app is told: the offer and the person's own workspace", (
     expect((await w.access(installSession.access)).body).toMatchObject({ slackTeamId: TEAM });
     const oidcSession = await w.signIn("owner");
     expect((await w.access(oidcSession.access)).body).not.toHaveProperty("slackTeamId");
+  });
+
+  it("a client's own check on a person's behalf (client secret + developer id) never names the workspace", async () => {
+    const w = world();
+    const first = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    const id = ownerKeyForSubject(SLACK_OIDC_ISSUER, `${OTHER}:U0NEW0001`);
+    const made = newCompanyInviteCode();
+    await w.operator({ kind: "company-invite-create", codeHash: made.codeHash, expiresInHours: 24 });
+    expect((await w.call("POST", "/v1/dev/company", first.access, { name: "Other Co", inviteCode: made.code })).status).toBe(200);
+    const slackSession = await w.signIn("U0NEW0001", { slackTeam: OTHER });
+    expect((await w.access(slackSession.access)).body).toMatchObject({ slackTeamId: OTHER, companyRole: "owner" });
+    const basic = `Basic ${Buffer.from(`web-app:${SECRET}`).toString("base64")}`;
+    const answer = await w.callWith("POST", "/v1/dev/access", basic, { developerId: id });
+    expect(answer.status).toBe(200);
+    expect(answer.body).not.toHaveProperty("slackTeamId");
   });
 
   it("the access check leaves the workspace out when the stored one is not a Slack workspace id", async () => {
