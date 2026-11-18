@@ -28,7 +28,7 @@ export function intakeCandidateOfTrackerEvent(input: { orgId: OrgId; project: st
   const person = event.type === "item.assigned_to_rovara" ? event.assignedBy : event.labelledBy;
   return {
     orgId, project, channel: "tracker", externalRef: externalRef.data,
-    title: item.title, body: item.body,
+    title: item.title, body: item.body, ...(item.parent === undefined ? {} : { parent: item.parent }),
     ...(event.occurredAt === undefined ? {} : { occurredAt: event.occurredAt }),
     eventId: event.eventId,
     act: event.type === "item.assigned_to_rovara" ? { kind: "assignee", value: "rovara" } : { kind: "label", value: event.label },

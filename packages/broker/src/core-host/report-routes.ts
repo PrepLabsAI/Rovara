@@ -144,9 +144,9 @@ export async function routeHostedReport(input: HostedReportInput): Promise<Broke
       try { starter = await input.flow.access.canAct(input.principal, task); } catch { throw unavailable(); }
       if (!manager && !starter) throw agentXError("NOT_FOUND", TASK_FEATURE_NOT_FOUND);
       const existing = await features.taskFeature(taskId);
-      // The starter files a task ONCE (a task with a feature already, whoever or whatever put it there, or filed under no feature on purpose, is moved by a maintainer, owner or admin). A move by a maintainer
-      // is `moved` (the highest rule: a tracker read or an inheritance never replaces it).
-      if (!manager && existing !== undefined) throw agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER);
+      // A starter/plan approver may replace a suggestion, including one confirmed at plan approval.
+      // A deliberate filing is moved by a manager; their `moved` source remains the highest rule.
+      if (!manager && existing !== undefined && existing.source !== "tracker" && existing.source !== "confirmed_at_plan") throw agentXError("FORBIDDEN", TASK_FEATURE_NEEDS_MAINTAINER);
       const source = manager ? "moved" as const : "chosen" as const;
       const set = await features.setTaskFeature({ taskId, project: task.project, featureId: feature, source }, actor);
       const filed = set.record.featureId === null ? null : { id: set.record.featureId, source: set.record.source };

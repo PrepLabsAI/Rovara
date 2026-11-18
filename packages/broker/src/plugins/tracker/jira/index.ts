@@ -11,7 +11,7 @@
 // no such issue) is a `TrackerWriteRefusedError`, so a ticket that cannot be written never fails the task. Jira sends no webhook here: the adapter has no `events`.
 import { createHash } from "node:crypto";
 import {
-  TrackerItemSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
+  TrackerItemSchema, TrackerParentSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
   type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerItem, type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
@@ -55,6 +55,16 @@ const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
 const lower = (value: unknown): string => (typeof value === "string" ? value.toLowerCase() : "");
 const cut = (text: string, max: number): string => [...text].slice(0, max).join("");
+// Jira's project is never a feature suggestion; only a verified epic parent is.
+function epicParent(fields: Record<string, unknown>, site: string) {
+  const parent = rec(fields["parent"]), facts = rec(parent["fields"]), type = rec(facts["issuetype"]);
+  if (type["hierarchyLevel"] !== 1 && str(type["name"])?.toLowerCase() !== "epic") return {};
+  const key = str(parent["key"]);
+  if (key === undefined || !JIRA_KEY.test(key)) return {};
+  const parsed = TrackerParentSchema.safeParse({ kind: "epic", id: `${new URL(site).hostname}/${key}`, title: cut(str(facts["summary"]) ?? "", 200), url: `${site}/browse/${key}` });
+  return parsed.success ? { parent: parsed.data } : {};
+}
+
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "Jira could not be reached just now.");
 const rateLimited = () => agentXError("TOO_MANY_REQUESTS", "Jira asked Rovara to slow down.");
 const refused = (status: number): boolean => status === 401 || status === 403;
@@ -201,7 +211,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
     async readItem(ref: TrackerItemRef, scope: HostScope): Promise<TrackerItem> {
       checkedScope(scope);
       const key = keyOf(ref);
-      const answer = await call(`/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,status,assignee,labels,updated`);
+      const answer = await call(`/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,status,assignee,labels,updated,project,parent`);
       if (answer.status === 404 || refused(answer.status)) throw agentXError("RUNTIME_UNAVAILABLE", "the tracker has no such item");
       if (answer.status !== 200) throw unavailable();
       const issue = rec(answer.body);
@@ -215,6 +225,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
         ...(str(rec(fields["assignee"])["displayName"]) === undefined ? {} : { assignee: cut(str(rec(fields["assignee"])["displayName"])!, 200) }),
         labels: arr(fields["labels"]).filter((label): label is string => typeof label === "string" && label !== "").slice(0, 100).map((label) => cut(label, 200)),
         ...(str(fields["updated"]) === undefined || Number.isNaN(Date.parse(str(fields["updated"])!)) ? {} : { updatedAt: new Date(str(fields["updated"])!).toISOString() }),
+        ...epicParent(fields, site),
       });
     },
 
@@ -290,7 +301,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
         }
         if (clauses.length === 0) return [];
         const jql = `(${clauses.join(" OR ")}) AND statusCategory != Done ORDER BY updated DESC`;
-        const params = new URLSearchParams({ jql, maxResults: String(Math.min(query.limit, 50)), fields: "summary,description,labels,assignee,reporter", expand: "changelog" });
+        const params = new URLSearchParams({ jql, maxResults: String(Math.min(query.limit, 50)), fields: "summary,description,labels,assignee,reporter,project,parent", expand: "changelog" });
         const answer = await call(`/rest/api/3/search/jql?${params.toString()}`, { signal: query.signal });
         if (refused(answer.status)) throw new TrackerSearchError("CONNECTION_REFUSED");
         if (answer.status !== 200) throw new TrackerSearchError("SEARCH_FAILED");
@@ -312,6 +323,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
             // The change that made the label-add, as Jira's own change log says: claimed once per company by the engine, so a project watching the same label does not start it a second time as the person.
             ...(label === undefined || found.changeId === undefined ? {} : { change: { id: found.changeId, act: { kind: "label" as const, value: label } } }),
             ...(numeric === undefined ? {} : { alternateIds: [numeric] }),
+        ...epicParent(fields, site),
           });
         }
         return items;

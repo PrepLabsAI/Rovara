@@ -23,6 +23,7 @@ export function intakeSearchOfTracker(tracker: Tracker | undefined, scope: HostS
       ...(item.change === undefined ? {} : { change: item.change }),
       ...(item.occurredAt === undefined ? {} : { occurredAt: item.occurredAt }),
       ...(item.alternateIds === undefined || item.alternateIds.length === 0 ? {} : { alternateIds: item.alternateIds }),
+      ...(item.parent === undefined ? {} : { parent: item.parent }),
     }));
   };
 }

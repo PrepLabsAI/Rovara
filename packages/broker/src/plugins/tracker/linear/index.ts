@@ -9,7 +9,7 @@
 // Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (`core/intake`).
 import { createHash } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema,
+  agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema, TrackerParentSchema,
   type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
@@ -47,6 +47,8 @@ export interface LinearIssueRead {
   /** The issue's link on linear.app. */
   url: string;
   updatedAt?: string | undefined;
+  project?: { id: string; name: string; url?: string | undefined } | undefined;
+  parent?: { id: string; title: string; url?: string | undefined } | undefined;
 }
 
 export interface LinearTrackerAccess {
@@ -170,12 +172,16 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
       // An answer for another issue than the one asked about is no answer.
       if (issue === undefined || normalizeIssueKey(issue.key) !== key) throw agentXError("RUNTIME_UNAVAILABLE", "the tracker has no such item");
       const link = linearLink(issue.url);
+      const rawParent = issue.project === undefined ? issue.parent === undefined ? undefined : { kind: "parent_issue", id: issue.parent.id, title: cut(issue.parent.title, 200), url: issue.parent.url }
+        : { kind: "project", id: issue.project.id, title: cut(issue.project.name, 200), url: issue.project.url };
+      const parent = TrackerParentSchema.safeParse(rawParent);
       return TrackerItemSchema.parse({
         ref: { tracker: LINEAR_TRACKER_KIND, id: key, ...(link === undefined ? {} : { url: link }) },
         title: cut(issue.title, 1_000), body: cut(issue.description, 65_536), status: NEUTRAL_STATUS_OF[issue.stateType],
         ...(issue.assignee === undefined || issue.assignee === "" ? {} : { assignee: cut(issue.assignee, 200) }),
         labels: [...issue.labels].filter((label) => label !== "").slice(0, 100).map((label) => cut(label, 200)),
         ...(issue.updatedAt === undefined ? {} : { updatedAt: issue.updatedAt }),
+        ...(parent.success ? { parent: parent.data } : {}),
       });
     },
     ...(access.hook === undefined ? {} : { events: linearEvents(access) }),

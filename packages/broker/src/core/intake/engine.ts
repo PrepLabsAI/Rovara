@@ -17,6 +17,7 @@ import {
   AgentXError,
   INTAKE_TITLE_MAX,
   IntakeExternalRefSchema,
+  TrackerParentSchema,
   intakeItemIdOf,
   type CodeIntentRequest,
   type ExternalAccountRef,
@@ -73,6 +74,7 @@ export interface IntakeCandidate {
   trackerWord?: "required" | undefined;
   /** Other spellings of the ticket's id (a Jira issue has a key and a numeric id): a note of Rovara's under any of them is the ticket's. */
   alternateIds?: readonly string[] | undefined;
+  parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } | undefined;
 }
 
 export type IntakeOutcome =
@@ -93,7 +95,7 @@ export interface IntakePorts {
   /** Whether the member, read now, holds a role on the project that starts tasks. A read that failed throws. */
   mayStart(orgId: OrgId, developerId: string, project: string): Promise<boolean>;
   /** `startCodeIntent`, as that member. Throws what a start throws. */
-  start(orgId: OrgId, developerId: string, request: CodeIntentRequest): Promise<{ task: { taskId: string }; sessionId?: string | undefined }>;
+  start(orgId: OrgId, developerId: string, request: CodeIntentRequest, parent?: IntakeCandidate["parent"]): Promise<{ task: { taskId: string }; sessionId?: string | undefined }>;
   /** The session this ticket already follows in the org (a binding, whoever made it), or undefined. `ended`: its task finished, failed, was cancelled or closed (absent: it runs). */
   sessionOfTicket(orgId: OrgId, binding: Extract<SessionBinding, { kind: "tracker_item" }>): Promise<{ sessionId: string; ended?: boolean | undefined } | undefined>;
   /** Lets an ended session's hold on its ticket go (the binding and the surface), so a new session may follow the ticket. Absent: a ticket is never started a second time. */
@@ -171,7 +173,7 @@ async function startHeld(ports: IntakePorts, record: IntakeItemRecord, input: Co
     return { outcome: "waiting", reason: "start_refused" };
   }
   try {
-    const started = await ports.start(orgId, developerId, requestOf(record, input, developerId));
+    const started = await ports.start(orgId, developerId, requestOf(record, input, developerId), record.parent);
     if (!await markIntakeStarted(table, orgId, project, itemId, { holder: developerId, taskId: started.task.taskId, sessionId: started.sessionId, requester: record.requester })) {
       ports.log("intake.mark_not_holder", { orgId, project, system: record.system });
     }
@@ -324,7 +326,8 @@ async function ingestOnce(ports: IntakePorts, candidate: IntakeCandidate, contex
   const writer = inertWriter(candidate.reporter?.display);
   const input = ticketRunInput({ system: ref.system, id: ref.id, title, body: prepareTicketBody(candidate.body), writer });
   const requester = { display: inertTicketLine(candidate.actor?.display ?? candidate.reporter?.display ?? "someone", 80) || "someone", standing: resolved.standing, ...(resolved.developerId === undefined ? {} : { developerId: resolved.developerId }) };
-  const base = { orgId, project, itemId, channel: candidate.channel, system: ref.system, id: ref.id, url: ref.url, title, writer, requester };
+  const parent = TrackerParentSchema.safeParse(candidate.parent);
+  const base = { orgId, project, itemId, channel: candidate.channel, system: ref.system, id: ref.id, url: ref.url, title, writer, requester, ...(parent.success ? { parent: parent.data } : {}) };
   const mayStartNow = resolved.reason === undefined && resolved.developerId !== undefined;
 
   if (known !== undefined && relabeling) return relabel(ports, known, { base, body: prepareTicketBody(candidate.body, WAITING_BODY_MAX_BYTES), input, resolved, mayStartNow, context, binding: bindingOf(known) });

@@ -443,3 +443,26 @@ describe("lane L11's wiring parts", () => {
     expect(DecisionCardsViewSchema.parse(JSON.parse(listed!.body)).cards.map((card) => card.id)).toEqual([cardOf(taskId)]);
   });
 });
+
+
+it.each(["tracker", "chosen", "none"] as const)("real approve_plan confirms only a suggestion (%s)", async (kind) => {
+  const t = await setup();
+  const taskId = await t.waitingTask("dev-a");
+  const { createFeatureStore } = await import("../../packages/broker/src/core/report/feature-store.js");
+  const features = createFeatureStore({ store: t.world.store, companyId: ORG, audit: t.runtime.flow.deps.audit, now: () => t.world.clock.now });
+  const feature = await features.create({ name: "Payments" }, { type: "system", id: "test" });
+  await features.setTaskFeature({ taskId, project: "payments", featureId: kind === "none" ? null : feature.id, source: kind === "tracker" ? "tracker" : "chosen" }, { type: "person", id: "dev-a" });
+  const result = await approve(t.deps, taskId, cardCaller("dev-a"));
+  expect(result?.statusCode).toBe(200);
+  expect((await t.stored(taskId)).decisions.at(-1)?.decision).toBe("APPROVE");
+  expect(await features.taskFeature(taskId)).toMatchObject({ featureId: kind === "none" ? null : feature.id, source: kind === "tracker" ? "confirmed_at_plan" : "chosen" });
+});
+
+it("a feature-store failure cannot turn a committed approval into an error", async () => {
+  const t = await setup();
+  const taskId = await t.waitingTask("dev-a");
+  const get = t.world.store.get.bind(t.world.store);
+  vi.spyOn(t.world.store, "get").mockImplementation(async (key) => { if (key.sk.startsWith("TASKFEAT#")) throw new Error("private canary"); return get(key); });
+  expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
+  expect((await t.stored(taskId)).decisions.at(-1)?.decision).toBe("APPROVE");
+});

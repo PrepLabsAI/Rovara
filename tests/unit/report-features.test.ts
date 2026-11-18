@@ -237,8 +237,40 @@ describe("a task's feature: the rule order", () => {
     expect(await w.a.taskFeature(TASK)).toEqual(answer.record);
   });
 
-  it("the rank order is moved, chosen, tracker, inherited, confirmed at plan", () => {
-    expect(["moved", "chosen", "tracker", "inherited", "confirmed_at_plan"].map((s) => FEATURE_SOURCE_RANK[s as FeatureSource])).toEqual([5, 4, 3, 2, 1]);
+  it("the rank order is moved, chosen, confirmed at plan, tracker, inherited", () => {
+    expect(["moved", "chosen", "confirmed_at_plan", "tracker", "inherited"].map((s) => FEATURE_SOURCE_RANK[s as FeatureSource])).toEqual([5, 4, 3, 2, 1]);
+  });
+
+  it("a confirmed-at-plan feature resists tracker and inherited writes, while chosen and moved replace it", async () => {
+    const w = world();
+    const ids = await Promise.all(["Confirmed", "Tracker", "Inherited", "Chosen", "Moved"].map((name) => w.a.create({ name }, ada)));
+    const [confirmed, tracker, inherited, chosen, moved] = ids as [typeof ids[number], typeof ids[number], typeof ids[number], typeof ids[number], typeof ids[number]];
+    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: confirmed.id, source: "confirmed_at_plan" }, ada);
+    for (const [feature, source] of [[tracker, "tracker"], [inherited, "inherited"]] as const) {
+      expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: feature.id, source }, ada)).outcome).toBe("kept");
+      expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: confirmed.id, source: "confirmed_at_plan" });
+    }
+    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: chosen.id, source: "chosen" }, ada)).outcome).toBe("set");
+    expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: chosen.id, source: "chosen" });
+    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: confirmed.id, source: "confirmed_at_plan" }, ada)).outcome).toBe("kept");
+    expect((await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: moved.id, source: "moved" }, ada)).outcome).toBe("set");
+    expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: moved.id, source: "moved" });
+  });
+
+  it("plan approval confirms only a still-tracker suggestion and preserves a chosen feature or No feature", async () => {
+    const w = world();
+    const suggested = await w.a.create({ name: "Tracker parent" }, ada);
+    const chosen = await w.a.create({ name: "Chosen" }, ada);
+    await w.a.setTaskFeature({ taskId: TASK, project: "alpha", featureId: suggested.id, source: "tracker" }, ada);
+    await w.a.confirmTaskFeatureAtPlan(TASK);
+    expect(await w.a.taskFeature(TASK)).toMatchObject({ featureId: suggested.id, source: "confirmed_at_plan" });
+    await w.a.setTaskFeature({ taskId: TASK2, project: "alpha", featureId: chosen.id, source: "chosen" }, ada);
+    await w.a.confirmTaskFeatureAtPlan(TASK2);
+    expect(await w.a.taskFeature(TASK2)).toMatchObject({ featureId: chosen.id, source: "chosen" });
+    const none = "33333333-3333-4333-8333-333333333333";
+    await w.a.setTaskFeature({ taskId: none, project: "alpha", featureId: null, source: "chosen" }, ada);
+    await w.a.confirmTaskFeatureAtPlan(none);
+    expect(await w.a.taskFeature(none)).toMatchObject({ featureId: null, source: "chosen" });
   });
 
   it("'No feature' on purpose is a person's move: a tracker read cannot file the task afterwards; a later move can", async () => {

@@ -18,6 +18,7 @@ import { dispatchRowItem } from "../core/task-flow/dispatch-rows.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { planFeedbackKey } from "../core/task-flow/stage-machine.js";
 import { breakdownForApproval } from "../core/work-breakdown/plan-graph.js";
+import { confirmPlanFeature } from "../core/report/confirm-plan-feature.js";
 import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 
 export interface DecisionServiceOptions {
@@ -81,11 +82,21 @@ export function createDecisionService(options: DecisionServiceOptions): Decision
       ];
     },
   });
-  const gate = createDecisionGate({
+  const underlyingGate = createDecisionGate({
     store, approvers: options.approvers, audit: options.audit, subjects: [...(options.subjects ?? []), workflowSubject],
     ...(options.policy === undefined ? {} : { policy: options.policy }),
     ...(options.identity === undefined ? {} : { identity: options.identity }),
     ...(options.now === undefined ? {} : { now: options.now }),
   });
+  const gate: DecisionGate = {
+    ...underlyingGate,
+    async decide(attempt) {
+      const result = await underlyingGate.decide(attempt);
+      if (result.status === "decided" && result.record.kind === "workflow-document" && result.record.approvalKind === "plan" && result.record.outcome === "approve") {
+        await confirmPlanFeature({ store, audit: options.audit, companyId: options.companyId, now: () => (options.now?.() ?? new Date()).getTime(), ...(flow.log === undefined ? {} : { log: flow.log }) }, result.record.subjectId, result.approver.personId);
+      }
+      return result;
+    },
+  };
   return { gate, actions: createDecisionActions({ gate, companyId: options.companyId }) };
 }

@@ -5,6 +5,8 @@ import { deriveTaskStatus, taskIndexKey, type DeveloperTaskIndexRecord } from ".
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { OPERATION_SK_PREFIX, taskKey } from "./keys.js";
+import { reportFeatureKey, reportTaskFeatureKey } from "@agentx/contracts";
+import { featureOf, resolveFeature, taskFeatureOf } from "../report/feature-store.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 
 export interface TaskView {
@@ -21,6 +23,7 @@ export interface TaskView {
   workflow?: { definitionVersion: string; path: string; stage: string; state: string; revision: number; blockReason?: string };
   failure?: DeveloperTaskFailure;
   operations: Array<{ id: string; kind: string; status: string; workflowMode?: string }>;
+  feature?: { id: string; name: string; source: string } | null;
 }
 
 export async function readTask(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<TaskRecord | undefined> {
@@ -67,6 +70,18 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     deps.store.get(location.taskPointerKey()).then((item) => fromDocument<TaskPointerRecord>(item)),
     operationsAt(deps, location),
   ]);
+  const storedAssignment = taskFeatureOf(await deps.store.get(reportTaskFeatureKey(deps.companyId, task.taskId)), deps.companyId);
+  const assignment = storedAssignment?.project === task.project ? storedAssignment : undefined;
+  const resolved = new Map<string, NonNullable<ReturnType<typeof featureOf>>>();
+  let featureId = assignment?.featureId;
+  for (let hop = 0; featureId != null && hop <= 8; hop += 1) {
+    const record = featureOf(await deps.store.get(reportFeatureKey(deps.companyId, featureId)), deps.companyId);
+    if (record === undefined || resolved.has(featureId)) break;
+    resolved.set(featureId, record);
+    if (record.state !== "merged") break;
+    featureId = record.mergedInto;
+  }
+  const featureRecord = assignment?.featureId == null ? undefined : resolveFeature(resolved, assignment.featureId);
   const derived = deriveTaskStatus({
     ...(task.closedAt === undefined ? {} : { closedAt: task.closedAt }),
     workspaceStatus: workspace?.status ?? "PREPARING",
@@ -91,6 +106,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     } }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, ...(operation.workflowMode === undefined ? {} : { workflowMode: operation.workflowMode }) })),
+    ...(assignment === undefined ? {} : { feature: assignment.featureId === null || featureRecord === undefined ? null : { id: featureRecord.id, name: featureRecord.name, source: assignment.source } }),
   };
 }
 

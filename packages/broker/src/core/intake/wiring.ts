@@ -3,7 +3,7 @@
 // (`TaskAccess.checkStart`). The start is the task flow's own `start` as that person, so the project, the company's rules, the admission and the run limits are the ones that already exist: nothing here
 // decides money or access, and a ticket NEVER approves anything. The plan still waits for the owner's page.
 import {
-  AgentXError, agentXError, agentSessionKey, change, cleanClientName, when, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type OrgId, type Principal, type RunInput, type SessionBinding,
+  AgentXError, FeatureTrackerLinkSchema, agentXError, agentSessionKey, change, cleanClientName, when, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type OrgId, type Principal, type RunInput, type SessionBinding,
 } from "@agentx/contracts";
 import type { CodeIntentRequest } from "@agentx/contracts";
 import { developerIdOf, taskSessionId } from "../sessions/create.js";
@@ -13,6 +13,7 @@ import type { TaskFlow } from "../task-flow/flow.js";
 import { noteTicketTaskStarted, type MomentTable } from "../ticket-updates/moments.js";
 import type { IntakePorts } from "./engine.js";
 import { ticketFenceId, ticketRequestText } from "./ticket-text.js";
+import { cleanFeatureName, createFeatureStore, resolveFeature } from "../report/feature-store.js";
 
 export interface IntakeWiring {
   store: DocumentStore;
@@ -21,7 +22,7 @@ export interface IntakeWiring {
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
   identity: Pick<IdentityProvider, "resolveExternalAccount" | "getPrincipal">;
   access: Pick<TaskAccess, "checkStart">;
-  flow: Pick<TaskFlow, "start">;
+  flow: Pick<TaskFlow, "start" | "deps">;
   /** A key only this install holds: the ticket's fence label is made from it (`ticketFenceId`), so a ticket's author cannot guess it. */
   fenceKey: Uint8Array;
   /** The install's one owner: the person who presses "Start" on a waiting ticket. */
@@ -78,18 +79,45 @@ export function intakePortsOf(wiring: IntakeWiring): IntakePorts {
         throw error;
       }
     },
-    start: async (orgId: OrgId, developerId: string, request: CodeIntentRequest) => {
+    start: async (orgId: OrgId, developerId: string, request: CodeIntentRequest, parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined }) => {
       const principal = await principalOf(orgId, developerId);
       if (principal === undefined) throw agentXError("FORBIDDEN", "The person this run is for isn't a member of the company.");
       if (request.input.text === undefined || request.binding?.kind !== "tracker_item") throw agentXError("CONFIG_INVALID", "A ticket's task needs the ticket's words and its link.");
       // `ticket` is how the task says its request is the ticket's: the plan credits the words to the ticket, not to the owner who started it.
-      const caller: TaskStartCaller = { principal, origin: "tracker", client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url } };
+      const caller: TaskStartCaller = { principal, origin: "tracker", client: cleanClientName(request.source), ticket: { system: request.binding.system, id: request.binding.id, url: request.binding.url, ...(parent === undefined ? {} : { parent }) } };
       const title = request.input.context?.[0]?.title;
       // The same start as any other: the task flow's own, so admission, run limits and the project's rules apply. The ticket's words ride in the request under their "information only" line; the task
       // starts as a workflow, so its plan waits for the owner's approval like every plan.
       const started = await wiring.flow.start(caller, {
         requestId: request.requestId, project: request.project, instructions: instructionsOfRunInput(request.input, ticketFenceId(wiring.fenceKey, request.requestId)), ...(title === undefined || title === "" ? {} : { title }), workflow: true,
       });
+      // Filing is only a suggestion: the committed task, binding and started moment always stand.
+      try {
+        const name = parent === undefined ? undefined : cleanFeatureName(parent.title);
+        const link = FeatureTrackerLinkSchema.safeParse({ tracker: request.binding.system, id: parent?.id, url: parent?.url });
+        if (parent !== undefined && name !== undefined && request.binding.url !== "" && link.success) {
+          const { deps } = wiring.flow;
+          const features = createFeatureStore({ store: deps.store, companyId: orgId, audit: deps.audit, now: () => (deps.now?.() ?? new Date()).getTime() });
+          const all = await features.all();
+          const match = [...all.values()].find((item) => item.trackerLink?.tracker === link.data.tracker && item.trackerLink.id === link.data.id && item.trackerLink.url === link.data.url);
+          let feature = match === undefined
+            ? [...all.values()].find((item) => item.name.toLowerCase() === name.toLowerCase())
+            : resolveFeature(all, match.id);
+          if (match === undefined && feature === undefined) {
+            try { feature = await features.create({ name, trackerLink: link.data }, { type: "system", id: "tracker-intake" }); }
+            catch (error) {
+              // A concurrent start may have filed this parent or the company's one name.
+              const fresh = await features.all();
+              const winner = [...fresh.values()].find((item) => (item.trackerLink?.tracker === link.data.tracker && item.trackerLink.id === link.data.id && item.trackerLink.url === link.data.url) || item.name.toLowerCase() === name.toLowerCase());
+              feature = winner === undefined ? undefined : resolveFeature(fresh, winner.id);
+              if (feature === undefined) throw error;
+            }
+          }
+          if (feature?.state === "open") await features.setTaskFeature({ taskId: started.task.taskId, project: request.project, featureId: feature.id, source: "tracker" }, { type: "system", id: "tracker-intake" });
+        }
+      } catch {
+        log("intake.feature_suggestion_skipped", { companyId: orgId, code: "FEATURE_SUGGESTION_UNAVAILABLE" });
+      }
       const sessionId = taskSessionId(started.task.taskId);
       // The task follows its ticket (and a ticket follows one task): the binding the engine's lookup, the write-back and the merged milestone read. It was written in the start's own transaction (`startExtras`);
       // for a flow whose start does not carry it, and for a repeat, this binds the same (an already bound ticket answers `already_bound`).
