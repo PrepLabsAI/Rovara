@@ -181,6 +181,9 @@ describe("one company's evidence is never another's", () => {
     // READ: B's own task whose row points at A's owner and workspace shows no pack (the shared bucket holds A's, but B's store cannot read it).
     const b = await w.taskOf(ownerB, OTHER, { raw: undefined, causes: undefined });
     await w.fake.store.put({ item: { ...(await w.fake.store.get(taskKey(b.taskId)))!, ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId } as never });
+    // A's pack bytes sit at the key B's forged row names (B's task id under A's workspace), in the one shared bucket: only the company-bound read keeps them out of B's Proof tab.
+    await w.blobs.put(evidencePackKey({ ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: b.taskId }, DIGEST), before!, { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    expect(await loadEvidencePack(w.blobs, { ownerKey: a.record.ownerKey, workspaceId: a.record.workspaceId, taskId: b.taskId }, DIGEST)).toBeDefined();
     const answer = body(await w.read(ownerB, b.taskId));
     expect(answer["failures"]).toBeUndefined();
     expect(JSON.stringify(answer)).not.toContain("applies discount");
