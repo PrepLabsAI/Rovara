@@ -557,6 +557,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * stored or queued. Sent only to a worker that lists "task.knowledgeContext.v1"; an older worker is sent none, which is safe (the task runs with the lessons block alone). Never carries a tool, a check, an approval or a limit.
          */
         knowledgeContext: KnowledgeContextSchema.optional(),
+        /**
          * Lead 4 L4-AK3: the project's Rovara skills (approved by two people, versioned, digest-pinned) for `read_skill`, beside the meta repo's. Built at delivery from the task's OWN project, never stored or queued; at most 8
          * skills and 96 KB of text. Sent only to a worker that lists "task.rovaraSkills.v1" and only for a plan or build step; an older worker is sent none, which is safe. A skill grants nothing: the worker removes any
          * pre-run line and tool grant, and the meta repo's skill wins a name clash.
