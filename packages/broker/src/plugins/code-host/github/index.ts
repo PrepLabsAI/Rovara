@@ -17,7 +17,8 @@ import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
 import { readCodeOwnersFile } from "../code-owners-file.js";
 import { accountKindOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
-import { entryAt, fileTrees, instructionList } from "./file-details.js";
+import type { SetupFilesRead } from "@agentx/contracts";
+import { entryAt, fileTrees, instructionList, setupFileList } from "./file-details.js";
 import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
@@ -300,6 +301,15 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
         const max = readOptions?.max ?? 500;
         if (!Number.isSafeInteger(max) || max < 0) throw agentXError("CONFIG_INVALID", "instruction file limit is invalid");
         return instructionList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions)), max);
+      },
+    }),
+
+    // L4-DR (DEC 254z c): the watched setup files and their content ids, from the same company-bound, cached tree read as `instructionFiles`.
+    ...(provider.listTreeAtCommit === undefined ? {} : {
+      async setupFileVersions(repository: RepositoryRef, revision: string, scope: HostScope, readOptions: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead> {
+        const checked = checkedScope(scope);
+        if (!Number.isSafeInteger(readOptions.max) || readOptions.max < 0) throw agentXError("CONFIG_INVALID", "setup file limit is invalid");
+        return setupFileList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions.timeoutMs === undefined ? undefined : { timeoutMs: readOptions.timeoutMs })), readOptions);
       },
     }),
 

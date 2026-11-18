@@ -19,3 +19,7 @@ The per-adapter cache keeps at most eight complete trees, keyed by scope, reposi
 ## Coverage limits
 
 Local tests use GitHub fixtures and a loopback HTTP server; they never contact an outside host. The fake models exact renames, not Git similarity scoring. The change classifier does not consume these additions yet. Other code-host providers may omit both optional additions. Tree content is immutable, but authorization remains live; there is no persistence or cross-instance cache.
+
+## Setup files (L4-DR, DEC 254z c)
+
+`setupFileVersions` is optional and read-only. For a full commit id it lists the paths the caller's `match` accepts (the setup snapshot passes `isSetupWatchedPath`: lockfiles, compose files, Dockerfiles, the dev container, `.env.example` variants, test configs, version files, CI workflows and the marker files) with the host's object id of each file, from the same one tree read, cache and company check as `instructionFiles`. Never a file's content. Symbolic links are listed by their own object id; directories and submodules are skipped; an entry of an unknown kind, an object id that is not a hex id and a limit that is not a nonnegative safe integer throw. A truncated tree, or more than `max` matches, sets `complete: false`, which the drift check reads as "cannot tell" and never as "no drift". A host without it leaves the drift check at "not checked".

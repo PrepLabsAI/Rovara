@@ -1,12 +1,12 @@
 // A CodeHost over the in-memory model. It is a test double for everything that takes the port, and the reference the contract suite is written against:
 // a real adapter must answer what this one answers for the same state.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
-  type RepositoryRef, type SummaryCheckPost,
+  type RepositoryRef, type SetupFilesRead, type SummaryCheckPost,
 } from "@agentx/contracts";
 import { readCodeOwnersFile } from "../code-host/code-owners-file.js";
 import { FAKE_ROVARA_SOURCE, type FakeChangeRequest, type FakeHostModel } from "./model.js";
@@ -127,6 +127,22 @@ export class FakeCodeHost implements CodeHost {
     const at = model.revision(revision);
     const matches = [...at.entries].filter(([path]) => isAiInstructionPath(path)).sort(([a], [b]) => a.localeCompare(b));
     return { files: matches.slice(0, max).map(([path, type]) => ({ path, type })), complete: !model.incompleteTrees.has(revision) && matches.length <= max };
+  }
+
+  /** L4-DR: the watched files at a revision with a content id each (git's own blob hash of the file's text). A tree marked incomplete answers only the first half, as a host that cut its listing would. */
+  async setupFileVersions(repository: RepositoryRef, revision: string, scope: HostScope, options: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    const at = model.revision(revision);
+    const found: Array<{ path: string; id: string }> = [];
+    for (const [path, type] of [...at.entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      if (type === "submodule" || !options.match(path)) continue;
+      const content = at.files.get(path) ?? "";
+      found.push({ path, id: createHash("sha1").update(`blob ${String(Buffer.byteLength(content, "utf8"))}\0`).update(content).digest("hex") });
+    }
+    const incomplete = model.incompleteTrees.has(revision);
+    const kept = incomplete ? found.slice(0, Math.ceil(found.length / 2)) : found;
+    return { files: kept.slice(0, options.max), complete: !incomplete && kept.length <= options.max };
   }
 
   /** Wiki W0: every entry at a revision (directories derived from the paths). A tree marked incomplete answers only the first half of its entries, as a host that cut its listing would. */

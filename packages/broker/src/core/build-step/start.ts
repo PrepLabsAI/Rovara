@@ -17,6 +17,7 @@ import { ownerRoundPlaceOf, readOwnerNote, readOwnerRoundPlace } from "../task-f
 import { readTask } from "../task-flow/reads.js";
 import type { StepTestPlan } from "../test-env/seam.js";
 import { toDocument, type TaskRecord, type WorkspaceRecord } from "../task-flow/records.js";
+import { setupGateBeforeBuild } from "../setup-agent/recheck.js";
 import { acceptStep, acceptStepWithNotes, commitWorkflow, readWorkspace, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log, newId } from "../task-flow/support.js";
 import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, workflowWithCurrentGraphOperation } from "../work-breakdown/invocation.js";
@@ -123,6 +124,14 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   if (found === "waiting") return "WAITING";
   const { task, workspace } = found;
   const { workflow } = task;
+  // L4-DR (DEC 254z c): the task's first coding run waits for the project's automatic setup re-check, if one was started for it at the task's start; the earlier steps never did. A re-check that found the setup
+  // BROKEN pauses the task here, with fixed words, and nothing else does. A task with no re-check (the common case) goes straight on.
+  const setupGate = await setupGateBeforeBuild(deps, { project: task.project, taskId: task.taskId });
+  if (setupGate.answer === "wait") return "WAITING";
+  if (setupGate.answer === "blocked") {
+    await commitWorkflow(deps, task, blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps)));
+    return settled(deps, row, "STALE");
+  }
   // A fix is made for the head Rovara pushed: if a person pushed meanwhile, the round ends here and the task waits for the merge again.
   if (await personPushedMeanwhile(deps, task, workflow)) {
     await commitWorkflow(deps, task, abandonWorkflowFix(workflow, iso(deps)));

@@ -6,6 +6,7 @@ import { taskOwnerView, type TaskOwnerView } from "../../developer/task-owner-vi
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { OPERATION_SK_PREFIX, taskKey } from "./keys.js";
+import { setupRecheckLineOf } from "../setup-agent/recheck-rows.js";
 import { fromDocument, type OperationRecord, type TaskPointerRecord, type TaskRecord, type WorkspaceRecord } from "./records.js";
 
 export interface TaskView {
@@ -24,6 +25,8 @@ export interface TaskView {
   workflow?: { definitionVersion: string; path: string; stage: string; state: string; revision: number; blockReason?: string };
   failure?: DeveloperTaskFailure;
   operations: Array<{ id: string; kind: string; status: string; workflowMode?: string }>;
+  /** L4-DR (DEC 254z c): the one quiet line when Rovara re-checked the project's setup for this task ("Setup re-checked after dependency files changed: still works."). Absent when there was no drift. */
+  setupRecheck?: string;
 }
 
 export async function readTask(deps: Pick<TaskFlowDeps, "store">, taskId: string): Promise<TaskRecord | undefined> {
@@ -97,6 +100,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
   });
   const workflow: WorkflowSnapshot | undefined = task.workflow;
   const owner = taskOwnerView(task);
+  const setupRecheck = await setupRecheckLineOf(deps, task.project, task.taskId);
   return {
     taskId: task.taskId,
     ...(owner === undefined ? {} : { owner }),
@@ -115,6 +119,7 @@ export async function taskViewOf(deps: TaskFlowDeps, task: TaskRecord): Promise<
     } }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, ...(operation.workflowMode === undefined ? {} : { workflowMode: operation.workflowMode }) })),
+    ...(setupRecheck === undefined ? {} : { setupRecheck }),
   };
 }
 

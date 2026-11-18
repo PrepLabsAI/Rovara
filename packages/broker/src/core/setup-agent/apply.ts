@@ -21,6 +21,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
+import { commitsOf, readCurrentSetupFiles, snapshotItem, takeSetupSnapshot } from "./snapshot.js";
 import { refusedCommand } from "./refused-command.js";
 import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
@@ -61,6 +62,8 @@ export interface SetupApplyRow {
   check: SetupCheckMark;
   reply: Record<string, unknown>;
   createdAt: string; decidedAt?: string; decidedBy?: string;
+  /** L4-DR: the commit of each repository when the candidate's check was started (the code the check prepares), so the snapshot saved at approval is of THAT code and not of whatever landed meanwhile. Absent: no snapshot is saved. */
+  baseCommits?: Record<string, string>;
 }
 
 /** Whether the project has a proposal waiting (its candidate revision exists and no decision was made). Another new revision is refused meanwhile. */
@@ -186,7 +189,9 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
   const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now };
+  // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval). The candidate keeps the base's repositories.
+  const baseCommits = await readBaseCommits(deps.flow, candidate);
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
@@ -229,6 +234,39 @@ export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "co
 
 // ---- the approval
 
+/** The commit of each repository now (L4-DR), or undefined when it cannot be read whole. Never throws. */
+async function readBaseCommits(flow: Pick<TaskFlowDeps, "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, definition: Parameters<typeof readCurrentSetupFiles>[1]): Promise<Record<string, string> | undefined> {
+  try {
+    const read = await readCurrentSetupFiles({ companyId: flow.companyId, ...(flow.codeHosts === undefined ? {} : { codeHosts: flow.codeHosts }) }, definition);
+    return read.status === "read" ? commitsOf(read.repositories) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const SNAPSHOT_DEADLINE_MS = 10_000;
+
+/** The snapshot of the candidate being approved (L4-DR), or undefined when the install has no code host to read it from, it cannot be read whole, or the candidate cannot be read. Never throws. */
+async function snapshotOfApproved(flow: Pick<TaskFlowDeps, "store" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>, row: Pick<SetupApplyRow, "project" | "candidateRevision" | "baseCommits">, at: string): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    // Without the commits the check prepared there is no honest baseline: none is saved, and the project's first re-check saves it.
+    if (flow.codeHosts === undefined || row.baseCommits === undefined) return undefined;
+    const deadline = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SNAPSHOT_DEADLINE_MS); });
+    return await Promise.race([readIt(), deadline]);
+  } catch {
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  async function readIt(): Promise<Awaited<ReturnType<typeof takeSetupSnapshot>>> {
+    const stored = await flow.store.get(projectRevisionKey(flow.companyId, row.project, row.candidateRevision));
+    const definition = ProjectDefinitionSchema.safeParse((stored as { definition?: unknown } | undefined)?.definition);
+    if (!definition.success) return undefined;
+    return await takeSetupSnapshot({ companyId: flow.companyId, codeHosts: flow.codeHosts }, { definition: definition.data, setupRevision: row.candidateRevision, at, commits: row.baseCommits! });
+  }
+}
+
 /** The laptop's words when someone other than the install's owner answers. */
 export const SETUP_OWNER_ONLY = "Only the owner approves a project's setup.";
 
@@ -261,7 +299,7 @@ export async function setupCandidateRisk(store: Pick<DocumentStore, "get">, orgI
  * Approving makes the candidate the project's latest revision (the catalog row moves from the base revision to it, and the project's own setup check mark is the check that passed) in the decision's transaction;
  * rejecting removes the candidate. The approver is the owner on the page's own session (the laptop), or whoever the host's `approval` rule allows at the candidate's risk: a repository collaborator's comment is never one.
  */
-export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId">; approval?: SetupProposalApproval }): DecisionSubject {
+export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId"> & Partial<Pick<TaskFlowDeps, "codeHosts">>; approval?: SetupProposalApproval }): DecisionSubject {
   const { flow, approval } = options;
   return {
     kind: SETUP_APPLY_KIND,
@@ -297,6 +335,9 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       if (attempt.outcome === "approve") {
         // A host's other copy of the revisions moves in the same transaction (L4-SF c); a copy that has moved refuses the approval.
         const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
+        // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
+        // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
+        const snapshot = await snapshotOfApproved(flow, row, at);
         return {
           ops: [change.set("state", "approved"), change.set("decidedAt", at), change.set("decidedBy", approver.personId)],
           extra: [
@@ -304,6 +345,7 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
             { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.present() },
             ...mirrored,
+            ...(snapshot === undefined ? [] : [snapshotItem(orgId, row.project, snapshot)]),
           ],
           result: { project: row.project, revision: row.candidateRevision },
         };
