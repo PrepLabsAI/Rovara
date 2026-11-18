@@ -1,5 +1,6 @@
 // Shared AI words for private and counts-only public evidence. No verdict is decided here.
 import { EVAL_NOT_RUN_SENTENCES } from "./eval-check.js";
+import { evalRunFailureSentence } from "./eval-run-diagnostic.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import { readEvidenceAi, type EvidenceAi, type PublicEvidenceAi } from "./evidence-ai.js";
 
@@ -10,11 +11,11 @@ const changeWords = { broke: "broke", newly_fail: "newly fail", newly_pass: "new
 const noticeWords = { details_withheld: "AI question details withheld", baseline_measuring: "baseline still being measured", subset_unsupported: "Question re-asks skipped: the runner cannot run a subset.", same_judge_family: "The judge and product use the same model family." } as const;
 const noun = (n: number) => `${n} question${n === 1 ? "" : "s"}`;
 
-function summary(ai: { eval: Pick<EvidenceAi["eval"], "label" | "privateSet" | "counts" | "notRunReason">; realModelRun: EvidenceAi["realModelRun"]; promptWithoutEval: boolean }): { firstLine?: string; lines: string[] } {
+function summary(ai: { eval: Pick<EvidenceAi["eval"], "label" | "privateSet" | "counts" | "notRunReason" | "runFailure">; realModelRun: EvidenceAi["realModelRun"]; promptWithoutEval: boolean }, named = true): { firstLine?: string; lines: string[] } {
   const e = ai.eval; const c = e.counts;
   const firstLine = e.label === "Worse on eval" ? e.privateSet ? "Worse on eval on private questions" : c!.broke > 0 ? `Worse on eval: ${noun(c!.broke)} broke` : "Worse on eval: aggregate pass rate dropped" : undefined;
   const words = e.privateSet ? `${e.label} on private questions` : e.label === "Improved on eval" ? "Improved on eval on questions the agent could read" : e.label;
-  const evalLine = ai.promptWithoutEval ? PROMPT_WITHOUT_EVAL_NOTICE : e.label === "Not run" ? `Eval: Not run: ${EVAL_NOT_RUN_SENTENCES[e.notRunReason!].replace(/^not run: /iu, "")}.${e.notRunReason === "no_eval_configured" ? "" : " Retry from the Rovara task page"}` : `Eval: ${words}`;
+  const evalLine = ai.promptWithoutEval ? PROMPT_WITHOUT_EVAL_NOTICE : e.label === "Not run" ? `Eval: Not run: ${(e.runFailure === undefined ? EVAL_NOT_RUN_SENTENCES[e.notRunReason!].replace(/^not run: /iu, "") : evalRunFailureSentence(e.runFailure, { named }))}.${e.notRunReason === "no_eval_configured" ? "" : " Retry from the Rovara task page"}` : `Eval: ${words}`;
   const real = ai.realModelRun;
   return { ...(firstLine === undefined ? {} : { firstLine }), lines: [
     "AI checks", evalLine,
@@ -29,7 +30,7 @@ export function renderPublicAi(input: PublicEvidenceAi | undefined): { firstLine
   // renderPublicView is a public boundary too. Validate, then print only the fixed summary fields.
   const ai = readEvidenceAi({ ...input, eval: { ...input.eval, notices: [], questions: [] } });
   if (ai === undefined) return { lines: ["AI checks: not recorded"] };
-  const out = summary(ai);
+  const out = summary(ai, false);
   if (ai.promptWithoutEval) out.lines[1] = `${PROMPT_WITHOUT_EVAL_NOTICE} Details are behind sign-in.`;
   return out;
 }
@@ -48,6 +49,8 @@ export function renderAiEvidence(input: unknown, questionLimit = 10, budget = 40
     `  New: ${inertEvidenceText(q.new.filter(Boolean).join(" / ") || "not recorded", 150)}`,
   ];
   const fixed = [...base.lines, ...e.notices.map(n => noticeWords[n]),
+    // L4-EVS: what the eval's own command printed last (redacted by the worker, made inert again), only here (never in the public view).
+    ...(e.runFailure === undefined || e.runFailure.tail === "" ? [] : [`Eval output (last lines, secrets removed): ${inertEvidenceText(e.runFailure.tail, 600)}`]),
     ...(e.label === "Not run" || e.catchableDrop === undefined ? [] : [`Eval sensitivity: estimated catchable drop ${e.catchableDrop} points`]),
     ...(e.label === "Not run" || e.fixRound === undefined ? [] : [`Eval fix round: ${e.fixRound}`]),
   ];

@@ -386,11 +386,12 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const nets = daemon.calls.filter((c) => c[0] === "network" && c[1] === "create").map((c) => c.at(-1));
     expect(nets).toHaveLength(2); expect(new Set(nets).size).toBe(2);
   });
-  it("the sandbox's logs go nowhere (an agent's output cannot fill the host's disk)", async () => {
+  it("the sandbox's log is small and capped (an agent's output cannot fill the host's disk) and goes with the container (L4-EVS: it was `none`; the worker reads its tail for a failed run)", async () => {
     const w = await world();
     await w.sandbox.run(w.input());
     const sandbox = runArgsOf(w.daemon.calls, "-eval")!;
-    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("none");
+    expect(sandbox[sandbox.indexOf("--log-driver") + 1]).toBe("json-file");
+    expect(sandbox.flatMap((arg, index) => (sandbox[index - 1] === "--log-opt" ? [arg] : [])).sort()).toEqual(["max-file=1", "max-size=64k"]);
   });
   it("names unsound limits, name, working folder, labels and env file (mutants of the built list)", () => {
     const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", `${RUN_NETWORK_LABEL}=rovara-svc-0123456789ab`, "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
@@ -403,7 +404,7 @@ describe("review fixes (TE-B1 REVIEW-1)", () => {
     const insert = (...extra: string[]) => [...args.slice(0, at), ...extra, ...args.slice(at)];
     for (const [name, mutant] of Object.entries({
       memory: replace("--memory", "64g"), swap: replace("--memory-swap", "-1"), cpus: replace("--cpus", "64"), pids: replace("--pids-limit", "-1"), stop: replace("--stop-timeout", "3600"),
-      logs: replace("--log-driver", "json-file"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
+      logs: replace("--log-driver", "local"), name: replace("--name", "other"), workdir: replace("--workdir", "/"), workdirUp: replace("--workdir", "/workspace/../etc"),
       label: insert("--label", "com.docker.compose.project=x"), labelLookalike: insert("--label", "rovara.run-networkX=1"), envInCheckout: replace("--env-file", "/s/r1/checkout/.env"), envInBridge: replace("--env-file", "/s/e1/models/env"),
     })) expect(freshEvalSandboxArgProblems(mutant, net, expected), name).not.toEqual([]);
   });

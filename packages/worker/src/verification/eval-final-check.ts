@@ -3,8 +3,9 @@ import {
   EVAL_NOT_RUN_CLASSES, EvalRequestSchema, EvalSpendInputsSchema, EvalRoundArtifactSchema, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS,
   EVAL_QUESTION_LIMIT, evalSpendInputsDigest, evalBaseCacheKey, evalResultFromArtifact,
   type EvalRequest, type EvalSpendInputs, type EvalSpendGrant, type EvalSpendApproval, type MonthlyMeter, type EvalMeterReservation,
-  type EvalRoundArtifact, type EvalRoundKind, type EvalNotRunReason, type BaseScoreCache, type EvalRoundFacts,
+  type EvalRoundArtifact, type EvalRoundKind, type EvalNotRunReason, type BaseScoreCache, type EvalRoundFacts, type EvalRunDiagnostic,
 } from "@agentx/contracts";
+import { runFailureOf } from "./eval-run-diagnostic.js";
 import { z } from "zod";
 import { openMeteredStage } from "./eval-spend-guard.js";
 import { runEvalRound, readEvalMeasures, evalSettingsFingerprint, type EvalRoundInput, type EvalQuestionPlan, type EvalRoundOutput } from "./eval-round.js";
@@ -78,7 +79,16 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
   const envelope = { schemaVersion: 1 as const, candidateDigest: facts.candidateDigest, roundKind, evalPass: req.evalPass } as const;
   const context = () => ({ aiChange: true, discovery: plan === undefined ? "unknown" as const : plan.evalConfigured ? "configured" as const : "not_configured" as const, previousPasses: (req.evalPass - 1) as 0 | 1 });
   const usage = () => ({ calls: usedCalls, ...(costKnown ? { costMicros: usedCost } : {}) });
-  const refuse = (reason: EvalNotRunReason): EvalRoundArtifact => ({ ...envelope, outcome: "not_run", notRunReason: reason, context: context(), excluded: [], notices: [], usage: usage(), cache: "not_used", feedback: { notRun: true }, fixRequested: false, ...(plan === undefined ? {} : { evalConfigured: plan.evalConfigured }) });
+  // L4-EVS: the cause of the FIRST sandbox failure that was the eval's own (an install step or the command failed and left no result), never a model call the stage refused or failed (then the stage's reason stands).
+  let runFailure: EvalRunDiagnostic | undefined;
+  let providerTrouble = false;
+  const noteFailure = (error: unknown): void => { if (runFailure === undefined && !providerTrouble) runFailure = runFailureOf(error); };
+  // The consequences of a run that could not start or finish are not each other's cause: they all read as the one cause. Anything else (stopped, over budget, spend, a safe result) is left as it is.
+  const CONSEQUENCES: ReadonlySet<EvalNotRunReason> = new Set<EvalNotRunReason>(["provider_error", "no_base_score", "partial_run", "no_measures_file", "question_data_missing", "unreadable_score", "invalid_question_data", "eval_set_unknown"]);
+  const withFailure = (artifact: EvalRoundArtifact): EvalRoundArtifact => runFailure !== undefined && !providerTrouble && artifact.privatePass === undefined && artifact.privateSet !== true && artifact.outcome === "not_run" && artifact.notRunReason !== undefined && CONSEQUENCES.has(artifact.notRunReason)
+    ? { ...artifact, notRunReason: "eval_run_failed", runFailure, feedback: { notRun: true } } : artifact;
+  const refuse0 = (reason: EvalNotRunReason): EvalRoundArtifact => ({ ...envelope, outcome: "not_run", notRunReason: reason, context: context(), excluded: [], notices: [], usage: usage(), cache: "not_used", feedback: { notRun: true }, fixRequested: false, ...(plan === undefined ? {} : { evalConfigured: plan.evalConfigured }) });
+  const refuse = (reason: EvalNotRunReason): EvalRoundArtifact => withFailure(refuse0(reason));
   if (!parsed.success) return refuse("invalid_question_data");
   if (ports === undefined) return refuse("not_connected");
   if (roundKind === "working") return refuse("needs_fresh_sandbox");
@@ -102,7 +112,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     if (evalResultFromArtifact(checked.data).notRun?.reason === "invalid_question_data" && output.result.notRun?.reason !== "invalid_question_data") return refuse("invalid_question_data");
     const derived = evalResultFromArtifact(checked.data);
     const displayed = new Set(checked.data.questions?.filter(q => q.answers !== undefined).map(q => q.id));
-    return { ...checked.data, fixRequested: derived.fixRequested, feedback: derived.outcome === "not_run" ? { notRun: true } : { questions: derived.questions.filter(q => displayed.has(q.id)).slice(0, 20).map(q => ({ ...q, oldAnswers: [...q.oldAnswers], newAnswers: [...q.newAnswers] })) } };
+    return withFailure({ ...checked.data, fixRequested: derived.fixRequested, feedback: derived.outcome === "not_run" ? { notRun: true } : { questions: derived.questions.filter(q => displayed.has(q.id)).slice(0, 20).map(q => ({ ...q, oldAnswers: [...q.oldAnswers], newAnswers: [...q.newAnswers] })) } });
   };
   const input: EvalRoundInput = { tier: { reasons: [{ code: "eval_hint" }] }, trigger: { needed: true, reason: "changes" }, roundKind, key: p.key, settings: p.settings, evalSetHash: p.evalSetHash, evalConfigured: p.evalConfigured, cache: ports.cache };
   if (!p.evalConfigured) return finish(await runEvalRound(input));
@@ -131,7 +141,7 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
     let output: Awaited<ReturnType<EvalFinalCheckPorts["runner"]>> | undefined;
     try {
       output = await ports.runner({ ...r, signal: facts.signal, call: frame => facts.signal.aborted ? Promise.reject(new Error("eval stage stopped")) : stage.call(frame) });
-    } catch { /* Only fixed refusal words leave this boundary. */ }
+    } catch (error) { /* Only fixed refusal words leave this boundary. */ if (stage.callFailure() !== undefined || stage.failure() !== undefined) providerTrouble = true; else noteFailure(error); }
     finally {
       await stage.close();
       if (stage.callFailure() === undefined && stage.failure() !== undefined) closeFailed = true;
@@ -150,13 +160,15 @@ export async function runFinalCheckEval(request: EvalRequest | undefined, ports:
       let accounted = false;
       return { call: frame => facts.signal.aborted ? Promise.reject(new Error("eval stage stopped")) : stage.call(frame), close: async () => {
         await stage.close();
+        if (stage.callFailure() !== undefined || stage.failure() !== undefined) providerTrouble = true;
         if (!accounted) { accounted = true; account(stage); baselineCalls = usedCalls; baselineCost = costKnown ? usedCost : NaN; }
       } };
     } }, cache: ports.cache,
     run: async ({ call }) => {
       if (facts.signal.aborted) throw new Error("eval stage stopped");
       const started = Date.now();
-      const output = await ports.runner({ side: "old", ids: p.questions.map(q => q.id), runs: 1, call, signal: facts.signal });
+      let output: Awaited<ReturnType<EvalFinalCheckPorts["runner"]>>;
+      try { output = await ports.runner({ side: "old", ids: p.questions.map(q => q.id), runs: 1, call, signal: facts.signal }); } catch (error) { noteFailure(error); throw error; }
       const read = await readEvalMeasures(output.report);
       if (!read.ok || output.attestation === undefined) throw new Error("eval baseline unavailable");
       return { measures: read.measures, attestation: output.attestation, seconds: (Date.now() - started) / 1000 };

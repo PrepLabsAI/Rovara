@@ -5,7 +5,9 @@ client, with unit tests, an eval set scored by a script, a CI-like command, and 
 runs offline and gives the same answers every time. It exists so Rovara's eval path can be proven before a real customer's
 repository is connected. Every name, address and order in it is made up.
 
-Python 3.9 or newer. No packages to install.
+Python 3.9 or newer. One third-party package, like any real project: PyYAML (`requirements.txt`; the eval command reads
+`evals/config.yaml` with it). Install it with `python3 -m pip install -r requirements.txt` (the project's setup step). Everything
+else is the standard library. A sandbox that has not run that step fails at `import yaml`.
 
 | What | Where |
 |---|---|

@@ -81,7 +81,7 @@ class Fallback extends Error {
   constructor(readonly step: SavedEnvUseStep) { super(step); }
 }
 
-interface Extracted { seed: string; manifest: SavedEnvImageManifest; remove(): Promise<void> }
+export interface Extracted { seed: string; manifest: SavedEnvImageManifest; remove(): Promise<void> }
 
 const defaultFolder = async () => {
   const folder = await mkdtemp(path.join(tmpdir(), "rovara-saved-env-use-"));
@@ -185,6 +185,15 @@ async function extractImage(options: SavedEnvUseOptions, repositories: readonly 
     await cleanup();
     throw error instanceof Fallback ? error : new Fallback("extract");
   }
+}
+
+/**
+ * L4-EVS: the same pull, check and extract a preparation does (revision, digest-only pull, inspect, `docker create` and `docker cp` of the seed, manifest, layout and link checks), for a caller that wants the
+ * seed's FILES and nothing else (the sealed eval takes the dependency folders). Nothing in the image is ever executed. `repositories` is what the manifest and layout are checked against; an empty list checks
+ * neither (the caller names the one folder it reads and checks it itself). Throws a fixed-word error; the caller removes what it made through `remove`.
+ */
+export async function extractSavedEnvSeed(options: SavedEnvUseOptions, repositories: readonly Repository[] = []): Promise<Extracted> {
+  return await extractImage(options, repositories);
 }
 
 /**

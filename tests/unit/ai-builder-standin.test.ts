@@ -20,8 +20,9 @@ import { discoverEvals } from "../../packages/worker/src/verification/eval-disco
 import { produceEvalDiscoveryReport } from "../../packages/worker/src/verification/eval-discovery-producer.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import {
-  CASES_DIR, EVAL_COMMAND, EVAL_REPORT, SCORING_PATH, createStandInWorld, git, pythonAvailable, runProject, teamGate, unitTests, type StandInWorld,
+  CASES_DIR, EVAL_COMMAND, EVAL_REPORT, SCORING_PATH, createStandInWorld, evalRun, git, pythonAvailable, teamGate, unitTests, type StandInWorld,
 } from "../support/ai-builder-standin.js";
+import { blockedModelHosts, redirectEscapesFor } from "../support/model-host-block-facts.js";
 
 const GREEN = "01-friendlier-tone.patch";
 const REGRESSION = "02-simplify-prompt-regression.patch";
@@ -108,7 +109,7 @@ describe("the stand-in project (the customer's side)", () => {
   it("the friendly change really changes the answers (the fake follows the new tone) while every score stays", async () => {
     const w = await world({ patch: GREEN });
     const answers = async (dir: string): Promise<Record<string, { pass: boolean; answer: string }>> => {
-      const run = runProject(dir, "python3", ["evals/run.py", "--out", "rovara-measures.json"], { VERTEX_API_ENDPOINT: w.fake.endpoint, ROVARA_EVAL_RUNS: "1" });
+      const run = evalRun(dir, ["evals/run.py", "--out", "rovara-measures.json"], { VERTEX_API_ENDPOINT: w.fake.endpoint, ROVARA_EVAL_RUNS: "1" });
       expect(run.status).toBe(0);
       const file = JSON.parse(await readFile(`${dir}/rovara-measures.json`, "utf8")) as { questions: Array<{ id: string; samples: Array<{ pass: boolean; answer: string }> }> };
       return Object.fromEntries(file.questions.map(q => [q.id, q.samples[0]!]));
@@ -438,6 +439,9 @@ describe("what happens when the eval cannot run (never a pass, never a fake Wors
     const artifact = await check(w);
     expect(evalResultFromArtifact(artifact)).toMatchObject({ outcome: "not_run", label: "Not run" });
     expect(w.cache.records.size).toBe(0);
+    // L4-EVS: the eval command died on the refused call and left no report, but the cause is the provider's: its own reason stands, with no diagnostic.
+    expect(artifact.notRunReason).not.toBe("eval_run_failed");
+    expect(artifact.runFailure).toBeUndefined();
   }, TIMEOUT);
 
   it("failed unit tests: the eval is not run and no model call is made", async () => {
@@ -459,4 +463,70 @@ describe("what happens when the eval cannot run (never a pass, never a fake Wors
     expect(evalRequestFor(flow([{ code: "eval_hint" }]), { done: 0, calls: 0, costMicros: 0 })).toMatchObject({ aiChange: true, reason: "eval_hint", evalPass: 1 });
     expect(evalRequestFor(flow([]), { done: 0, calls: 0, costMicros: 0 })).toBeUndefined();
   });
+});
+
+// ---- L4-EVS (DEC 254zzz20 D3): the eval runs in the project's saved environment; a missing package reads as a named, redacted reason, never a quiet "Not run"
+describe("the project's own dependency (PyYAML): saved environment vs the bare sandbox", () => {
+  it("a bare sandbox (the worker image: python3 and the standard library only) fails at `import yaml`: Not run, and the reason is named", async () => {
+    const w = await world({ environment: "bare" });
+    const artifact = await check(w);
+    expect(artifact.outcome).toBe("not_run");
+    expect(artifact.notRunReason).toBe("eval_run_failed");
+    expect(artifact.runFailure).toMatchObject({ code: "missing_package", phase: "run", name: "yaml", exitCode: 1 });
+    expect(artifact.runFailure!.tail).toContain("No module named 'yaml'");
+    // The first thing that ran was the baseline; nothing was compared, no model call was made, and no money was spent.
+    expect(w.frames).toHaveLength(0);
+    expect(w.sides.every(side => side.exitCode === 1)).toBe(true);
+    expect(artifact.usage).toMatchObject({ calls: 0 });
+    const result = evalResultFromArtifact(artifact);
+    expect(result).toMatchObject({ outcome: "not_run", label: "Not run" });
+    expect(result.notRun?.sentence).toBe("not run: the eval couldn't import 'yaml' (missing package)");
+  }, TIMEOUT);
+
+  it("the pull request says why in the fixed words, with the redacted output tail; a public repository's description keeps the fixed sentence without the name or the output", async () => {
+    const w = await world({ environment: "bare" });
+    const artifact = await check(w);
+    const { body } = await pullRequest(w, artifact);
+    expect(body).toContain("Eval: Not run: the eval couldn't import 'yaml' (missing package).");
+    expect(body).toContain("Eval output (last lines, secrets removed):");
+    expect(body).toContain("No module named");
+    const publicBody = (await pullRequest(w, artifact, { repositoryKnownPrivate: false })).body;
+    expect(publicBody).toContain("Eval: Not run:");
+    expect(publicBody).not.toContain("yaml");
+    expect(publicBody).not.toContain("No module named");
+    expect(publicBody).not.toContain("Eval output");
+  }, TIMEOUT);
+
+  it("the saved environment makes the SAME eval run: per-case results, the comparison and the label, with the dependency really imported", async () => {
+    const w = await world({ patch: GREEN });
+    expect(w.savedEnvironment).toBeDefined();
+    const artifact = await check(w);
+    expect(artifact.outcome).toBe("done");
+    expect(evalResultFromArtifact(artifact)).toMatchObject({ outcome: "ran", label: "No regression measured (eval)", casesRun: 10 });
+    expect(artifact.runFailure).toBeUndefined();
+    // Positive control for the two worlds: the bare one above failed on the very same command and commit.
+    expect(teamGate(w.baseDir).status).toBe(0);
+    expect(teamGate(w.baseDir, false).status).not.toBe(0);
+  }, TIMEOUT);
+
+  it("a stop keeps its own reason: the failed command's diagnostic never overrides `stopped` (a stop is not a missing package)", async () => {
+    const w = await world({ environment: "bare" });
+    const controller = new AbortController();
+    const inner = w.ports.runner;
+    const ports = { ...w.ports, runner: async (r: Parameters<typeof inner>[0]) => { try { return await inner(r); } catch (error) { controller.abort(); throw error; } } };
+    const artifact = await runFinalCheckEval(request, ports, { status: "verified", candidateDigest: manifestOf(w).digest, signal: controller.signal });
+    expect(artifact).toBeDefined();
+    expect(artifact!.notRunReason).toBe("stopped");
+    expect(artifact!.runFailure).toBeUndefined();
+  }, TIMEOUT);
+
+  it("what the command printed cannot leak: a secret in its error output is gone from the artifact, the pull request and the evidence", async () => {
+    const w = await world({ environment: "bare" });
+    const artifact = await check(w);
+    const text = JSON.stringify(artifact) + (await pullRequest(w, artifact)).body;
+    expect(text).not.toContain("rovara-test-key");
+    expect(text).not.toContain("runtoken");
+    // The tail is the redacted one and is inert once more in the evidence (no link, mention or image survives).
+    expect(artifact.runFailure!.tail.length).toBeLessThanOrEqual(4096);
+  }, TIMEOUT);
 });
