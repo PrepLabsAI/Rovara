@@ -42,7 +42,10 @@ export function createStartSuggestLimiter(now: () => number, limit: number): (pe
   };
 }
 
-export function createStartSuggest(deps: StartSuggestDependencies, limiter?: (personId: string) => boolean): StartSuggest {
+/** Takes one place for the person (true: there was room). Hosted: a stored counter (async; a fault throws and is no place); the laptop: the in-process one above. */
+export type StartSuggestLimiter = (personId: string) => boolean | Promise<boolean>;
+
+export function createStartSuggest(deps: StartSuggestDependencies, limiter?: StartSuggestLimiter): StartSuggest {
   const take = limiter ?? createStartSuggestLimiter(deps.now, deps.limit ?? START_SUGGESTS_PER_PERSON_PER_HOUR);
   return {
     async suggest({ personId, project, body }) {
@@ -57,7 +60,13 @@ export function createStartSuggest(deps: StartSuggestDependencies, limiter?: (pe
       const talk = smallTalkOf(text);
       if (talk !== undefined) return { kind: "small_talk", classifier: "ok", pick: "answer", smallTalk: talk };
       if (deps.route === undefined) return { kind: "unknown", classifier: "unavailable", pick: "answer" };
-      if (!take(personId)) throw agentXError("TOO_MANY_REQUESTS", START_SUGGEST_WORDS.rate);
+      // A counter that cannot be written is no place (fail closed): nothing is asked, and the suggestion says the classifier is unavailable.
+      let placed: boolean;
+      try { placed = await take(personId); } catch {
+        deps.log?.({ event: "start_suggest.classified", kind: "unknown", outcome: "unavailable" });
+        return { kind: "unknown", classifier: "unavailable", pick: "answer" };
+      }
+      if (!placed) throw agentXError("TOO_MANY_REQUESTS", START_SUGGEST_WORDS.rate);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? START_SUGGEST_TIMEOUT_MS);
       try {
