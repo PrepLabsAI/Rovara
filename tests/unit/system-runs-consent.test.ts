@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a JSON answer is read field by field */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SYSTEM_RUNS_CONSENT_WORDS, queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, SYSTEM_RUNS_CONSENT_WORDS, queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { routeHostedUpkeep, type HostedUpkeepWiring } from "../../packages/broker/src/core-host/upkeep-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
@@ -33,7 +33,7 @@ const standingOf = (company: OrgId, project: string, person: string): SetupRunSt
   return { access: "none" };
 };
 
-interface Options { store?: MemoryDocumentStore; company?: OrgId; ceiling?: boolean; consent?: boolean; standing?: HostedUpkeepWiring["standing"]; cap?: HostedUpkeepWiring["cap"]; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail" }
+interface Options { webApp?: boolean; store?: MemoryDocumentStore; company?: OrgId; ceiling?: boolean; consent?: boolean; standing?: HostedUpkeepWiring["standing"]; cap?: HostedUpkeepWiring["cap"]; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail" }
 
 function hosted(options: Options = {}) {
   const base = options.store ?? new MemoryDocumentStore();
@@ -56,6 +56,8 @@ function hosted(options: Options = {}) {
     const answer = await routeHostedUpkeep({
       request: { method, path: `/v1/app/projects/${project}/upkeep`, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, path: `/v1/app/projects/${project}/upkeep`,
       principal: { companyId: company, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: company, flow, wiring, audit, now: () => T0,
+      // Owner DEC 254zzz91: the Rovara website's own client by default; a test that is not one says so.
+      webApp: options.webApp ?? true,
     });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
   };
@@ -268,7 +270,7 @@ describe("the setup PUT: consent and the project switch in ONE transaction, audi
     const w = (() => {
       const wiring: HostedUpkeepWiring = { standing: async (person, org, project) => standingOf(org, project, person), available: () => true, schedule: () => ({ put: async (scope) => { calls.push(`put:${scope.project}`); }, remove: async (scope) => { calls.push(`remove:${scope.project}`); } }) };
       const flow = { store: base.store, projects: { latest: async () => ({ definition: { repositories: [] } }) } } as never;
-      return (person: string, body: unknown) => routeHostedUpkeep({ request: { method: "PUT", path: "/v1/app/projects/beacon/upkeep", headers: {}, body: JSON.stringify(body) }, path: "/v1/app/projects/beacon/upkeep", principal: { companyId: COMPANY_A, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A, flow, wiring, audit: { stage: () => [], record: async () => undefined }, now: () => T0 });
+      return (person: string, body: unknown) => routeHostedUpkeep({ request: { method: "PUT", path: "/v1/app/projects/beacon/upkeep", headers: {}, body: JSON.stringify(body) }, path: "/v1/app/projects/beacon/upkeep", principal: { companyId: COMPANY_A, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A, flow, wiring, audit: { stage: () => [], record: async () => undefined }, now: () => T0, webApp: true });
     })();
     await w(OWNER, { requestId: randomUUID(), on: true, allowSystemRuns: true });
     await w(OWNER, { requestId: randomUUID(), on: false, allowSystemRuns: false });
@@ -376,5 +378,39 @@ describe("allowing needs a live company owner or admin and no step-up (the setup
     const w = hosted({ consent: true });
     expect((await w.call(MAINTAINER, "PUT", "beacon", { requestId: randomUUID(), on: true })).status).toBe(200);
     expect((await w.call(MAINTAINER, "PUT", "beacon", { requestId: randomUUID(), on: false })).status).toBe(200);
+  });
+});
+
+describe("owner DEC 254zzz91: allowing the company's automatic runs is the Rovara website's own client's act", () => {
+  it("the website's client allows them; a CLI or AI-tool client (not webApp) gets 403 with the website words and NOTHING is written or recorded", async () => {
+    const web = hosted();
+    expect((await setup(web, OWNER)).status).toBe(200);
+    expect((await consentOf(web.store)).enabled).toBe(true);
+    for (const person of [OWNER, ADMIN]) {
+      const w = hosted({ webApp: false });
+      const answer = await setup(w, person);
+      expect(answer.status).toBe(403);
+      expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+      await nothingWritten(w);
+      expect(w.audited).toEqual([]);
+    }
+  });
+
+  it("the role and company rules still refuse first, on the website's own client too: a maintainer, a member and another company's owner allow nothing", async () => {
+    for (const person of [MAINTAINER, MEMBER, OWNER_B]) {
+      const w = hosted({ webApp: true });
+      const answer = await setup(w, person);
+      expect(answer.status).not.toBe(200);
+      expect(errorOf(answer).message).not.toBe(ON_THE_WEBSITE_MESSAGE);
+      await nothingWritten(w);
+    }
+  });
+
+  it("withdrawing them from a CLI or AI-tool client still works (turning off must be easy)", async () => {
+    const w = hosted({ consent: true, webApp: false });
+    await Promise.resolve();
+    const answer = await w.call(OWNER, "PUT", "beacon", { requestId: randomUUID(), on: false, allowSystemRuns: false });
+    expect(answer.status).toBe(200);
+    expect((await consentOf(w.store)).enabled).toBe(false);
   });
 });

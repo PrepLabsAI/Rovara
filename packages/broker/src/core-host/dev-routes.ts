@@ -25,7 +25,7 @@
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with the risk-based approver rule; the rules are setup-run-routes.ts's;
 //   - a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, audit gap 11b): the laptop's GET and PUT, any project role reads, a live company owner or admin or the project's administrator changes (ticket-updates-routes.ts);
-//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role (DEC 254zzz73: no step-up). A token's own requests are not accepted
+//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and the Rovara website's own client (DEC 254zzz73: no step-up; DEC 254zzz91: website only). A token's own requests are not accepted
 //     here either (the broker's sign-in decides that).
 //
 // Rules:
@@ -36,7 +36,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { AgentXError, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
@@ -677,7 +677,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedUpkeep({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep,
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep, webApp: caller.webApp === true,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
           });
         }
@@ -701,7 +701,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; the ceiling is the upkeep wiring's.
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedSystemRuns({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available,
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available, webApp: caller.webApp === true,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
           });
         }
@@ -788,6 +788,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (tokens[1] === undefined && request.method === "POST") {
             // Refuse the role before reading the body; core creation enforces it too.
             if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
+            // Owner DEC 254zzz91: a long-lived credential is made only from the Rovara website's own client, never by a CLI or AI-tool token.
+            if (caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
             const canRead = target.wiring.canReadProject;
             if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
             const cap = target.wiring.sessionCapSeconds;

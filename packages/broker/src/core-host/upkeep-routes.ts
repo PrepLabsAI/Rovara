@@ -41,6 +41,8 @@ export interface HostedUpkeepInput {
   wiring: HostedUpkeepWiring;
   audit: AuditSink;
   now: () => number;
+  /** Owner DEC 254zzz91: the caller is the Rovara website's own client (set by the broker's sign-in, never from a request). */
+  webApp?: boolean | undefined;
 }
 
 const UPKEEP_PATH = /^\/v1\/app\/projects\/([^/]+)\/upkeep$/u;
@@ -89,7 +91,7 @@ export async function routeHostedUpkeep(input: HostedUpkeepInput): Promise<Broke
       return isManage(now) ? { access: "manage", companyAdmin: isCompanyAdmin(now) } : now?.access === "view" ? { access: "view" } : { access: "none" };
     };
     const deps: UpkeepSettingsDeps = {
-      store: flow.store, companyId, now: input.now, standing: live, schedule: wiring.schedule?.(companyId), available: wiring.available === undefined ? undefined : () => wiring.available!(companyId),
+      store: flow.store, companyId, now: input.now, webApp: input.webApp === true, standing: live, schedule: wiring.schedule?.(companyId), available: wiring.available === undefined ? undefined : () => wiring.available!(companyId),
       cap: wiring.cap === undefined ? undefined : () => wiring.cap!(companyId, project),
       // L4-SR1: this month's nightly spend of THIS project in THIS company, from the company's own rows.
       spend: (name) => readSystemRunSpend({ store: flow.store, companyId, now: input.now }, { project: name }),

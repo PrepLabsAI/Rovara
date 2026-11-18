@@ -12,14 +12,15 @@
 //   - A plain member, and anyone whose membership does not read, gets the same answers as the invitation routes (404 "not found" / 401 sign in again).
 //   - A person of another company, a missing person and an id that does not read all answer the same "member not found".
 //   - Only an owner may change or remove an owner, or make someone an owner (DEC 232e). Nobody changes their own role or removes themselves here.
-//   - DEC 254zzz73: there is no step-up; a removal or a role change needs the signed-in admin's live membership and the role rules above, read now.
+//   - DEC 254zzz73: there is no step-up; a removal or a role change needs the signed-in admin's live membership and the role rules above, read now, and (DEC 254zzz91)
+//     the Rovara website's own client (`webApp`): the CLI's token or an AI tool's is refused with ON_THE_WEBSITE_MESSAGE.
 //   - Bodies and queries are validated at runtime and strictly; every refusal is a fixed sentence that never echoes what was sent.
 //   - Reads are bounded in total; past a bound the whole answer is refused, never a partial one.
 //   - L4-GH2: a removal takes the person's GitHub link (core/people/github-links.ts) with it, in the same request, only after the removal itself succeeded. The cleanup is conditional and idempotent, never blocks
 //     the removal (a failure is logged in fixed words, no cause), and a repeat of the same removal request retries it (the repeat is still answered "already removed"). Only this company's rows are read or removed.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { unlinkGithubAccount } from "../core/people/github-links.js";
@@ -114,7 +115,7 @@ function unwrap(reply: CompanyMemberReply): Extract<CompanyMemberReply, { ok: tr
  * Company admin routes. The caller is already authenticated and its route row (`full`) applied; `companyId` is the company its live membership names (resolveCompany).
  * The membership is read again here, so a role or company that changed since is what counts.
  */
-export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input: { caller: DeveloperCaller; companyId: string }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input: { caller: DeveloperCaller; companyId: string; webApp?: boolean }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const { caller, companyId } = input;
   let me: z.infer<typeof Membership> | undefined;
   try { me = await membershipOf(ctx, caller.developerId); } catch { me = undefined; }
@@ -142,6 +143,8 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
     return removalPreview(ctx, me, target);
   }
   if (targetId === caller.developerId) throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
+  // Owner DEC 254zzz91: a role change or a removal is made only from the Rovara website's own client (never the CLI's or an AI tool's token); reads and the preview are not.
+  if (input.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   if (match[2] === "role") {
     const parsed = RoleBody.safeParse(body(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", ROLE_BODY);

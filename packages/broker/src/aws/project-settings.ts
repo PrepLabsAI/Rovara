@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AgentXError, AgentXNameSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped,
+  AgentXError, AgentXNameSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, PolicyRowsSchema, POLICY_FIELDS, PROJECT_CATALOG_PK, agentXError, projectCatalogKey, companyScoped, policyFieldPageOnly, ON_THE_WEBSITE_MESSAGE,
   canonicalJson, companyLog, orgProjectCatalogKey, orgProjectCatalogPk, orgSettingsKey, projectRevisionKey, createRowsPolicySource, withPolicyHookValues, type HostedPolicyHookSettings, type PolicySource, type PolicyRows, type ResolvedPolicy,
 } from "@agentx/contracts";
 import { createPolicyHookClient, policyHookValuesAsker, type PolicyHookClientOptions } from "../core/policy-hook/index.js";
@@ -274,8 +274,14 @@ async function checkedSettingsRoute(deps: DeveloperRouteDependencies, caller: De
   const row: SettingsRow = { companyId, projectName, ...(preset === undefined ? {} : { preset }),
     overrides: (input.overrides ?? current?.overrides ?? {}) as SettingsRow["overrides"], revision: input.expectedRevision + 1,
     updatedAt: new Date(deps.now()).toISOString(), updatedBy: caller.developerId };
-  // DEC 254zzz73: no step-up for a cost or approval field (the old page-only rule, DEC 236j, rode on it); who may change what is the role rule above. The STORED choice, before any company bound.
+  // M4a slice 2 / owner DEC 254zzz91: a change to a cost or approval field is made only from the Rovara website's own client (no step-up, DEC 254zzz73). The STORED choice is compared
+  // (preset and overrides, before any company bound), so a company minimum that hides the effect today cannot be used to change what would show when the minimum is lifted.
   const storedAfter = await storedResolution(policy.scope, row);
+  // The chosen preset is itself a cost and approval choice: an override that pins preset_level can hide a preset change in the resolved values, so it is compared directly too.
+  const pageOnlyChange = current?.preset !== row.preset || POLICY_FIELDS.some((field) => policyFieldPageOnly(field.id)
+    && (storedBefore.values[field.id]!.value !== storedAfter.values[field.id]!.value
+      || Object.hasOwn(current?.overrides ?? {}, field.id) !== Object.hasOwn(row.overrides, field.id)));
+  if (pageOnlyChange && caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   policy.propose(row);
   let after: ResolvedPolicy;
   try { after = await policy.source.resolve(policy.scope, {}); }

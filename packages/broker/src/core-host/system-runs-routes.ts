@@ -24,6 +24,8 @@ export interface HostedSystemRunsInput {
   available?: ((companyId: OrgId) => boolean) | undefined;
   audit: AuditSink;
   now: () => number;
+  /** Owner DEC 254zzz91: the caller is the Rovara website's own client (set by the broker's sign-in, never from a request). */
+  webApp?: boolean | undefined;
 }
 
 const SYSTEM_RUNS_PATH = "/v1/app/company/system-runs";
@@ -49,7 +51,7 @@ export async function routeHostedSystemRuns(input: HostedSystemRunsInput): Promi
     const role = input.role;
     const admin = role === "owner" || role === "admin";
     const deps: SystemRunsControlDeps = {
-      store: input.flow.store, companyId, now: input.now, isCompanyAdmin: async () => admin,
+      store: input.flow.store, companyId, now: input.now, isCompanyAdmin: async () => admin, webApp: input.webApp === true,
       available: input.available === undefined ? undefined : () => input.available!(companyId),
       record: async (details) => {
         const event: AuditEvent = {

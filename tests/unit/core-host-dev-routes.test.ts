@@ -2,7 +2,7 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
@@ -37,7 +37,9 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
 
 const get = (path: string, headers: Record<string, string> = {}) => ({ method: "GET", path, headers, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
-const callerOf = (companyId: string): DeployedCaller => ({ principal: localOwnerPrincipal({ companyId: companyId }), client: "cli" });
+// Owner DEC 254zzz91: the Rovara website's own client by default (making a script token and allowing automatic runs are its acts alone); `cliOf` is the CLI's or an AI tool's token.
+const callerOf = (companyId: string): DeployedCaller => ({ principal: localOwnerPrincipal({ companyId: companyId }), client: "web", webApp: true });
+const cliOf = (caller: DeployedCaller): DeployedCaller => { const { webApp: _web, ...rest } = caller; void _web; return { ...rest, client: "cli" }; };
 const WIRED: CoreDevWiring = { origin: () => "https://api.example", scriptTokens: { enabled: () => true } };
 
 async function world2(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
@@ -356,6 +358,21 @@ describe("making a script token and acting on a decision card need no step-up", 
     expect(created.secret.length).toBeGreaterThan(20);
     const listed = JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ tokenId: string }> };
     expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
+  });
+
+  it("owner DEC 254zzz91: an owner's CLI or AI-tool token (not the Rovara website's own client) makes no script token: 403 with the website words, and nothing is listed after", async () => {
+    const { routes, remember } = await setup();
+    const web = remember(FAKE_COMPANY);
+    const refused = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), cliOf(web));
+    expect(refused?.statusCode).toBe(403);
+    expect(JSON.parse(refused!.body)).toEqual({ error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } });
+    expect((JSON.parse((await routes.route(get("/v1/app/script-tokens"), web))!.body) as { tokens: unknown[] }).tokens).toEqual([]);
+    // Listing and revoking stay open to the CLI's token.
+    expect((await routes.route(get("/v1/app/script-tokens"), cliOf(web)))?.statusCode).toBe(200);
+    // A member on the website's own client is refused for the role, not for the client.
+    const member = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY, "member", "person-member-web"));
+    expect(member?.statusCode).toBe(403);
+    expect((JSON.parse(member!.body) as { error: { message: string } }).error.message).not.toBe(ON_THE_WEBSITE_MESSAGE);
   });
 
   it("writes the caller's verified sign-in method as the token's amr, and no sign-in time", async () => {
@@ -726,6 +743,21 @@ describe("the company's automatic runs: the live owner or admin role to allow an
     return { ...w, routes, consentOf };
   }
 
+
+  it("owner DEC 254zzz91: an owner's CLI or AI-tool token cannot ALLOW on either route (403, the website words, nothing written) but can WITHDRAW", async () => {
+    const a = await setup();
+    const owner = a.remember(FAKE_COMPANY);
+    for (const [path, body] of [[SYSTEM_RUNS, allow()], [UPKEEP, setupAllow()]] as const) {
+      const refused = await a.routes.route(put(path, body), cliOf(owner));
+      expect(refused?.statusCode, path).toBe(403);
+      expect(errorOf(refused)).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+      expect(await a.consentOf(FAKE_COMPANY)).toBe(false);
+    }
+    expect((await a.routes.route(put(SYSTEM_RUNS, allow()), owner))?.statusCode).toBe(200);
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
+    expect((await a.routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), cliOf(owner)))?.statusCode).toBe(200);
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(false);
+  });
 
   it("a signed-in owner with no step-up allows it, through both routes", async () => {
     const a = await setup();

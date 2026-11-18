@@ -1,6 +1,6 @@
 // Person erase on the deployed API (row 13.1): off is byte-identical; only an owner or admin of the member company can erase someone else in that company (DEC 254zzz73: no step-up).
 import { describe, expect, it } from "vitest";
-import { when, type AuditSink, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, when, type AuditSink, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { personErasedKey, type PersonEraseDeps } from "../../packages/broker/src/core/people/erase.js";
 import { ERASE_NEEDS_ADMIN, ERASE_NOT_YOURSELF, ERASE_REMOVE_FIRST, createPersonEraseRoute, type PersonEraseCaller, type PersonEraseRouteOptions } from "../../packages/broker/src/core-host/person-erase-route.js";
@@ -35,7 +35,8 @@ function setup(overrides: Partial<PersonEraseRouteOptions> & { serving?: boolean
 }
 
 const post = (person = TARGET, body: unknown = { requestId: REQ }) => ({ method: "POST", path: `/v1/app/people/${person}/erase`, headers: {}, body: JSON.stringify(body) }) as never;
-const caller = (extra: Partial<PersonEraseCaller> = {}): PersonEraseCaller => ({ principal: principal("dev_admin"), ...extra });
+// Owner DEC 254zzz91: the Rovara website's own client by default; a test that is not one says so.
+const caller = (extra: Partial<PersonEraseCaller> = {}): PersonEraseCaller => ({ principal: principal("dev_admin"), webApp: true, ...extra });
 const answer = async (s: Setup, request = post(), who = caller()) => {
   const response = await createPersonEraseRoute(s.options).route(request, who);
   return response === undefined ? undefined : { status: response.statusCode, body: JSON.parse(response.body ?? "{}") as { receipt?: Record<string, unknown>; error?: unknown } };
@@ -83,6 +84,17 @@ describe("person erase route", () => {
       expect((await answer(s))?.status).toBe(401);
       expect(s.erased).toEqual([]);
     }
+  });
+
+  it("owner DEC 254zzz91: a CLI or AI-tool client (not the Rovara website's own) is refused with the website words, and nothing is erased or read past the role", async () => {
+    const s = setup();
+    const { webApp: _web, ...cli } = caller();
+    void _web;
+    expect(await answer(s, post(), cli)).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } } });
+    expect(s.erased).toEqual([]);
+    expect(await s.store.get(personErasedKey(A, TARGET))).toBeUndefined();
+    // The website's own client erases the same person.
+    expect((await answer(setup(), post(), caller()))?.status).toBe(200);
   });
 
   it("a script token cannot erase", async () => {
