@@ -114,7 +114,7 @@ export type StandInWriterInput = z.infer<typeof StandInWriterInputSchema>;
 
 // ---- the answer shape of an outside operation, from the contract finder (E6)
 
-/** The part of an answer shape the writer needs (a structural subset of `AnswerShape` of service-contract.ts, so no import cycle and no provenance). */
+/** The part of an answer shape the writer needs (a structural subset of the contract finder's `AnswerShape`, so no import cycle and no provenance). */
 export type StandInShape =
   | { type: "object"; fields: ReadonlyArray<{ name: string; required: boolean; shape: StandInShape }> }
   | { type: "array"; items: StandInShape }

@@ -1,4 +1,4 @@
-508 record kinds: 137 company-scoped, 22 install-wide, 349 needs-company. 266 routes: 87 company-scoped, 10 install-wide, 169 needs-company.
+510 record kinds: 139 company-scoped, 22 install-wide, 349 needs-company. 266 routes: 87 company-scoped, 10 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
