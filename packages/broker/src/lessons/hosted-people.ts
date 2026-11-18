@@ -24,9 +24,9 @@ export interface HostedApprovers {
   complete: boolean;
   /** Bumped by every change to who may approve (the approval's writes are fenced on it). */
   membershipVersion: number;
-  /** The company's owners. */
+  /** The company's owners (live now). NOT a recipient list: a notice to "the people who can decide" goes to `eligibleIds`, which also holds the company's non-owner admins and the project's maintainers. */
   ownerIds: string[];
-  /** Who may approve a lesson here (maintainers and company owners or admins). */
+  /** Who may approve a lesson here (maintainers and company owners or admins), live now. The one list notices to deciders are sent to. */
   eligibleIds: string[];
   /** When an eligible person last lost that right (ms), or null. */
   lastEligibleLossAtMs: number | null;
@@ -44,6 +44,12 @@ export interface HostedLessonPeople {
   isErased(companyId: OrgId, personId: string): Promise<boolean>;
   /** The member an id that was merged into another stands for (the end of the chain). Absent: ids compare as they are. */
   resolveMember?(companyId: OrgId, personId: string): Promise<string>;
+  /**
+   * Every person on the project's roster now (a live company owner or admin, or a live member with a role on the project): the complete list, in the same terms as `onProjectRoster` (who is in it
+   * here is who that answers yes for). Throws when the list cannot be completed (never a partial list). For a consumer that must know every name a project's people carry (the knowledge names filter);
+   * a consumer that finds this absent treats the roster as unknown and withholds.
+   */
+  projectMembers?(companyId: OrgId, project: string): Promise<readonly string[]>;
 }
 
 /** What a task is, as lessons need it: its company, project and person. Undefined when there is no such task. */

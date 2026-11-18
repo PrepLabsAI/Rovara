@@ -149,8 +149,11 @@ export interface BrokerCoreRootInputs {
   extraModules?: () => readonly CoreAdapterModule[];
   /** The policy hook's asker (`policyHookInstallFromEnvironment`). Absent: an install with hook settings refuses its registry. */
   policyHookInstall?: () => PolicyHookInstall | undefined;
-  /** The people lessons ask (per company). Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once). */
-  lessonsPeople?: (companyId: OrgId) => HostedLessonPeople;
+  /**
+   * The people lessons ask (per company; `createHostedLessonsPeople`). `context.store` is the company's own core store (the person erase receipts live there), asked for only when an erase is read.
+   * Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once).
+   */
+  lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
   /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   lessonsLearning?: CoreLessonsOptions["learning"];
   /**
@@ -668,7 +671,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
         } else {
           lessons = createCoreLessons({
-            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId), now: () => now().getTime(), log,
+            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
@@ -856,7 +859,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
     // runtime's (built once); the person's project role is the broker's own project grant (administrator: maintainer, developer: contributor).
-    const lessonsPeople = inputs.lessonsPeople;
+    const lessonsPeopleOf = inputs.lessonsPeople;
+    const lessonsPeople = lessonsPeopleOf === undefined ? undefined : (companyId: OrgId) => lessonsPeopleOf(companyId, { store: async () => (await app.registry()).require("storage") });
     if (lessonsSwitch.value.mode !== "off" && lessonsPeople !== undefined) {
       lessons = createLessonsApi({
         lessonsSwitch: lessonsSwitch.value,
