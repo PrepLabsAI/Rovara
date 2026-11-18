@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
+import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
@@ -248,7 +249,7 @@ describe("named environment templates", () => {
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutDnsFirewall(template)
         : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
-        : stack.stackName === "agentx-staging-control-plane" ? withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(template)))), "staging")
+        : stack.stackName === "agentx-staging-control-plane" ? withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutBrokerSlackPoster(template, "staging"))))), "staging")
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
       expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);

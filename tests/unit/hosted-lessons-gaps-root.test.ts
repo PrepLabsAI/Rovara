@@ -23,7 +23,7 @@ async function setup(lessonsSlack: Parameters<typeof createBrokerCoreRoot>[0]["l
   const world = createFakeWorld();
   adapters.modules = world.modules;
   const client = { async send(command: unknown) {
-    if (command instanceof GetCommand) return { Item: await world.store.get((command.input as { Key: { pk: string; sk: string } }).Key) };
+    if (command instanceof GetCommand) return { Item: await world.store.get((command.input as unknown as { Key: { pk: string; sk: string } }).Key) };
     throw new Error("unexpected");
   } };
   const root = createBrokerCoreRoot({
