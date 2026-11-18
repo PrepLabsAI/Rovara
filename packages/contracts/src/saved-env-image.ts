@@ -59,6 +59,17 @@ export function savedEnvRepositoryName(input: { env: string; orgId: string; proj
   return `${savedEnvRepositoryPrefix(input.env)}/o${orgHash}/p${projectHash}`;
 }
 
+/** The org hash segment (`o<32 hex>`) `savedEnvRepositoryName` puts in every repository of one company: the one derivation, so a company prefix is never built a second way. Throws on an id that is not text. */
+function savedEnvOrgSegment(orgId: string): string {
+  const org = IdText.parse(orgId);
+  return `o${sha256Hex(`rovara.saved-env.org\u0000${org}`).slice(0, 32)}`;
+}
+
+/** The prefix of every repository of ONE company in one environment: `rovara-env/<env>/o<hash of the org>` (no trailing slash). Throws on an environment name or an id that is not text. */
+export function savedEnvCompanyRepositoryPrefix(input: { env: string; orgId: string }): string {
+  return `${savedEnvRepositoryPrefix(input.env)}/${savedEnvOrgSegment(input.orgId)}`;
+}
+
 /** L4-EVS: whether `name` is the repository of THIS org's THIS project (its last two segments are the hashes `savedEnvRepositoryName` makes for them; the environment prefix is not compared). Never throws. */
 export function savedEnvRepositoryIsFor(name: string, input: { orgId: string; projectId: string }): boolean {
   try {
@@ -91,6 +102,11 @@ export interface SavedEnvAccountScope { partition: string; region: string; accou
 export function savedEnvRepositoryArn(scope: SavedEnvAccountScope, repositoryName: string): string {
   if (!isSavedEnvRepositoryName(repositoryName)) throw new Error("not a saved environment repository name");
   return `arn:${scope.partition}:ecr:${scope.region}:${scope.account}:repository/${repositoryName}`;
+}
+
+/** Every repository of ONE company in the environment: `.../repository/rovara-env/<env>/o<hash>/*` (for the company-wide listing session of company erase; no other session names it). */
+export function savedEnvCompanyRepositoriesArn(scope: SavedEnvAccountScope, input: { env: string; orgId: string }): string {
+  return `arn:${scope.partition}:ecr:${scope.region}:${scope.account}:repository/${savedEnvCompanyRepositoryPrefix(input)}/*`;
 }
 
 /** Every repository of the environment (for the ROLES' own policies; a session narrows it to one). */
@@ -128,6 +144,15 @@ export const savedEnvPullSessionPolicy = (scope: SavedEnvAccountScope, repositor
 export const savedEnvScanSessionPolicy = (scope: SavedEnvAccountScope, repositoryName: string): SessionPolicyJson => sessionPolicy(scope, repositoryName, ["ecr:StartImageScan", "ecr:DescribeImageScanFindings"], "", "ScanThisRepository", false);
 /** What a manage session may do: list, describe and delete the images of ONE repository, and delete the repository. No token, no push, no pull. */
 export const savedEnvManageSessionPolicy = (scope: SavedEnvAccountScope, repositoryName: string): SessionPolicyJson => sessionPolicy(scope, repositoryName, SAVED_ENV_MANAGE_ACTIONS, "", "ManageThisRepository", false);
+
+/**
+ * What a company LISTING session may do (company erase, owner-approved 2026-11-18, lane L4-SE6b): describe the repositories under ONE company's prefix, to prove none is left. Exactly ONE action
+ * (`ecr:DescribeRepositories`, which the manage role already holds on `rovara-env/<env>/*`: this narrows the role, it adds nothing to it) on exactly ONE resource pattern, that company's prefix. No token, no
+ * image action, no delete. The role's own policy and this one must both allow a call, so the session reaches only the company's repositories whatever the caller passes.
+ */
+export function savedEnvManageListSessionPolicy(scope: SavedEnvAccountScope, input: { env: string; orgId: string }): SessionPolicyJson {
+  return { Version: "2012-10-17", Statement: [{ Sid: "ListThisCompanysRepositories", Effect: "Allow", Action: ["ecr:DescribeRepositories"], Resource: savedEnvCompanyRepositoriesArn(scope, input) }] };
+}
 
 /**
  * The repository policy every saved-environment repository is created with (from the registry's creation template). It DENIES the data actions to every principal except the push and pull roles, so a
