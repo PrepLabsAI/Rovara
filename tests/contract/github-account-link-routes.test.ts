@@ -309,6 +309,15 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
     // GitHub's own answer is never echoed.
     expect((await w.link("nope")).raw).not.toMatch(/bad_verification_code|ghost/);
   });
+  it("re-checks what the GitHub client answers: an id that is not a positive whole number, or a login that is not plain, links nothing", async () => {
+    for (const answer of [{ id: 0, login: "ghost" }, { id: -5, login: "ghost" }, { id: 1.5, login: "ghost" }, { id: 2 ** 60, login: "ghost" }, { id: 5, login: "has space" }, { id: 5, login: "" }, { id: Number.NaN, login: "x" }]) {
+      const w = world();
+      w.deps.developer.githubLink!.github = { oauthClient: async () => ({ clientId: "Iv1.client", clientSecret: "x" }), githubUserOfCode: async () => answer };
+      const result = await w.link("ada-code");
+      expect(result.status, JSON.stringify(answer)).toBe(403); expect(result.body.error).toEqual(uniform);
+      expect(await githubLinkOf(w.store, A, ADA)).toBeUndefined();
+    }
+  });
   it("a session that is not a sign-in session (a service's token) cannot link", async () => {
     const w = world(); w.claims.sid = "";
     const answer = await w.start();
