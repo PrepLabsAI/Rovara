@@ -161,6 +161,8 @@ function scopedCalls(provider: GitHubCodeHostProvider, url: string, scope: unkno
     ["getCompareChanges", () => provider.getCompareChanges!(url, sha, "b".repeat(40), s)],
     ["listPullRequestComments", () => provider.listPullRequestComments!(url, 1, {}, s)],
     ["postPullRequestComment", () => provider.postPullRequestComment!(url, 1, "Done.", s)],
+    // L4-RC: the "Rovara" Check write.
+    ["upsertRovaraCheck", () => provider.upsertRovaraCheck!(url, { headSha: sha, payload: { status: "completed", conclusion: "success", title: "t", summary: "s", text: "x" } }, s)],
   ];
   return calls;
 }
@@ -178,8 +180,8 @@ describe("the core's code host on the broker: company scope", () => {
     const world = await bridgeWorld();
     expect(missingGitHubProviderMethods(world.provider)).toEqual([]);
     const names = scopedCalls(world.provider, GITHUB_REPO_URL, GITHUB_ORG_SCOPE).map(([name]) => name);
-    // Every method of the bridge is checked below, apart from the two that take no scope.
-    expect(Object.keys(world.provider).sort()).toEqual([...names, "installationForRepository", "fileDetailsError"].sort());
+    // Every method of the bridge is checked below, apart from the three that take no scope (`summaryCheckSource` is the App's own id, which names no repository and no company).
+    expect(Object.keys(world.provider).sort()).toEqual([...names, "installationForRepository", "fileDetailsError", "summaryCheckSource"].sort());
     expect(GITHUB_CODE_HOST_PROVIDER_METHODS.every((name) => names.includes(name) || name === "installationForRepository")).toBe(true);
   });
 
