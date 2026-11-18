@@ -118,9 +118,11 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     // Run 0: the first big run (no gap; every new answer fails). The fill pass asks all three again. Run 1: the fill pass's old stage, which hits a gap. Run 2: the fill pass's new stage fails (provider error), so the pass is dropped.
     // Runs 3 and 4: the suspect re-asks, which report no stand-in at all, so the only old-side gap record would be the thrown-away run 1.
     const { input, requests } = await setup({ n: 3, gapOf: (side, _ids, index) => (index === 1 ? true : side === "new" && index === 0 ? false : undefined) });
-    const run = input.questionPlan.run;
-    input.questionPlan = { ...input.questionPlan, fillMissingRows: async () => ["q0", "q1", "q2"], run: async (request: Parameters<typeof run>[0]) => { if (requests.length === 2) { requests.push(request); throw new Error("provider down"); } return run(request); } };
-    const output = await runEvalRound(input);
+    const plan = input.questionPlan;
+    if (plan === undefined) throw new Error("plan");
+    const run = plan.run;
+    const patched: EvalRoundInput = { ...input, questionPlan: { ...plan, fillMissingRows: async () => ["q0", "q1", "q2"], run: async (request: Parameters<typeof run>[0]) => { if (requests.length === 2) { requests.push(request); throw new Error("provider down"); } return run(request); } } };
+    const output = await runEvalRound(patched);
     expect(requests.map((r) => `${r.side}:${String(r.runs)}`).slice(0, 5)).toEqual(["new:1", "old:3", "new:1", "old:3", "new:3"]);
     if (output.status !== "done") throw new Error("done");
     expect(output.result.excluded.filter((q) => q.reason === "stand_in_gap")).toEqual([]);
