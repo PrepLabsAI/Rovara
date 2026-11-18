@@ -3,7 +3,7 @@
 // failing tests, at most ten, as plain text.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, type EvidencePack, type JsonValue, type ObjectStorage, type ProjectDefinition } from "@agentx/contracts";
+import { orgProjectCatalogKey, projectRevisionKey, type EvidencePack, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
@@ -79,7 +79,7 @@ async function world() {
     return { principal: localOwnerPrincipal({ companyId, personId }), client: "cli" };
   };
   const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
-  const blobs = (await app.registry()).require("object-storage") as ObjectStorage;
+  const blobs = (await app.registry()).require("object-storage");
   /** A task of `companyId` started by `owner`, with a checked candidate (the fixture's digest), its recorded results and reviews, and (optionally) a kept pack. */
   const taskOf = async (owner: DeployedCaller, companyId: string, pack?: EvidencePack) => {
     const runtime = await app.runtimeFor(companyId);
@@ -99,7 +99,7 @@ async function world() {
   return { fake, routes, readers, person, taskOf, read, blobs };
 }
 
-const body = (answer: { statusCode: number; body: string } | undefined) => ({ status: answer?.statusCode, ...JSON.parse(answer!.body) as Record<string, unknown> });
+const body = (answer: { statusCode: number; body: string } | undefined): Record<string, unknown> => ({ status: answer?.statusCode, ...JSON.parse(answer!.body) as Record<string, unknown> });
 
 describe("GET /v1/dev/tasks/{id}/evidence on a core task", () => {
   it("answers the owner the proof index of the current code, with the failing tests and their likely causes", async () => {

@@ -79,7 +79,7 @@ describe("proofIndexOf", () => {
   it("lists at most ten failing tests across checks and counts the rest; the rest is counted, never dropped silently", () => {
     const index = Index.parse(proofIndexOf("t", workflowWith(), packWith([ids(7, "a"), ids(6, "b")])));
     expect(index.failures).toHaveLength(PROOF_INDEX_FAILURES_MAX);
-    expect(index.failures!.map((row) => row.check)).toEqual([...Array(7).fill("suite 0"), ...Array(3).fill("suite 1")]);
+    expect(index.failures!.map((row) => row.check)).toEqual([...Array<string>(7).fill("suite 0"), ...Array<string>(3).fill("suite 1")]);
     expect(index.failuresNotListed).toBe(3);
     // Exactly ten: no count.
     const ten = proofIndexOf("t", workflowWith(), packWith([ids(10, "a")]));
@@ -113,7 +113,7 @@ const refusal = async (promise: Promise<unknown>) => {
   throw new Error("expected a refusal");
 };
 function checked(fixture: PageTaskFixture): void {
-  fixture.setWorkflow({ ...fixture.workflow(), candidate: undefined } as WorkflowSnapshot);
+  fixture.setWorkflow({ ...fixture.workflow(), candidate: undefined });
   const stored = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
   // The workflow as the old broker keeps it once a candidate was checked (written whole, as the flow's commit does; the fixture's own setter re-parses a full snapshot).
   fixture.db.set({ ...stored, workflow: { ...stored.workflow, candidate: { digest: DIGEST }, verification: { candidateDigest: DIGEST, results: [{ checkId: "required-1", status: "FAILED" }] } } });

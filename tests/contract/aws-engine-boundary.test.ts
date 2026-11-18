@@ -362,7 +362,7 @@ describe("the proof index on the AWS developer route `GET /v1/dev/tasks/{id}/evi
     const own = await routes.route({ method: "GET", path: `/v1/dev/tasks/${task.taskId}/evidence`, headers: {} }, { principal: owner, client: "cli" });
     expect(own?.statusCode).toBe(200);
     const read = await dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}/evidence`);
-    expect(read).toEqual({ status: 200, body: JSON.parse(own!.body) });
+    expect(read).toEqual({ status: 200, body: JSON.parse(own!.body) as unknown });
     expect(read.body).toMatchObject({ taskId: task.taskId, items: [] });
     expect(workspaceReads()).toEqual([]);
   });
