@@ -406,7 +406,7 @@ describe("the deployment's wiring (hostedAnswersModel)", () => {
 
 // L4-AM (DEC 254zzn(2)): ROVARA_CORE_ANSWERS_MODEL is the hosted answers' own model; empty means the agent model, exactly as before; the task flow's route is never touched.
 describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
-  const ANSWERS_MODEL = "claude-haiku-4-5";
+  const ANSWERS_MODEL = "claude-haiku-5-5";
   const BASE = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
   const tokens = () => ({ signer: taskKey(), issuer: ISSUER });
   const sentModel = async (env: NodeJS.ProcessEnv): Promise<{ token: unknown; body: string } | undefined> => {
@@ -440,7 +440,7 @@ describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
     expect(await sentModel({ ...glm, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
   });
 
-  it.each(["zai.glm-5", "us.anthropic.claude-haiku-4-5", "anthropic.claude-haiku-4-5-v1:0", "Claude-Haiku-4-5", "claude-", "claude-haiku 4", "claude-haiku-4-5,am=x", `claude-${"a".repeat(33)}`, "https://evil.example/x"])(
+  it.each(["zai.glm-5", "us.anthropic.claude-haiku-5-5", "anthropic.claude-haiku-5-5-v1:0", "Claude-Haiku-4-5", "claude-", "claude-haiku 4", "claude-haiku-5-5,am=x", `claude-${"a".repeat(33)}`, "https://evil.example/x"])(
     "a set value that is not a Claude engine name (%j) is 'not set up', never the agent model", async (bad) => {
       const r = recording();
       expect(hostedAnswersModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: bad }, tokens, r.fetchImpl)).toBeUndefined();

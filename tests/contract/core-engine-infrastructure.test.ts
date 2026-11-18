@@ -107,10 +107,10 @@ describe("the hosted answers model (stack parameter CoreAnswersModel)", () => {
     expect(json.Parameters.CoreAnswersModel).toMatchObject({ Default: "", AllowedPattern: CORE_ANSWERS_MODEL_PATTERN, MaxLength: CORE_ANSWERS_MODEL_MAX_LENGTH });
     expect(CORE_ANSWERS_MODEL_MAX_LENGTH).toBe(39);
     const pattern = new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u");
-    for (const ok of ["", "claude-haiku-4-5", "claude-sonnet-4-6", `claude-${"a".repeat(32)}`]) expect(pattern.test(ok), ok).toBe(true);
-    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-4-5", "Claude-haiku", "claude-", "claude-a,b", "claude-a=b", "claude-a b", "claude-a\n", `claude-${"a".repeat(33)}`, "https://x/claude-a"]) expect(pattern.test(bad), bad).toBe(false);
+    for (const ok of ["", "claude-haiku-5-5", "claude-sonnet-4-6", `claude-${"a".repeat(32)}`]) expect(pattern.test(ok), ok).toBe(true);
+    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-5-5", "Claude-haiku", "claude-", "claude-a,b", "claude-a=b", "claude-a b", "claude-a\n", `claude-${"a".repeat(33)}`, "https://x/claude-a"]) expect(pattern.test(bad), bad).toBe(false);
     // The stack pattern admits exactly the ids the broker's own check admits (plus empty): no gap between them.
-    for (const value of ["claude-haiku-4-5", "claude-a.b-c", `claude-${"a".repeat(32)}`, "claude-A", "claude-.a"]) expect(pattern.test(value), value).toBe(CORE_CLAUDE_AGENT_MODEL.test(value));
+    for (const value of ["claude-haiku-5-5", "claude-a.b-c", `claude-${"a".repeat(32)}`, "claude-A", "claude-.a"]) expect(pattern.test(value), value).toBe(CORE_CLAUDE_AGENT_MODEL.test(value));
   });
 
   it("is packed for the BROKER only (aa), never as a variable of its own, and the dispatcher has no piece of it", () => {
@@ -125,19 +125,6 @@ describe("the hosted answers model (stack parameter CoreAnswersModel)", () => {
       const users = Object.entries(template.Resources).filter(([, resource]) => /"Ref":"CoreAnswersModel"/u.test(JSON.stringify(resource))).map(([id, resource]) => `${id.replace(/[0-9A-F]{8}$/u, "")}:${resource.Type}`);
       expect(users).toEqual(["Broker:AWS::Lambda::Function"]);
     }
-  });
-
-  it("makes room in the broker's 4 KB: the launch template id is packed (lt) behind a constrained parameter in a named environment, and whole and unconstrained in the legacy template", () => {
-    expect(packedSettings(brokerVariables).get("lt")).toStrictEqual({ Ref: "Ec2WorkerLaunchTemplateId" });
-    expect(brokerVariables).not.toHaveProperty("EC2_WORKER_LAUNCH_TEMPLATE_ID");
-    expect(json.Parameters.Ec2WorkerLaunchTemplateId).toMatchObject({ AllowedPattern: "^lt-[0-9a-f]{8,17}$" });
-    const pattern = new RegExp(json.Parameters.Ec2WorkerLaunchTemplateId!.AllowedPattern!, "u");
-    for (const ok of ["lt-0123456789abcdef0", "lt-01234567", "lt-0a1b2c3d4e5f60718"]) expect(pattern.test(ok), ok).toBe(true);
-    for (const bad of ["", "lt-", "lt-0123456", "LT-0123456789abcdef0", "lt-0123456789abcdef01", "lt-01234567,x=y", "lt-01234567\n", "0123456789abcdef0"]) expect(pattern.test(bad), bad).toBe(false);
-    const legacyJson = legacy.toJSON() as Json;
-    expect(legacyJson.Parameters.Ec2WorkerLaunchTemplateId).not.toHaveProperty("AllowedPattern");
-    const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
-    expect((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.EC2_WORKER_LAUNCH_TEMPLATE_ID).toStrictEqual({ Ref: "Ec2WorkerLaunchTemplateId" });
   });
 
   it("is absent from the legacy (production) template", () => {

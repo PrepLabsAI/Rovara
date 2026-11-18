@@ -379,7 +379,7 @@ describe("the hosted route's hourly limit, stored", () => {
 
 // L4-AM (DEC 254zzn(2)): the classifier runs on the dedicated answers model when ROVARA_CORE_ANSWERS_MODEL is set, and on the agent model otherwise.
 describe("the hosted start box and the dedicated answers model (L4-AM)", () => {
-  const ANSWERS_MODEL = "claude-haiku-4-5";
+  const ANSWERS_MODEL = "claude-haiku-5-5";
 
   it("empty or unset: the token and the request name the agent model, exactly as before", async () => {
     for (const env of [ENV, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "" }, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "  " }]) {
@@ -402,7 +402,7 @@ describe("the hosted start box and the dedicated answers model (L4-AM)", () => {
   });
 
   it("set to something the answers purpose cannot serve: the classifier is unavailable, never a silent fall back to the agent model", async () => {
-    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-4-5", "claude-haiku-4-5,am=x", "Claude-Haiku"]) {
+    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-5-5", "claude-haiku-5-5,am=x", "Claude-Haiku"]) {
       const w = gatewayWorld(undefined, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: bad });
       const result = await w.post(A, "ada");
       expect(result.body, bad).toMatchObject({ classifier: "unavailable" });

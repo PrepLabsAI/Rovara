@@ -1121,8 +1121,7 @@ export class ControlPlaneStack extends Stack {
     // the zone=subnet pairs and the launch template, with no AWS call.
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
-    // L4-AM: a named broker gets the launch template id packed in AGENTX_SETTINGS (`lt`; room for the answers model in its 4 KB); the legacy broker gets the variable whole, as before.
-    addBrokerSetting(broker, naming, "ec2WorkerLaunchTemplate", foundationParameter("Ec2WorkerLaunchTemplateId"));
+    broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
     // Issue 195: the alarm for stuck cancels. Named environments only: the legacy template is

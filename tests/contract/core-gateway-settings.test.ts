@@ -384,8 +384,8 @@ describe("agentx config set", () => {
 // L4-AM (DEC 254zzn(2)): the hosted answers model, `agentx config set coreEngine.answersModel`. Empty = the agent model answers (today's behaviour).
 describe("coreEngine.answersModel (the hosted answers model)", () => {
   const ANSWERS_KEY = "coreEngine.answersModel";
-  const ANSWERS_MODEL = "claude-haiku-4-5";
-  const ANSWERS_ALLOWED = `${ANSWERS_KEY} must be empty (none: answers use the agent model) or an Anthropic model id this Rovara knows, such as claude-haiku-4-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: the answers run on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_ANSWERS_MODEL_MAX_LENGTH} characters)`;
+  const ANSWERS_MODEL = "claude-haiku-5-5";
+  const ANSWERS_ALLOWED = `${ANSWERS_KEY} must be empty (none: answers use the agent model) or an Anthropic model id this Rovara knows, such as claude-haiku-5-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: the answers run on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_ANSWERS_MODEL_MAX_LENGTH} characters)`;
   const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: MODEL, CoreAnswersModel: "", ...parameters } });
 
   it("is the stack parameter CoreAnswersModel of the control plane, empty by default, with no model role and no live gateway check", () => {
@@ -411,8 +411,8 @@ describe("coreEngine.answersModel (the hosted answers model)", () => {
   });
 
   it.each([
-    "claude-made-up-9", "us.anthropic.claude-haiku-4-5", "anthropic.claude-haiku-4-5-v1:0", "Claude-Haiku-4-5", "claude sonnet", `claude-${"a".repeat(80)}`, "claude-",
-    GLM, "zai.glm-9", "deepseek.v3.2", "https://evil.example/claude-haiku-4-5", "claude-haiku-4-5,am=x", "claude-haiku-4-5\nam=x", "u:p@claude-haiku-4-5",
+    "claude-made-up-9", "us.anthropic.claude-haiku-5-5", "anthropic.claude-haiku-5-5-v1:0", "Claude-Haiku-4-5", "claude sonnet", `claude-${"a".repeat(80)}`, "claude-",
+    GLM, "zai.glm-9", "deepseek.v3.2", "https://evil.example/claude-haiku-5-5", "claude-haiku-5-5,am=x", "claude-haiku-5-5\nam=x", "u:p@claude-haiku-5-5",
   ])("refuses %j, without echoing it", (value) => {
     let message = "";
     try { configKey(ANSWERS_KEY).parse(value); } catch (error) { message = (error as Error).message; }
@@ -445,7 +445,7 @@ describe("coreEngine.answersModel (the hosted answers model)", () => {
   });
 
   it("refuses a Bedrock id, a non-Claude model, an unknown model and a malformed id before any AWS call", async () => {
-    for (const value of ["us.anthropic.claude-haiku-4-5", GLM, "claude-made-up-9", "claude-haiku-4-5,am=x"]) {
+    for (const value of ["us.anthropic.claude-haiku-5-5", GLM, "claude-made-up-9", "claude-haiku-5-5,am=x"]) {
       const cloudFormation = fakeCloudFormation();
       await expect(runConfigSet(services({ store: await seeded(), cloudFormation, stacks: controlPlane({}) }), ENV, { key: ANSWERS_KEY, value, yes: true }), value).rejects.toThrow("nothing changed");
       expect(cloudFormation.calls, value).toEqual([]);
