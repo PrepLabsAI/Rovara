@@ -176,7 +176,7 @@ const bareHost = (raw: string): string => raw.trim().replace(/^\[|\]$/gu, "").re
 const normalHost = (raw: string): string => bareHost(raw).toLowerCase();
 
 /** One outside host name, lower-cased, or undefined when it is an address, this machine, not the strict host shape, or carries a secret this run knows. */
-function cleanHost(raw: string | undefined, secrets: readonly string[]): string | undefined {
+export function cleanHost(raw: string | undefined, secrets: readonly string[]): string | undefined {
   if (raw === undefined) return undefined;
   const written = bareHost(raw);
   const host = written.toLowerCase();

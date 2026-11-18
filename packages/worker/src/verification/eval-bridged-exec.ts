@@ -85,7 +85,7 @@ export interface EvalDryRunObservation {
   readonly modelRoute: { readonly hosts: readonly string[]; readonly suffixes: readonly string[] };
   /** The run's own placeholder values (never a real secret: a dry run holds none), so a name that contains one is never kept. */
   readonly secrets: readonly string[];
-  /** The sinkhole's address: where every unknown name pointed, so a refused connection to it names the port the eval wanted. */
+  /** The sinkhole's address: where every unknown name pointed, so a failed connection to it (nothing listens there: it reads refused or unreachable) names the port the eval wanted. */
   readonly sinkholeIp: string;
 }
 
@@ -365,7 +365,7 @@ function runProblem(input: FreshEvalSandboxRun): boolean {
 }
 
 export interface FreshEvalSandboxArgsInput {
-  readonly net: Pick<ServicesNetwork, "name" | "checkSandboxIp" | "labelArgs">;
+  readonly net: Pick<ServicesNetwork, "name" | "checkSandboxIp" | "labelArgs"> & Partial<Pick<ServicesNetwork, "dnsHelperIp">>;
   readonly image: string;
   readonly name: string;
   /** The checkout on the worker: the one mount, at `FRESH_EVAL_WORKSPACE`. */
@@ -391,7 +391,8 @@ export function freshEvalSandboxRunArgs(input: FreshEvalSandboxArgsInput, forbid
     // Sealed: the name server's own files are mounted (below) and the hostname is the check sandbox's; otherwise loopback DNS and the pinned names, as before (plus the run's service names, E1).
     ...(input.dnsFiles === undefined
       ? ["--dns", NO_UPSTREAM_DNS, ...modelHostAddHostArgs(input.block), ...(input.serviceHosts ?? []).flatMap((entry) => ["--add-host", `${entry.alias}:${entry.address}`])]
-      : ["--hostname", CHECK_SANDBOX_HOSTNAME]),
+      // Sealed: Docker's embedded resolver (127.0.0.11) cannot be removed from a user-network container, so its ONLY upstream is the run's own sealed name server (`--dns`): an unpatched daemon that forwards the queries of an internal-only container then forwards them to the sinkholing, recording name server and never to the host's resolvers.
+      : ["--dns", input.net.dnsHelperIp ?? "", "--hostname", CHECK_SANDBOX_HOSTNAME]),
     "--user", FRESH_EVAL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--memory", FRESH_EVAL_MEMORY, "--memory-swap", FRESH_EVAL_MEMORY, "--cpus", FRESH_EVAL_CPUS, "--pids-limit", FRESH_EVAL_PIDS, "--log-driver", "json-file", ...FRESH_EVAL_LOG_OPTIONS.flatMap(option => ["--log-opt", option]),
     "--tmpfs", FRESH_EVAL_TMPFS,
@@ -415,7 +416,7 @@ const isUnder = (path: string, folder: string): boolean => path === folder || pa
  * Reads the fresh sandbox's `docker run` arguments back and names every way they are unsound, in fixed words. Allow-list: a flag the sandbox does not take is a problem, so a second network, a published port, a capability,
  * a device, a second mount or the bridge folder cannot be added by accident. An empty list is a sound set.
  */
-export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<ServicesNetwork, "name" | "checkSandboxIp">, expected: { readonly checkout: string; readonly bridgeDir: string; readonly helperIp: string | undefined; readonly serviceHosts?: readonly RunHostEntry[]; readonly dnsFiles?: FreshEvalDnsFiles }): string[] {
+export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<ServicesNetwork, "name" | "checkSandboxIp"> & Partial<Pick<ServicesNetwork, "dnsHelperIp">>, expected: { readonly checkout: string; readonly bridgeDir: string; readonly helperIp: string | undefined; readonly serviceHosts?: readonly RunHostEntry[]; readonly dnsFiles?: FreshEvalDnsFiles }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -440,9 +441,9 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   if (!only("--network", net.name) || !NETWORK_NAME.test(net.name)) problems.push("the sandbox must be on the round network and on no other network");
   if (!only("--ip", net.checkSandboxIp)) problems.push("the sandbox must have the round's check sandbox address");
   const sealed = expected.dnsFiles !== undefined;
-  // Sealed (E2): the name server is the run's own, through two mounted files; Docker's `--dns` and `--add-host` are not used (a bind-mounted /etc/hosts would hide them). Not sealed: loopback DNS, as before.
+  // Sealed (E2): the name server is the run's own, through two mounted files, and the embedded resolver's only upstream is that same name server; `--add-host` is not used (a bind-mounted /etc/hosts would hide it). Not sealed: loopback DNS, as before.
   if (sealed) {
-    if (flags.has("--dns")) problems.push("a sealed sandbox takes its name server from its own resolv.conf, never --dns");
+    if (net.dnsHelperIp === undefined || !only("--dns", net.dnsHelperIp)) problems.push("a sealed sandbox's only DNS server must be the run's own sealed name server");
     if (!only("--hostname", CHECK_SANDBOX_HOSTNAME)) problems.push("a sealed sandbox's host name is the check sandbox's");
   } else {
     if (!only("--dns", NO_UPSTREAM_DNS)) problems.push("the sandbox's only DNS server must be its own loopback (no upstream)");
@@ -476,6 +477,8 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   const serviceHosts = new Set((expected.serviceHosts ?? []).map((entry) => `${entry.alias}:${entry.address}`));
   if (sealed && flags.has("--add-host")) problems.push("a sealed sandbox pins no name with --add-host");
   // A pinned name points at the model helper, or is one of the run's own service names at that service's helper address (E1). Nothing else.
+  // A service entry is checked again here (plain alias, an address in the run's helper range .16 to .47), not only where it was made.
+  for (const entry of expected.serviceHosts ?? []) if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u.test(entry.alias) || !new RegExp(`^${net.checkSandboxIp.replace(/\.\d+$/u, "").replace(/\./gu, "\\.")}\\.(?:1[6-9]|2\\d|3\\d|4[0-7])$`, "u").test(entry.address)) problems.push("a service name is not a plain name at one of the run's helper addresses");
   for (const host of flags.get("--add-host") ?? []) if (!serviceHosts.has(host) && (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp)) problems.push("a pinned name points somewhere other than the model helper or one of the run's own services");
   return problems;
 }

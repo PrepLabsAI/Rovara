@@ -1,6 +1,7 @@
 // L4-E12 (E1): the fresh eval box joins the project's test services on its round network (.16 to .47), gets their connection variables in its env file, and still mounts only its checkout. Base and change each get a NEW copy.
 // Nothing starts Docker: a stateful fake daemon (tests/support/fake-eval-sealed-daemon.ts) answers every command and answers one NETWORK question from the arguments alone (what can the box reach?). The Linux proof is a pending
 // deferred check (DEFERRED-CHECKS L4-E12-LINUX).
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -76,7 +77,7 @@ function stubStarter(services: { alias: string; slotIndex: number; env: Array<[s
 // ---- the arguments: a helper's address is accepted, anything else is still refused
 
 describe("E1: the sandbox's arguments (allow-list)", () => {
-  const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
+  const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
   const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
   const build = (extra: object = {}) => freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["eval.js"], cwd: "." }, ...extra }, { bridgeDir: "/scratch/e1/models" });
   const problems = (args: string[], extra: object = {}) => freshEvalSandboxArgProblems(args, net, { checkout: "/scratch/run-a/checkout", bridgeDir: "/scratch/e1/models", helperIp: "172.30.7.9", ...extra });
@@ -278,7 +279,8 @@ describe("E2: the sealed name server on the eval round", () => {
     expect(dns.ip).toBe(runNetworkAddresses(slot).dnsHelperIp);
     expect(dns.args[dns.args.indexOf("--source") + 1]).toBe(runNetworkAddresses(slot).checkSandboxIp);
     expect(dns.args[dns.args.indexOf("--sinkhole") + 1]).toBe(runNetworkHelperIp(slot, 31));
-    expect(sandbox.args).not.toContain("--dns");
+    // the embedded resolver's only upstream is the run's own sealed name server (never the host's, never loopback)
+    expect(sandbox.args.filter((arg, index) => sandbox.args[index - 1] === "--dns")).toEqual([runNetworkAddresses(slot).dnsHelperIp]);
     expect(sandbox.args).not.toContain("--add-host");
     expect(sandbox.args[sandbox.args.indexOf("--hostname") + 1]).toBe("check");
     expect(daemon.mountedFiles.find((file) => file.destination === "/etc/resolv.conf")!.content).toContain(`nameserver ${runNetworkAddresses(slot).dnsHelperIp}`);
@@ -316,5 +318,47 @@ describe("E2: the sealed name server on the eval round", () => {
     expect(evalSealedDnsOn({})).toBe(true);
     expect(evalSealedDnsOn({ ROVARA_EVAL_SEALED_DNS: "1" })).toBe(true);
     expect(evalSealedDnsOn({ ROVARA_EVAL_SEALED_DNS: "0" })).toBe(false);
+  });
+});
+
+describe("E2: review fixes (embedded resolver, default, cleanup)", () => {
+  it("a sealed box's only --dns is the run's own name server: another upstream, loopback or none is refused (mutant: drop the --dns check)", () => {
+    const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
+    const dnsFiles = { resolvConfPath: "/scratch/run-a/resolv.conf", hostsPath: "/scratch/run-a/hosts" };
+    const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+    const args = freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["e.js"], cwd: "." }, dnsFiles }, { bridgeDir: "/scratch/e1/models" });
+    const expected = { checkout: "/scratch/run-a/checkout", bridgeDir: "/scratch/e1/models", helperIp: "172.30.7.9", dnsFiles };
+    expect(freshEvalSandboxArgProblems(args, net, expected)).toEqual([]);
+    for (const other of ["8.8.8.8", "127.0.0.1", "172.30.7.1"]) expect(freshEvalSandboxArgProblems(args.map((arg) => (arg === "172.30.7.2" ? other : arg)), net, expected), other).not.toEqual([]);
+    const without = args.filter((arg, index) => arg !== "--dns" && args[index - 1] !== "--dns");
+    expect(freshEvalSandboxArgProblems(without, net, expected)).not.toEqual([]);
+  });
+
+  it("the allow-list checks a service entry itself: an alias that is not plain or an address outside .16 to .47 of the round is a problem even when the pin matches it", () => {
+    const net = { name: "rovara-svc-0123456789ab", checkSandboxIp: "172.30.7.4", dnsHelperIp: "172.30.7.2", labelArgs: () => ["--label", "rovara.run-network=rovara-svc-0123456789ab", "--label", "rovara.run-network.created=1", "--label", "rovara.run-network.expires=2", "--label", `rovara.run-network.workspace=${WS}`] };
+    const block = planModelHostBlock({ hasModelRow: true, helperIp: "172.30.7.9" });
+    for (const bad of [{ alias: "postgres", address: "172.30.7.60" }, { alias: "postgres", address: "172.30.7.15" }, { alias: "postgres", address: "172.30.8.16" }, { alias: "Bad_Name", address: "172.30.7.16" }]) {
+      const base = freshEvalSandboxRunArgs({ net, image: IMAGE, name: `${net.name}-eval`, checkout: "/scratch/run-a/checkout", envFile: "/scratch/run-a/env", block, command: { executable: "node", args: ["e.js"], cwd: "." } }, { bridgeDir: "/scratch/e1/models" });
+      const at = base.indexOf("--user");
+      const withPin = [...base.slice(0, at), "--add-host", `${bad.alias}:${bad.address}`, ...base.slice(at)];
+      expect(freshEvalSandboxArgProblems(withPin, net, { checkout: "/scratch/run-a/checkout", bridgeDir: "/scratch/e1/models", helperIp: "172.30.7.9", serviceHosts: [bad] }).length, JSON.stringify(bad)).toBeGreaterThan(0);
+    }
+  });
+
+  it("production wiring keeps a plain paid round on loopback DNS (sealedDns left undefined: on only with services or a dry run) and only the operator's switch forces false", () => {
+    const wiring = readFileSync(new URL("../../packages/worker/src/verification/eval-wiring.ts", import.meta.url), "utf8");
+    expect(wiring).toMatch(/\.\.\.\(evalSealedDnsOn\(host\.environment\) \? \{\} : \{ sealedDns: false \}\)/u);
+    expect(wiring).not.toMatch(/sealedDns: evalSealedDnsOn/u);
+  });
+
+  it("a sealed name server that cannot start ends the run and leaves no container, network or name file (the services stop too)", async () => {
+    const log: string[] = [];
+    const daemon = fakeEvalDaemon({ failRun: (args) => (args[args.indexOf("--name") + 1] ?? "").endsWith("-dns") });
+    const w = await world(daemon, { sealedDns: true, services: stubStarter([{ alias: "postgres", slotIndex: 0, env: [["DATABASE_URL", "postgres://a:b@postgres:5432/app"]] }], log) });
+    await expect(w.sandbox().run(w.input())).rejects.toThrow("the sealed name server could not start");
+    expect(daemon.everStarted.some((container) => container.name.endsWith("-eval"))).toBe(false);
+    expect(daemon.containers).toEqual([]);
+    expect(daemon.networks).toEqual([]);
+    expect(log.filter((line) => line.startsWith("stop "))).toHaveLength(1);
   });
 });

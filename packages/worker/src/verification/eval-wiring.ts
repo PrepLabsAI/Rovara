@@ -196,8 +196,8 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
         roundBudgetMs: Math.min(Math.max(1, Math.floor(check.round.roundBudgetMs)), FRESH_EVAL_RUN_MAX_MS),
         repository: { directory: check.repository.directory, baseCommit: check.repository.baseCommit, candidateCommit: check.repository.candidateCommit },
         command: check.command, report: check.report, rowId: check.rowId, scratchDir: check.round.scratchDir, workingSandbox: check.round.workingSandbox, environment: host.environment,
-        // L4-E12: this run's own services (E1) and the sealed name server (E2, on unless the operator switched it off).
-        ...(services === undefined ? {} : { services }), sealedDns: evalSealedDnsOn(host.environment),
+        // L4-E12: this run's own services (E1) and the sealed name server (E2: on with services, off for a plain round as before; the operator's switch can force it off).
+        ...(services === undefined ? {} : { services }), ...(evalSealedDnsOn(host.environment) ? {} : { sealedDns: false }),
       };
       pinned = { row: check.rowId, path: evalModelPathPattern(check.rowId, check.model) };
       return await (host.make ?? createFreshEvalSandbox)(config).run(input);

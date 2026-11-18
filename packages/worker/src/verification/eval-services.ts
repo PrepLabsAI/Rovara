@@ -94,7 +94,7 @@ async function startOnce(config: TestServicesConfig, dependencies: readonly Task
     helpers = await startHelpers(config.docker, net, {
       registry: `${config.registry}/${CATALOG_REGISTRY_ROOT}/${config.catalogEnv}`, edition: config.edition, probeImage: config.probeImage, maxMemMiB: config.maxMemMiB,
       // The round's own fixed containers (the model helper, the name server, the box) count toward the guard's ceiling.
-      ...(config.limits === undefined ? {} : { limits: { containers: Math.max(1, config.limits.containers - 1), helperMemMiB: config.limits.helperMemMiB } }),
+      ...(config.limits === undefined ? {} : { limits: { containers: Math.max(1, config.limits.containers - 3), helperMemMiB: config.limits.helperMemMiB } }),
       ...(config.imageReferences === undefined ? {} : { imageReferences: config.imageReferences }),
       helpers: resolved.map((item) => item.request), files, signal,
       ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }),

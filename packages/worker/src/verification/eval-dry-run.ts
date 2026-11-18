@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { EVAL_BLOCKED_HOST, EVAL_DEPENDENCY_DATABASES_MAX, EVAL_DEPENDENCY_ENV_NAME, EVAL_DEPENDENCY_ENV_VARS_MAX, EVAL_DEPENDENCY_HOSTS_MAX, EVAL_PINNED_IMAGE, EvalDependencyListSchema, type EvalDependencyList, type SetupEvalDiscoveryReport } from "@agentx/contracts";
 import type { DockerCli } from "../swebench/containers.js";
 import { createFreshEvalSandbox, type EvalDryRunObservation, type FreshEvalSandbox, type FreshEvalSandboxConfig } from "./eval-bridged-exec.js";
-import { diagnoseEvalFailure, findAllReaches, isModelRoute } from "./eval-run-diagnostic.js";
+import { cleanHost, diagnoseEvalFailure, findAllReaches, isModelRoute } from "./eval-run-diagnostic.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./eval-wiring.js";
 
 /** The longest the free dry run may take, in milliseconds: a few machine minutes inside the setup run. */
@@ -86,7 +86,8 @@ export function dependencyListFrom(observation: EvalDryRunObservation, options: 
   // The name server's record: an unknown name that is not a database's own host, not this machine's and not the model's is an outside name the eval looked up.
   for (const entry of observation.dns?.unknown ?? []) {
     const name = typeof entry?.name === "string" ? entry.name.toLowerCase().replace(/\.$/u, "") : "";
-    if (!EVAL_BLOCKED_HOST.test(name) || own.has(name) || isModelRoute(name, route) || name === "localhost" || name.endsWith(".localhost") || secrets.some(secret => secret.length >= 8 && name.includes(secret.toLowerCase()))) continue;
+    // The same cleaning as a host in an error line: not an address, not this machine, not secret-shaped or opaque.
+    if (cleanHost(name, secrets) === undefined || !EVAL_BLOCKED_HOST.test(name) || own.has(name) || isModelRoute(name, route) || name === "localhost" || name.endsWith(".localhost") || secrets.some(secret => secret.length >= 8 && name.includes(secret.toLowerCase()))) continue;
     if (!hosts.some(host => host.name === name)) hosts.push({ name });
   }
   // The port of a name the eval looked up and was refused at: when exactly one name has no port and exactly one port was refused at the sinkhole, they belong together (more than one of either is ambiguous and is left unnamed).
