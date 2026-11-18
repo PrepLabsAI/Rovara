@@ -59,6 +59,18 @@ export function createProcessDockerCli(binary = "docker"): DockerCli {
   }) };
 }
 
+/**
+ * Lane L4-NETG2: the gateway network and name server of a worker whose boot said `AGENTX_SANDBOX_EGRESS=gateway` (the worker's environment file), or undefined on every other worker (a laptop, a bridge-mode worker). A gateway-mode
+ * worker that lost either value throws: nothing then builds on a bridge with a way out. The worker package reads the same variables for its own sandboxes (task-sandbox.ts `gatewayEgressFor`); this one is for the code that runs in the verifier package
+ * (the install qualification, the driving test), which cannot import the worker.
+ */
+export function buildEgressFromEnvironment(environment: NodeJS.ProcessEnv): { network: string; dns: string } | undefined {
+  if (environment["AGENTX_RUNTIME"] !== "ec2" || environment["AGENTX_SANDBOX_EGRESS"] !== "gateway") return undefined;
+  const network = environment["AGENTX_SANDBOX_NETWORK"] ?? "";
+  const dns = environment["AGENTX_SANDBOX_DNS"] ?? "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(network) || !IPV4.test(dns)) throw new Error("this worker's builds must go through the egress gateway, but the network or name server it set up is missing or not valid");
+  return { network, dns };
+}
 export const ROVARA_RUN_LABEL = "rovara.run";
 export const ROVARA_CREATED_LABEL = "rovara.created";
 const SAFE_RUN_ID = /^[A-Za-z0-9-]{1,64}$/;

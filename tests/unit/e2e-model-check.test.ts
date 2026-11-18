@@ -197,6 +197,11 @@ describe("the check the runner makes", () => {
   });
 
   it("finds the driving test's host from the worker's own configuration, and fails closed without it", () => {
+    // L4-NETG2: a gateway-mode worker's driving-test builds are given the gateway's network and name server; a gateway-mode worker that lost them refuses.
+    const gatewayEnvironment = { EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64), AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
+    expect(drivingTestHostConfig(gatewayEnvironment, "linux", "arm64").buildEgress).toEqual({ network: "rovara-snet", dns: "172.28.250.2" });
+    expect(drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_EGRESS: "bridge" }, "linux", "arm64")).not.toHaveProperty("buildEgress");
+    expect(() => drivingTestHostConfig({ ...gatewayEnvironment, AGENTX_SANDBOX_DNS: "" }, "linux", "arm64")).toThrow(/egress gateway/);
     expect(() => drivingTestHostConfig({}, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
     expect(() => drivingTestHostConfig({ EXECUTOR_IMAGE: "-bad" }, "linux", "arm64")).toThrow();
     expect(drivingTestHostConfig({ EXECUTOR_IMAGE: "111122223333.dkr.ecr.us-east-1.amazonaws.com/executor@sha256:" + "e".repeat(64) }, "linux", "arm64")).toMatchObject({ runRoot: expect.stringContaining("web-api-probes") as string });

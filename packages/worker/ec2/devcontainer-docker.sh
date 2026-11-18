@@ -25,6 +25,7 @@ no_network_option() { local arg; for arg in "$@"; do [[ "$arg" =~ ^--net(work)?(
 walled_build() { no_network_option "${@:2}"; exec "$REAL_DOCKER" "$1" --network "$network" "${@:2}"; }
 walled() { exec "$REAL_DOCKER" "$1" --network "$network" --dns "$dns" --cap-drop NET_RAW "${@:2}"; }
 case "${1:-}" in
+  -*) echo "devcontainer-docker: a leading option (-H, --context, --config ...) could point docker elsewhere, so nothing was run" >&2; exit 125 ;;
   run | create) walled "$@" ;;
   build) walled_build "$@" ;;
   buildx) echo "devcontainer-docker: buildx cannot build on the walled network, so nothing was built (the classic builder is used)" >&2; exit 125 ;;

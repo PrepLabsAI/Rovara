@@ -28,6 +28,21 @@ async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunne
 }
 
 describe("the production web/API probe runner", () => {
+  it("L4-NETG2: on a gateway-mode worker the probe's build commands run on the gateway's network with the gateway as name server, and no rvb build bridge is made", async () => {
+    const egress = { network: "rovara-snet", dns: "172.28.250.2" };
+    const { fake, runner } = await setup({ buildEgress: egress });
+    fake.failOn("build", 7);
+    const run = await runner("build-imds-denial-v1");
+    expect(run.observation).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
+    const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") && !args[args.indexOf("--name") + 1]!.endsWith("-0"));
+    expect(builds.length).toBeGreaterThan(0);
+    for (const args of builds) {
+      expect(args.filter((value, at) => args[at - 1] === "--network")).toEqual([egress.network]);
+      expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual([egress.dns]);
+    }
+    expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").every((args) => !args.some((value) => /bridge\.name=rvb/u.test(value)))).toBe(true);
+  });
+
   it("takes the build exit code from the host's structured result, not from anything the build printed", async () => {
     const { fake, runner } = await setup();
     // The build log claims exit code 3 and even a successful fetch; only the code docker returned counts.

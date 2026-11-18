@@ -20,7 +20,7 @@ interface Options {
   failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
-  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean;
+  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean;
 }
 const DAEMON_BEFORE = '{"data-root": "/mnt/workspace/.docker", "default-address-pools": [{"base":"172.28.0.0/16","size":24}]}\n';
 const TASK_NETWORK_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -36,7 +36,7 @@ function host(options: Options = {}): Host {
   writeFileSync(h.envFile, "AWS_REGION=us-west-2\nAGENTX_SANDBOX_IMAGE=x\n");
   writeFileSync(h.rules, options.noMetadataBlock === true ? "" : "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
   writeFileSync(h.rules6, "");
-  writeFileSync(h.resolv, `${options.loopbackResolver === true ? "nameserver 127.0.0.53\n" : ""}nameserver 10.42.0.2\nnameserver 169.254.169.253\n`);
+  writeFileSync(h.resolv, options.noResolvers === true ? "nameserver 127.0.0.53\n" : `${options.loopbackResolver === true ? "nameserver 127.0.0.53\n" : ""}nameserver 10.42.0.2\nnameserver 169.254.169.253\n`);
   writeFileSync(h.daemon, options.emptyDaemonJson === true ? "{}\n" : options.notJsonDaemon === true ? "[]\n" : options.otherDaemonDns === true ? '{"dns": ["8.8.8.8"], "data-root": "/x"}\n' : options.dnsAlreadySet === true ? '{"dns": ["172.28.250.2"], "data-root": "/x"}\n' : DAEMON_BEFORE);
   writeFileSync(h.firewall, `#!/bin/bash\necho "firewall run" >>"${h.calls}"\n${options.failFirewall === true ? "exit 1" : "exit 0"}\n`);
   chmodSync(h.firewall, 0o755);
@@ -95,6 +95,7 @@ esac`);
 function stageFor(h: Host): string {
   return stage
     .split("/usr/local/libexec/rovara-sandbox-egress-restore").join(h.restore)
+    .split("/etc/agentx").join(join(h.dir, "agentx"))
     .split("/usr/local/libexec/rovara-container-firewall").join(h.firewall)
     .split("/etc/docker/daemon.json").join(h.daemon)
     .split("/etc/systemd/system").join(h.units)
@@ -190,6 +191,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     ["the gateway is not on both networks", { ghostNetworks: true }, "is not running on its two networks"],
     ["a sandbox's place cannot reach the gateway, or reaches a registry or a raw address", { failProbe: true }, "did not pass its checks"],
     ["Docker already has another default name server (it is never overwritten)", { otherDaemonDns: true }, "default name server"],
+    ["the host has no non-loopback name server to give the worker", { noResolvers: true }, "host's name servers"],
     ["daemon.json is not a JSON object", { notJsonDaemon: true }, "default name server"],
     ["Docker does not restart on the new daemon file", { failDockerRestart: true }, "default name server"],
     ["the container firewall cannot be put back after the restart", { failFirewall: true }, "default name server"],
@@ -228,6 +230,44 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(log[restart + 1]).toBe("firewall run");
     expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker network create")));
     expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker create")));
+  });
+
+  // H1 of REVIEW-1: the worker container runs on the HOST network and inherits the daemon's default name server unless it is given its own.
+  it("gives the worker container the host's resolvers (never the loopback stub, never the gateway) in the file its launcher reads, so a host-network worker still resolves names", () => {
+    const h = host({ loopbackResolver: true });
+    expect(runStage(h).status).toBe(0);
+    expect(readFileSync(join(h.dir, "agentx", "worker-dns"), "utf8")).toBe("10.42.0.2\n169.254.169.253\n");
+  });
+
+  it("probes the default name server too: a second check from a container with no --dns of its own (as a docker build step is) that must also see the registry name refused", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    const probes = calls(h).filter((line) => line.startsWith("docker run") && line.includes("--network rovara-snet"));
+    expect(probes).toHaveLength(2);
+    expect(probes[0]).toContain("--dns 172.28.250.2");
+    expect(probes[1]).not.toContain("--dns");
+    // (the probe script spans lines in the call log, so its last argument is on a later line; the fake `timeout` and the fake `docker` each log the call)
+    expect(calls(h).filter((line) => line.endsWith(" default"))).toHaveLength(2);
+    // The second one failing fails the boot (a daemon that was not restarted on the new file).
+    const failing = host();
+    writeFileSync(join(failing.dir, "bin", "docker"), readFileSync(join(failing.dir, "bin", "docker"), "utf8").replace('*" --network rovara-snet "*) exit 0 ;;', '*" --network rovara-snet "*) case "$*" in *" default") exit 1 ;; *) exit 0 ;; esac ;;'));
+    const result = runStage(failing);
+    expect(result.status).not.toBe(0);
+    expect(result.failure).toContain("did not pass its checks");
+  });
+
+  it("the worker's launcher (boot.sh) gives the worker container --dns for each line of that file, before it execs docker, and nothing when the file is absent (bridge mode)", () => {
+    const launcher = bootScript.slice(bootScript.indexOf("<<'LAUNCHER'"), bootScript.indexOf("\nLAUNCHER\n"));
+    const line = launcher.split("\n").find((entry) => entry.startsWith("while read -r r; do args+=(--dns"))!;
+    expect(line).toBeDefined();
+    // Before the line that adds the pinned worker image, which must stay the last docker argument (tests/contract/worker-image.test.ts).
+    expect(launcher.indexOf(line)).toBeLessThan(launcher.indexOf('"$worker_image")'));
+    const dir = mkdtempSync(join(tmpdir(), "se-launcher-"));
+    const file = join(dir, "worker-dns");
+    writeFileSync(file, "10.42.0.2\n169.254.169.253\n");
+    const run = (path: string) => spawnSync("bash", ["-c", `args=(run --network host)\n${line.split("/etc/agentx/worker-dns").join(path)}\nprintf '%s\\n' "\${args[@]}"`], { encoding: "utf8" }).stdout.trim().split("\n");
+    expect(run(file)).toEqual(["run", "--network", "host", "--dns", "10.42.0.2", "--dns", "169.254.169.253"]);
+    expect(run(join(dir, "absent"))).toEqual(["run", "--network", "host"]);
   });
 
   it("an empty daemon.json object gets the key without a trailing comma", () => {

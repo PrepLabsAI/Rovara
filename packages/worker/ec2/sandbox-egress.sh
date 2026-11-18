@@ -39,10 +39,19 @@ readonly SE_PROGRAM_BYTES_MIN=20000
 readonly SE_FIREWALL=/usr/local/libexec/rovara-container-firewall
 readonly SE_DAEMON_JSON=/etc/docker/daemon.json
 readonly SE_TASK_NETWORK=agentx-task
+readonly SE_WORKER_DNS_FILE=/etc/agentx/worker-dns
 
+# The host's own resolvers, one per line (the VPC resolver; systemd-resolved's loopback stub is no use inside a container).
+se_host_resolvers() { awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | sort -u || true; }
+# The worker container runs on the HOST network, so the daemon's default name server (the gateway) would be its only one, and the host has no route to it: the worker's launcher (boot.sh) gives it `--dns` for each line of this file.
+se_worker_dns() {
+  local resolvers
+  resolvers=$(se_host_resolvers) && [[ -n "$resolvers" ]] || return 1
+  install -d -m 0755 /etc/agentx && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE" && chmod 0644 "$SE_WORKER_DNS_FILE"
+}
 # The gateway is the Docker DAEMON's default name server. A container with its own `--dns` is not affected; a container that has none (a `docker build` step, which has no such option) asks the gateway, which is reachable only from rovara-snet: on any other
 # network (docker0, a stale bridge) a name lookup now fails, which is the point. Idempotent. Docker is restarted only when the file changes, then the container firewall is put back (a restart rebuilds Docker's chains).
-se_daemon_dns_is() { grep -q "\"dns\": \[\"$SE_INNER_IP\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
+se_daemon_dns_is() { grep -q "\"dns\": \[\"${SE_INNER_IP//./\\.}\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
 se_daemon_dns() {
   local content
   se_daemon_dns_is && return 0
@@ -149,7 +158,7 @@ se_gateway() {
   local program config resolver dns=()
   # The gateway asks the host's own resolvers (the VPC resolver), by name: the daemon's default name server is the gateway itself, which would loop.
   # (Loopback stubs such as systemd-resolved's 127.0.0.53 are no use inside a container; the real resolver is in /run/systemd/resolve/resolv.conf.)
-  for resolver in $(awk '$1=="nameserver"&&$2~/^[0-9.]+$/&&$2!~/^127\./{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null | sort -u); do dns+=(--dns "$resolver"); done
+  for resolver in $(se_host_resolvers); do dns+=(--dns "$resolver"); done
   ((${#dns[@]} > 0)) || return 1
   program=$(se_program) && ((${#program} >= SE_PROGRAM_BYTES_MIN)) && [[ "$program" == '"use strict";'* ]] || return 1
   config=$(se_config) || return 1
@@ -172,7 +181,7 @@ se_gateway_running() {
 readonly SE_PROBE='
 const dns = require("dns"), net = require("net");
 const resolver = new dns.promises.Resolver({ timeout: 4000, tries: 2 });
-resolver.setServers([process.argv[1]]);
+if (process.argv[1] !== "default") resolver.setServers([process.argv[1]]);
 const done = (ok, why) => { console.log(JSON.stringify({ ok, why })); process.exit(ok ? 0 : 1); };
 resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"), (error) => {
   if (error.code !== "ENOTFOUND") return done(false, "the gateway did not answer: " + error.code);
@@ -184,7 +193,10 @@ resolver.resolve4("ghcr.io").then(() => done(false, "a registry name resolved"),
 });'
 se_probe() {
   timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --dns "$SE_INNER_IP" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
-    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null
+    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" "$SE_INNER_IP" >/dev/null || return 1
+  # The same from a container with NO `--dns` of its own, as a docker build step is: its name server is the daemon's default, which must be the gateway (a daemon that was not restarted on the new file fails here).
+  timeout --foreground --kill-after=10s "$(try_seconds 60)s" docker run --rm --network "$SE_INNER_NET" --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 \
+    --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$SE_PROBE" default >/dev/null
 }
 
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
@@ -219,6 +231,8 @@ UNIT
 sandbox_egress_main() {
   BOOT_STEP="make the gateway the Docker name server"
   se_daemon_dns || fail "could not make the sandbox egress gateway the Docker daemon's default name server"
+  BOOT_STEP="give the worker the host's resolvers"
+  se_worker_dns || fail "could not give the worker container the host's name servers"
   BOOT_STEP="wall the sandbox network"
   se_walls || fail "could not wall the sandbox network off from the host and private networks"
   BOOT_STEP="make the sandbox networks"

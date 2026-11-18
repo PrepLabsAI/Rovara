@@ -122,6 +122,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "rm", CONTROL_NETWORK);
     await docker("network", "rm", NETWORK);
     await docker("network", "rm", "rovara-xnet");
+    await sudo("rm", "-f", "/etc/agentx/worker-dns");
     // Docker's own configuration is put back, and Docker restarted on it with the runner's container firewall.
     if (daemonBefore === undefined) await sudo("rm", "-f", DAEMON_JSON);
     else await sudo("cp", join(dir, "daemon.before"), DAEMON_JSON);
@@ -232,6 +233,16 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(daemon.stdout).toContain(`"dns": ["${GATEWAY_IP}"]`);
   }, 180_000);
 
+  // H1 of REVIEW-1: the daemon's default name server is the gateway now, which a container on the HOST network cannot reach; the worker's launcher gives it the host's resolvers with --dns.
+  it("a host-network container (the worker) resolves names when given the host resolvers the stage wrote, as the launcher does", async () => {
+    const written = (await sudo("cat", "/etc/agentx/worker-dns")).stdout.split("\n").filter(Boolean);
+    expect(written.length).toBeGreaterThan(0);
+    for (const address of written) expect(address).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+    expect(written.some((address) => address.startsWith("127."))).toBe(false);
+    const withDns = await docker("run", "--rm", "--pull=never", "--network", "host", ...written.flatMap((address) => ["--dns", address]), "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", lookupOutcome("registry.npmjs.org"));
+    expect(withDns.stdout.trim(), withDns.stderr).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+  }, 120_000);
+
   /** The wrapper (the real docker's path put in), run as the devcontainer CLI runs it. */
   async function wrapperDocker(args: string[], environment: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
     const real = (await run("which", ["docker"])).stdout.trim();
@@ -256,7 +267,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   it("a dev container's IMAGE BUILD through the wrapper cannot reach a raw address or resolve a push-capable registry, though the same build on an ordinary user bridge reaches the raw address", async () => {
     // The classic builder is what the worker's devcontainer CLI uses (the worker image has no buildx, and the wrapper refuses it). A runner without it skips the build checks.
     const probe = await wrapperDocker(["build", "-q", "-t", "rovara-netg2-probe", await context("probe", ["RUN true"])]);
-    if (probe.code !== 0) { console.warn(`classic docker build unavailable on this runner, build checks skipped: ${probe.stderr.slice(0, 300)}`); return; }
+    // The production worker image has no buildx, so its docker CLI uses the classic builder; a runner that cannot run it must FAIL here, not pass without checking anything.
+    expect(probe.code, `the classic builder must work through the wrapper: ${probe.stderr.slice(0, 400)}`).toBe(0);
     const raw = await context("raw", [mustNotConnect("1.1.1.1"), mustNotConnect("8.8.8.8")]);
     const walled = await wrapperDocker(["build", "-t", "rovara-netg2-raw", raw]);
     expect(walled.code, `${walled.stdout}\n${walled.stderr}`).toBe(0);
@@ -274,7 +286,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
   it("npm reaches the registry from a dev container image build through the gateway (an allowed name works)", async () => {
     const probe = await wrapperDocker(["build", "-q", "-t", "rovara-netg2-probe2", await context("probe2", ["RUN true"])]);
-    if (probe.code !== 0) return;
+    expect(probe.code, probe.stderr.slice(0, 400)).toBe(0);
     const control = await hostHttps("registry.npmjs.org");
     const built = await wrapperDocker(["build", "-t", "rovara-netg2-npm", await context("npm", ["RUN npm ping --registry https://registry.npmjs.org/"])]);
     if (/^status /u.test(control)) expect(built.code, `${built.stdout}\n${built.stderr}`).toBe(0);

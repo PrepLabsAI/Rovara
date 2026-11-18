@@ -71,6 +71,18 @@ describe("the devcontainer docker wrapper", () => {
     }
   });
 
+  it("refuses a leading global option (-H, --context, --config), which could point docker somewhere that is not walled", () => {
+    for (const args of [["-H", "tcp://x:1", "build", "."], ["--context", "other", "run", "image"], ["--config", "/tmp/c", "build", "."], ["-D", "ps"]]) {
+      const result = run(args, GATEWAY);
+      expect(result.status, args.join(" ")).toBe(125);
+      expect(result.seen).toBeUndefined();
+    }
+  });
+
+  it("the worker image has no buildx plugin (the devcontainer CLI must find none and use the classic builder, the only one that takes the walled network)", () => {
+    expect(readFileSync(new URL("../../environments/base/Dockerfile", import.meta.url), "utf8")).not.toMatch(/buildx/iu);
+  });
+
   it("FAILS CLOSED: without the network or the name server in the environment, or with a value that is not a plain network name and an IPv4 address, no docker command runs at all", () => {
     for (const environment of [{}, { AGENTX_SANDBOX_NETWORK: "rovara-snet" }, { AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "dns.example.com" },
       { AGENTX_SANDBOX_NETWORK: "--privileged", AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "a b", AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2 --dns 8.8.8.8" }]) {
