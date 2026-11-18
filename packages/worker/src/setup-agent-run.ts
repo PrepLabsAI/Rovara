@@ -16,13 +16,13 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, STANDIN_WRITER_WORDS, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
 import { trackedPathsOf, type TrackedPaths } from "./setup-citations.js";
-import { SETUP_NEXT_TURN_MARGIN_TOKENS, type ModelPrice } from "./setup-agent-price.js";
+import { SETUP_CACHE_WRITE_EXTRA, SETUP_NEXT_TURN_MARGIN_TOKENS, type ModelPrice } from "./setup-agent-price.js";
 import { assistantOutcome, failedTurn } from "./session-events.js";
 import { budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { checkTrackedFiles, finishSetupAgent, setupAgentShell, setupAgentSessionParts, type SetupAgentRepository, type SetupCommandRecord, type TrackedFilesVerdict } from "./setup-agent.js";
@@ -35,6 +35,7 @@ import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import type { TaskSandbox } from "./task-sandbox.js";
 import { EVAL_DRAFT_REFUSAL_WORDS, produceEvalDiscoveryReport } from "./verification/eval-discovery-producer.js";
 import type { EvalDiscovery } from "./verification/eval-discovery.js";
+import { runStandInWriter } from "./standin-writer.js";
 
 /** What the preparation manifest says about a repository (the broker's own record of the default branch's head). */
 export interface SetupManifestRepository { name: string; path: string; resolvedCommit: string; checkedOut?: unknown }
@@ -61,6 +62,14 @@ export interface SetupRunPorts {
   tickMs?: number;
   /** How often a parked run (waiting for an administrator) talks to the broker. Default 15 s. */
   parkTickMs?: number;
+  /**
+   * L4-E7, the stand-in writer: a separate agent step at the END of a run that proposed (never a stopped or failed one), on the company's own AI, inside the run's cap. `input` reads the shapes it writes for (the tables from the
+   * schema reading, the outside services' answer shapes from the contract finder: shapes only, never a row); `openSession` opens its tool-less model session. Absent: no writer, the run is as it was.
+   */
+  standIn?: {
+    input(repositories: ReadonlyArray<SetupAgentRepository>, tracked: TrackedPaths): Promise<unknown>;
+    openSession(): Promise<PiSessionHandle>;
+  };
 }
 
 export interface SetupRunInput {
@@ -117,8 +126,7 @@ async function withinMs<T>(work: Promise<T>, ms: number): Promise<T | undefined>
   }
 }
 
-/** A cache write costs 1.25 times the input price: the extra quarter, on top of the input price already counted for it. */
-export const SETUP_CACHE_WRITE_EXTRA = 0.25;
+export { SETUP_CACHE_WRITE_EXTRA };
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
 /**
@@ -187,6 +195,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   let lastOutputTokens = 0;
   let ownSpendUsd = 0;
   let turns = 0;
+  /** What the stand-in writer cost, in cents: counted in the run's spend, so it is inside the cap and on the run's record. */
+  let writerSpendCents = 0;
+  /** Ends the writer's model call when a person stops the run while it goes. */
+  let abortWriter: (() => Promise<void>) | undefined;
   const pendingEntries: SetupJournalEntry[] = [];
   const seenHosts = new Set<string>();
   const told = new Set<string>();
@@ -209,16 +221,20 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     sandbox = ports.createSandbox(network);
     const refreshBlocked = async (): Promise<void> => { blocked = await network.readBlocked(); };
     const base = serialize(executionFor(SANDBOX_TARGET, { sandbox }).bashOperations(), refreshBlocked);
+    // The run's spend so far: the model session's (the larger of what it reports and what the run counted) plus what the stand-in writer cost, which is part of the same cap.
+    const runSpendCents = (): number | undefined => {
+      let main: number | undefined = 0;
+      if (session !== undefined) {
+        const reported = centsFromDollars(session.getSessionStats().cost);
+        const own = centsFromDollars(ownSpendUsd);
+        main = turns > 0 && (reported ?? 0) === 0 && (own ?? 0) === 0 ? undefined : reported === undefined ? own : own === undefined ? reported : Math.max(reported, own);
+      }
+      return main === undefined ? undefined : main + writerSpendCents;
+    };
     const governor = new SetupAgentGovernor({
       limits, now,
       // The larger of what the session reports and what the run counted itself from each turn's tokens at the catalog price: a proxy-routed model may report a cost of 0, and a turn with no usage and no cost is unreadable (= used up).
-      spendCents: () => {
-        if (session === undefined) return 0;
-        const reported = centsFromDollars(session.getSessionStats().cost);
-        const own = centsFromDollars(ownSpendUsd);
-        if (turns > 0 && (reported ?? 0) === 0 && (own ?? 0) === 0) return undefined;
-        return reported === undefined ? own : own === undefined ? reported : Math.max(reported, own);
-      },
+      spendCents: runSpendCents,
       // The next turn at most: the last turn's input and output and 4 KiB more as input (what is new may be written to the cache, at 1.25 times the input price), and the full output cap as output, at the model's own prices.
       nextTurnCents: () => estimateNextTurnCents({ inputTokens: lastInputTokens + lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS + SETUP_CACHE_WRITE_EXTRA * (lastOutputTokens + SETUP_NEXT_TURN_MARGIN_TOKENS), maxOutputTokens: SETUP_AGENT_MAX_OUTPUT_TOKENS, ...price }),
       // The names the helper saw refused since the last entry: from the helper's file, never from any output.
@@ -260,7 +276,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       governorSessionListener(governor)(event);
     });
     unregister = ports.register({
-      abort: async () => { cancelled = true; governor.stop("infrastructure"); await session?.abort(); },
+      abort: async () => { cancelled = true; governor.stop("infrastructure"); await session?.abort(); await abortWriter?.().catch(() => undefined); },
       steer: async (text) => (session?.steer === undefined || session.isStreaming?.() !== true ? false : (await session.steer(text), true)),
       streaming: () => session?.isStreaming?.() === true,
     });
@@ -373,6 +389,22 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     // F5: after a person's Stop the run still finishes and reports what it had, but only within a few seconds; past that it reports the stop with no proposal (the cancel has already ended the task, and the
     // sandbox is removed below whatever happened here). An unfinished look at the tracked files is never a clean one.
     let evalReport: SetupEvalDiscoveryReport | undefined;
+    const writeStandIns = async (standIn: NonNullable<SetupRunPorts["standIn"]>): Promise<void> => {
+      let request: unknown;
+      try { request = await standIn.input(repositories, tracked); } catch { request = null; }
+      // Nothing found to write for (no table, no outside service): the run says nothing about it and spends nothing.
+      if (request === undefined) return;
+      const spent = runSpendCents();
+      const outcome = await runStandInWriter({
+        input: request, price, remainingCents: spent === undefined ? 0 : limits.budgetCents - spent, openSession: () => standIn.openSession(),
+        register: (abort) => { abortWriter = abort; return () => { abortWriter = undefined; }; },
+      });
+      writerSpendCents += outcome.spendCents;
+      if (outcome.status !== "written") { await ports.progress(outcome.words).catch(() => undefined); return; }
+      if (cancelled) return;
+      const stored = await ports.callback({ kind: "stand_in_data", set: outcome.set }).then((answer) => (answer as { stored?: unknown } | undefined)?.stored === true, () => false);
+      await ports.progress(stored ? STANDIN_WRITER_WORDS.written : STANDIN_WRITER_WORDS.failed).catch(() => undefined);
+    };
     const finishRun = async (): Promise<{ proposal: SetupProposal | undefined; summary: SetupRunSummary }> => {
       governor.dispose();
       await sandbox!.dispose();
@@ -392,6 +424,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
             if ("report" in produced) evalReport = produced.report;
             // A draft that could not be used is said in fixed words on the run's live view (never the draft or a path), so "no eval" on the page is not a silent drop.
             else if (produced.refused !== "none") await ports.progress(`Rovara did not use the eval the setup drafted (${EVAL_DRAFT_REFUSAL_WORDS[produced.refused]}).`).catch(() => undefined);
+            // L4-E7: the stand-in writer, a separate step. It can never fail the setup run: every end of it is words on the live view.
+            if (ports.standIn !== undefined) await writeStandIns(ports.standIn).catch(() => undefined);
           }
           return { proposal: finished.proposal, summary: SetupRunSummarySchema.parse({ ...governor.summary(), stop: finished.end, partial: false }) };
         }

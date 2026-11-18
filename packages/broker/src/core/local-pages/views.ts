@@ -322,6 +322,8 @@ export interface SetupPageView {
   limits: { commands: number; sameStepTries: number; wallClockMin: number; budgetCents: number; hostAsks: number };
   /** Rovara cannot start a run (no model key, or the feature is off): the sentence. */
   cannotStart?: string;
+  /** L4-E7: what the run's sample-data writer does and costs (or that an AI must be connected first), in fixed words; shown beside the run's limits, before the run. */
+  standInWriter?: string;
   summary?: { commandsRun: number; spendCents: number; elapsedMin: number; hostAsks: number; partial: boolean; stop: string };
   items: SetupItemView[];
   verified: boolean;

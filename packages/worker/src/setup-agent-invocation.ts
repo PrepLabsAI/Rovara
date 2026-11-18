@@ -15,6 +15,8 @@ import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
+import { standInRequestOf } from "./standin-shapes.js";
+import { standInSessionInputOf } from "./standin-writer.js";
 
 export interface SetupInvocationDependencies {
   rootPath: string;
@@ -87,6 +89,11 @@ export async function runSetupAgentInvocation(
         rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic: () => undefined, extensionFactories: [], ...parts,
       }, dependencies.piAdapter),
       callback,
+      // L4-E7: the stand-in writer's own session: its own system prompt, no repository context, and NO tool at all (`agentTools: []`; the file-tool guard is satisfied only because none is active). The company's model, the setup run's cap.
+      standIn: {
+        input: (repositories, tracked) => standInRequestOf(repositories, tracked),
+        openSession: () => createWorkspacePiSession(standInSessionInputOf({ rootPath: dependencies.rootPath, model: dependencies.model }), dependencies.piAdapter),
+      },
       progress: async (message) => { await events.append("progress", { message }); },
       register: (control) => {
         const unregister = dependencies.cancellationController?.register(invocation.operationId, {

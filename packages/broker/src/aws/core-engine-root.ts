@@ -118,6 +118,7 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { fixtureObjectPortOf } from "../core/test-env/fixture-store-aws.js";
 import { baseFlakyTests } from "../core/test-env/base-flaky.js";
 import { flakyFactsPort } from "../lessons/knowledge-facts.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
@@ -1272,7 +1273,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
-          setupAgent: { mayStillRun: async () => false },
+          // L4-E7: and the stand-in writer's sample data goes to this install's object storage (the broker's own bucket access; keys are `private/<company>/standins/<project>/<digest>`).
+          setupAgent: { mayStillRun: async () => false, standInObjects: fixtureObjectPortOf(registry.require("object-storage")) },
           // Lead 4 W4: a hosted wiki build's callback: the requester's live standing, the project's own code host read for the citation re-read, and THIS company's wiki store as the page sink.
           wikiBuild: wikiBuildCallbackWiring({
             store: registry.require("storage"), companyId, now: () => now().getTime(),
