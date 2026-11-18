@@ -242,9 +242,11 @@ describe("the writer inside a setup run", () => {
     expect(result.setupProposal).toBeDefined();
   });
   it("never runs for a run that did not propose (a stopped run, a limit stop, a run that needs a code change)", async () => {
-    const needs = await world({ final: "NEEDS CODE CHANGE: the lockfile is broken\n```agentx-setup-proposal\n{}\n```" });
-    await runSetupAgent(needs.input);
+    const needs = await world({ final: `NEEDS CODE CHANGE: the lock file is broken\n${block(ANSWER)}` });
+    const needsResult = await runSetupAgent(needs.input);
+    expect(needsResult.setupRunSummary.stop).toBe("needs_code_change");
     expect(needs.w.writerOpened).toBe(0);
+    expect(stood(needs)).toHaveLength(0);
     const stoppedRun = await world({ script: async (control) => { await control.abort(); } });
     const stoppedResult = await runSetupAgent(stoppedRun.input);
     expect(stoppedResult.setupRunSummary.stop).not.toBe("proposed");
