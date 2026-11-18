@@ -210,8 +210,7 @@ function queryProblem(url: ParsedUrl): "write" | undefined {
     // A GraphQL document in a GET's query string: a mutation or a subscription is not a read, wherever the server routes it.
     if ((lower === "query" || lower === "mutation") && value.length > 0) {
       const verdict = parseGraphqlDocument(value);
-      if (!verdict.ok && (verdict.code === "mutation" || verdict.code === "subscription")) return "write";
-      // A document this check cannot read, or reads as no operation (a description in front, a type-system document), that still names one is refused too: not readable is not "no mutation".
+      // A document that is not a plain query and names a mutation or a subscription (one this check reads as one, cannot read, or reads as no operation: a description in front, a type-system document) is refused: not readable is not "no mutation".
       if (!verdict.ok && /mutation|subscription/iu.test(value)) return "write";
     }
   }
@@ -513,16 +512,14 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
   if (typeof members.query === "string" && /^\s*#\s*legacysql/iu.test(members.query)) return refuse("not_allowed", label);
   for (const flag of ["useLegacySql", "useQueryCache"]) if (members[flag] !== undefined && typeof members[flag] !== "boolean") return refuse("unreadable", label);
   const dataset = members.defaultDataset;
-  let rebuiltDataset: Record<string, string> | undefined;
   if (dataset !== undefined) {
     if (typeof dataset !== "object" || dataset === null || Array.isArray(dataset)) return refuse("unreadable", label);
-    // Exactly {projectId, datasetId}: another spelling of a member (`project_id`, which protobuf JSON also accepts) is a second way to name a project that this check does not read, so any other member is refused and the object is rebuilt below from these two.
+    // Exactly {projectId, datasetId}: another spelling of a member (`project_id`, which protobuf JSON also accepts) is a second way to name a project that this check does not read, so any other member is refused.
     const given = dataset as Record<string, unknown>;
     if (Object.keys(given).some((key) => key !== "projectId" && key !== "datasetId")) return refuse("not_allowed", label);
     const { projectId, datasetId } = given;
     if (projectId !== undefined && (typeof projectId !== "string" || !(policy.gcpProjects ?? []).includes(projectId))) return refuse("not_allowed", label);
     if (typeof datasetId !== "string" || !/^[A-Za-z0-9_]{1,1024}$/u.test(datasetId)) return refuse("unreadable", label);
-    rebuiltDataset = projectId === undefined ? { datasetId } : { projectId, datasetId };
   }
   // A table of another project (`p.d.t`), or one on the production list, is not this connection's: only its own project's tables are read.
   const refs = bigQueryProjectRefs(members.query) ?? [];
@@ -538,7 +535,7 @@ function classifyBigQueryQuery(members: Record<string, unknown>, label: string, 
     requested = Math.min(Number(text), cap);
   }
   const maximumBytesBilled = String(requested);
-  const forwarded = JSON.stringify({ ...members, ...(rebuiltDataset === undefined ? {} : { defaultDataset: rebuiltDataset }), maximumBytesBilled, useLegacySql: false });
+  const forwarded = JSON.stringify({ ...members, maximumBytesBilled, useLegacySql: false });
   return { allow: true, protocol: "google", method: "POST", host, operation: label, bigQuery: { maximumBytesBilled, dryRun: members.dryRun === true }, forwardBody: forwarded };
 }
 
