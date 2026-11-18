@@ -2,7 +2,7 @@
 // without prices reads exactly as before), checked strictly (a price that is not two amounts refuses the WHOLE list, never a partial one), and
 // passed through untouched to the page; the engine's choice, its stored validation and the dispatcher's copy work the same with or without it.
 import { describe, expect, it } from "vitest";
-import { OfferedAgentModelsSchema, agentModelIdentity, type OrgId, type Principal } from "@agentx/contracts";
+import { OfferedAgentModelsSchema, agentModelIdentity, type Principal } from "@agentx/contracts";
 import { createAgentModelChoice, type OfferedModelsReader } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { dispatcherStoredAgentModelChoice } from "../../packages/broker/src/core-host/stored-agent-model-choice.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
