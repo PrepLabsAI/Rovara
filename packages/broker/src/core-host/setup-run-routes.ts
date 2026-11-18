@@ -15,6 +15,8 @@
 //   GET  /v1/app/projects/{project}/setup-agent/updates    L4-SC (DEC 254z c): the "Update setup" offers a merged plan's setup changes left (managers only; a reader sees none)
 //   POST /v1/app/projects/{project}/setup-agent/updates/prepare   "Update setup": a candidate from the offer's items and its check (the same flow as confirm; approves nothing)
 //   POST /v1/app/projects/{project}/setup-agent/updates/dismiss   "Not now" ({ requestId, taskId })
+//   POST /v1/app/projects/{project}/setup-agent/eval-decide   approve or reject a waiting eval spend item (a changed eval that grew past its approved limit asks again)
+//   POST /v1/app/projects/{project}/setup-agent/eval-health   the OPT-IN "Check my evals now": records the person's yes; nothing runs without it (eval-health-request.ts)
 //   POST /v1/app/projects/{project}/setup-agent/decide     approve or reject the waiting candidate once its check passed (L4-D, setup-approval.ts): a fresh step-up, then the risk-based
 //                                                         approver rule (DEC 254z b), through the approval gate, bound to the candidate's digest and revision
 //   POST /v1/app/projects/{project}/setup-agent/host-decide  allow or refuse a website a setup run asked for (L4-SF d): the high-risk rule (a company owner or admin, either answer), a fresh step-up, through
@@ -41,11 +43,12 @@ import { cancelTask } from "../core/task-flow/cancel.js";
 import { EvalDiscoveryConfirmBodySchema, EvalWrapperActionBodySchema } from "@agentx/contracts";
 import { readEvalCard } from "../core/setup-agent/eval-card.js";
 import { confirmEvalDiscovery, type EvalDiscoveryConfirmDeps } from "../core/setup-agent/eval-discovery.js";
-import { EVAL_SPEND_KIND, roleFor as evalRoleFor } from "../core/setup-agent/eval-spend.js";
+import { EVAL_SPEND_KIND, readEvalSpendRecord, roleFor as evalRoleFor } from "../core/setup-agent/eval-spend.js";
 import { detectEvalWrappers, dismissEvalWrapper, openEvalWrapperPullRequest, refreshEvalWrappers, reopenEvalWrapper, type EvalWrapperDeps } from "../core/setup-agent/eval-wrapper.js";
 import { readEvalWrapperCards } from "../core/setup-agent/eval-wrapper-card.js";
 import { readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
 import { developerIdOf } from "../core/sessions/create.js";
+import { EvalHealthRequestBodySchema, requestEvalHealthCheck } from "../core/setup-agent/eval-health-request.js";
 import { SetupAgentStartBodySchema, SetupAgentStopBodySchema, getSetupAgent, readState, startSetupAgent, stopSetupAgent, type SetupAgentDeps } from "../core/setup-agent/agent.js";
 import type { SetupApplyDeps } from "../core/setup-agent/apply.js";
 import { SETUP_APPLY_KIND, SetupConfirmBodySchema, confirmSetupAgent, discardSetupApply, readSetupApply, setupCandidateRisk, waitingSetupApply } from "../core/setup-agent/apply.js";
@@ -73,6 +76,7 @@ export const EVAL_WRAPPER_UNAVAILABLE = "Setting up the file Rovara needs to rea
 /** "Check now" looks at the code host at most once in this long per eval (any member may press it; the host's quota is the company's). */
 const CHECK_NOW_FLOOR_MS = 15_000;
 export const EVAL_WRAPPER_ROLE = "Only a company owner, admin or project maintainer can ask Rovara to open a pull request for the eval's file, set it aside, or approve its test run.";
+export const EVAL_DECIDE_STALE = "That eval approval changed since you looked. Read it again.";
 export const EVAL_APPROVAL_UNAVAILABLE = "Approving an eval's spend isn't available on this install yet.";
 export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
 export const SETUP_PROOF_UNAVAILABLE = "Your approval could not be proved just now, so nothing was decided. Try again.";
@@ -99,7 +103,13 @@ export interface HostedSetupRunWiring {
    * L4-EVC: the eval card (DEC 254zzz20). The company's monthly eval cap (the bound `eval-reservation` adapter's source; absent: no eval can be confirmed here) and the code host's file read for the
    * broker's own hashing of the confirmed files. Served only together with `approval` (whose gate decides the eval spend item and whose members read the live roles).
    */
-  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"]; /** L4-EVW4: the project's repositories as code host targets (`createEvalWrapperTargets`), for the wrapper file's detection on the default branch and the pull request a person asks for. Absent: nothing is read from or written to a host. */ wrapperTargets?: EvalWrapperDeps["targets"] } | undefined;
+  eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"];
+    /** L4-EVW4: the project's repositories as code host targets (`createEvalWrapperTargets`), for the wrapper file's detection on the default branch and the pull request a person asks for. Absent: nothing is read from or written to a host. */
+    wrapperTargets?: EvalWrapperDeps["targets"];
+    /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
+    healthRuns?: boolean;
+    /** L4-EVH: starts the health run for the project's waiting yes (the broker claims it and hands it to a worker). Best effort; never throws, and the person's answer does not wait on the worker. Absent: nothing starts here (the card shows no button). */
+    healthRun?: (project: string) => Promise<unknown> } | undefined;
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
 }
@@ -140,10 +150,16 @@ const HostDecideBodySchema = z.object({
   reason: z.string().max(500).optional(),
 }).strict();
 const DiscardBodySchema = z.object({ requestId: z.string().uuid() }).strict();
+/** L4-EVC: a decision on a waiting eval spend item: the offer the card showed (its request id, revision and digest). */
+const EvalDecideBodySchema = z.object({
+  requestId: z.string().regex(/^eval-[a-f0-9]{40}-[0-9]{1,15}$/u),
+  outcome: z.enum(["approve", "reject"]),
+  seen: z.object({ revision: z.number().int().min(1), artifactDigest: z.string().regex(/^[a-f0-9]{64}$/u) }).strict(),
+}).strict();
 /** L4-SC: the task whose offer the person pressed (a task id, as every key names one). */
 const UpdateBodySchema = z.object({ requestId: z.string().uuid(), taskId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/u) }).strict();
 
-const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-wrapper|updates|updates\/prepare|updates\/dismiss|host-decide))?$/u;
+const SETUP_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-agent(?:\/(stop|journal|confirm|discard|decide|eval|eval-approve|eval-decide|eval-health|eval-wrapper|updates|updates\/prepare|updates\/dismiss|host-decide))?$/u;
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
 
 /** Whether this method and path is the hosted setup run's. */
@@ -152,7 +168,7 @@ export function isSetupRunPath(path: string, method: string): boolean {
   if (match === null) return false;
   const tail = match[2];
   if (method === "GET") return tail === undefined || tail === "journal" || tail === "updates" || tail === "eval";
-  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss" || tail === "host-decide" || tail === "eval-approve" || tail === "eval-wrapper";
+  if (method === "POST") return tail === undefined || tail === "stop" || tail === "confirm" || tail === "discard" || tail === "decide" || tail === "updates/prepare" || tail === "updates/dismiss" || tail === "host-decide" || tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health" || tail === "eval-wrapper";
   return false;
 }
 
@@ -425,7 +441,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         const latest = await readEvalDiscovery({ store: flow.store, companyId }, project);
         if (latest !== undefined) await detectEvalWrappers(reads, project, latest.report);
       }
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap }, project, input.principal)) });
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
@@ -495,13 +511,32 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       return await decide(input, approval, project, raw);
     }
     if (tail === "eval-wrapper") return await evalWrapperAct(input, project, basis, raw);
-    if (tail === "eval-approve") {
+    if (tail === "eval-approve" || tail === "eval-decide" || tail === "eval-health") {
       const approval = input.wiring.approval;
       const evalWiring = input.wiring.eval;
       if (approval === undefined || evalWiring === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
       const stamp = String(input.now());
+      if (tail === "eval-health") {
+        if (evalWiring.healthRuns !== true) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
+        // The opt-in (D5): a person's yes, kept as one request row. Nothing runs here; the host's health runner reads the row.
+        const body = parsed(EvalHealthRequestBodySchema, raw);
+        await recorded(input, auditEvent(input, "eval.health_requested", `eval.health:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
+        const asked = await requestEvalHealthCheck({ store: flow.store, companyId, now: input.now, members: approval.evalMembers }, project, body, input.principal);
+        // The yes is kept; now the broker re-reads everything it rested on and starts the run (a repeat of the same yes starts nothing again).
+        if (!asked.duplicate) await Promise.resolve(evalWiring.healthRun?.(project)).catch(() => undefined);
+        return json(200, { project, ...asked });
+      }
       if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
       const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);
+      if (tail === "eval-decide") {
+        const body = parsed(EvalDecideBodySchema, raw);
+        // The offer is the waiting item's own (its digest and revision), never an id the card did not show.
+        const waiting = await readEvalSpendRecord({ store: flow.store, companyId }, project);
+        if (waiting === undefined || body.requestId !== `eval-${waiting.digest.slice(0, 40)}-${String(waiting.revision)}`) throw agentXError("CHANGE_STALE", EVAL_DECIDE_STALE);
+        await recorded(input, auditEvent(input, "eval.spend_decision_requested", `eval.decide:${companyId}:${project}:${personId}:${stamp}`, project, basis, { outcome: body.outcome }));
+        await decideEvalItem(input, approval, project, body, stepUp, input.principal);
+        return json(200, { project, decision: body.outcome === "approve" ? "approved" : "rejected" });
+      }
       // ONE approval: confirm the eval and approve its spend in the same act. The body names the dollars the person saw; the broker holds them against its own figures.
       const body = parsed(EvalDiscoveryConfirmBodySchema, raw);
       if (body.approve !== true) throw agentXError("CONFIG_INVALID", "approve: this route confirms and approves in one act");

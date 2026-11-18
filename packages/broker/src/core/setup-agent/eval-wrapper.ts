@@ -16,9 +16,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
-  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, EVAL_WRAPPER_TEMPLATE_VERSION, change, evalOutputNeedsWrapper, evalWrapperDigestOf, evalWrapperFor,
+  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, EVAL_WRAPPER_TEMPLATE_VERSION, canonicalJson, change, evalOutputNeedsWrapper, evalWrapperCommandOf, evalWrapperDigestOf, evalWrapperFor,
   evalWrapperTemplateVersionOf, queryAll, when,
-  type DocumentStore, type EvalWrapperLanguage, type OrgId, type SetupEvalDiscoveryReport, type StoredDocument,
+  type DocumentStore, type EvalPlanBody, type EvalWrapperLanguage, type OrgId, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import { assertGuarded, guardTarget, headOf, readOwnPr, verifyRepository, type EvalWrapperTarget } from "./eval-wrapper-host.js";
 import { setupPartition } from "./keys.js";
@@ -442,6 +442,22 @@ export async function recordEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" 
   if (row === undefined) return false;
   const done = await deps.store.update({ key: fileKeyOf(deps.companyId, project, row.id), ops: [change.set("test", result), change.set("testAt", new Date(deps.now()).toISOString())], condition: when.eq("checkedAt", row.checkedAt) });
   return done.applied;
+}
+
+/**
+ * The health run's answer for the wrapped eval of an approved plan (DEC 254zzz43: "then confirm it's readable"). The plan names the eval (its selection and repository) and, for a wrapped eval, runs the wrapper itself as
+ * its command and reports through the wrapper's fixed JUnit path: that is how the file is told from an eval that was never wrapped (nothing is recorded for those). Only a file whose test run was approved takes an answer
+ * (a file that changed since starts over at `none` and takes none), the same answer again changes nothing, and a failed write leaves the file as it was (still `test_approved`). Never throws.
+ */
+export async function settleEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, plan: Pick<EvalPlanBody, "selection" | "repository" | "command" | "report">, result: "readable" | "unreadable"): Promise<boolean> {
+  try {
+    if (plan.command === undefined || plan.report === undefined || plan.report.cwd !== "." || plan.report.argument !== EVAL_WRAPPER_REPORT_PATH) return false;
+    const language = (["python", "node"] as const).find((entry) => canonicalJson(plan.command) === canonicalJson(evalWrapperCommandOf(entry)));
+    if (language === undefined) return false;
+    const row = (await listEvalWrapperFiles(deps, project)).find((entry) => entry.selection === plan.selection && entry.suiteRepository === (plan.repository ?? "") && entry.language === language && entry.status === "present" && entry.match !== "outdated" && entry.match !== "other");
+    if (row === undefined || row.test === "none" || row.test === result) return false;
+    return await recordEvalWrapperTest(deps, project, { ...(plan.repository === undefined ? {} : { repository: plan.repository }), selection: plan.selection, language }, result);
+  } catch { return false; }
 }
 
 /**
