@@ -19,6 +19,9 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 
 // ---- Limits -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+/** Most flag rows (open AND resolved: resolved rows are not pruned yet) one `openClaimFlagPages` read looks at; more than this is read as "any page may be flagged". */
+export const WIKI_FLAG_SCAN_MAX = 2_000;
+
 export const WIKI_LIMITS = {
   /** Pages in one project's wiki (W0's `pagesPerProject`). */
   pagesPerProject: 300,
@@ -452,6 +455,11 @@ export interface WikiStore {
   addFlag(project: string, flag: WikiFlagAdd): Promise<WikiFlag>;
   /** Resolves every open flag on a page (a refresh rewrote it). */
   resolveFlags(project: string, pageId: string): Promise<number>;
+  /**
+   * The pages of the project that have an open CLAIM-level flag (a "Mark wrong" on one claim, or a J1/J5 flag), with the time of the newest such flag. Page-level flags are not here (the index says
+   * `flagged`). Reads at most `WIKI_FLAG_SCAN_MAX` flag rows; `complete` is false when there were more (the caller must then treat every page as possibly flagged, never a partial answer).
+   */
+  openClaimFlagPages(project: string): Promise<{ pages: Array<{ pageId: string; latestAt: string }>; complete: boolean }>;
   writeBuild(project: string, record: WikiBuildRecord): Promise<void>;
   readBuild(project: string, buildId: string): Promise<WikiBuildRecord | undefined>;
   /** The most recent build (by start time), if any. */

@@ -12,7 +12,7 @@
 //    reasons are never given to agents.
 import { randomUUID } from "node:crypto";
 import {
-  OrgIdSchema, WIKI_ANSWER_RETENTION_DAYS, WIKI_ANSWER_SWEEP_MAX, WIKI_LIMITS, WIKI_QUOTE_MAX, WIKI_SK, WikiAnswerRecordWriteSchema, WikiBlockSchema, WikiBuildRecordSchema, WikiClaimSchema,
+  OrgIdSchema, WIKI_ANSWER_RETENTION_DAYS, WIKI_ANSWER_SWEEP_MAX, WIKI_FLAG_SCAN_MAX, WIKI_LIMITS, WIKI_QUOTE_MAX, WIKI_SK, WikiAnswerRecordWriteSchema, WikiBlockSchema, WikiBuildRecordSchema, WikiClaimSchema,
   WikiFlagAddSchema, WikiFlagSchema, WikiIdSchema, WikiNoteAddSchema, WikiNoteSchema, WikiPageIdSchema, WikiPageKindSchema, WikiPageWriteSchema, WikiPersonIdSchema, WikiProjectSchema,
   WikiRepoCommitSchema, WikiRepoSchema, WikiSourceStateSchema, queryAll, redactText, when, wikiAnswerKey, wikiBodyKey, wikiBuildKey, wikiFlagKey, wikiNoteKey, wikiPageKey, wikiPartition, wikiRowKey,
   type DocumentStore, type OrgId, type StoredDocument, type TransactItem, type WikiAnswerRecord, type WikiAnswerRecordWrite, type WikiAudience, type WikiBlock, type WikiBuildRecord,
@@ -331,6 +331,27 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     return flag;
   }
 
+  async function openClaimFlagPages(project: string): Promise<{ pages: Array<{ pageId: string; latestAt: string }>; complete: boolean }> {
+    const name = projectOf(project);
+    const latest = new Map<string, string>();
+    let seen = 0;
+    let complete = true;
+    let cursor: string | undefined;
+    do {
+      const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.flag }, limit: 200, ...(cursor === undefined ? {} : { cursor }) });
+      for (const item of page.items) {
+        if (seen >= WIKI_FLAG_SCAN_MAX) { complete = false; break; }
+        seen += 1;
+        const { flag } = readRow(FlagRow, item, name)!;
+        if (flag.state !== "open" || flag.claimId === undefined) continue;
+        const have = latest.get(flag.pageId);
+        if (have === undefined || Date.parse(flag.createdAt) > Date.parse(have)) latest.set(flag.pageId, flag.createdAt);
+      }
+      cursor = complete ? page.cursor : undefined;
+    } while (cursor !== undefined);
+    return { pages: [...latest].map(([pageId, latestAt]) => ({ pageId, latestAt })).sort((x, y) => x.pageId.localeCompare(y.pageId)), complete };
+  }
+
   async function resolveFlags(project: string, pageId: string): Promise<number> {
     const name = projectOf(project);
     const id = pageIdOf(pageId);
@@ -496,5 +517,5 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     };
   }
 
-  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, acknowledgeNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
+  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, acknowledgeNote, deleteNote, addFlag, resolveFlags, openClaimFlagPages, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
 }
