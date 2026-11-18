@@ -53,11 +53,14 @@ export function taskSharedOf(deps: TaskSharedDependencies): (orgId: OrgId, taskI
     // A People list that does not read says nothing reliable about who may see the task: not shared (fail closed), whatever else the records hold.
     if (people === "unreadable") return false;
     if (people !== undefined) {
-      // Which people are not Slack entries (read from the item peopleOfItem just validated; a person listed twice keeps the last entry, as there).
+      // Which people are not Slack entries (read from the item peopleOfItem just validated).
       const checked = new Set<string>();
-      for (const entry of (peopleItem as unknown as { people: Array<{ developerId: string }> }).people) {
-        if (taskPeopleEntryKind(entry as unknown as Record<string, unknown>) === "slack") checked.delete(entry.developerId);
-        else checked.add(entry.developerId);
+      const seen = new Set<string>();
+      for (const entry of (peopleItem as unknown as { people: Array<Record<string, unknown> & { developerId: string }> }).people) {
+        // The real People reader refuses a list that names a person twice (task-people.ts `parsePeople`): so does this, and a later entry cannot loosen how an earlier one is checked.
+        if (seen.has(entry.developerId)) return false;
+        seen.add(entry.developerId);
+        if (taskPeopleEntryKind(entry) !== "slack") checked.add(entry.developerId);
       }
       const counts = async (developerId: string): Promise<boolean> => !checked.has(developerId) || await webEntryLive(deps, orgId, task["project"], developerId);
       const owners: string[] = [];

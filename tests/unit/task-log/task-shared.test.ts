@@ -20,7 +20,7 @@ async function put(store: MemoryDocumentStore, taskId: string, company: OrgId, o
 }
 type Entry = { developerId: string; role: string; method?: string };
 /** A bare { developerId, role } is a Slack entry (the pre-C1 shape: a chat account id, no method); one with a `method` is a web entry (no chat account id). */
-const entryOf = (entry: Entry): Record<string, unknown> => (entry.method === undefined ? { ...entry, slackUserId: "UAAAAAAAA", name: "Ana" } : { ...entry, name: "Ana" });
+const entryOf = (entry: Entry): Record<string, JsonValue> => (entry.method === undefined ? { ...entry, slackUserId: "UAAAAAAAA", name: "Ana" } : { ...entry, name: "Ana" });
 const people = (store: MemoryDocumentStore, taskId: string, entries: Entry[], over: Record<string, unknown> = {}) =>
   store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: entries.map(entryOf), ...over } });
 const share = (store: MemoryDocumentStore, company: OrgId, taskId: string, n: number, principal: JsonValue) =>
@@ -194,7 +194,7 @@ describe("L4-LP4: a web People entry counts as shared only while the person's gr
   });
 
   it("a task whose project is missing, empty or not a name cannot have a grant checked: its web entries do not count", async () => {
-    const anyGrant: SessionMembers = { companyRole: async () => "member", projectGrant: async () => "contributor" };
+    const anyGrant: SessionMembers = { companyRole: async () => "member" as const, projectGrant: async () => "contributor" as const };
     for (const project of ["", 5, null] as const) {
       const store = await withPeople([WEB("a", "owner"), WEB("b", "commenter")], { project });
       expect(await sharedWith(store, A, live(), anyGrant)(A, TASK), JSON.stringify(project)).toBe(false);
@@ -211,15 +211,15 @@ describe("L4-LP4: a web People entry counts as shared only while the person's gr
     // A members reader that throws outright (not the deployed one, which swallows its own faults) is no grant either.
     const throwing: SessionMembers = { companyRole: async () => { throw new Error("boom"); }, projectGrant: async () => { throw new Error("boom"); } };
     expect(await sharedWith(store, A, live(), throwing)(A, TASK)).toBe(false);
-    const grantThrows: SessionMembers = { companyRole: async () => "member", projectGrant: async () => { throw new Error("boom"); } };
+    const grantThrows: SessionMembers = { companyRole: async () => "member" as const, projectGrant: async () => { throw new Error("boom"); } };
     expect(await sharedWith(store, A, live(), grantThrows)(A, TASK)).toBe(false);
-    const roleThrows: SessionMembers = { companyRole: async () => { throw new Error("boom"); }, projectGrant: async () => "contributor" };
+    const roleThrows: SessionMembers = { companyRole: async () => { throw new Error("boom"); }, projectGrant: async () => "contributor" as const };
     expect(await sharedWith(store, A, live(), roleThrows)(A, TASK)).toBe(false);
   });
 
   it("a members reader that finds no company role is not live even if it names a grant", async () => {
     const store = await withPeople([WEB("a", "owner"), WEB("b", "commenter")]);
-    const noRole: SessionMembers = { companyRole: async () => undefined, projectGrant: async () => "contributor" };
+    const noRole: SessionMembers = { companyRole: async () => undefined, projectGrant: async () => "contributor" as const };
     expect(await sharedWith(store, A, live(), noRole)(A, TASK)).toBe(false);
   });
 
@@ -259,6 +259,17 @@ describe("L4-LP4: a web People entry counts as shared only while the person's gr
     expect(await sharedWith(denied, A, live())(A, TASK)).toBe(false);
   });
 
+  it("a person listed twice makes the list unreadable (the real People reader refuses it): not shared, in either order", async () => {
+    const dir = directory({ members: { [DEV("b")]: A }, grants: { [`${DEV("b")}/web`]: "developer" } });
+    for (const entries of [
+      [WEB("a", "owner"), WEB("b", "commenter"), { developerId: DEV("b"), role: "owner" }],
+      [WEB("a", "owner"), { developerId: DEV("b"), role: "viewer" }, WEB("b", "viewer")],
+    ]) {
+      const store = await withPeople(entries);
+      expect(await sharedWith(store, A, dir)(A, TASK)).toBe(false);
+    }
+  });
+
   it("an unreadable People list is still not shared, whatever the live check would say", async () => {
     const store = await withPeople([WEB("a", "owner"), WEB("b", "commenter")]);
     await people(store, TASK, [WEB("b", "commenter")], { schemaVersion: 2 });
@@ -293,6 +304,7 @@ describe("L4-LP4: two companies, the live check is the company's own", () => {
     const store = await withPeople([WEB("a", "owner"), WEB("b", "commenter")]);
     const dir = directory({ members: { [DEV("b")]: A }, grants: { [`${DEV("b")}/web`]: "developer" } });
     await sharedWith(store, A, dir)(A, TASK);
-    expect(dir.calls.every((c) => c.personId === DEV("b") || c.personId === DEV("a"))).toBe(true);
+    expect(dir.calls.length).toBeGreaterThan(0);
+    expect(dir.calls.every((c) => c.personId === DEV("b"))).toBe(true);
   });
 });
