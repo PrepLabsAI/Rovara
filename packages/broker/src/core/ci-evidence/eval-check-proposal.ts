@@ -29,7 +29,7 @@ const EVAL_WORD = /(?:^|[^a-z0-9])(?:evals?|evaluations?|deepeval|promptfoo|raga
 /** A command that runs an eval: a tool that exists for it, or a path or module that is plainly one (`evals/`, `-m evals`). A bare `eval` is the shell's own and counts for nothing. */
 const EVAL_COMMAND = /(?:^|[\s/='"])(?:evals?|evaluations?)\/|(?:^|\s)-m\s+(?:evals?|evaluations?)\b|(?:^|[^a-z0-9])(?:promptfoo|deepeval|ragas|braintrust|langsmith)(?:$|[^a-z0-9])/iu;
 /** A check name that can be matched exactly: no expression, no control character, and a sensible length. */
-const FIXED_NAME = /^[^\p{Cc}${}]{1,200}$/u;
+const FIXED_NAME = /^[^\p{Cc}\p{Cf}${}]{1,200}$/u;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 

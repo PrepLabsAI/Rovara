@@ -107,6 +107,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
     // Lead 4 N1: the nightly upkeep switch.
     ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
+    // L4-EVCI2: the setup card's eval check from the customer's CI (additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/ci-eval-check", "full"], ["PUT", "/v1/app/projects/payments/ci-eval-check", "full"],
     // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
     ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
     // Lead 4 PCF: the plan card's "Change" lists the open features (the same people as the filing).
@@ -150,6 +152,8 @@ describe("the /v1/app route table", () => {
       ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
       // The upkeep switch: GET and PUT only, no other tail.
       ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
+      // The eval check card: GET and PUT only, no other tail.
+      ["POST", "/v1/app/projects/payments/ci-eval-check"], ["DELETE", "/v1/app/projects/payments/ci-eval-check"], ["PATCH", "/v1/app/projects/payments/ci-eval-check"], ["GET", "/v1/app/projects/payments/ci-eval-check/extra"], ["PUT", "/v1/app/projects/payments/ci-eval-checks"],
       ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
       // The company's automatic-runs control: GET and PUT only, no other tail.
       ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],

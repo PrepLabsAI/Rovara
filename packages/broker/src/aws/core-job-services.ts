@@ -21,6 +21,7 @@ import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SummaryDependencies } from "../core/sessions/summary.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import { boundedCorePass } from "./core-job-pass.js";
+import { evalCheckEvidencePort } from "../core/ci-evidence/eval-check-setting.js";
 
 // One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
 const recoveryPass = new AsyncLocalStorage<{
@@ -148,7 +149,10 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         log();
       };
       const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
-        ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
+        ciMode: ci.ciMode,
+        // L4-EVCI2: the customer's confirmed eval check, kept per company and project (core/ci-evidence/eval-check-setting.ts); nothing confirmed: a pass is what it was.
+        ciEvidence: evalCheckEvidencePort({ store, companyId }),
+        ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
       const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;
