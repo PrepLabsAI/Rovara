@@ -3,6 +3,8 @@
 // The rule this file keeps: Rovara DRAFTS, a person DECIDES. Nothing here approves a setup, makes a candidate the project's latest revision, imports the approval gate, or asks a model anything itself. What it does:
 //   1. When the free re-check (recheck.ts) settles as "setup broken", and ONLY THEN, `startRepairDraft` decides whether to start ONE setup-agent run for that failure. It starts nothing unless ALL of these hold, each read
 //      now and each failing CLOSED (a throw, a missing answer or a malformed one is "no"):
+//        - the company's EFFECTIVE system-runs gate is on (L4-P2, owner DEC 254zzt: the operator's `CoreSystemRuns` ceiling AND the company's consent, `effectiveSystemRunsGate`). An absent gate is OFF: this file never
+//          starts anything on its own authority. A host that wires this hook must pass that gate; nothing hosted wires it yet (see the OFF NOTE below);
 //        - a person turned upkeep ON for the project (`UpkeepGate.enabled`: a page-only act, audited; this file only reads it);
 //        - a dollar cap is enforced on this install (the unattended door's `enforces.dollars`; the door itself refuses a model run without one);
 //        - the project's upkeep cap has room for the whole run (`UpkeepGate.roomCents` >= the run's budget). The gateway holds the real cap on every model call (the token carries the work origin "nightly", so the
@@ -15,12 +17,18 @@
 //      by `confirmSetupAgent` (the SAME path a person's "Use this setup" takes: every citation re-read from the code host, the candidate stored but not the project's latest, its check started on a NEW workspace) ->
 //      the candidate's check passed -> `ready`: the project's maintainers see "Approve new setup", and the decision is the hosted approval gate's (risk-based approvers, a fresh sign-in, the digest) as for any setup.
 //      A run that failed, a proposal nothing could be used from, or a candidate whose check failed ends the draft as `failed`, in fixed words, and the failed candidate is removed. The manual "Fix setup" stays open.
+//
+// OFF NOTE (lead 4, owner DEC 254zzl/254zzt/254zzy): the AUTOMATIC path is OFF on every install. Nothing wires `TaskFlowDeps.afterSetupBroken` or calls `advanceRepairDraft`, the system starter refuses `repair_draft`
+// (`createSystemStarter` starts the two free kinds only) and the access rule does not accept a system owner for a `setup_agent` task. Turning it on needs ALL of: the starter taking this kind through `startUnattendedRun`
+// like the wiki refresh; a hosted starter that knows `setupRepair`; the access rule's step marks for the setup task; the audit record written BEFORE the run starts (here it is staged after); the `systemRuns` gate above.
+// Until then a person starts the fix ("Fix setup (uses your AI, up to $4)") and the same approval rule decides it.
 import { createHash } from "node:crypto";
 import {
   ROVARA_CODE_AGENT_ID, SETUP_RUN_END_WORDS, change, effectiveSetupAgentLimits, systemOwnerIdOf, when,
   type SetupDriftClass, type TransactItem,
 } from "@agentx/contracts";
 import { eventIdOf } from "../automatic-runs/cap.js";
+import { systemRunsGateSaysOn, type SystemRunsGate } from "../system-runs/consent.js";
 import { putRow } from "../automation/kit.js";
 import { startUnattendedRun, type AutomatedRunRequest, type UnattendedStartDeps } from "../automation/run-seam.js";
 import { iso, log } from "../task-flow/support.js";
@@ -47,13 +55,15 @@ export interface UpkeepGate {
 }
 
 export interface RepairDraftDeps extends SetupApplyDeps {
+  /** The company's EFFECTIVE system-runs gate (the operator's ceiling AND the company's consent, read now). Absent, a throw or anything but an explicit `true`: no automatic draft. */
+  systemRuns?: SystemRunsGate | undefined;
   upkeep?: UpkeepGate | undefined;
   /** The unattended door's dependencies (the switch, the cap declaration, `Admission`, the host's starter). Absent: nothing starts on its own. */
   run?: UnattendedStartDeps | undefined;
 }
 
 /** Why a draft was not started (nothing was written, nothing was spent). */
-export type RepairSkip = "not_broken" | "upkeep_off" | "no_cap" | "no_room" | "busy" | "cooling_down" | "start_refused";
+export type RepairSkip = "not_broken" | "system_runs_off" | "upkeep_off" | "no_cap" | "no_room" | "busy" | "cooling_down" | "start_refused";
 export type RepairStart = { status: "started"; row: RepairRow } | { status: "exists"; row: RepairRow } | { status: "skipped"; why: RepairSkip };
 
 /** A draft whose run or check has not finished after this long is over (the run's own stale rule is shorter; this covers a proposal that can never be confirmed). */
@@ -105,6 +115,8 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
   if (recheck === undefined || recheck.state !== "broken") return { status: "skipped", why: "not_broken" };
   const existing = await readRepair(deps, project, recheckKey);
   if (existing !== undefined) return { status: "exists", row: existing };
+  // The company's gate first (ceiling AND consent): where it is off nothing more is read, written or started. Absent is off.
+  if (deps.systemRuns === undefined || !(await systemRunsGateSaysOn(deps.systemRuns))) return { status: "skipped", why: "system_runs_off" };
   if (!(await upkeepOn(deps, project))) return { status: "skipped", why: "upkeep_off" };
   const door = deps.run;
   if (door === undefined || door.enforces.dollars !== true) return { status: "skipped", why: "no_cap" };

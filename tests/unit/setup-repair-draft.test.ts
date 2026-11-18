@@ -8,6 +8,7 @@
 //   the run's own  only a finished, whole proposal of THIS draft's run is confirmed; a partial run, a failed run, another run's proposal and a failed check each end the draft in fixed words
 //   isolation      another project and another company never meet the rows, the pointer, the card or the run
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -23,6 +24,7 @@ import {
   REPAIR_COOLDOWN_MS, REPAIR_START_STALE_MS, REPAIR_WORDS, advanceRepairDraft, fixSetupLabel, readRepairView, repairCurrentKey, repairDraftHook, repairRowKey, startRepairDraft,
   type RepairDraftDeps, type RepairRow, type UpkeepGate,
 } from "../../packages/broker/src/core/setup-agent/repair-draft.js";
+import { effectiveSystemRunsGate, systemRunsConsentKey, type SystemRunsGate } from "../../packages/broker/src/core/system-runs/consent.js";
 import { fixedAutomationSwitch } from "../../packages/broker/src/core/automation/switch.js";
 import type { AutomatedRunRequest, AutomatedRunStarter, UnattendedStartDeps } from "../../packages/broker/src/core/automation/run-seam.js";
 import { SETUP_REPAIR_NOT_HERE, createTaskFlowRunStarter } from "../../packages/broker/src/local/app/automation.js";
@@ -150,20 +152,20 @@ function upkeepOf(initial: { on?: unknown; room?: unknown } = {}): Upkeep {
   return gate;
 }
 
-function repairDepsOf(w: World, door: Door | undefined, upkeep: UpkeepGate | undefined, extra: { limitSetting?: (project: string) => Promise<unknown> } = {}): RepairDraftDeps {
+function repairDepsOf(w: World, door: Door | undefined, upkeep: UpkeepGate | undefined, extra: { limitSetting?: (project: string) => Promise<unknown>; systemRuns?: SystemRunsGate | undefined } = {}): RepairDraftDeps {
   return {
     store: w.h.store, companyId: w.h.deps.companyId, now: () => w.h.clock.now, flow: w.h.deps, starter: undefined,
     async latest(project) { const found = await w.h.deps.projects.latest(project); return found === undefined ? undefined : { revision: found.definition.revision, definition: found.definition }; },
-    upkeep, run: door?.run, ...extra,
+    upkeep, run: door?.run, systemRuns: { enabled: () => true }, ...extra,
   };
 }
 
 interface Rig { w: World; door: Door; upkeep: Upkeep; deps: RepairDraftDeps }
-async function rig(options: { enforce?: boolean; on?: unknown; room?: unknown; limitSetting?: (project: string) => Promise<unknown>; wireHook?: boolean } = {}): Promise<Rig> {
+async function rig(options: { enforce?: boolean; on?: unknown; room?: unknown; limitSetting?: (project: string) => Promise<unknown>; wireHook?: boolean; systemRuns?: SystemRunsGate | undefined } = {}): Promise<Rig> {
   const w = await world();
   const door = doorOf(w, options.enforce === undefined ? {} : { enforce: options.enforce });
   const upkeep = upkeepOf({ ...("on" in options ? { on: options.on } : {}), ...("room" in options ? { room: options.room } : {}) });
-  const deps = repairDepsOf(w, door, upkeep, options.limitSetting === undefined ? {} : { limitSetting: options.limitSetting });
+  const deps = repairDepsOf(w, door, upkeep, { ...(options.limitSetting === undefined ? {} : { limitSetting: options.limitSetting }), ..."systemRuns" in options ? { systemRuns: options.systemRuns } : {} });
   if (options.wireHook !== false) w.h.deps.afterSetupBroken = repairDraftHook(deps);
   return { w, door, upkeep, deps };
 }
@@ -255,6 +257,40 @@ describe("when a draft starts, and when it never does", () => {
     await breakSetup(r.w);
     expect(r.door.requests).toEqual([]);
     expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
+  });
+
+  it.each([["absent", undefined], ["off", { enabled: () => false }], ["a string", { enabled: () => "true" as unknown as boolean }], ["throws", { enabled: () => { throw new Error("gate down"); } }], ["rejects", { enabled: () => Promise.reject(new Error("gate down")) }]])("the company's system-runs gate %s: nothing starts, nothing is read from upkeep, nothing is written (the gate comes first)", async (_name, systemRuns) => {
+    const r = await rig({ systemRuns });
+    const { recheck } = await breakSetup(r.w);
+    expect(r.door.requests).toEqual([]);
+    expect(r.upkeep.asked).toEqual([]);
+    expect(await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments")).toEqual([]);
+    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "system_runs_off" });
+  });
+
+  it("the EFFECTIVE gate (ceiling AND the company's stored consent): the ceiling alone starts nothing; ceiling plus consent starts one run", async () => {
+    const w0 = await world();
+    const ceilingOnly = effectiveSystemRunsGate({ ceiling: () => true, store: w0.h.store, companyId: w0.h.deps.companyId });
+    const r = await rig({ systemRuns: ceilingOnly });
+    const { recheck } = await breakSetup(r.w);
+    expect(await startRepairDraft(r.deps, "payments", recheck.key)).toEqual({ status: "skipped", why: "system_runs_off" });
+    expect(r.door.requests).toEqual([]);
+    // Consent given (a company owner's act, written by the setup PUT): both locks open.
+    const w = await world();
+    const gate = effectiveSystemRunsGate({ ceiling: () => true, store: w.h.store, companyId: w.h.deps.companyId });
+    await w.h.store.put({ item: { ...systemRunsConsentKey(w.h.deps.companyId), entityType: "SYSTEM_RUNS_CONSENT", orgId: w.h.deps.companyId, enabled: true } });
+    const door = doorOf(w);
+    const deps = repairDepsOf(w, door, upkeepOf(), { systemRuns: gate });
+    w.h.deps.afterSetupBroken = repairDraftHook(deps);
+    await breakSetup(w);
+    expect(door.requests).toHaveLength(1);
+    // The ceiling shut again: the gate is off whatever the stored consent says.
+    expect(await effectiveSystemRunsGate({ ceiling: () => false, store: w.h.store, companyId: w.h.deps.companyId }).enabled()).toBe(false);
+  });
+
+  it("the draft code never imports or calls an approval (a person decides; the proofs that a ready draft stays `checking` are below)", () => {
+    const text = readFileSync(resolve("packages/broker/src/core/setup-agent/repair-draft.ts"), "utf8");
+    expect(text).not.toMatch(/approval-gate|approveSetup|setupApproverAllows|decideSetup/u);
   });
 
   it("no upkeep seam at all, or no unattended door: nothing starts", async () => {
