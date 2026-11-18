@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EVAL_STAND_IN_RUN_DIR, EVAL_STAND_IN_SET_PATH, buildOpenApiFake, parseEvalStandInSetBytes, type EvalStandInPlan, type EvalStandInSetContent, type TrustedEvalStandInSummary } from "@agentx/contracts";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
 import {
-  EVAL_STAND_IN_ENVIRONMENT, EVAL_STAND_IN_FAILURE_SENTENCE, EVAL_STAND_IN_GRACE_MS, EVAL_STAND_IN_HELPER_ENTRY, evalStandInArgProblems, evalStandInContainerName, evalStandInRunArgs, evalStandInsOffered,
+  EVAL_STAND_IN_ENVIRONMENT, EVAL_STAND_IN_FAILURE_SENTENCE, EVAL_STAND_IN_HELPER_INDEX, EVAL_STAND_IN_GRACE_MS, EVAL_STAND_IN_HELPER_ENTRY, evalStandInArgProblems, evalStandInContainerName, evalStandInRunArgs, evalStandInsOffered,
   startEvalStandIns, startEvalStandInsOnce, writeEvalStandInRunFiles, type EvalStandInNetwork,
 } from "../../packages/worker/src/eval-standin-hosted.js";
 import { createRunCa } from "../../packages/worker/src/run-ca.js";
@@ -102,7 +102,7 @@ describe("the launch arguments", () => {
   it("are one network, one read-only mount, no capability, no port, no env, a non-root user and the round's four labels", () => {
     expect(problems(args)).toEqual([]);
     expect(values(args, "--network")).toEqual([net.name]);
-    expect(values(args, "--ip")).toEqual([net.helperIp(0)]);
+    expect(values(args, "--ip")).toEqual([net.helperIp(EVAL_STAND_IN_HELPER_INDEX)]);
     expect(values(args, "--volume")).toEqual([`/scratch/run-x/standin:${EVAL_STAND_IN_RUN_DIR}:ro`]);
     expect(values(args, "--cap-drop")).toEqual(["ALL"]);
     expect(values(args, "--user")).toEqual(["1000:1000"]);
@@ -110,11 +110,11 @@ describe("the launch arguments", () => {
     expect(args.filter((arg) => ["--publish", "-p", "--env", "-e", "--env-file", "--add-host", "--privileged", "--cap-add", "--device", "--pid", "--volumes-from"].includes(arg))).toEqual([]);
     expect(values(args, "--label").map((label) => label.split("=")[0])).toEqual(LABEL_KEYS);
     expect(values(args, "--name")).toEqual([HELPER]);
-    expect(args.slice(args.indexOf(IMAGE))).toEqual([IMAGE, EVAL_STAND_IN_HELPER_ENTRY, "--listen", net.helperIp(0), "--caller", net.checkSandboxIp, "--digest", DIGEST, "--workspace", WORKSPACE, "--operation", OPERATION, "--lifetime-ms", "3600000"]);
+    expect(args.slice(args.indexOf(IMAGE))).toEqual([IMAGE, EVAL_STAND_IN_HELPER_ENTRY, "--listen", net.helperIp(EVAL_STAND_IN_HELPER_INDEX), "--caller", net.checkSandboxIp, "--digest", DIGEST, "--workspace", WORKSPACE, "--operation", OPERATION, "--lifetime-ms", "3600000"]);
   });
-  it("serve ONE caller (the eval box at .4), listen on the helper's own address (.16), and carry the one namespaced sysctl that lets a non-root helper bind 80 and 443", () => {
+  it("serve ONE caller (the eval box at .4), listen on the helper's own address (.47, the sinkhole), and carry the one namespaced sysctl that lets a non-root helper bind 80 and 443", () => {
     expect(net.checkSandboxIp.endsWith(".4")).toBe(true);
-    expect(net.helperIp(0).endsWith(".16")).toBe(true);
+    expect(net.helperIp(EVAL_STAND_IN_HELPER_INDEX).endsWith(".47")).toBe(true);
     expect(values(args, "--sysctl")).toEqual(["net.ipv4.ip_unprivileged_port_start=0"]);
   });
   it.each([
@@ -187,7 +187,7 @@ describe("starting the helper", () => {
   it("runs the helper on the round network only, waits until its first summary is bound to this company, task and digest, and gives its address", async () => {
     const daemon = fakeDaemon();
     const started = await startEvalStandInsOnce({ docker: daemon.docker, image: IMAGE, net, parent: await scratch(), content: content(), roundBudgetMs: 600_000, sleep: async () => undefined });
-    expect(started.address).toBe(net.helperIp(0));
+    expect(started.address).toBe(net.helperIp(EVAL_STAND_IN_HELPER_INDEX));
     const run = daemon.calls.find((call) => call[0] === "run")!;
     expect(values(run, "--lifetime-ms")).toEqual([String(600_000 + EVAL_STAND_IN_GRACE_MS)]);
     expect(daemon.calls.map((call) => call[0])).toEqual(["run", "inspect", "exec"]);

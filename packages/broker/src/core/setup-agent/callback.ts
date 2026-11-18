@@ -8,6 +8,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   host          a website the run could not reach: the name only (and where it came from): the broker decides whether it is refused, already allowed, joined or a new ask. Nothing is granted;
 //   poll          "anything for me?": the next command the owner typed (handed over once), and where each host this run asked for stands (open, approved, refused);
 //   command_done  a person's command finished, with the journal position of its result;
+//   eval_dry_run  L4-E12: the free dry run's dependency list (databases by port, outside hosts by name, missing variables by name), kept once per project (the newest run's) and shown through the TH1 words (`eval-dependency-list.ts`).
 //   eval_discovery  DEC 253n(1): the eval questions the run found (suites, their question files and categories, the command, judge pins, model catalog row and image), kept once per run and
 //                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
@@ -19,6 +20,7 @@ import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./comman
 import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
 import { SETUP_JOURNAL_BATCH_MAX, appendSetupJournal } from "./journal.js";
 import { recordEvalDiscovery, type EvalDiscoveryLogEvent } from "./eval-discovery.js";
+import { recordEvalDependencyList, type EvalDependencyListLogEvent } from "./eval-dependency-list.js";
 
 export interface SetupAgentCallbackDeps {
   store: DocumentStore;
@@ -33,7 +35,7 @@ export interface SetupAgentCallbackDeps {
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
   /** Fixed-word log lines (the eval discovery's); never the body. */
-  log?: ((entry: { event: EvalDiscoveryLogEvent; reason?: string }) => void) | undefined;
+  log?: ((entry: { event: EvalDiscoveryLogEvent | EvalDependencyListLogEvent; reason?: string }) => void) | undefined;
 }
 
 /** The authenticated operation, as the callback route read it. */
@@ -54,6 +56,8 @@ export const SetupAgentCallbackBodySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("command_done"), seq: z.number().int().min(1).max(20), journalN: z.number().int().min(1).max(400).optional() }).strict(),
   // The report itself is checked by `recordEvalDiscovery` (`SetupEvalDiscoveryReportSchema`), so a bad report gets its own fixed refusal.
   z.object({ kind: z.literal("eval_discovery"), report: z.unknown() }).strict(),
+  // L4-E12 (DEC 254zzz55 N6): what the free dry run of the drafted eval found it reaches. Checked by `recordEvalDependencyList` (a fixed-shape list; a model call claimed is refused).
+  z.object({ kind: z.literal("eval_dry_run"), list: z.unknown() }).strict(),
 ]);
 export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema>;
 
@@ -101,5 +105,7 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
       return { finished: await finishSetupCommand(table, run, { seq: body.seq, journalN: body.journalN }) };
     case "eval_discovery":
       return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
+    case "eval_dry_run":
+      return await recordEvalDependencyList({ ...table, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.list);
   }
 }

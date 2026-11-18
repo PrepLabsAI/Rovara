@@ -1,5 +1,5 @@
 // The HOSTED home of the eval stand-in (L4-E56, rows E5 and E6). The sealed eval box (verification/eval-bridged-exec.ts) runs on a round network of its own with the model helper at .9; when the round has outside HTTP hosts to stand in
-// for, a stand-in helper CONTAINER from the worker's own image joins THAT network at the first service-helper address (.16) and answers every outside name the box asks for. DEPLOYMENT CODE: nothing here has been run against Docker
+// for, a stand-in helper CONTAINER from the worker's own image joins THAT network at the sinkhole's address (.47, the last service-helper address) and answers every outside name the box asks for. DEPLOYMENT CODE: nothing here has been run against Docker
 // by its author (no Docker is started on a build machine); the first real proof is a Linux check beside the eval sandbox's own. The pattern is general-fakes-hosted.ts; this module keeps its rules.
 //
 // What the helper may and may not do (each rule is checked when the arguments are built AND by `evalStandInArgProblems`, which reads them back against an allow-list):
@@ -8,17 +8,17 @@
 //     non-root helper can bind the standard ports 80 and 443 (a vendor URL names no other) without a capability; it changes nothing outside the helper's own network namespace.
 //   - ONE bind mount, read-only: the run's `standin` folder holding only the set file (the plan, the repository's recordings, the answer book so far, and the round's certificate authority). ONE tmpfs for its own summary.
 //   - bounded: memory (swap equal), CPUs, pids, no log driver; the program limits a request's body, the connections and every counter.
-//   - it listens on its own address (.16) and serves ONE address, the eval box (.4); a connection from any other address is closed unread and counted.
+//   - it listens on its own address (.47) and serves ONE address, the eval box (.4); a connection from any other address is closed unread and counted.
 //   - ALL four labels of the run network are on the container (the network's own stop removes it by them; run-network.ts rule 1).
 // The CA KEY: it is in the set file (the helper's own read-only mount) and in the worker's memory. It is never written into the box's checkout, env file or arguments: the box gets the public certificate and variable NAMES only
 // (run-ca.ts `evalStandInTrustEnvironment`).
-// Names: the box's host table (`--add-host name:<helper address>`, one per planned vendor host) sends each vendor name to the helper; every other name needs the sealed DNS helper's sinkhole (lane E12), whose address is this helper's
-// (`catchAllAddress`): until that lands, a name nobody planned does not resolve (the client fails fast) instead of getting the catch-all answer.
+// Names (L4-E12's sealed name server): the helper is at the SINKHOLE address, so every name the name server does not know reaches the stand-in's catch-all (never stop); each planned vendor name is also put at that address in the box's
+// hosts file and the name server's table (`evalStandInHostsLines`, `evalStandInDnsPairs`), so a planned name does not depend on the sinkhole. A stand-in therefore implies the sealed name server (eval-bridged-exec.ts).
 import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import {
-  EVAL_STAND_IN_RUN_DIR, EVAL_STAND_IN_SET_PATH, EVAL_STAND_IN_SUMMARY_MAX_BYTES, agentXError, buildEvalStandInSetBytes, parseEvalStandInSummaryText,
+  EVAL_STAND_IN_MAX_HOSTS, EVAL_STAND_IN_RUN_DIR, EVAL_STAND_IN_SET_PATH, EVAL_STAND_IN_SUMMARY_MAX_BYTES, agentXError, buildEvalStandInSetBytes, isEvalStandInPlanHost, parseEvalStandInSummaryText,
   type EvalStandInSetContent, type TrustedEvalStandInSummary,
 } from "@agentx/contracts";
 import { EVAL_STAND_IN_HELPER_MAX_LIFETIME_MS, EVAL_STAND_IN_HELPER_MIN_LIFETIME_MS } from "./eval-standin-helper.js";
@@ -56,6 +56,29 @@ const LABEL_KEYS: readonly string[] = [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LA
 
 export type EvalStandInNetwork = Pick<ServicesNetwork, "name" | "checkSandboxIp" | "labelArgs" | "helperIp">;
 
+/**
+ * The stand-in takes the round network's SINKHOLE address, helper index 31 (.47): the sealed name server (lane E12) sends every name it does not know there, so the stand-in's catch-all answers a name nobody planned, and the
+ * planned vendor names are put at the same address in the box's hosts file and the name server's table. The test services use indexes 0 to 30 (.16 to .46).
+ */
+export const EVAL_STAND_IN_HELPER_INDEX = 31;
+const IPV4 = /^(?:\d{1,3}\.){3}\d{1,3}$/u;
+
+function assertNames(address: string, names: readonly string[]): void {
+  const bad = (what: string): never => { throw agentXError("CONFIG_INVALID", `not ${what} for the stand-in's names`); };
+  if (!IPV4.test(address) || isIP(address) !== 4) bad("an address");
+  if (names.length > EVAL_STAND_IN_MAX_HOSTS || new Set(names).size !== names.length || !names.every((name) => isEvalStandInPlanHost(name))) bad("names");
+}
+/** The box's hosts-file lines for the planned vendor names: `<address> <name>`. Plain names only (a dotted outside name, never localhost or an address); the caller has already left out the model's names. */
+export function evalStandInHostsLines(address: string, names: readonly string[]): string {
+  assertNames(address, names);
+  return names.map((name) => `${address} ${name}\n`).join("");
+}
+/** The same names for the sealed name server's table (`--host name=address`). */
+export function evalStandInDnsPairs(address: string, names: readonly string[]): string[] {
+  assertNames(address, names);
+  return names.map((name) => `${name}=${address}`);
+}
+
 /** The helper's container name: the network's own name and `-standin`. */
 export const evalStandInContainerName = (net: Pick<ServicesNetwork, "name">): string => `${net.name}-standin`;
 
@@ -85,7 +108,7 @@ function assertInput(input: EvalStandInLaunchInput): void {
 export function evalStandInRunArgs(input: EvalStandInLaunchInput): string[] {
   assertInput(input);
   const { net } = input;
-  const helperIp = net.helperIp(0);
+  const helperIp = net.helperIp(EVAL_STAND_IN_HELPER_INDEX);
   const args = [
     "run", "--detach", "--pull=never", "--name", evalStandInContainerName(net), "--stop-timeout", "1", ...net.labelArgs(),
     "--network", net.name, "--ip", helperIp, "--dns", NO_UPSTREAM_DNS,
@@ -137,7 +160,7 @@ export function evalStandInArgProblems(args: readonly string[], net: EvalStandIn
     break;
   }
   const only = (flag: string, wanted: string): boolean => (flags.get(flag) ?? []).length === 1 && flags.get(flag)![0] === wanted;
-  const helperIp = net.helperIp(0);
+  const helperIp = net.helperIp(EVAL_STAND_IN_HELPER_INDEX);
   if (image === undefined || !IMAGE_REFERENCE.test(image)) problems.push("there is no pinned image");
   if (!only("--network", net.name)) problems.push("the helper must be on the round network and on no other network");
   if (!only("--dns", NO_UPSTREAM_DNS)) problems.push("the helper's only DNS server must be its own loopback (no upstream)");
@@ -257,7 +280,7 @@ export async function startEvalStandInsOnce(input: StartEvalStandInsInput): Prom
   const files = await writeEvalStandInRunFiles({ parent: input.parent, content: input.content }).catch(() => undefined);
   if (files === undefined) return fail();
   const helperName = evalStandInContainerName(input.net);
-  const helperIp = input.net.helperIp(0);
+  const helperIp = input.net.helperIp(EVAL_STAND_IN_HELPER_INDEX);
   let stopped: Promise<void> | undefined;
   const stop = (): Promise<void> => (stopped ??= (async () => {
     await call(["rm", "--force", helperName]);

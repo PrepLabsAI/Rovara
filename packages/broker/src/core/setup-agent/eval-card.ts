@@ -8,6 +8,7 @@ import { dollarRangeOf, dollarsUpOf, evalApprovalSentence, evalAsksAgainWords } 
 import { evalCommandFingerprintOf } from "@agentx/contracts";
 import { evalEstimateOf, evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
 import { evalHealthNotRunWords } from "@agentx/contracts";
+import { evalReachesView, type EvalReachesView } from "./eval-dependency-list.js";
 import { readEvalHealthView, type EvalHealthResultSummary } from "./eval-health-request.js";
 import { readEvalSpendItem, readEvalSpendRecord, roleFor } from "./eval-spend.js";
 
@@ -21,6 +22,8 @@ export interface EvalCardDeps {
   healthRuns?: boolean | undefined;
   /** The host's clock (milliseconds), for the health check's age and window. Absent: the stored row is read as it is. */
   now?: (() => number) | undefined;
+  /** L4-E12: whether this install's test services are off right now (`!testServicesEnabled(env)`). The dry run's words then carry the fixed "Test services are off on this install" reason. Absent: read as on. */
+  testServicesOff?: (() => boolean) | undefined;
 }
 
 export interface EvalCardSuiteView {
@@ -52,6 +55,8 @@ export interface EvalCardView {
     words?: string; result?: EvalHealthResultSummary };
   /** Why no card can be offered (the install has no eval budget). */
   unavailable?: string;
+  /** L4-E12 (E2): what the free dry run of the drafted eval found it reaches, in the TH1 words (`words`), with the TH1 items. Absent: no dry run ran, or it found nothing worth saying. */
+  reaches?: EvalReachesView;
 }
 
 /** The whole card for a project, as `principal` sees it. Reads only this company's own rows; an unreadable one reads as absent. */
@@ -61,7 +66,8 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   let monthlyCap: number | undefined;
   try { const cap = deps.monthlyCap === undefined ? undefined : await deps.monthlyCap({ company: deps.companyId, project }); monthlyCap = typeof cap === "number" && Number.isSafeInteger(cap) && cap > 0 ? cap : undefined; } catch { monthlyCap = undefined; }
   const table = { store: deps.store, companyId: deps.companyId, ...members, ...(monthlyCap === undefined ? {} : { monthlyCapMicros: monthlyCap }) };
-  const [item, record, found] = await Promise.all([readEvalSpendItem(table, project), readEvalSpendRecord(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project)]);
+  const [item, record, found, reaches] = await Promise.all([readEvalSpendItem(table, project), readEvalSpendRecord(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project),
+    evalReachesView({ store: deps.store, companyId: deps.companyId }, project, { servicesOff: (() => { try { return deps.testServicesOff?.() === true; } catch { return false; } })() })]);
   // An approval counts for the preview only while its approver still may approve (the item's own live reading) and it carries the dollars the person saw.
   const standing = item?.state === "approved" && record?.state === "approved" && record.plan.dollars !== undefined ? record.plan : undefined;
   const suites: EvalCardSuiteView[] = [];
@@ -88,7 +94,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
     ? await (async () => {
       const view = await readEvalHealthView({ ...table, ...(deps.now === undefined ? {} : { now: deps.now }) }, project);
       return { state: view.state, label: card.healthRun.label, cost: card.healthRun.cost, seenCostMicros: record.plan.estimate.costMicros,
-        ...(view.reason === undefined ? {} : { words: evalHealthNotRunWords(view.reason) }), ...(view.result === undefined ? {} : { result: view.result }) };
+        ...(view.reason === undefined ? {} : { words: evalHealthNotRunWords(view.reason, view.blocked) }), ...(view.result === undefined ? {} : { result: view.result }) };
     })()
     : undefined;
   return {
@@ -97,6 +103,7 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
       ...(card === undefined ? {} : { perPr: card.perPr, monthly: card.monthly, ...(card.needsApproval === undefined ? {} : { needsApproval: card.needsApproval }), ...(card.carried === true ? { carried: true } : {}), ...(card.setupRevision === undefined ? {} : { setupRevision: card.setupRevision }) }),
       ...(item.approval === undefined ? {} : { approval: { requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest } }) } }),
     ...(health === undefined ? {} : { health }),
+    ...(reaches === undefined ? {} : { reaches }),
     ...(monthlyCap === undefined && state !== "approved" ? { unavailable: "This install has no eval budget, so an eval can't be approved here yet." } : {}),
   };
 }

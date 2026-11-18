@@ -115,7 +115,7 @@ import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js"; import { attentionEmailFromEnvironment, attentionEmailModule } from "./attention-email.js"; import { LambdaClient } from "@aws-sdk/client-lambda";
-import { hostedServiceCatalog } from "./hosted-test-services.js";
+import { hostedServiceCatalog, hostedWorkersRunTestServices } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
 import { baseFlakyTests } from "../core/test-env/base-flaky.js";
@@ -1016,6 +1016,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
               ...(healthDeps === undefined ? {} : { healthRuns: true, healthRun: (project: string) => kickEvalHealth(healthDeps, project) }),
+              // L4-E12: hosted test services run only where the operator set TestServiceImages=mirrored (and the switch is on): otherwise the dry run's words say they are off on this install.
+              testServicesOff: () => !hostedWorkersRunTestServices(env),
             },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
             approval: setupApproval,

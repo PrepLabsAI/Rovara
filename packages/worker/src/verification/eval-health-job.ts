@@ -6,10 +6,11 @@
 //   - the cache it hands `runEvalHealth` keeps nothing: it only catches the record the three runs made, which is returned to the broker. The broker checks it against its own plan and keeps it under its own key. This
 //     worker never writes a baseline, and its result has no key, company, project, cost or payer in it.
 // Never throws. Words are the broker's (`evalHealthNotRunWords`); nothing a repository or a provider said is in the result but the measured record itself.
-import { EVAL_HEALTH_WORKER_REASONS, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, type BaseScoreCache, type EvalBaseRecord, type EvalHealthResultBody, type EvalSpendGrant, type PrepareEvalHealth } from "@agentx/contracts";
+import { EVAL_HEALTH_WORKER_REASONS, EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, type BaseScoreCache, type EvalBaseRecord, type EvalBlockedReach, type EvalHealthResultBody, type EvalSpendGrant, type PrepareEvalHealth } from "@agentx/contracts";
 import { EVAL_PLAN_QUESTIONS_CHANGED, validPlan, type EvalFinalCheckPorts } from "./eval-final-check.js";
 import { runEvalHealth, type EvalHealthInput } from "./eval-health.js";
 import { readEvalMeasures } from "./eval-round.js";
+import { runFailureOf } from "./eval-run-diagnostic.js";
 
 export type EvalHealthJobPorts = Pick<EvalFinalCheckPorts, "plan" | "approval" | "meter" | "runner">;
 const WORKER_REASONS: ReadonlySet<string> = new Set(EVAL_HEALTH_WORKER_REASONS);
@@ -33,6 +34,8 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
     // What the grant allows is the limit of the three runs; nothing else (the request's own estimate is not here at all).
     const limits = { maxCalls: whole(grant.maxCalls) ? grant.maxCalls : EVAL_DEFAULT_CALL_BUDGET, maxCostMicros: whole(grant.maxCostMicros) ? grant.maxCostMicros : EVAL_DEFAULT_COST_BUDGET_MICROS };
     let caught: EvalBaseRecord | undefined;
+    // TH1: the first run that stopped because the eval tried to reach something other than the model: what it tried to reach (fixed shape, host names only; never a cause or a log line).
+    let blocked: EvalBlockedReach | undefined;
     // Catches the record the three runs made; keeps nothing. Reading finds nothing, so no earlier baseline stands in for the measurement.
     const cache: BaseScoreCache = { read: async () => undefined, write: async (_parts, record) => { caught = record; return "stored"; } };
     const ids = plan.questions.map(q => q.id);
@@ -43,7 +46,11 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
       run: async ({ call }) => {
         if (signal.aborted) throw new Error("eval stage stopped");
         const started = Date.now();
-        const output = await ports.runner({ side: "old", ids, runs: 1, call, signal });
+        const output = await ports.runner({ side: "old", ids, runs: 1, call, signal }).catch((error: unknown) => {
+          const failure = runFailureOf(error);
+          if (blocked === undefined && failure?.code === "blocked_connection") blocked = failure.blocked;
+          throw error;
+        });
         const read = await readEvalMeasures(output.report);
         if (!read.ok || output.attestation === undefined) throw new Error("eval baseline unavailable");
         return { measures: read.measures, attestation: output.attestation, seconds: (Date.now() - started) / 1000 };
@@ -51,6 +58,7 @@ export async function runEvalHealthJob(job: PrepareEvalHealth, ports: EvalHealth
     };
     const outcome = await runEvalHealth(input);
     if (signal.aborted) return notRun("stopped");
+    if (outcome.status === "not_run" && outcome.reason === "unavailable" && blocked !== undefined) return result({ status: "not_run", reason: "blocked_connection", blocked });
     if (outcome.status === "not_run") return notRun(WORKER_REASONS.has(outcome.reason) ? outcome.reason : "unavailable");
     return caught === undefined ? notRun("unavailable") : result({ status: "measured", record: caught });
   } catch { return notRun("unavailable"); }

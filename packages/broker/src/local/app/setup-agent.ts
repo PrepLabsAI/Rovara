@@ -15,6 +15,8 @@ import { startTask } from "../../core/task-flow/start.js";
 import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readState, startSetupAgent, stopSetupAgent, verifiedView, getSetupAgent, type SetupAgentView } from "../../core/setup-agent/agent.js";
 import { createEvalSpendSubject, EVAL_SPEND_KIND, readEvalSpendItem } from "../../core/setup-agent/eval-spend.js";
+import { evalReachesView } from "../../core/setup-agent/eval-dependency-list.js";
+import { testServicesEnabled } from "../../core/test-env/test-services-switch.js";
 import { EVAL_NO_CAP_MESSAGE, confirmEvalDiscovery, readEvalDiscovery, setupEvalDiscoveryView, type EvalDiscoveryConfirmDeps } from "../../core/setup-agent/eval-discovery.js";
 import { boundEvalMonthlyCap } from "../../core/setup-agent/eval-reservation.js";
 import { SETUP_APPLY_KIND, confirmSetupAgent, createSetupProposalSubject, discardSetupApply, readSetupApply, type SetupApplyDeps } from "../../core/setup-agent/apply.js";
@@ -171,6 +173,8 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
     const apply = await readSetupApply({ flow, store, companyId, now: options.now }, project);
     const evalSpend = await readEvalSpendItem({ store, companyId, members: localMembers }, project);
     const evalDiscovery = setupEvalDiscoveryView(await readEvalDiscovery({ store, companyId }, project), evalSpend?.state, boundEvalMonthlyCap(options.registry) === undefined ? EVAL_NO_CAP_MESSAGE : undefined);
+    // L4-E12: the free dry run's list, in the TH1 words; "off" is read from this install now (the owner's switch, or the host's marker).
+    const evalReaches = await evalReachesView({ store, companyId }, project, { servicesOff: !testServicesEnabled(process.env) });
     const waiting = apply !== undefined && apply.state === "checking";
     void pointerTask;
     const cannotStart = !options.enabled ? "Setting a project up with Rovara is off on this install." : (await options.modelAccessConfigured()) ? undefined : "Rovara has no model key on this install, so it cannot run a setup. Set a model key, then restart `rovara up`.";
@@ -178,7 +182,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       project, revision: latest.revision, status: state.status, ...(state.failure === undefined ? {} : { failure: state.failure }), ...(state.stoppedBy === undefined ? {} : { stoppedBy: state.stoppedBy.name }),
       limits: state.limits, ...(cannotStart === undefined ? {} : { cannotStart }),
       ...(state.summary === undefined ? {} : { summary: { commandsRun: state.summary.commandsRun, spendCents: state.summary.spendCents, elapsedMin: Math.round(state.summary.elapsedMs / 60_000), hostAsks: state.summary.hostAsks, partial: state.summary.partial, stop: state.summary.stop } }),
-      items, verified: state.verified === true, ...(evalSpend === undefined ? {} : { evalSpend }), ...(evalDiscovery === undefined ? {} : { evalDiscovery }),
+      items, verified: state.verified === true, ...(evalSpend === undefined ? {} : { evalSpend }), ...(evalDiscovery === undefined ? {} : { evalDiscovery }), ...(evalReaches === undefined ? {} : { evalReaches: { words: evalReaches.words } }),
       ...(evalDiscovery === undefined && boundEvalMonthlyCap(options.registry) === undefined ? { evalNoBudget: EVAL_NO_CAP_MESSAGE } : {}),
       journal: journal.map((entry) => ({ n: entry.n, source: entry.source, command: entry.command, exitCode: entry.exitCode, timedOut: entry.timedOut, flagged: entry.flagged, tail: entry.tail, blockedHosts: entry.blockedHosts })),
       hostAsks: asks.map((ask): SetupHostAskView => ({ host: ask.host, status: ask.state, international: isInternationalName(ask.host), ...(ask.from === undefined ? {} : { from: ask.from }), ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.state === "open" ? { approval: offerOfHost(ask) } : {}) })),
