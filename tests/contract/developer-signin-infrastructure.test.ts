@@ -11,6 +11,7 @@ import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parit
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { planCompanyImport, planCompanyImportUndo } from "../../packages/broker/src/aws/install-company-import.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
@@ -648,6 +649,8 @@ describe("task-token key and membership IAM", () => {
     withoutCoreEngine(remainder);
     // The switch-over parity additions (evidence expiry rules, broker names) are checked in full by switchover-parity-infrastructure.test.ts; shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
+    // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts checks them in full).
+    withoutNatEgressControlPlane(remainder);
     withoutGithubSignIn(remainder, "staging");
     // DEC 254zzz(2): the install company import's two sign-in table reads are exactly BrokerCompanyImportReads (asserted in full in the test of that name); taken out so the digest still pins everything else.
     expect(companyImportPolicies(remainder)).toHaveLength(1);

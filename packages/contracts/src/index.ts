@@ -480,3 +480,4 @@ export * from "./cost-report.js";
 export * from "./upkeep.js";
 export * from "./prompt-locations.js";
 export * from "./ai-markers.js";
+export * from "./company-egress-addresses.js";
