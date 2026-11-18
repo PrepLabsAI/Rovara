@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WIKI_BUILD_TOOLS, agentXError, type WikiBuildPins } from "@agentx/contracts";
+import { BUDGET_LIMIT_KINDS, WIKI_BUILD_TOOLS, agentXError, budgetExhaustedWords, type WikiBuildPins } from "@agentx/contracts";
 import { ModelBudgetExhaustedError } from "@agentx/model-runtime";
 import { agentStepTools } from "../../packages/worker/src/agent-step.js";
 import { createWorkspacePiSession, piTaskToolCapabilities, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
@@ -256,6 +256,14 @@ describe("money: metered spend, a ceiling that holds", () => {
   it("the gateway's budget-exhausted marker on a turn (the project's monthly limit ran out) is the budget stop", async () => {
     for (const scope of ["project", "org", "task"] as const) {
       const w = world([pageJob("overview")], (session) => session.turn("", { input: 10, output: 1 }, { stopReason: "error", errorMessage: `AI budget exhausted (${scope})` }));
+      await runWikiBuild(w.input);
+      expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
+    }
+  });
+
+  it("a plain error carrying any limit's own words (task, project, company month, person month, company day) is the budget stop", async () => {
+    for (const limit of BUDGET_LIMIT_KINDS) {
+      const w = world([pageJob("overview")], () => { throw new Error(budgetExhaustedWords(limit)); });
       await runWikiBuild(w.input);
       expect(answers(w)[0]).toMatchObject({ failure: "budget_used" });
     }
