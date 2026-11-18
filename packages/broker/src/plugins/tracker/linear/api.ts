@@ -78,6 +78,8 @@ export interface LinearApiOptions {
 /** Comments fetched per page, and the most pages one call walks to reach a page (a deeper page is not there). */
 export const LINEAR_COMMENTS_PER_PAGE = 100;
 export const LINEAR_COMMENT_PAGES_MAX = 5;
+/** The cursors kept for the next page of a read in progress (a handful of tickets at a time). */
+const COMMENT_CURSORS_MAX = 20;
 const COMMENTS_QUERY = `query($id: String!, $first: Int!, $after: String, $filter: CommentFilter) { viewer { id } issue(id: $id) { identifier url comments(first: $first, after: $after, filter: $filter) { pageInfo { hasNextPage endCursor } nodes { id body createdAt updatedAt user { id } botActor { id } } } } }`;
 const STATE_TYPES: readonly string[] = ["triage", "backlog", "unstarted", "started", "completed", "canceled"];
 const ASKED_QUERY = `query($filter: IssueFilter!, $first: Int!) { viewer { id } issues(first: $first, filter: $filter) { nodes { id identifier title description url project { id name url } parent { id identifier title url }
@@ -258,11 +260,17 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
    * One page of an issue's comments (L4-SRC-TK, fetch only): at most `LINEAR_COMMENTS_PER_PAGE`, those created after `since` when it is given. A page past the first is reached by walking Linear's cursors, so pages are honest
    * and numbered from 1. An author is `isBot` for an app actor (`botActor`), for a comment with no user, and, when the key is Rovara's own account, for that account (the viewer). An issue that is not found has no comments.
    */
+  const commentCursors = new Map<string, { page: number; after: string }>();
   const listComments: NonNullable<LinearTrackerAccess["listComments"]> = async (_orgId, key, query) => {
     const issueKey = normalizeIssueKey(key);
     if (issueKey === undefined) return undefined;
-    let after: string | null = null;
-    for (let page = 1; page <= LINEAR_COMMENT_PAGES_MAX; page += 1) {
+    // A caller that reads page after page (the lessons' ticket source does) costs one request per page, not one more each time: the cursor that ends a page is remembered for the next page of the same read.
+    const wanted = query.page ?? 1;
+    const memoKey = `${issueKey}\0${query.since ?? ""}`;
+    const known = commentCursors.get(memoKey);
+    let page = known !== undefined && known.page <= wanted ? known.page : 1;
+    let after: string | null = known !== undefined && known.page <= wanted ? known.after : null;
+    for (; page <= LINEAR_COMMENT_PAGES_MAX; page += 1) {
       const answer = await call(COMMENTS_QUERY, { id: issueKey, first: LINEAR_COMMENTS_PER_PAGE, after, filter: query.since === undefined ? null : { createdAt: { gt: query.since } } });
       if ("errors" in answer) {
         if (isNotFoundAnswer(answer.errors)) return undefined;
@@ -277,7 +285,7 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
       const connection = rec(issue["comments"]);
       const more = rec(connection["pageInfo"])["hasNextPage"] === true;
       const cursor = str(rec(connection["pageInfo"])["endCursor"]);
-      if (page < (query.page ?? 1)) {
+      if (page < wanted) {
         // Walking to the page asked for: a connection that says there is more but gives no cursor cannot be walked (the page is not there).
         if (!more || cursor === undefined) return { comments: [] };
         after = cursor;
@@ -294,6 +302,10 @@ export function createLinearApiAccess(options: LinearApiOptions): Required<Pick<
         const accountId = str(rec(node["user"])["id"]);
         const isBot = str(rec(node["botActor"])["id"]) !== undefined || accountId === undefined || (viewer !== undefined && accountId === viewer);
         comments.push({ id, ...(accountId === undefined ? {} : { accountId }), isBot, body: cut(str(node["body"]) ?? "", LINEAR_COMMENT_MAX_CHARS), createdAt, updatedAt });
+      }
+      if (more && cursor !== undefined) {
+        if (commentCursors.size >= COMMENT_CURSORS_MAX) commentCursors.delete(commentCursors.keys().next().value!);
+        commentCursors.set(memoKey, { page: page + 1, after: cursor });
       }
       return { comments, ...(more ? { nextPage: page + 1 } : {}) };
     }

@@ -75,6 +75,11 @@ describe("who wrote it: a person's account, not a bot, not Rovara", () => {
   it("a comment with no account id, or an id that is not a plain account id, names nobody and is left out", async () => {
     expect(await texts([row({ accountId: undefined }), row({ accountId: "a b" }), row({ accountId: "x".repeat(129) }), row({ accountId: "" })])).toEqual([]);
   });
+  it("an id that is not a plain account id is nobody even when the identity point would place it", async () => {
+    const places = { personOf: async () => "dev-any" };
+    expect(await texts([row({ accountId: "a b" }), row({ accountId: "x".repeat(129) }), row({ accountId: "a/b" })], places)).toEqual([]);
+    expect(await texts([row({ accountId: "712020:a1b2-c3_d4" })], places)).toEqual([RULE]);
+  });
   it("Rovara's own comments are left out by their words (a laptop writes with the owner's own account): the status line, the thread root, a decision, the plan notice, the pull request notice", async () => {
     const own = [
       "Rovara started work on this ticket: \"Refunds fail\".", "Rovara: \"Refunds fail\"\nState: Working on it (since Nov 17 14:10 UTC)", "Rovara's plan for this ticket is ready for review: \"Refunds fail\".",

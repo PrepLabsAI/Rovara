@@ -51,7 +51,7 @@ function people(roster: Record<string, string[]>): HostedLessonPeople {
 interface Over {
   origin?: "intake" | "hand_linked" | "raced" | "none"; tracker?: Tracker | undefined; company?: OrgId; project?: string; ended?: boolean; closedAt?: string | undefined; releasedAt?: string | undefined;
   roster?: Record<string, string[]>; paused?: () => Promise<boolean>; wiring?: boolean; developerId?: string;
-  accounts?: Record<string, string>;
+  accounts?: Record<string, string>; emptyUrl?: boolean;
 }
 async function world(over: Over = {}) {
   const store = new MemoryDocumentStore();
@@ -79,7 +79,7 @@ async function world(over: Over = {}) {
     workflow: { revision: 3, artifacts: [], reviews: [], pullRequests: [], decisions: [], ...(ended ? { outcome: "MERGED" } : {}) } } });
   if (origin === "intake" || origin === "raced") {
     const itemId = intakeItemIdOf("linear", KEY);
-    await claimIntakeItem(table, { orgId: company, project, itemId, channel: "tracker", system: "linear", id: KEY, url, title: "Refunds fail", requester: { display: "Dana", standing: "outsider" }, state: "starting", startedBy: "holder" });
+    await claimIntakeItem(table, { orgId: company, project, itemId, channel: "tracker", system: "linear", id: KEY, url: over.emptyUrl === true ? "" : url, title: "Refunds fail", requester: { display: "Dana", standing: "outsider" }, state: "starting", startedBy: "holder" });
     await markIntakeStarted(table, company, project, itemId, { holder: "holder", taskId: origin === "raced" ? randomUUID() : taskId, sessionId, requester: { display: "Dana", standing: "outsider" } });
   }
   const fake = over.tracker === undefined ? onePage(comment("c1")) : undefined;
@@ -108,6 +108,12 @@ describe("only the ticket that STARTED this task is read", () => {
     expect(w.calls[0]).toMatchObject({ ref: { tracker: "linear", id: KEY, url: `https://linear.app/acme/issue/${KEY}/x` }, options: { since: STARTED, page: 1 }, scope: { orgId: A } });
     expect(spans.map((s) => [s.kind, s.authorId, s.trust, s.sourceKey, s.text])).toEqual([["ticket_comment", "ann", "member", "linear:payments", RULE]]);
     expect(spans[0]!.eventId).toBe("ticket:linear:ENG-12:c1");
+  });
+  it("a ticket whose own link was not recorded (the intake item has none) is not read (the workspace cannot be told)", async () => {
+    const w = await world({ emptyUrl: true });
+    expect(await w.spans()).toEqual([]);
+    expect(w.calls).toHaveLength(0);
+    expect(w.logs.some((l) => l.fields["code"] === "no_url")).toBe(true);
   });
   it("a ticket someone linked by hand to a task that did not start from it is never read", async () => {
     const w = await world({ origin: "hand_linked" });

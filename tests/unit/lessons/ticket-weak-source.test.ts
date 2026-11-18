@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { OrgId } from "@agentx/contracts";
 import { erasePersonLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import { DocumentLessonStore } from "../../../packages/broker/src/lessons/document-store.js";
+import { curateDraft, type CurateDeps } from "../../../packages/broker/src/lessons/curate.js";
 import { earnedAttention, processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
 import { reflectSubject, type LessonDraft } from "../../../packages/broker/src/lessons/reflect.js";
@@ -12,7 +13,7 @@ import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.
 import { LessonProvenanceSchema, SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
 import { STRONG_SPAN_KINDS, WEAK_SIGHTINGS_NEEDED, WEAK_SPAN_KINDS, hasWeakKind, isWeakOnly, seenEnoughTimes, weakSourceWaits } from "../../../packages/broker/src/lessons/weak-source.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, autoSettings, candidateJson, draft, embedder, facts, lessonRecord, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
+import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, autoSettings, candidateJson, closeEmbedder, draft, embedder, facts, lessonRecord, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -208,5 +209,51 @@ describe("erase: the person's lessons that rest on a ticket comment go with the 
     await erasePersonLessons({ store, audit: { stage: () => [], record: async () => undefined }, companyId: A, personId: "ann", now: () => 9 });
     expect(await idsOf(store, A)).toEqual(["les_tk000002"]);
     expect(await idsOf(store, B)).toEqual(["les_tk000001", "les_tk000002", "les_tk000003"]);
+  });
+});
+
+describe("the curator: a weak sighting waits as a candidate, with no alert, even for a contradiction or a possible duplicate", () => {
+  const text = (title: string, body: string, kinds: string[]): LessonDraft => {
+    const d = draft({ title, description: "", body });
+    return { ...d, provenance: { ...d.provenance, sourceKinds: kinds as never, sourceEvents: ["ticket:linear:ENG-12:c1"], supportTasks: ["task-1"], memberSignal: false, sources: ["linear:payments"], inputSources: ["linear:payments"] } };
+  };
+  const setup = (verdict: string) => {
+    const store = new InMemoryLessonStore();
+    let n = 0;
+    const alerts = new Alerts();
+    const deps: CurateDeps & { verifier: unknown; settings: unknown } = {
+      store, embedder: closeEmbedder, vectors: new MemoryVectors(), judgeModel: new ScriptedModel([JSON.stringify({ verdicts: [{ n: 1, verdict }] })]), spend: new Spend(), audit: new Audit(), alerts, now: new Clock().now,
+      verifier: verifier("valid"), settings: settings(), newId: () => `les_${String(++n).padStart(4, "0")}`,
+    };
+    return { deps, store, alerts };
+  };
+  const pos = "Always use withRetry for HTTP calls in the api service";
+  const neg = "Never use withRetry for HTTP calls in the api service";
+  const a = "Use withRetry from src/retry/index.ts for HTTP retries in the api service client calls";
+  const reworded = "Wrap outbound HTTP calls in the api service with withRetry from src/retry/index.ts";
+
+  it("a contradiction: a weak-only draft is a candidate and raises no alert; the same draft from a strong source is pending and alerts", async () => {
+    for (const [kinds, status, alerted] of [[["ticket_comment"], "candidate", false], [["ticket_comment", "intent"], "candidate", false], [["human_edit"], "pending", true], [["ticket_comment", "human_edit"], "pending", true]] as const) {
+      const { deps, alerts } = setup("contradicts");
+      await curateDraft(deps, KEY, text("Retries", pos, ["human_edit"]));
+      const out = await curateDraft(deps, KEY, text("Retries", neg, [...kinds]));
+      expect(out.outcome, kinds.join()).toBe("contradiction");
+      if (out.outcome !== "contradiction") return;
+      expect(out.lesson.status, kinds.join()).toBe(status);
+      expect(alerts.sent.includes("lesson_contradiction"), kinds.join()).toBe(alerted);
+    }
+  });
+  it("a possible duplicate: a weak-only draft is a candidate; the same draft from a strong source is pending", async () => {
+    for (const [kinds, status] of [[["ticket_comment"], "candidate"], [["human_edit"], "pending"]] as const) {
+      const { deps, store } = setup("same");
+      await curateDraft(deps, KEY, text("Retries", a, ["human_edit"]));
+      // The first lesson cannot merge across the repository line: it is the only one that is repo-only.
+      const [first] = await store.list(KEY);
+      await store.commit(KEY, await store.setVersion(KEY), [{ ...first!, version: first!.version + 1, provenance: { ...first!.provenance, repoOnly: { place: "github:repo/1" } } }], 2);
+      const out = await curateDraft(deps, KEY, text("Retries", reworded, [...kinds]));
+      expect(out.outcome, kinds.join()).toBe("possible_duplicate");
+      if (out.outcome !== "possible_duplicate") return;
+      expect(out.lesson.status, kinds.join()).toBe(status);
+    }
   });
 });
