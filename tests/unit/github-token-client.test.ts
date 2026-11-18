@@ -130,7 +130,8 @@ describe("the owner-token GitHub client", () => {
     for (const name of GITHUB_CODE_HOST_PROVIDER_METHODS) expect(typeof (client as unknown as Record<string, unknown>)[name], name).toBe("function");
     // The App client's other public methods (agent tokens, webhook history, installation lists) are not reachable through it.
     const surface = Object.keys(client).sort();
-    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "getCommitChanges", "getCompareChanges", "getDeploymentStatuses", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch"].sort());
+    // Batch 14: #964 (revert detection) exposes the read-only listRecentCommits on the owner-token client (token-client.ts lists it).
+    expect(surface).toEqual([...GITHUB_CODE_HOST_PROVIDER_METHODS, "getPathKindAtCommit", "getCommitChanges", "getCompareChanges", "getDeploymentStatuses", "listPullRequestComments", "postPullRequestComment", "commitFilesToBranch", "findLessonsPullRequest", "deleteLessonsBranch", "listRecentCommits"].sort());
     expect(Object.isFrozen(client)).toBe(true);
     for (const name of ["createAgentInstallationToken", "agentRepositoryReader", "appSlug", "oauthClient", "listWebhookDeliveries", "installation"]) expect(name in client).toBe(false);
   });

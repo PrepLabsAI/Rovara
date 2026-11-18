@@ -5,7 +5,7 @@
 //
 // Per-company isolation: each company runs in its own try/catch, so one company's failure never skips the others, and the order rotates by run so a time budget never defers the same tail
 // companies every time.
-import { CORE_JOB_EVENT_SOURCE } from "@agentx/contracts";
+import { CORE_JOB_EVENT_SOURCE, UPKEEP_NIGHT_JOB } from "@agentx/contracts";
 import type { CoreRuntime, CoreServiceName } from "./core-runtime.js";
 import type { CoreArea } from "./flags.js";
 
@@ -47,6 +47,9 @@ export const CORE_JOBS: readonly CoreJob[] = [
   // The after-merge watcher's pass (optional service, M7 slice 2): windows that ended close, a report that could not be sent goes out again, and the deploy read backs up a deployment event that never came. The service is the
   // one `createAfterMergeService` makes for this company (`core/after-merge/service.ts`); it does nothing for a project whose own `afterMergeWatch` setting is off, and a runtime that wires none skips this job.
   { name: "after-merge", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("after-merge") },
+  // L4-P1 (owner DEC 254zzl 6): the upkeep night. Each hour it starts the projects that are due (their hash hour inside 07:00-11:00 UTC, upkeep on, not claimed today) through the system starter. Optional service: wired only
+  // where the company's `ROVARA_CORE_SYSTEM_RUNS` flag covers it, so a runtime without one skips this job (`service_not_wired`) and the schedule is enabled only with that flag (infra/lib/core-engine.ts).
+  { name: UPKEEP_NIGHT_JOB, area: "flow", trigger: { kind: "schedule", rate: "rate(1 hour)" }, run: service("upkeep") },
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */

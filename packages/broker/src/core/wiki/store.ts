@@ -12,7 +12,7 @@
 //    reasons are never given to agents.
 import { randomUUID } from "node:crypto";
 import {
-  OrgIdSchema, WIKI_ANSWER_RETENTION_DAYS, WIKI_ANSWER_SWEEP_MAX, WIKI_LIMITS, WIKI_QUOTE_MAX, WIKI_SK, WikiAnswerRecordWriteSchema, WikiBlockSchema, WikiBuildRecordSchema, WikiClaimSchema,
+  OrgIdSchema, WIKI_ANSWER_RETENTION_DAYS, WIKI_ANSWER_SWEEP_MAX, WIKI_FLAG_SCAN_MAX, WIKI_LIMITS, WIKI_QUOTE_MAX, WIKI_SK, WikiAnswerRecordWriteSchema, WikiBlockSchema, WikiBuildRecordSchema, WikiClaimSchema,
   WikiFlagAddSchema, WikiFlagSchema, WikiIdSchema, WikiNoteAddSchema, WikiNoteSchema, WikiPageIdSchema, WikiPageKindSchema, WikiPageWriteSchema, WikiPersonIdSchema, WikiProjectSchema,
   WikiRepoCommitSchema, WikiRepoSchema, WikiSourceStateSchema, queryAll, redactText, when, wikiAnswerKey, wikiBodyKey, wikiBuildKey, wikiFlagKey, wikiNoteKey, wikiPageKey, wikiPartition, wikiRowKey,
   type DocumentStore, type OrgId, type StoredDocument, type TransactItem, type WikiAnswerRecord, type WikiAnswerRecordWrite, type WikiAudience, type WikiBlock, type WikiBuildRecord,
@@ -80,7 +80,7 @@ type BodyRowT = z.infer<typeof BodyRow>;
 const NoteRow = z.object({ ...scoped, entityType: z.literal(WIKI_NOTE_ENTITY), note: WikiNoteSchema }).passthrough();
 const FlagRow = z.object({ ...scoped, entityType: z.literal(WIKI_FLAG_ENTITY), flag: WikiFlagSchema }).passthrough();
 const BuildRow = z.object({ ...scoped, entityType: z.literal(WIKI_BUILD_ENTITY), build: WikiBuildRecordSchema }).passthrough();
-const AnswerRow = z.object({ ...scoped, entityType: z.literal(WIKI_ANSWER_ENTITY), answer: WikiAnswerRecordWriteSchema, createdAt: isoTime, expiresAt: z.number().int() }).passthrough();
+const AnswerRow = z.object({ ...scoped, entityType: z.literal(WIKI_ANSWER_ENTITY), answer: WikiAnswerRecordWriteSchema, createdAt: isoTime, expiresAt: z.number().int(), notRight: z.boolean().optional() }).passthrough();
 
 export function createWikiStore(options: WikiStoreOptions): WikiStore {
   const companyId = OrgIdSchema.parse(options.companyId);
@@ -120,6 +120,17 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
   async function readIndex(project: string): Promise<WikiIndexEntry[]> {
     const name = projectOf(project);
     return (await pageRows(name)).map(indexEntryOf).sort((a, b) => (a.parentId ?? "").localeCompare(b.parentId ?? "") || a.order - b.order || a.pageId.localeCompare(b.pageId)).slice(0, WIKI_LIMITS.pagesPerProject);
+  }
+
+  async function readPageBody(project: string, pageId: string): Promise<{ title: string; summary: string; blocks: WikiBlock[] } | undefined> {
+    const name = projectOf(project);
+    const id = pageIdOf(pageId);
+    const [pageItem, bodyItem] = await store.getMany([wikiPageKey(companyId, name, id), wikiBodyKey(companyId, name, id)]);
+    const row = readRow(PageRow, pageItem, name);
+    const body = readRow(BodyRow, bodyItem, name);
+    if (row === undefined || body === undefined) return undefined;
+    if (row.pageId !== id || body.pageId !== id || row.revision !== body.revision) throw unreadable();
+    return { title: row.title, summary: row.summary, blocks: body.blocks };
   }
 
   async function notesOf(project: string, pageId: string): Promise<WikiNote[]> {
@@ -287,6 +298,17 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     return written.applied ? note : undefined;
   }
 
+  async function acknowledgeNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined> {
+    const name = projectOf(project);
+    const key = wikiNoteKey(companyId, name, pageIdOf(pageId), idOf(noteId));
+    const acknowledgedBy = parsed(WikiPersonIdSchema, by);
+    const row = readRow(NoteRow, await store.get(key), name);
+    if (row === undefined) return undefined;
+    const note: WikiNote = { ...row.note, changedAcknowledgement: { by: acknowledgedBy, at: iso() } };
+    const written = await store.put({ item: { ...key, entityType: WIKI_NOTE_ENTITY, ...rowBase(name), note } as unknown as StoredDocument, condition: when.present() });
+    return written.applied ? note : undefined;
+  }
+
   async function deleteNote(project: string, pageId: string, noteId: string): Promise<boolean> {
     const name = projectOf(project);
     const gone = await store.delete({ key: wikiNoteKey(companyId, name, pageIdOf(pageId), idOf(noteId)), return: "old" });
@@ -307,6 +329,27 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     const result = await store.transact(items);
     if (!result.applied) throw new WikiStoreError("conflict", "That mark could not be saved. Try again.");
     return flag;
+  }
+
+  async function openClaimFlagPages(project: string): Promise<{ pages: Array<{ pageId: string; latestAt: string }>; complete: boolean }> {
+    const name = projectOf(project);
+    const latest = new Map<string, string>();
+    let seen = 0;
+    let complete = true;
+    let cursor: string | undefined;
+    do {
+      const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.flag }, limit: 200, ...(cursor === undefined ? {} : { cursor }) });
+      for (const item of page.items) {
+        if (seen >= WIKI_FLAG_SCAN_MAX) { complete = false; break; }
+        seen += 1;
+        const { flag } = readRow(FlagRow, item, name)!;
+        if (flag.state !== "open" || flag.claimId === undefined) continue;
+        const have = latest.get(flag.pageId);
+        if (have === undefined || Date.parse(flag.createdAt) > Date.parse(have)) latest.set(flag.pageId, flag.createdAt);
+      }
+      cursor = complete ? page.cursor : undefined;
+    } while (cursor !== undefined);
+    return { pages: [...latest].map(([pageId, latestAt]) => ({ pageId, latestAt })).sort((x, y) => x.pageId.localeCompare(y.pageId)), complete };
   }
 
   async function resolveFlags(project: string, pageId: string): Promise<number> {
@@ -354,7 +397,41 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     const row = readRow(AnswerRow, await store.get(wikiAnswerKey(companyId, name, idOf(answerId))), name);
     // A record past its time may still be in the table until the sweep removes it: it is gone for every reader from that moment.
     if (row === undefined || row.expiresAt * 1000 <= now()) return undefined;
-    return { ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt };
+    return { ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) };
+  }
+
+  async function listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }> {
+    const name = projectOf(project);
+    const most = parsed(z.number().int().min(1).max(1_000), scanMax);
+    const records: WikiAnswerRecord[] = [];
+    let seen = 0;
+    let more = false;
+    let cursor: string | undefined;
+    do {
+      const page = await store.query({ pk: wikiPartition(companyId, name), sk: { op: "beginsWith", prefix: WIKI_SK.answer }, limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+      for (const item of page.items) {
+        const row = readRow(AnswerRow, item, name)!;
+        // An expired row (not yet swept) is gone and does not count toward the bound.
+        if (row.expiresAt * 1000 <= now()) continue;
+        if (seen >= most) { more = true; break; }
+        seen += 1;
+        records.push({ ...row.answer, createdAt: row.createdAt, expiresAt: row.expiresAt, ...(row.notRight === true ? { notRight: true } : {}) });
+      }
+      cursor = more ? undefined : page.cursor;
+    } while (cursor !== undefined);
+    return { records, more };
+  }
+
+  async function markAnswerNotRight(project: string, answerId: string, personId: string): Promise<"marked" | "already" | undefined> {
+    const name = projectOf(project);
+    const person = parsed(WikiPersonIdSchema, personId);
+    const key = wikiAnswerKey(companyId, name, idOf(answerId));
+    const row = readRow(AnswerRow, await store.get(key), name);
+    // Another person's record and an expired one are "not there".
+    if (row === undefined || row.expiresAt * 1000 <= now() || row.answer.askedBy !== person) return undefined;
+    if (row.notRight === true) return "already";
+    const done = await store.update({ key, ops: [{ op: "set", path: ["notRight"], value: true }], condition: when.eq("expiresAt", row.expiresAt) });
+    return done.applied ? "marked" : undefined;
   }
 
   // Expiry is app-driven (no table TTL): an expired record reads as gone at once, and this bounded sweep deletes expired rows (every answer write runs it; J1 or a scheduled job can too).
@@ -392,7 +469,13 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
           done.notes += 1;
         } else if (row.note.approval.state === "approved" && row.note.approval.by === person) {
           // Someone else's note they approved stays approved, but no longer names them.
-          await store.put({ item: { ...item, note: { ...row.note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
+          const note = { ...row.note };
+          if (note.changedAcknowledgement?.by === person) delete note.changedAcknowledgement;
+          await store.put({ item: { ...item, note: { ...note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
+        } else if (row.note.changedAcknowledgement?.by === person) {
+          const note = { ...row.note };
+          delete note.changedAcknowledgement;
+          await store.put({ item: { ...item, note } as unknown as StoredDocument, condition: when.present() });
         }
       }
       for (const item of await family(name, WIKI_SK.build)) {
@@ -434,5 +517,5 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     };
   }
 
-  return { companyId, pageSink, readIndex, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson };
+  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, acknowledgeNote, deleteNote, addFlag, resolveFlags, openClaimFlagPages, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
 }

@@ -224,6 +224,8 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/aws/developer-tasks.ts": [1, 0], // legacy task ConditionCheck
     "packages/broker/src/aws/project-catalog-backfill.ts": [0, 3], // operator reads + fenced mark/undo
     "packages/broker/src/aws/project-settings.ts": [1, 2], // v1 read and v2 existence/start-key reads
+    "packages/broker/src/core-host/dev-routes.ts": [0, 1], // L4-B3c: owner/admin existence read of the project's catalog row in the membership's own company (the test environment state read)
+    "packages/broker/src/aws/setup-registry-mirror.ts": [4, 0], // L4-SF: the hosted setup approval's old-registry mirror: legacy catalog read, check and conditional move in the approval's own transaction, only for the company that owns the old rows
     "packages/broker/src/core-host/lessons.ts": [0, 1],
     "packages/broker/src/core/e2e/local-authority.ts": [0, 1],
     "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update

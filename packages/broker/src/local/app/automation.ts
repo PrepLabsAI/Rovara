@@ -63,6 +63,7 @@ export function createTaskFlowTasks(options: { flow: Pick<TaskFlow, "close" | "d
 
 /** The words a custom agent's run, or a model-free automatic job, is refused with until the agent-run bridge is on this install. */
 export const CUSTOM_AGENT_RUN_NOT_HERE = "This install starts Rovara Code for an event or a schedule. A custom agent's run is not on this install yet, so nothing is started for it.";
+export const SETUP_REPAIR_NOT_HERE = "Automatic setup repair drafts need a spending limit that this install enforces, so nothing is started on its own.";
 export const AUTOMATIC_JOB_NOT_HERE = "A model-free automatic job is not started by the task flow on this install yet.";
 
 /** The project rules from the registered projects: the project's definition (its action policy) and whether it is archived. */
@@ -102,6 +103,8 @@ export function createTaskFlowRunStarter(options: { flow: Pick<TaskFlow, "start"
   return {
     async start(request: AutomatedRunRequest): Promise<AutomatedRunResult> {
       if (request.automatic !== undefined) throw agentXError("NOT_AVAILABLE_HERE", AUTOMATIC_JOB_NOT_HERE);
+      // L4-RD: a setup repair draft is a setup run, started by the host that carries it. This starter would make an ordinary task from its text, so it refuses (a laptop never enforces a cost cap either).
+      if (request.setupRepair !== undefined) throw agentXError("NOT_AVAILABLE_HERE", SETUP_REPAIR_NOT_HERE);
       if (request.agent.agentId !== ROVARA_CODE_AGENT_ID) throw agentXError("AGENT_UNAVAILABLE", CUSTOM_AGENT_RUN_NOT_HERE);
       const started = await flow.start({ principal: owner, origin: request.origin, client: AUTOMATION_CLIENT }, {
         requestId: request.requestId, project: request.project, instructions: instructionsOf(request), title: titleOf(request), client: AUTOMATION_CLIENT,

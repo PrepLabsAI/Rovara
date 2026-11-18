@@ -15,13 +15,14 @@
 // status sentence (fixed words) and a link supplied by the surface that serves the task page. Never task content beyond that, never a secret. Logs carry fixed codes and counts only.
 import { createHash } from "node:crypto";
 import {
-  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
-  sessionTaskStatus, taskStatusText, when,
+  OrgIdSchema, DOCUMENT_STORE_LIMITS, EmailError, INDEX_EXPIRY_ATTRIBUTE, NOTIFY_BATCH_MINUTES, NOTIFY_ITEMS_MAX, UPKEEP_NOTICE_WORDS, agentSessionKey, change, defaultNotifyChannel, effectiveNotify, hideEmailAddresses, isPlainEmailAddress, isRealtimeNotice,
+  sessionTaskStatus, taskStatusText, upkeepMonthOf, upkeepSubjectId, upkeepSubjectOf, when,
   type AgentSessionRecord, type ChannelAdapter, type ChannelEvent, type ConversationRef, type DocumentStore, type EmailSender, type OrgId, type RealtimeEntry, type RealtimePublisher, type RegistryView,
-  type SessionSummary, type StoredDocument,
+  type SessionSummary, type StoredDocument, type UpkeepPauseReason,
 } from "@agentx/contracts";
 import type { SessionChange } from "../sessions/summary.js";
 import { SessionStore } from "../sessions/store.js";
+import { upkeepExpiryOf, upkeepNoticeKey } from "../upkeep/keys.js";
 import { attentionEmail, type AttentionEmailLinks } from "./email-text.js";
 import { NOTIFY_TARGETS_MAX, notifyTargetKey as targetKey, readNotifyPrefs, type NotifyTarget } from "./prefs.js";
 import { digestSlotDay, holdOf } from "./schedule.js"; import { putInboxRow } from "./inbox-rows.js";
@@ -29,8 +30,11 @@ import { tenantIsCompanys, type ChannelCompanyOf } from "../channel/company.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 
-/** What a person is told about. */
-export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done";
+/**
+ * What a person is told about. `upkeep_paused` (lead 4 N1) is not about a session: it tells a project's admins that nightly upkeep stopped at its cap (`queueUpkeepPaused`). Its row names a project, a month and a
+ * reason where a task's row names a session, and it is delivered by its own checks (the person may still administer the project), never by a session read.
+ */
+export type AttentionKind = "needs_you" | "paused" | "ready" | "failed" | "done" | "upkeep_paused";
 
 /**
  * A notice for the company's admins that is not about a task (owner decision 2026-11-17: one person's tools were served an unusual amount of team knowledge in a day). It rides the same pending queue, so it is batched,
@@ -85,16 +89,28 @@ async function followersOf(store: Pick<DocumentStore, "query">, session: AgentSe
 }
 
 /**
- * Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed; the session's followers for a failure and for the end. A closed task tells only its followers
- * (a merged one tells its owner too).
+ * The task's People list as the host reads it (web task channel): the co-owners and the commenters, as attention ids (the ids the queue's rows and the inbox use). Absent: only the task's own person, as before.
+ * A host that has People says who: nothing here reads a role by itself, and a name on the list is no more than a person to ask again about (delivery and the inbox check each person's live access).
  */
-export async function attentionRecipients(store: Pick<DocumentStore, "query">, session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind): Promise<string[]> {
+export interface PeopleRecipients { owners: readonly string[]; commenters: readonly string[] }
+export type PeopleOf = (session: AgentSessionRecord) => Promise<PeopleRecipients>;
+
+const PERSON = /^[a-f0-9]{64}$/u;
+const personIds = (value: unknown): string[] => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && PERSON.test(id)) : []);
+
+/**
+ * Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed; the session's followers for a failure and for the end. A closed task tells only its followers
+ * (a merged one tells its owner too). People (web task channel): the task's co-owners are told like its owner, and its commenters like its followers (a failure and the end).
+ */
+export async function attentionRecipients(store: Pick<DocumentStore, "query">, session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind, people?: PeopleRecipients): Promise<string[]> {
   const owner = session.owner.developerId;
-  const named = summary.needsPeople.filter((id) => /^[a-f0-9]{64}$/u.test(id));
+  const named = summary.needsPeople.filter((id) => PERSON.test(id));
   const followers = kind === "failed" || kind === "done" ? await followersOf(store, session) : [];
   const ownerToo = kind !== "done" || sessionTaskStatus(summary).state === "merged";
-  const people = [...(ownerToo ? [owner] : []), ...(kind === "needs_you" || kind === "paused" ? named : []), ...followers];
-  return [...new Set(people)].slice(0, RECIPIENTS_MAX);
+  const coOwners = ownerToo ? personIds(people?.owners) : [];
+  const commenters = kind === "failed" || kind === "done" ? personIds(people?.commenters) : [];
+  const told = [...(ownerToo ? [owner] : []), ...coOwners, ...(kind === "needs_you" || kind === "paused" ? named : []), ...followers, ...commenters];
+  return [...new Set(told)].slice(0, RECIPIENTS_MAX);
 }
 
 /**
@@ -117,7 +133,7 @@ async function publishAttentionChanged(realtime: Pick<RealtimePublisher, "publis
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
-export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
+export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; peopleOf?: PeopleOf; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
   try {
     if (change.session.subject.kind !== "task") return 0;
     const kind = attentionKindOf(change.summary);
@@ -128,12 +144,17 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
     if (change.session.endedAt !== undefined && kind !== "done" && kind !== "failed") return 0;
     const before = sessionTaskStatus(change.previous), after = sessionTaskStatus(change.summary);
     if (before.state === after.state && before.reason === after.reason) return 0;
-    const people = await attentionRecipients(deps.store, change.session, change.summary, kind);
+    // The task's People, when the host keeps them: a list that cannot be read tells the others as before (and says so in fixed words), it never holds the queue back.
+    let onTask: PeopleRecipients | undefined;
+    if (deps.peopleOf !== undefined) {
+      try { onTask = await deps.peopleOf(change.session); } catch { (deps.log ?? (() => undefined))({ event: "attention.people_failed", sessionId: change.sessionId }); }
+    }
+    const people = await attentionRecipients(deps.store, change.session, change.summary, kind, onTask);
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
     for (const developerId of people) {
       if (deps.pending !== false) await deps.store.put({
         item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-      }); await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
+      }); if (kind !== "upkeep_paused") await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
     }
     await publishAttentionChanged(deps.realtime, change.orgId, people, change.sessionId, kind);
     return people.length;
@@ -143,6 +164,48 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
   }
 }
 
+/**
+ * Lead 4 N1: nightly upkeep stopped at its limit (the gateway refused an upkeep call with `upkeep_paused`, or the limit read says so before one was made). Tells the project's admins ONCE per company, project,
+ * month and reason, in fixed words, in the same inbox and chats as every other attention: a marker row (`NOTICE#<month>#<reason>`) is written first and only while absent, so a second pause of the same kind in
+ * the month writes nothing, however many nights or workers see it; the winner writes one pending row per person `recipients` names (the project's admins and the company's owners and admins, as the host reads them
+ * now). Nobody to tell, or a recipient read that failed, gives the marker back so a later night tries again. Never throws: a notice is never a reason for the night to fail. Answers how many people were queued.
+ */
+export async function queueUpkeepPaused(
+  deps: { store: Pick<DocumentStore, "put" | "delete" | "transact">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; recipients(orgId: OrgId, project: string): Promise<readonly string[]> },
+  input: { orgId: OrgId; project: string; reason: UpkeepPauseReason; month?: string },
+): Promise<{ queued: number; deduped: boolean }> {
+  const log = deps.log ?? ((): void => undefined);
+  const clock = deps.now ?? (() => new Date());
+  try {
+    const orgId = OrgIdSchema.parse(input.orgId);
+    const nowMs = clock().getTime();
+    const month = input.month ?? upkeepMonthOf(nowMs);
+    const subjectId = upkeepSubjectId({ project: input.project, month, reason: input.reason });
+    const marker = upkeepNoticeKey({ orgId, project: input.project }, month, input.reason);
+    const first = await deps.store.put({ item: { ...marker, entityType: "UPKEEP_NOTICE", orgId, project: input.project, month, reason: input.reason, at: new Date(nowMs).toISOString(), ...upkeepExpiryOf(nowMs) }, condition: when.absent() });
+    if (!first.applied) return { queued: 0, deduped: true };
+    let people: string[];
+    try {
+      people = [...new Set((await deps.recipients(orgId, input.project)).filter((id) => /^[a-f0-9]{64}$/u.test(id)))].slice(0, RECIPIENTS_MAX);
+    } catch (error) {
+      await deps.store.delete({ key: marker }).catch(() => undefined);
+      log({ event: "upkeep.notice_recipients_failed", error: error instanceof Error ? error.name : "unknown" });
+      return { queued: 0, deduped: false };
+    }
+    if (people.length === 0) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
+    // All the rows or none, so a partial failure never leaves some admins told and the marker standing over the rest.
+    const written = await deps.store.transact(people.map((developerId) => ({
+      kind: "put" as const,
+      item: { ...pendingKey(orgId, developerId, subjectId, "upkeep_paused"), entityType: "NOTIFY_PENDING", orgId, developerId, sessionId: subjectId, kind: "upkeep_paused", at: new Date(nowMs).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
+    }))).catch(() => ({ applied: false as const }));
+    if (!written.applied) { await deps.store.delete({ key: marker }).catch(() => undefined); return { queued: 0, deduped: false }; }
+    await publishAttentionChanged(deps.realtime, orgId, people, subjectId, "upkeep_paused");
+    return { queued: people.length, deduped: false };
+  } catch (error) {
+    log({ event: "upkeep.notice_failed", error: error instanceof Error ? error.name : "unknown" });
+    return { queued: 0, deduped: false };
+  }
+}
 
 /**
  * Queues one admin notice for each person named (the caller says who the admins are). `noticeId` makes the row: the same notice again (the same day's alert) replaces it, so nothing piles up. Never throws.
@@ -211,7 +274,12 @@ export interface AttentionDeliveryDependencies {
    */
   adminNotice?: (orgId: OrgId, developerId: string) => Promise<boolean>;
   /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
-  emailLinks?: AttentionEmailLinks;
+  emailLinks?: AttentionEmailLinks | ((orgId: OrgId, developerId: string) => AttentionEmailLinks);
+  /**
+   * Lead 4 N1: what an `upkeep_paused` row needs. `administers`: whether the person still administers the project now (a project admin, or a company owner or admin), read live before every send; a row whose person no
+   * longer does, or any failure to tell, is dropped without a word. `link`: the address of the Spending limits page for the project (a plain https link), or undefined. Absent: no upkeep row is delivered (it is dropped).
+   */
+  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean>; link?(project: string): string | undefined };
   log?: Log;
 }
 
@@ -229,8 +297,10 @@ export const oneLine = (text: string, max: number): string => {
  */
 export function attentionText(lines: readonly Line[], more: number, maxLength: number, footer?: string): string {
   const count = lines.length + more;
+  const upkeepLines = lines.filter((line) => line.kind === "upkeep_paused").length;
   const body = [
-    count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:",
+    upkeepLines === 0 ? (count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:")
+      : upkeepLines === lines.length && more === 0 ? "Nightly upkeep needs your attention in Rovara:" : "These items need your attention in Rovara:",
     ...lines.map((line) => `- ${line.title}: ${line.status}${line.link === undefined ? "" : ` ${line.link}`}`),
     ...(more > 0 ? [`- and ${String(more)} more`] : []),
   ].join("\n");
@@ -242,7 +312,7 @@ export function attentionText(lines: readonly Line[], more: number, maxLength: n
 
 const doneText = (lines: readonly Line[], maxLength: number, footer?: string): string => attentionText(lines, 0, maxLength, footer).replace(/^A task needs your attention in Rovara:/u, "A task finished in Rovara:").replace(/^These tasks need your attention in Rovara:/u, "These tasks finished in Rovara:");
 const noticeText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "A notice from Rovara:");
-const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need) your attention in Rovara:/u, "Your Rovara digest:");
+const digestText = (lines: readonly Line[], more: number, maxLength: number, footer?: string): string => attentionText(lines, more, maxLength, footer).replace(/^(?:A task needs|These tasks need|Nightly upkeep needs|These items need) your attention in Rovara:/u, "Your Rovara digest:");
 
 /** The event id of a batch: the same rows to the same target are the same event, so an adapter that is told twice drops the repeat. */
 export function batchEventId(orgId: string, developerId: string, target: string, rows: readonly { sk: string; at: string }[]): string {
@@ -258,7 +328,9 @@ interface PendingRow { key: { pk: string; sk: string }; orgId: OrgId; developerI
 function pendingRowOf(item: StoredDocument, nowSeconds: number): PendingRow | undefined {
   const { orgId, developerId, sessionId, kind, at, sk } = item;
   if (typeof orgId !== "string" || typeof developerId !== "string" || typeof sessionId !== "string" || typeof at !== "string" || typeof sk !== "string") return undefined;
-  if (typeof kind !== "string" || ![...["needs_you", "paused", "ready", "failed", "done"], ...ADMIN_NOTICE_KINDS].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  if (typeof kind !== "string" || ![...["needs_you", "paused", "ready", "failed", "done", "upkeep_paused"], ...ADMIN_NOTICE_KINDS].includes(kind) || sk !== `${orgId}#${developerId}#${sessionId}#${kind}`) return undefined;
+  // An upkeep row's subject must be an upkeep subject (and a task's row never one): a row that is neither reads as nothing.
+  if ((kind === "upkeep_paused") !== (upkeepSubjectOf(sessionId) !== undefined)) return undefined;
   // A row past its expiry is not delivered (the store deletes expired items late).
   const expires = item[INDEX_EXPIRY_ATTRIBUTE];
   if (typeof expires === "number" && expires <= nowSeconds) return undefined;
@@ -384,6 +456,16 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
         current.push({ row, line: { ...ADMIN_NOTICE_LINE[row.kind], kind: row.kind } });
         continue;
       }
+      if (row.kind === "upkeep_paused") {
+        // Not a session's row: the notice is about a project. Still theirs to read only while they administer it.
+        const subject = upkeepSubjectOf(row.sessionId);
+        // No upkeep wiring on this host: the row waits (it expires by itself) instead of being dropped over a notice that was written once for the month.
+        if (deps.upkeep === undefined) continue;
+        const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
+        if (!allowed) { stale.push(row); continue; }
+        current.push({ row, line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: UPKEEP_NOTICE_WORDS[subject.reason], link: deps.upkeep.link?.(subject.project), kind: "upkeep_paused" } });
+        continue;
+      }
       const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
       if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
       const session = await sessions.get(orgId, row.sessionId);
@@ -402,7 +484,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
     // Where each session's change is also told: the conversation it was started from, when this person started it.
     const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
     if (deps.thread !== undefined) {
-      for (const sessionId of new Set(current.filter(({ row }) => row.kind !== "knowledge_read").map(({ row }) => row.sessionId))) {
+      for (const sessionId of new Set(current.filter(({ row }) => row.kind !== "knowledge_read" && row.kind !== "upkeep_paused").map(({ row }) => row.sessionId))) {
         const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
         if (thread === undefined || thread.personId !== developerId) continue;
         const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };
@@ -460,7 +542,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done"), allNotice = lines.every((line) => line.kind === "knowledge_read");
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
-        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : allNotice ? "notice" : "attention", deps.emailLinks);
+        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : allNotice ? "notice" : "attention", typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks);
         try {
           await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
           ok = true;

@@ -5,6 +5,7 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
 import { CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type SlackChannelBinding, type WorkerInvocation, SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix } from "@agentx/contracts";
@@ -18,7 +19,7 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
@@ -381,7 +382,7 @@ function taskPersonRuntimePorts(input: {
     return { items, complete: true };
   };
   const taskProjection = (sortKey: string): readonly string[] => sortKey === "META"
-    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share"]
+    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share", "companyId", "orgId"]
     : sortKey.startsWith("PERSON_SUBJECT#")
       ? ["pk", "sk", "schemaVersion", "personId", "developerId", "createdAt"]
       : ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"];
@@ -461,13 +462,13 @@ export const createTaskDispatchGuard = (workspaces?: Pick<SlackWorkspaceBindings
   const personRuntime = proofArn === undefined || proofArn.trim() === "" || (workspaces === undefined && !SlackTeamIdSchema.safeParse(slackTeamId).success) ? undefined : createTaskPersonRuntime({
     ...(workspaces === undefined ? {} : { workspaces }),
     admission,
-    ports: taskPersonRuntimePorts({
+    ports: withTaskPersonMembershipRead(taskAuthorityDocumentClient, process.env.DEVELOPER_SIGNIN_TABLE_NAME, taskPersonRuntimePorts({
       admission,
       stateTableName,
       signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
       proofArn,
       slackTeamId,
-    }),
+    })),
     stateTableName,
     slackTeamId,
     now: () => Date.now(),
@@ -590,6 +591,8 @@ const dispatcherSessions = new SessionManager({
       return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
     },
   },
+  // DEC 254zb: absent while ROVARA_MACHINE_SIZE_RUN is off (every worker launches as the template says).
+  ...optionalPicker(machineSizePicker({ documentClient, tableName: tableName ?? "" })),
 });
 
 /** KMS Sign with the invoke signing key, which only this function's role may use. */
@@ -643,6 +646,15 @@ const deliverEc2 = createEc2Delivery({
       operationId: record.operationId,
       fence: record.invocation.fence,
       onceKey: `session-wait#${record.id}`,
+      event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
+    });
+  },
+  async machineNote(record, message) {
+    await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
+      workspaceId: record.workspaceId,
+      operationId: record.operationId,
+      fence: record.invocation.fence,
+      onceKey: `machine-size#${record.id}`,
       event: { type: "progress", timestamp: new Date().toISOString(), payload: { message } },
     });
   },

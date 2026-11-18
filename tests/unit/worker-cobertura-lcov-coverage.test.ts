@@ -77,6 +77,10 @@ describe("the coverage report formats", () => {
     expect([...odd.files.get("a.py")!]).toEqual([[3, true]]);
   });
 
+  it("keeps the shared legacy behavior of dropping a CDATA source", () => {
+    expect(parseCobertura('<coverage><sources><source><![CDATA[/work/src]]></source></sources></coverage>')?.sources).toEqual([]);
+  });
+
   it("reads an LCOV tracefile: DA records per SF, repeated files merged, CRLF and unknown records tolerated", () => {
     const parsed = parseLcov("TN:\r\nSF:/w/api/a.py\r\nDA:1,2\r\nDA:2,0,abc\r\nFN:1,f\r\nBRDA:1,0,0,1\r\nend_of_record\r\nSF:/w/api/a.py\nDA:2,5\nDA:1,0\nend_of_record\nDA:9,9\nSF:/w/api/b.py\nDA:oops,1\nDA:4,0\nend_of_record\n")!;
     expect([...parsed.files.get("/w/api/a.py")!]).toEqual([[1, true], [2, true]]);

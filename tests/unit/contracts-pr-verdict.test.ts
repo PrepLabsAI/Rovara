@@ -3,13 +3,13 @@
 import { describe, expect, it } from "vitest";
 import { rovaraCheckOf } from "../../packages/contracts/src/rovara-check.js";
 import { PR_EXCEPTION_KINDS, prVerdictForCheck, prVerdictMarkdown, prVerdictOf, VERDICT_RESULT_WORDS, type PrExceptionKind, type PrVerdict, type PrVerdictInput, type VerdictCheckRow } from "../../packages/contracts/src/pr-verdict.js";
-import type { EvidenceDependency } from "../../packages/contracts/src/evidence.js";
+import { EvidenceDependencySchema, type EvidenceDependency } from "../../packages/contracts/src/evidence.js";
 
 const AS_OF = "2026-11-17T12:00:00.000Z";
 const pass = (label: string, passedTests?: number): VerdictCheckRow => ({ label, status: "passed", ...(passedTests === undefined ? {} : { passedTests }) });
 const dep = (over: Partial<EvidenceDependency> & Pick<EvidenceDependency, "name" | "label" | "backing">): EvidenceDependency => over;
 const POSTGRES = dep({ name: "Postgres", backing: "project_image", label: "real_project_image" });
-const STRIPE_FRESH = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", fixtureRevision: 3 });
+const STRIPE_FRESH = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", approvedAt: "2026-10-14T00:00:00.000Z", fixtureRevision: 3 });
 
 /** The typical green task of design example 1. */
 function green(over: Partial<PrVerdictInput> = {}): PrVerdictInput {
@@ -29,6 +29,12 @@ const kinds = (v: PrVerdict): PrExceptionKind[] => v.items.map((item) => item.ki
 const aboveFold = (v: PrVerdict): string => [v.heading, v.lines.changed, v.lines.proven, v.lines.testedAgainst, v.lines.reviews, ...v.lines.risk, v.lines.needsYou, ...v.items.flatMap((item) => [item.title, item.detail, ...item.lines])].join("\n");
 
 describe("the typical green task (design example 1)", () => {
+  it("accepts additive approval provenance while retaining legacy rows without it", () => {
+    expect(EvidenceDependencySchema.safeParse(STRIPE_FRESH).success).toBe(true);
+    const legacy = { ...STRIPE_FRESH };
+    delete legacy.approvedAt;
+    expect(EvidenceDependencySchema.safeParse(legacy).success).toBe(true);
+  });
   it("says Verified, low risk and nothing extra to check, with the six lines", () => {
     const v = verdict();
     expect(v.heading).toBe("Verified · Low risk · nothing extra to check");
@@ -36,12 +42,12 @@ describe("the typical green task (design example 1)", () => {
     expect(v.items).toEqual([]);
     expect(v.lines.changed).toBe("4 files, +86 -12. 3 tests added.");
     expect(v.lines.proven).toBe("3 of 3 requirements proven.");
-    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, 34 days old).");
+    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, approved 34 days ago).");
     expect(v.lines.reviews).toBe("Code review and security review passed. The second review found no blocking finding.");
     expect(v.lines.risk).toEqual(["Low. A small change with no sensitive paths, dependency changes or open concerns."]);
     expect(v.lines.needsYou).toBe("The normal code review. Nothing else.");
     expect(v.drawers).toEqual({
-      requirements: "Requirements and proof: 3 of 3 proven", checks: "Checks: 4 of 4 passed (214 tests)", setup: "Test setup: sandbox, 1 real service, 1 recorded fake", reviews: "Reviews: 2 passed, 0 findings accepted, second review found no blocking finding",
+      requirements: "Requirements and proof: 3 of 3 proven", checks: "Checks: 4 of 4 passed (214 tests)", setup: "Test setup: sandbox, 1 real service, 1 recorded fake, Stripe recorded fake, approved 34 days ago", reviews: "Reviews: 2 passed, 0 findings accepted, second review found no blocking finding",
     });
   });
   it("drawers for browser evidence and what Rovara used appear only when there is something", () => {
@@ -76,6 +82,7 @@ const TABLE: Array<[PrExceptionKind, Partial<PrVerdictInput>]> = [
   ["service_fell_back", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "hand_written_fake", fellBack: { from: "test_account", reason: "test_account_expired" } })] }],
   ["service_emulated", { dependencies: [dep({ name: "S3", backing: "emulated", label: "rovara_local_aws" })] }],
   ["service_old_fake", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-07-02T00:00:00.000Z" })] }],
+  ["service_spec_check", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })] }],
   ["tests_weaker", { weakening: { weaker: ["Snapshot files changed: tests/orders/__snapshots__/order-page.snap"], flags: [], notCompared: [] } }],
   ["weakening_not_compared", { weakening: { weaker: [], flags: [], notCompared: ["Test weakening: could not compare (the test proof did not run for this code)"] } }],
   ["flagged_files", { weakening: { weaker: [], flags: ["Rovara instruction files changed (a flag, not an approval): CLAUDE.md"], notCompared: [] } }],
@@ -205,8 +212,14 @@ describe("rule V4: every service is named, and only the quiet fake is quiet", ()
   });
   it("a fresh recorded fake with no made-up answer is named and quiet", () => {
     const v = verdict({ dependencies: [STRIPE_FRESH] });
-    expect(v.lines.testedAgainst).toContain("Stripe (recorded fake, 34 days old)");
+    expect(v.lines.testedAgainst).toContain("Stripe (recorded fake, approved 34 days ago)");
+    expect(v.drawers.setup).toContain("Stripe recorded fake, approved 34 days ago");
     expect(v.items).toEqual([]);
+  });
+  it("uses capture date wording for older evidence without approval provenance", () => {
+    const legacy = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z" });
+    expect(verdict({ dependencies: [legacy] }).lines.testedAgainst).toContain("Stripe (recorded fake, recorded 34 days ago)");
+    expect(kinds(verdict({ dependencies: [legacy] }))).toEqual([]);
   });
   it("a recorded fake over 90 days old, or with no date, is an item; 90 days exactly is still quiet", () => {
     const at = (days: number) => dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: new Date(Date.parse(AS_OF) - days * 86_400_000).toISOString() });
@@ -214,6 +227,25 @@ describe("rule V4: every service is named, and only the quiet fake is quiet", ()
     expect(kinds(verdict({ dependencies: [at(91)] }))).toEqual(["service_old_fake"]);
     expect(kinds(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake" })] }))).toEqual(["service_old_fake"]);
     expect(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake" })] }).lines.testedAgainst).toContain("date unknown");
+  });
+  it("uses approval age for the old fake rule even when the capture was recent", () => {
+    const approvedLongAgo = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-16T00:00:00.000Z", approvedAt: "2026-08-18T12:00:00.000Z" });
+    expect(verdict({ dependencies: [approvedLongAgo] }).lines.testedAgainst).toContain("approved 91 days ago");
+    expect(kinds(verdict({ dependencies: [approvedLongAgo] }))).toEqual(["service_old_fake"]);
+  });
+  it("keeps an approval exactly 90 days old quiet even when its capture is older", () => {
+    const approvedAtBoundary = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: new Date(Date.parse(AS_OF) - 200 * 86_400_000).toISOString(), approvedAt: new Date(Date.parse(AS_OF) - 90 * 86_400_000).toISOString() });
+    const v = verdict({ dependencies: [approvedAtBoundary] });
+    expect(kinds(v)).toEqual([]);
+    expect(v.lines.testedAgainst).toContain("approved 90 days ago");
+  });
+  it("uses neutral age wording for an old mixed set of approved and legacy fakes", () => {
+    const approved = dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-16T00:00:00.000Z", approvedAt: "2026-08-18T12:00:00.000Z" });
+    const legacy = dep({ name: "Mailer", backing: "fake", label: "recorded_fake", recordedAt: "2026-08-18T12:00:00.000Z" });
+    const item = verdict({ dependencies: [approved, legacy] }).items.find((entry) => entry.kind === "service_old_fake")!;
+    expect(item.detail).not.toContain("Approved");
+    expect(item.lines).toContain("Stripe: approved 91 days before this pull request");
+    expect(item.lines).toContain("Mailer: recorded 91 days before this pull request");
   });
   it("made-up answers and a fallback are in the Tested against line as well as the list", () => {
     const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", madeUpAnswers: 2, fellBack: { from: "test_account", reason: "test_account_busy" } })] });
@@ -227,7 +259,7 @@ describe("rule V4: every service is named, and only the quiet fake is quiet", ()
   });
   it("the setup drawer counts every kind of service and says an old fake is old", () => {
     const v = verdict({ dependencies: [POSTGRES, dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-07-02T00:00:00.000Z" }), dep({ name: "Mailer", backing: "fake", label: "rovara_made_fake" })] });
-    expect(v.drawers.setup).toBe("Test setup: sandbox, 1 real service, 1 old recorded fake, 1 fake made by Rovara");
+    expect(v.drawers.setup).toBe("Test setup: sandbox, 1 real service, 1 old recorded fake, 1 fake made by Rovara, Stripe recorded fake, recorded 138 days ago");
   });
 });
 
@@ -240,6 +272,25 @@ describe("rules V5 and V6: risk", () => {
     expect(v.heading).toBe("Verified · Risk not judged yet (treated as high) · nothing extra to check");
     expect(v.lines.needsYou).toContain("Merging needs a fresh sign-in (high risk)");
     expect(v.lines.needsYou).not.toContain("Nothing else");
+  });
+  it("a mock spec mismatch raises risk one level and adds the PR thing to check", () => {
+    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })] });
+    expect(v.riskLevel).toBe("medium");
+    expect(v.heading).toContain("Medium risk · 1 thing to check");
+    expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: does not match Stripe's published API; check this mock.");
+  });
+  it("a mock spec mismatch raises medium risk to high", () => {
+    const v = verdict({
+      dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })],
+      risk: { level: "medium", reasons: ["A medium-risk change."], judged: true },
+    });
+    expect(v.riskLevel).toBe("high");
+    expect(v.heading).toContain("High risk · 1 thing to check");
+  });
+  it("keeps catalog entries without a matching operation explicit and nonblocking", () => {
+    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "no_spec", mockSpecVendor: "stripe" })] });
+    expect(v.riskLevel).toBe("low");
+    expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: no published spec to check against.");
   });
   it("a file list read from the host but not judged is not 'still reading'", () => {
     expect(verdict({ risk: { level: "low", reasons: [], judged: false } }).lines.risk[0]).toBe("Not judged from the code host's list of changed files, so it counts as high.");
@@ -391,7 +442,7 @@ describe("bad news is never only in a fold (the drawers repeat counts and result
     expect(v.heading).toBe("Code failed · High risk · 6 things to check");
     expect(v.lines.changed).toBe("7 files, +231 -40. 5 tests added.");
     expect(v.lines.proven).toBe("2 of 4 requirements proven. 1 failed. 1 passed but is not proven.");
-    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, 138 days old).");
+    expect(v.lines.testedAgainst).toBe("Postgres (real, the project's image). Stripe (recorded fake, recorded 138 days ago).");
     expect(v.lines.reviews).toBe("Code review and security review passed. **The second review did not pass.**");
     expect(kinds(v)).toEqual(["check_failed", "requirement_failed", "requirement_not_proven", "service_old_fake", "tests_weaker", "second_review_blocking"]);
     expect(v.lines.needsYou).toBe("The 6 items below, then the normal code review. Merging needs a fresh sign-in (high risk).");
@@ -429,7 +480,7 @@ describe("review findings", () => {
     const quiet = dep({ name: "StripeQuiet", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z" });
     const made = dep({ name: "MadeLast", backing: "fake", label: "rovara_made_fake" });
     const line = verdict({ dependencies: [...reals, quiet, made] }).lines.testedAgainst;
-    expect(line).toContain("StripeQuiet (recorded fake, 34 days old)");
+    expect(line).toContain("StripeQuiet (recorded fake, recorded 34 days ago)");
     expect(line).toContain("MadeLast (fake made by Rovara)");
     expect(line).toMatch(/and \d+ more real services/u);
     expect(verdict({ dependencies: Array.from({ length: 24 }, (_, index) => dep({ name: `Fake${index}`, backing: "fake", label: "hand_written_fake" })) }).lines.testedAgainst).toContain("Fake23");
@@ -438,6 +489,9 @@ describe("review findings", () => {
   it("a recording dated after the pull request is not fresh", () => {
     expect(kinds(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2099-01-01T00:00:00.000Z" })] }))).toEqual(["service_old_fake"]);
     expect(kinds(verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "not a date" })] }))).toEqual(["service_old_fake"]);
+    const futureApproval = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-11-16T00:00:00.000Z", approvedAt: "2099-01-01T00:00:00.000Z" })] });
+    expect(kinds(futureApproval)).toEqual(["service_old_fake"]);
+    expect(futureApproval.lines.testedAgainst).toContain("approval date unknown");
     expect(kinds(verdict({ asOf: "garbage", dependencies: [STRIPE_FRESH] }))).toEqual(["service_old_fake"]);
   });
   // Mutant R7: counts, labels and statuses that cannot be read are read as "none" or "fine".

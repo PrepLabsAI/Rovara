@@ -87,8 +87,20 @@ export const LESSON_STATUSES = ["candidate", "pending", "active", "stale", "reti
 export type LessonStatus = (typeof LESSON_STATUSES)[number];
 export type Tier = 0 | 1 | 2;
 
-export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment"] as const;
+export const SPAN_KINDS = ["intent", "plan", "send_back", "review_finding", "ci_failure", "human_edit", "outcome", "loaded_lesson", "remembered", "close_reason", "fact", "pr_comment", "plan_comment", "design_comment"] as const;
 export type SpanKind = (typeof SPAN_KINDS)[number];
+
+/** What a STORED row's provenance reads an unknown span kind as: a kind a newer build wrote that this build does not know. */
+export const OTHER_SPAN_KIND = "other" as const;
+export type StoredSpanKind = SpanKind | typeof OTHER_SPAN_KIND;
+const KNOWN_SPAN_KINDS: ReadonlySet<string> = new Set(SPAN_KINDS);
+const isWrittenSpanKind = (kind: string): kind is SpanKind => KNOWN_SPAN_KINDS.has(kind);
+/**
+ * READ tolerance: a span kind this build does not know (a row written by a newer build during a rolling deploy) is read as `other`, so the lesson is kept and valid, never dropped (a dropped row is invisible to every
+ * list, load and erase). `other` is only a label: it has no weight anywhere (it is in no credit, member-signal, correction, person or priority set), and the row's own credit fields (`memberSignal`, `measured`, `authors`,
+ * `readFrom`) are stored separately and read as written. This build only ever writes kinds from `SPAN_KINDS` (the reflector builds them from spans); `other` appears only in a row read back.
+ */
+const StoredSpanKindSchema = z.string().max(100).transform((kind): StoredSpanKind => (isWrittenSpanKind(kind) ? kind : OTHER_SPAN_KIND));
 
 const PrCitationSchema = z.object({ kind: z.literal("pr"), url: z.string().url().max(300).refine((u) => u.startsWith("https://"), "https only") }).strict();
 const RecordCitationSchema = z.object({ kind: z.literal("record"), eventId: z.string().min(1).max(100) }).strict();
@@ -136,7 +148,7 @@ export const REPO_BLOCK_CODES = [
 export type RepoBlockCode = (typeof REPO_BLOCK_CODES)[number];
 
 export const LessonProvenanceSchema = z.object({
-  sourceEvents: z.array(z.string().max(100)).max(50), sourceKinds: z.array(z.enum(SPAN_KINDS)).max(20),
+  sourceEvents: z.array(z.string().max(100)).max(50), sourceKinds: z.array(StoredSpanKindSchema).max(20),
   /** Developer ids of the members whose words or edits the lesson comes from. */
   authors: z.array(z.string().max(100)).max(20),
   /**

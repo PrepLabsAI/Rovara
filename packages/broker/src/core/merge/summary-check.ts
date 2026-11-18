@@ -17,6 +17,9 @@ import { plain } from "./store.js";
 import { readProofHold } from "./proof-hold.js";
 import type { MergeTask } from "./seams.js";
 
+/** What the verdict source is asked: the task and the pull request head the Check is being written for. */
+export interface SummaryCheckVerdictInput { task: MergeTask; repositoryId: string; number: number; headSha: string }
+
 /** What the host supplies so the Check can be kept. Absent: no Check (gate `summaryCheck` off). */
 export interface SummaryCheckSource {
   /** The `summaryCheck` gate for the task's company and project. False: no Check is written for it. */
@@ -27,7 +30,7 @@ export interface SummaryCheckSource {
    * L4-C B4: the verdict of the head's code, rendered by the host from the same `prVerdictOf` object the pull request's description is written from (`resultKind`, the heading, and the body's lines: the six lines and the list
    * of things to check, already inert). The Check then says the same words as the description. Undefined, or a read that fails: the Check is what it was. It never changes the conclusion.
    */
-  verdict?(input: { task: MergeTask; repositoryId: string; number: number; headSha: string }): Promise<RovaraCheckVerdict | undefined>;
+  verdict?: (input: SummaryCheckVerdictInput) => Promise<RovaraCheckVerdict | undefined>;
   /** The name of a person as Rovara shows it (the override's actor). Undefined: "a person". */
   personName?(orgId: OrgId, personId: string): Promise<string | undefined>;
   /** Where the Check's "Details" opens: the task's signed-in page. Only an https address is used. */
@@ -37,6 +40,16 @@ export interface SummaryCheckSource {
 /** The longest the verdict source may take: the Check is written without it after this. */
 export const VERDICT_READ_MAX_MS = 2_000;
 export const SUMMARY_CHECK_ENTITY = "ROVARA_CHECK";
+
+/** The verdict from a source, or undefined: a source that is absent, fails or takes longer than `VERDICT_READ_MAX_MS` says nothing (words never make the Check, or a message, wait). Never throws. */
+export async function readVerdict(source: SummaryCheckSource["verdict"], input: SummaryCheckVerdictInput): Promise<RovaraCheckVerdict | undefined> {
+  if (source === undefined) return undefined;
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    (async () => source(input))().catch(() => undefined),
+    new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), VERDICT_READ_MAX_MS); }),
+  ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+}
 /** How long after a refused write (no Check permission) the write is tried again. */
 export const SUMMARY_CHECK_PERMISSION_RETRY_MS = 3_600_000;
 /** The most pull requests one stop pass looks at. */
@@ -171,12 +184,7 @@ export async function syncSummaryCheck(deps: SummaryCheckDependencies, pass: Sum
     const override = "override" in read ? read.override : undefined;
     const problem = unreadable ? "rovara_problem" : facts?.problem ?? (pass.headByRovara ? undefined : "not_run");
     // The verdict is only words: a source that cannot give it leaves the Check as it was (never a different conclusion, never a problem of its own).
-    // At most two seconds: the Check must never wait on words.
-    let timer: NodeJS.Timeout | undefined;
-    const verdict = await Promise.race([
-      (async () => deps.source.verdict?.({ task: pass.task, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head }))().catch(() => undefined),
-      new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), VERDICT_READ_MAX_MS); }),
-    ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+    const verdict = await readVerdict(deps.source.verdict, { task: pass.task, repositoryId: pass.pullRequest.repositoryId, number: pass.pullRequest.number, headSha: head });
     const payload = rovaraCheckOf({
       proof, ...(override === undefined ? {} : { override }), ...(problem === undefined ? {} : { problem }), ...(verdict === undefined ? {} : { verdict }),
       ci: pass.ci, ciMode: pass.ciMode, fullSuite: facts?.fullSuite ?? "not_needed", firstSeenAtMs, nowMs: now,

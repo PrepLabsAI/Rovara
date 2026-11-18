@@ -74,6 +74,17 @@ function decisionFields(view: PlanPageView): string {
     + `<br><span class="muted">${untrusted(option.consequence)}</span></label>`).join("")}</fieldset>`).join("");
 }
 
+/** Lead 4 PCF: the feature line of a waiting coding plan, and the owner's "Change" and "No feature". A name is a person's word: drawn as untrusted. */
+function featureHtml(context: PageContext, view: PlanPageView): string {
+  const feature = view.feature;
+  if (feature === undefined) return "";
+  const form = (subject: string, fields: string, button: string) => `<form class="decide" method="post" action="${esc(context.base)}/plan/${esc(view.taskId)}/feature">${hidden("revision", view.revision)}${hidden("ft", context.formToken({ action: "plan.feature", taskId: view.taskId, revision: view.revision, subject }))}${fields}${button}</form>`;
+  const change = !feature.canChange ? "" : (feature.choices.length === 0 ? "<p class=\"muted\">This company has no open features yet.</p>"
+    : form("pick", `<label>Feature<br><select name="feature">${feature.choices.map((choice) => `<option value="${esc(choice.id)}"${choice.id === feature.featureId ? " selected" : ""}>${untrusted(choice.name)}</option>`).join("")}</select></label>`, "<div class=\"row\"><button type=\"submit\">Change</button></div>"))
+    + (feature.featureId === null ? "" : form("none", hidden("feature", "none"), "<div class=\"row\"><button type=\"submit\">No feature</button></div>"));
+  return `<section class="panel" id="plan-feature"><p>${untrusted(feature.line)}</p>${change}</section>`;
+}
+
 function decideHtml(context: PageContext, view: PlanPageView): string {
   const offer = view.approval;
   if (offer === undefined) return "";
@@ -216,7 +227,7 @@ export async function renderPlanPage(context: PageContext, view: PlanPageView): 
   return layout({
     title: `Plan: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">${untrusted(view.status)} · revision ${esc(view.revision)} · <a href="${esc(context.base)}/proof/${esc(view.taskId)}">Proof report</a></p>`
-      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${costAndModelsHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
+      + `${attentionHtml(context, view)}${diagnosisHtml(context, view)}${critiqueHtml(view)}${costAndModelsHtml(view)}${secondReviewHtml(context, view)}${designNoteHtml(view)}${designReviewHtml(context, view)}${featureHtml(context, view)}${decideHtml(context, view)}${documents}${breakdown}${olderHtml}${checks}${findings}${prs}${commentsHtml(context, view)}`,
   });
 }
 
@@ -298,10 +309,15 @@ export function renderProof(context: PageContext, view: ProofReportView): string
     + ((evidence.videos ?? []).length === 0 ? "" : `<h3>Video of a failed page</h3><p class="muted">A video is the page as it loaded and is not masked the way the pictures are: Rovara records one only when this project says its app shows test data only. It is kept for a short time.</p><ul>`
       + (evidence.videos ?? []).map((video) => `<li><code>${esc(video.route)}</code> <a href="${esc(context.base)}/proof/${esc(view.taskId)}/evidence-video/${esc(video.sha256)}" download>Download the video</a></li>`).join("") + "</ul>")
     + (evidence.notes.length === 0 ? "" : `<ul>${evidence.notes.map((note) => `<li>${esc(note)}</li>`).join("")}</ul>`) + "</section>";
+  // TE-A6 (DEC 254zzf): the failing tests of a failed check and the change that most likely broke each, or unknown. Plain text only; nothing here is a link.
+  const failing = view.failures === undefined ? "" : `<section class="panel" id="failing-tests"><h2>Failing tests</h2><p class="muted">Rovara names a change only when the failure itself points at it; otherwise it says unknown.</p>`
+    + view.failures.checks.map((check) => `<h3>${untrusted(check.check)}</h3><ul>${check.tests.map((test) => `<li><code>${untrusted(test.test)}</code>: ${untrusted(test.cause)}</li>`).join("")}</ul>`).join("")
+    + (view.failures.more > 0 ? `<p class="muted">and ${esc(view.failures.more)} more failing ${view.failures.more === 1 ? "test" : "tests"} with a cause not listed</p>` : "") + "</section>";
   return layout({
     title: `Proof: ${view.title}`, nonce: context.nonce, base: context.base, ...(context.notice === undefined ? {} : { notice: context.notice }),
     body: `<h1>${untrusted(view.title)}</h1><p class="muted">Proof report · revision ${esc(view.revision)}${view.cost === undefined ? "" : ` · ${untrusted(view.cost)}`}</p><p>${untrusted(view.summary)}</p>${prs}`
       + `${rows.length === 0 ? "<p class=\"muted\">No claims to prove yet.</p>" : `<table><thead><tr><th>Claim</th><th>Check</th><th>Result</th><th>Detail</th></tr></thead><tbody>${rows.join("")}</tbody></table>`}`
+      + failing
       + browser
       + `<p><a href="${esc(context.base)}/plan/${esc(view.taskId)}">Back to the plan</a></p>`,
   });
@@ -310,7 +326,7 @@ export function renderProof(context: PageContext, view: ProofReportView): string
 // ---- script tokens
 
 const TOKEN_STATUS_CLASS = { active: "ok", expired: "warn", revoked: "bad" } as const;
-const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team knowledge of these projects" };
+const PERMISSION_WORDS: Record<string, string> = { read: "read your tasks on these projects", start: "start tasks on these projects", lessons: "read the team knowledge of these projects", wiki: "read the project wiki of these projects (hosted)" };
 
 /**
  * The script tokens page: the tokens (names, hints and states, never a secret), a form to make one when this page session is fresh enough, and a Revoke button for each live token. A token reaches only
@@ -387,7 +403,9 @@ export function renderTestEnvironment(context: PageContext, view: TestEnvironmen
       + (view.proposal.lessSafe.length === 0 ? "" : `<p class="warn">Less safe than the approved revision: ${view.proposal.lessSafe.map((word) => esc(word.replace(/_/gu, " "))).join(", ")}.</p>`)
       + `<h3>What changes</h3>${view.proposal.changes.length === 0 ? "<p class=\"muted\">Nothing differs from the approved revision.</p>" : `<ul>${view.proposal.changes.map((line) => `<li><code>${untrusted(line)}</code></li>`).join("")}</ul>`}${form}`;
   }
-  const machine = view.machine === undefined || view.machine.length === 0 ? "" : `<section class="panel"><h2>Machine size</h2><ul>${view.machine.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
+  const machine = view.machine === undefined || view.machine.length === 0 ? "" : `<section class="panel"><h2>Machine size</h2><ul>${view.machine.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul>${view.machineChoices === undefined ? "" : options.fresh === true
+    ? `<form class="decide" method="post" action="${esc(context.base)}/test-environment/${esc(encodeURIComponent(view.project))}/machine"><label>Choose a size<br><select name="rowId">${view.machineChoices.map((choice) => `<option value="${esc(choice.id)}"${view.machineChoice === choice.id ? " selected" : ""}>${esc(choice.label)}</option>`).join("")}</select></label>${hidden("ft", context.formToken({ action: "testenv.machine", subject: view.project }))}<div class="row"><button class="primary" type="submit">Save size choice</button></div></form>`
+    : `<p class="muted">Open this page from the terminal to choose a size. Today’s runs do not use the stored choice yet.</p>`}</section>`;
   const extra = view.extra === undefined || view.extra.length === 0 ? "" : `<section class="panel"><h2>More</h2><ul>${view.extra.map((line) => `<li>${untrusted(line)}</li>`).join("")}</ul></section>`;
   const serviceImages = view.serviceImages === undefined ? "" : renderServiceImages(context, view.project, view.serviceImages, options.fresh === true);
   return layout({

@@ -26,6 +26,12 @@ describe("a reader of a v1 pack", () => {
     expect(testsOf(read)).not.toHaveProperty("somethingNewer");
     expect(testsOf(read)?.["total"]).toBe(4);
   });
+  it("TE-A6: a reader keeps the failure causes the writer adds, and the strict writer schema still has them as an optional key", () => {
+    const causes = [{ testId: "tests/a.py::two", cause: { kind: "change", paths: ["src/a.py"], pathsCount: 1, basis: ["named_in_failure"] } }];
+    const written = pack({ total: 2, passed: 1, failed: 1, skipped: 0, newTests: [], names: [{ name: "tests/a.py::two", status: "failed" }, { name: "tests/a.py::one", status: "passed" }], failureCauses: causes });
+    expect(testsOf(EvidencePackReadSchema.parse(written))).toMatchObject({ failureCauses: causes });
+  });
+
   it("accepts the optional parts the writer will add and keeps them: absentOnNew, absentOnNewCount and the skip-rise counts round-trip", () => {
     const written = pack({ skippedBefore: 0, skippedAfter: 1, absentOnNew: ["tests/a.py::gone"], absentOnNewCount: 3 });
     const read = EvidencePackReadSchema.parse(written);

@@ -53,6 +53,10 @@ export function hostOf(wiring: HostedWikiMapWiring, repository: { host?: { kind:
 
 /** One service per wiring object (the wiring is built once per company), so the kept maps live as long as the company's wiring and are still keyed by company and project. */
 const services = new WeakMap<object, WikiMapService>();
+/** The kept-map service of a wiring object. The wiki build controls (W4) take the SAME wiring object, so a map the person just made is the one a build plans from. */
+export function wikiMapServiceOf(wiring: HostedWikiMapWiring, now: () => number, log: HostedWikiMapInput["log"]): WikiMapService {
+  return serviceOf(wiring, now, log);
+}
 function serviceOf(wiring: HostedWikiMapWiring, now: () => number, log: HostedWikiMapInput["log"]): WikiMapService {
   let service = services.get(wiring);
   if (service === undefined) { service = createWikiMapService({ now, log }); services.set(wiring, service); }

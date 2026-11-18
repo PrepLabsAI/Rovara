@@ -263,6 +263,8 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     const apply = (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "APPLY" }))!;
     const checkWorkspace = (apply["check"] as { workspaceId: string }).workspaceId;
     expect(checkWorkspace).not.toBe(run.workspaceId);
+    // L4-DR: the code the check is about to prepare is noted when the check starts (the snapshot saved at approval is of THAT code).
+    expect(apply["baseCommits"]).toEqual({ demo: h.host.model.headOf("main") });
     const checkJob = await h.nextJob(checkWorkspace, new Set());
     expect(checkJob).toMatchObject({ kind: "prepare", projectRevision: 2 });
     expect((checkJob.payload as { project: { setup: unknown[]; readiness: unknown[] } }).project).toMatchObject({ setup: [{ executable: "npm", args: ["ci"] }], readiness: [{ executable: "npm", args: ["test"] }] });
@@ -273,6 +275,9 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     const decided = await h.post(link, applyForm.action, { ...applyForm.fields, decision: "approve" });
     expect(decided.headers["location"]).toContain("n=setupdone");
     expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(2);
+    // L4-DR: the approval saved the setup snapshot in its own transaction: the commit the check prepared and the setup files at it (none in this repository), by id.
+    const snapshot = (await h.store.get({ pk: `ORG#${IMPLICIT_COMPANY_ID}#SETUP_DRAFT#payments`, sk: "SNAPSHOT" }))!;
+    expect(snapshot["snapshot"]).toMatchObject({ setupRevision: 2, repositories: [{ name: "demo", commit: h.host.model.headOf("main"), files: [] }], hosts: [] });
   });
 
   it("ends a run the owner stops as the owner's stop: the fixed sentence, who stopped it, and the workspace given back", async () => {

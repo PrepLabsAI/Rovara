@@ -13,6 +13,7 @@ import type { CodeSettingsReader } from "../../core/merge/seams.js";
 import {
   createMergeTrackingService, createMilestoneService, type MergeTrackingService, type MergeTrackingServiceOptions,
 } from "../../services/merge-tracking.js";
+import { rovaraCheckSource } from "../../services/rovara-check.js";
 
 export {
   CLOSED_OUTSIDE, MERGED_OUTSIDE, SWEEP_MAX_MS, SWEEP_MAX_REQUESTS, SWEEP_MAX_ROWS, TRACKING_FAILURE_MAX_MS, TRACKING_POLL_MS, TRACKING_QUIET_MAX_MS, createReadBudget, createRepositoryResolver, sessionTimeline,
@@ -31,5 +32,8 @@ export interface LocalTrackingOptions extends Omit<MergeTrackingServiceOptions, 
 export type LocalTracking = MergeTrackingService;
 
 export function createLocalTracking(options: LocalTrackingOptions): LocalTracking {
-  return createMergeTrackingService({ ...options, people: options.people ?? soleOwnerPeople, settings: options.settings ?? fixedCodeSettings() });
+  // L4-RC: the "Rovara" Check is on for every task (owner decision 2026-11-17). It is written only where the code host can write one: a laptop signed in with a personal token cannot (GitHub allows Checks from a GitHub App
+  // only; the token client (`token-client.ts`) hands the adapter neither Check method, so `githubTokenCodeHost` offers none), so there it is a no-op, and a laptop whose host is an App (a test's fake host, a future App sign-in) gets it. The Check's "Details" has no link here: the task page is
+  // an http address that carries the owner's session, and a Check only opens https addresses.
+  return createMergeTrackingService({ ...options, summaryCheck: options.summaryCheck ?? rovaraCheckSource(), people: options.people ?? soleOwnerPeople, settings: options.settings ?? fixedCodeSettings() });
 }

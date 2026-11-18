@@ -213,6 +213,8 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   if (listDirectoryAtCommit !== undefined) scoped.listDirectoryAtCommit = async (url, path, commit, scope, dirOptions) => listDirectoryAtCommit(url, path, commit, await companyScope(url, scope), dirOptions);
   const listCommitActivity = client.listCommitActivity?.bind(client);
   if (listCommitActivity !== undefined) scoped.listCommitActivity = async (url, commit, scope, activityOptions) => listCommitActivity(url, commit, await companyScope(url, scope), activityOptions);
+  const listRecentCommits = client.listRecentCommits?.bind(client);
+  if (listRecentCommits !== undefined) scoped.listRecentCommits = async (url, branch, max, scope, beforeRequest) => listRecentCommits(url, branch, max, await companyScope(url, scope), beforeRequest);
   const fileDetailsError = client.fileDetailsError?.bind(client);
   if (fileDetailsError !== undefined) scoped.fileDetailsError = (error) => fileDetailsError(error);
   const getPullRequestFileRevisions = client.getPullRequestFileRevisions?.bind(client);
@@ -225,6 +227,14 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   if (listPullRequestComments !== undefined) scoped.listPullRequestComments = async (url, number, page, scope, budget) => listPullRequestComments(url, number, page, await companyScope(url, scope), budget);
   const postPullRequestComment = client.postPullRequestComment?.bind(client);
   if (postPullRequestComment !== undefined) scoped.postPullRequestComment = async (url, number, text, scope, budget) => postPullRequestComment(url, number, text, await companyScope(url, scope), budget);
+  // L4-RC: the "Rovara" Check. Both or neither (the adapter offers the Check only with both). The write is for the company's own repository only, with the company that was checked; the App's id names no repository
+  // and no company (it is only how the App's own checks are told apart), so it takes no scope.
+  const summaryCheckSource = client.summaryCheckSource?.bind(client);
+  const upsertRovaraCheck = client.upsertRovaraCheck?.bind(client);
+  if (summaryCheckSource !== undefined && upsertRovaraCheck !== undefined) {
+    scoped.summaryCheckSource = () => summaryCheckSource();
+    scoped.upsertRovaraCheck = async (url, input, scope, budget) => upsertRovaraCheck(url, input, await companyScope(url, scope), budget);
+  }
   return scoped;
 }
 
