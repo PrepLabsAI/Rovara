@@ -287,7 +287,8 @@ describe("a script token", () => {
     const w = await setUp();
     const b = build(w);
     const secret = await makeToken(w, "a-contrib");
-    for (const bad of ["rvst_notatoken", `${secret}x`, `${secret.slice(0, -1)}A`, "garbage", ""]) {
+    // Batch 16+17 (rule F): the changed last character always differs from the real one (a secret ending in "A" made the old variant the real token, 1 run in 64 on CI).
+    for (const bad of ["rvst_notatoken", `${secret}x`, `${secret.slice(0, -1)}${secret.endsWith("A") ? "B" : "A"}`, "garbage", ""]) {
       const refused = await asToken(b, bad, lessonsPath());
       expect(refused, bad).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
       expect(refused.message ?? "").not.toContain(bad === "" ? "never" : bad);
