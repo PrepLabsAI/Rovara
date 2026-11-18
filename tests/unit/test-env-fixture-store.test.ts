@@ -29,13 +29,13 @@ function makeSet(over: Record<string, unknown> = {}): FixtureSet {
 }
 
 /** A maintainer's decision, for one action on one digest, in the org of the session; `fresh` is a sign-in a minute ago, `stale` one eleven minutes ago, `synth` the environment's schema_synth backing. */
-const by = (action: "approve" | "reject" | "withdraw", orgId: string, digest: string, actor: string, over: { fresh?: boolean; stale?: boolean; synth?: boolean; role?: string } = {}) => {
+const by = (action: "approve" | "reject" | "withdraw", orgId: string, digest: string, actor: string, over: { fresh?: boolean; stale?: boolean; synth?: boolean; role?: string; project?: string } = {}) => {
   const signedInAt = over.fresh === true ? new Date(NOW.getTime() - 60_000) : over.stale === true ? new Date(NOW.getTime() - 11 * 60_000) : undefined;
-  const decision = verifiedFixtureDecision({ orgId, project: PROJ, actor, role: over.role ?? "maintainer", action, digest, signedInAt, schemaSynth: over.synth ?? false });
+  const decision = verifiedFixtureDecision({ orgId, project: over.project ?? PROJ, actor, role: over.role ?? "maintainer", action, digest, signedInAt, schemaSynth: over.synth ?? false });
   if (decision === undefined) throw new Error("not a maintainer");
   return decision;
 };
-function setup(over: Partial<FixtureStoreDependencies> = {}, enabled = true) {
+function setup(over: Partial<FixtureStoreDependencies> = {}, enabled = true, failFirstReplace = false) {
   const ports = createMemoryFixturePorts();
   const touched: string[] = [];
   const objects: FixtureStoreDependencies["objects"] = {
@@ -44,11 +44,14 @@ function setup(over: Partial<FixtureStoreDependencies> = {}, enabled = true) {
     get: (...args) => { touched.push("get"); return ports.objects.get(...args); },
     presignGet: (...args) => { touched.push("presign"); return ports.objects.presignGet(...args); },
   };
+  let failReplace = failFirstReplace;
   const index: FixtureStoreDependencies["index"] = {
     get: (...args) => { touched.push("index.get"); return ports.index.get(...args); },
     putIfAbsent: (...args) => { touched.push("index.put"); return ports.index.putIfAbsent(...args); },
-    replace: (...args) => { touched.push("index.replace"); return ports.index.replace(...args); },
+    replace: (...args) => { touched.push("index.replace"); if (failReplace) { failReplace = false; return Promise.resolve(false); } return ports.index.replace(...args); },
     listByDependency: (...args) => { touched.push("index.list"); return ports.index.listByDependency(...args); },
+    putMockSpecSlice: (...args) => { touched.push("index.putSpec"); return ports.index.putMockSpecSlice(...args); },
+    getMockSpecSlice: (...args) => { touched.push("index.getSpec"); return ports.index.getMockSpecSlice(...args); },
   };
   let on = enabled;
   const store = createFixtureStore({ enabled: () => on, objects, index, denyFor: () => Promise.resolve(DENY), now: () => NOW, ...over });
@@ -73,6 +76,7 @@ describe("behind the tx switch", () => {
     expect(await store.deliver(ORG_A, PROJ, digest)).toEqual({ ok: false, reason: "disabled" });
     expect(await store.deliverById(ORG_A, PROJ, fixtureStoreId(ORG_A, PROJ, digest))).toEqual({ ok: false, reason: "disabled" });
     expect(await store.readApproved(ORG_A, PROJ, digest)).toEqual({ ok: false, reason: "disabled" });
+    expect(await store.specSlice(ORG_A, PROJ, digest)).toEqual({ ok: false, reason: "disabled" });
     expect(touched).toEqual([]);
   });
   it("reads the switch on every call: turning it off again stops delivery of a set that was approved", async () => {
@@ -83,6 +87,20 @@ describe("behind the tx switch", () => {
     setEnabled(false);
     expect(await store.deliver(ORG_A, PROJ, record.digest)).toEqual({ ok: false, reason: "disabled" });
   });
+});
+
+it("reuses the already-cut mock spec slice when approval retries after the row update fails", async () => {
+  const { store, touched } = setup({}, true, true);
+  const record = await submitOk(store);
+  expect(await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"))).toEqual({ ok: false, reason: "already_decided" });
+  const firstSliceWrite = touched.filter((item) => item === "index.putSpec").length;
+  expect(firstSliceWrite).toBe(1);
+  const retry = await store.approve(ORG_A, PROJ, record.digest, by("approve", ORG_A, record.digest, "lead"));
+  if (!retry.ok) throw new Error(`retry approval failed: ${retry.reason}`);
+  expect(retry.record).toMatchObject({ status: "approved" });
+  expect(retry.record.mockSpecSliceDigest).toEqual(expect.any(String));
+  expect(touched.filter((item) => item === "index.putSpec")).toHaveLength(1);
+  expect(touched.filter((item) => item === "index.getSpec")).toHaveLength(2);
 });
 
 describe("store ids and keys are org-scoped", () => {
@@ -255,6 +273,27 @@ describe("the review", () => {
 });
 
 describe("approving and delivering", () => {
+  it("pins a separate spec slice at approval and keeps its row company and project scoped", async () => {
+    const ports = createMemoryFixturePorts();
+    const dependencies: FixtureStoreDependencies = { enabled: () => true, ...ports, denyFor: () => Promise.resolve(DENY), now: () => NOW };
+    const store = createFixtureStore(dependencies);
+    const aWeb = await submitOk(store, makeSet(), ORG_A);
+    const bWeb = await submitOk(store, makeSet(), ORG_B);
+    const aOtherProjectResult = await store.submit(ORG_A, "api", makeSet(), { actor: "maya", recordedFrom: "synthetic" });
+    if (!aOtherProjectResult.ok) throw new Error(aOtherProjectResult.reason);
+    for (const [org, project, record] of [[ORG_A, PROJ, aWeb], [ORG_B, PROJ, bWeb], [ORG_A, "api", aOtherProjectResult.record]] as const) {
+      const approved = await store.approve(org, project, record.digest, by("approve", org, record.digest, "lead", { project }));
+      expect(approved.ok).toBe(true);
+      if (!approved.ok) throw new Error(approved.reason);
+      expect(approved.record).toMatchObject({ status: "approved" });
+      expect(approved.record.mockSpecSliceDigest).toMatch(/^[a-f0-9]{64}$/u);
+      const slice = await store.specSlice(org, project, record.digest);
+      expect(slice).toMatchObject({ ok: true, slice: { companyId: org, project, mockDigest: record.digest, vendor: "unknown", result: "no_spec", entityType: "MOCK_SPEC_SLICE" } });
+    }
+    expect(await store.specSlice(ORG_B, "api", aWeb.digest)).toEqual({ ok: false, reason: "not_found" });
+    expect(await store.specSlice(ORG_A, "other", aWeb.digest)).toEqual({ ok: false, reason: "not_found" });
+  });
+
   it("delivers only an approved set, with a 15-minute signed read of that one key and the digest to check", async () => {
     const { store } = setup();
     const record = await submitOk(store);

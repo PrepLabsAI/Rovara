@@ -82,6 +82,7 @@ const TABLE: Array<[PrExceptionKind, Partial<PrVerdictInput>]> = [
   ["service_fell_back", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "hand_written_fake", fellBack: { from: "test_account", reason: "test_account_expired" } })] }],
   ["service_emulated", { dependencies: [dep({ name: "S3", backing: "emulated", label: "rovara_local_aws" })] }],
   ["service_old_fake", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-07-02T00:00:00.000Z" })] }],
+  ["service_spec_check", { dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })] }],
   ["tests_weaker", { weakening: { weaker: ["Snapshot files changed: tests/orders/__snapshots__/order-page.snap"], flags: [], notCompared: [] } }],
   ["weakening_not_compared", { weakening: { weaker: [], flags: [], notCompared: ["Test weakening: could not compare (the test proof did not run for this code)"] } }],
   ["flagged_files", { weakening: { weaker: [], flags: ["Rovara instruction files changed (a flag, not an approval): CLAUDE.md"], notCompared: [] } }],
@@ -271,6 +272,25 @@ describe("rules V5 and V6: risk", () => {
     expect(v.heading).toBe("Verified · Risk not judged yet (treated as high) · nothing extra to check");
     expect(v.lines.needsYou).toContain("Merging needs a fresh sign-in (high risk)");
     expect(v.lines.needsYou).not.toContain("Nothing else");
+  });
+  it("a mock spec mismatch raises risk one level and adds the PR thing to check", () => {
+    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })] });
+    expect(v.riskLevel).toBe("medium");
+    expect(v.heading).toContain("Medium risk · 1 thing to check");
+    expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: does not match Stripe's published API; check this mock.");
+  });
+  it("a mock spec mismatch raises medium risk to high", () => {
+    const v = verdict({
+      dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "mismatch", mockSpecVendor: "stripe" })],
+      risk: { level: "medium", reasons: ["A medium-risk change."], judged: true },
+    });
+    expect(v.riskLevel).toBe("high");
+    expect(v.heading).toContain("High risk · 1 thing to check");
+  });
+  it("keeps catalog entries without a matching operation explicit and nonblocking", () => {
+    const v = verdict({ dependencies: [dep({ name: "Stripe", backing: "fake", label: "recorded_fake", recordedAt: "2026-10-14T00:00:00.000Z", mockSpecResult: "no_spec", mockSpecVendor: "stripe" })] });
+    expect(v.riskLevel).toBe("low");
+    expect(v.items.find((item) => item.kind === "service_spec_check")?.lines).toContain("Stripe: no published spec to check against.");
   });
   it("a file list read from the host but not judged is not 'still reading'", () => {
     expect(verdict({ risk: { level: "low", reasons: [], judged: false } }).lines.risk[0]).toBe("Not judged from the code host's list of changed files, so it counts as high.");

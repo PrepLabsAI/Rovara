@@ -209,6 +209,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:APPROVAL_PROOF_USED | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_SIGN_IN_SETTING | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:APPROVAL_STEP_UP_CLAIM | company-scoped | State table | no | - | Switch-on lane L2a: written, read and settled only under companyScoped(company, APPROVAL_STEP_UP_CLAIM); a claim id names its company and a random part that must match the row (core-host-hosted-approvers two-company test). |
+| record | entity:MOCK_SPEC_SLICE | company-scoped | State table | no | - | C-SPEC: key is ORG#<company>#MOCK_SPEC#<project>#<digest>; separate versioned test catalog excerpt row, while the approved mock row carries only its slice digest. tests/unit/test-env-fixture-store.test.ts covers two companies and two projects. |
 | record | entity:ARTIFACT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:ASK_LOCK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
