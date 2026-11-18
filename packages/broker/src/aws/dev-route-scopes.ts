@@ -167,6 +167,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // (checked by the knowledge API; no sign-in client scope reaches it). At most 10 units and 2 KB an answer, 300 reads a day a person, no bulk mode.
   { method: "POST", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/knowledge/areas", requires: "full" },
+  // L4-AK3H: a team SUGGESTION from a tool outside Rovara (`team_propose`; core-host/knowledge-api.ts), the same two callers and the same Team knowledge permission. A weak-source lesson that waits for a second sighting and a person; at most 10 a person a UTC day.
+  { method: "POST", path: "/v1/dev/projects/{project}/knowledge/propose", requires: "full" },
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
   { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },

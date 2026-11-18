@@ -2,6 +2,8 @@
 //
 //   POST /v1/dev/projects/{project}/lessons          { task?, files?, stage?, repo? }      at most 10 units and 2 KB: approved and live units the WHOLE project may read, for the repository named
 //   POST /v1/dev/projects/{project}/knowledge/areas  { repo? }                              the table of contents: project > repository > top folder, counts only
+//   POST /v1/dev/projects/{project}/knowledge/propose { advice, why?, when?, type?, paths?, repo? }  a team SUGGESTION from the tool (`team_propose`, L4-AK3H): the one write; a weak-source lesson that waits for a second
+//                                                                                          sighting and then for a person (never applied by itself), at most 10 a person a UTC day, no model call
 //
 // The request and the answer are the laptop's (`contracts/src/lessons-local-tools.ts`), and so is every rule, because the rules are not copied: both doors call ONE implementation (`lessons/knowledge-serve.ts` over the one
 // gate in `lessons/local-tools.ts`): the per-minute rate, the project's existence, 300 reads a day per person (fail closed, counted before anything is read), no `all`, one audit record per answer with unit ids only (written BEFORE
@@ -35,13 +37,13 @@ const ROUTE_NOT_FOUND = "route not found";
 const MAX_NAME_LOOKUPS = 300;
 
 /** The paths this API serves (one regex, so the route table's tests read the paths from it). */
-const KNOWLEDGE_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/areas)$/u;
+const KNOWLEDGE_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons|knowledge\/(?:areas|propose))$/u;
 
 /** The tool a method and path are, or undefined: not this API's. */
-export function knowledgeToolOf(method: string, path: string): KnowledgeTool | undefined {
+export function knowledgeToolOf(method: string, path: string): KnowledgeTool | "propose" | undefined {
   if (method !== "POST") return undefined;
   const match = KNOWLEDGE_API.exec(path);
-  return match === null ? undefined : path.endsWith("/knowledge/areas") ? "areas" : "lessons";
+  return match === null ? undefined : path.endsWith("/knowledge/areas") ? "areas" : path.endsWith("/knowledge/propose") ? "propose" : "lessons";
 }
 
 /** A script token that was authenticated: the company it belongs to, the person who made it (its limits are theirs) and what it may do. */
@@ -221,7 +223,8 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
     if (!onRoster) throw notFound(NO_SUCH_PROJECT);
 
     try {
-      return await serverOf(lessons).read({ project, developerId: personId, tool, body: request.body, ...(token === undefined ? {} : { token }) });
+      const call = { project, developerId: personId, body: request.body, ...(token === undefined ? {} : { token }) };
+      return tool === "propose" ? await serverOf(lessons).propose(call) : await serverOf(lessons).read({ ...call, tool });
     } catch (error) {
       if (error instanceof AgentXError) throw error;
       log("failed", { error: error instanceof Error ? error.name : "unknown" });
