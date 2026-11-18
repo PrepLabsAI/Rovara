@@ -8,6 +8,8 @@ import { DESIGN_REVIEW_WORKER_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEA
  */
 export const WORKER_IMPLEMENTED_FEATURES = [
   "task.evalRound.v1",
+  // The model gateway's address delivered with an eval request (`evalGatewayUrl`), used when the host sets no `ROVARA_EVAL_GATEWAY_URL` of its own (verification/eval-wiring.ts `evalEnvironmentWithGateway`).
+  "task.evalGateway.v1",
   "task.modelPolicy",
   "model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview",
   "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode",
