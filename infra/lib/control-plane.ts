@@ -1103,6 +1103,12 @@ export class ControlPlaneStack extends Stack {
       channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
       // Phase 7c2: the channel API's Slack router posts through the adapter too.
       channelAdapters.connectSlackPoster(channelAdapters.ingress, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+      // L4-HW8b (DEC 254zzz42 (a)): the broker's hosted lessons source sends Slack `thread_messages` commands through the adapter (aws/hosted-slack-thread.ts). Environment as the other posters have it;
+      // the secret read is in the SECRET's policy (the broker's role policy has no room), so the identity grant is skipped here. Named environments only: the legacy (production) template does not change.
+      if (naming.env !== undefined) {
+        channelAdapters.connectSlackPoster(broker, signInParameters.slackTeamId.valueAsString, { readsAdapterSecrets: true });
+        channelAdapters.allowBrokerToReadSlackAdapterSecret(broker.role!);
+      }
 
       // Preserve the health probe's existing five-queue inventory. Channel request failures remain alarm-only.
       const deadLetterQueues = {

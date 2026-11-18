@@ -196,7 +196,7 @@ describe("the client the port reads through", () => {
     await client.send(get(SIGN_IN, "DEVELOPER#x", "META"));
     await client.send(get(STATE, "MEMBER#x", "PROJECT#payments"));
     expect(inner.send).toHaveBeenCalledTimes(3);
-    const sentSignIn = inner.send.mock.calls.slice(0, 2).map(([command]) => (command as GetCommand).input);
+    const sentSignIn = inner.send.mock.calls.slice(0, 2).map((call) => ((call as unknown[])[0] as GetCommand).input);
     for (const input of sentSignIn) expect(input.ProjectionExpression).toBeDefined();
     inner.send.mockClear();
     for (const command of [
