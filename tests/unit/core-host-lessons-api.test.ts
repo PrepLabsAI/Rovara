@@ -1279,6 +1279,24 @@ describe("Rovara skills (L4-AK3)", () => {
     expect(await call(target, "b-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" })).toMatchObject({ ok: false, status: 404 });
   });
 
+  it("L4-JA review: nobody is told they may decide when the approver directory cannot answer, and the one-skill read says which approvals are yours", async () => {
+    const w = await setUp();
+    await proven(w);
+    const { api: target } = api(w);
+    await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {});
+    const working = w.people.approvers.bind(w.people);
+    for (const broken of [async () => ({ complete: false, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null }), async () => { throw new Error("down"); }]) {
+      w.people.approvers = broken;
+      expect(await call(target, "a-admin", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { canDecide: false } });
+      expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" })).toMatchObject({ ok: true, body: { canDecide: false } });
+    }
+    w.people.approvers = working;
+    expect(await call(target, "a-admin", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: true });
+    const read = async (person: string) => ((await call(target, person, "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" })) as { body: { skills: Array<Record<string, unknown>> } }).body.skills[0]!;
+    expect(await read("a-admin")).toMatchObject({ approvals: 1, approvedByYou: true });
+    expect(await read("a-maint")).toMatchObject({ approvals: 1, approvedByYou: false });
+  });
+
   it("L4-JA: a skill text this build cannot read back exactly has no form (never a guess), and the text is still shown; a long skill carries the splitting note", async () => {
     const w = await setUp();
     await proven(w);
