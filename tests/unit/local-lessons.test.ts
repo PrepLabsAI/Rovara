@@ -867,7 +867,7 @@ describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
 
   it("a fix round's correction words pick the lessons again (they rank; they are never stored or shown)", async () => {
     const w = await world();
-    await put(w, scoped("les_health001", { scope: {}, title: "Quokka handling", description: "", body: "Quokka cases need care in the quokka module.", type: "convention" }));
+    await put(w, scoped("les_health001", { scope: {}, title: "Quokka module test", description: "", body: "Quokka module test cases need care.", type: "convention" }));
     // The task is about a health endpoint: an unscoped lesson about quokkas does not pass the fit floor ...
     const plain = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-fix0", workflowMode: "IMPLEMENT", features: BOTH });
     expect(plain.learnedContext?.lessons.map((l) => l.id) ?? []).toEqual([]);
