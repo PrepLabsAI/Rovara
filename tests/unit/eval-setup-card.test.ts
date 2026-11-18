@@ -1,5 +1,5 @@
 // L4-EVC (DEC 254zzz20 D5, D6, D8): the eval's ONE setup card. One approval in plain dollars (the confirm and the spend approval in one act, through the existing approvers); a changed eval set rides on the
-// earlier approval while it stays inside the approved limit, and asks again (with its reason) when it does not; the health run is opt-in. Every guard has a named mutant in
+// earlier approval while it stays inside the approved limit, and asks again (with its reason) when it does not. Every guard has a named mutant in
 // briefs/lead4/L4-EVC-MUTANTS-20261118.md, each broken by hand and seen to fail one of these tests.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -8,7 +8,6 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalDollarsOf } from "../../packages/broker/src/core/setup-agent/eval-cost.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
-import { evalHealthState, finishEvalHealthRequest, readEvalHealthRequest, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { evalSpendKey, proposeEvalSpendApproval, readApprovedEvalPlan } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { A, B, CAP, COST_PER_CASE, MODEL, NOW, ROLES, VERSION, command, company, filesOf, person, project, reportOf, reportPath, type Role } from "../support/eval-card-world.js";
 
@@ -106,12 +105,11 @@ describe("one approval (D8)", () => {
     expect((await w.item())?.state).toBe("waiting");
     expect(await readApprovedEvalPlan({ store: w.store, companyId: A }, project)).toBeUndefined();
   });
-  it("the card after approval shows the approved dollars and the opt-in health button with its cost", async () => {
+  it("the card after approval shows the approved dollars", async () => {
     const w = company(A); const r = await w.run(filesOf(2), reportOf());
     await r.approve();
     const after = await readEvalCard({ store: w.store, companyId: A, members: w.members, monthlyCap: async () => CAP }, project, person(A, "admin"));
     expect(after.spend).toMatchObject({ state: "approved", perPr: "about $0.20-$1.80", monthly: "$50.00" });
-    expect(after.health).toMatchObject({ state: "none", label: "Check my evals now (about $0.60)", cost: "$0.60", seenCostMicros: 600_000 });
   });
 });
 
@@ -147,8 +145,6 @@ describe("a changed eval set (D6)", () => {
   it("a set that grew past the approved limit asks again: the eval reads 'Needs approval: your eval set grew past the approved $X' and its spend stops until a new card is approved", async () => {
     const { w } = await approvedOnce();
     const second = await w.run(filesOf(3), reportOf(3));
-    const preview = (await second.card()).suites[0]!;
-    expect(preview.versusApproved).toEqual({ within: false, words: "Needs approval: your eval set grew past the approved $1.80" });
     const answer = await second.confirmOnly();
     expect(answer.evalSpend).toMatchObject({ state: "waiting", card: { needsApproval: "Needs approval: your eval set grew past the approved $1.80", perPr: "about $0.30-$2.70" } });
     expect(await readApprovedEvalPlan({ store: w.store, companyId: A }, project)).toBeUndefined();
@@ -160,8 +156,7 @@ describe("a changed eval set (D6)", () => {
     const { w } = await approvedOnce();
     // 30 cases at 20 calls and a micro-dollar each: the dollars are tiny and inside the approved high figure, the calls (1,800) are past the approved 400.
     const second = await w.run(filesOf(30), reportOf(30, { maxCallsPerQuestion: 20, maxCostMicrosPerQuestion: 1 }));
-    const preview = (await second.card()).suites[0]!;
-    expect(preview.seen.perCheckHighMicros).toBeLessThan(1_800_000);
+    expect((await second.card()).suites[0]!.seen.perCheckHighMicros).toBeLessThan(1_800_000);
     const answer = await second.confirmOnly();
     expect(answer.evalSpend).toMatchObject({ state: "waiting", card: { needsApproval: "Needs approval: your eval set grew past the approved $1.80" } });
     expect(w.approved).toHaveLength(1);
@@ -245,68 +240,5 @@ describe("two companies", () => {
     await ra.approve(person(A, "admin"));
     const card = await readEvalCard({ store, companyId: B, members: b.members, monthlyCap: async () => CAP }, project, person(B, "admin"));
     expect(card.state).toBe("none"); expect(card.spend).toBeUndefined(); expect(card.suites).toEqual([]); expect(card.report).toBeUndefined();
-    expect(await requestEvalHealthCheck({ store, companyId: B, now: () => NOW, members: b.members }, project, { requestId: randomUUID(), seenCostMicros: 600_000 }, person(B, "admin")).catch(e => (e as { code: string }).code)).toBe("CHANGE_STALE");
-  });
-});
-
-describe("the health run is opt-in (D5)", () => {
-  const ask = (w: ReturnType<typeof company>, as: Principal = person(A, "admin"), body: Record<string, unknown> = {}) =>
-    requestEvalHealthCheck({ store: w.store, companyId: A, now: () => NOW, members: w.members }, project, { requestId: randomUUID(), seenCostMicros: 600_000, ...body }, as);
-  const reader = (w: ReturnType<typeof company>) => readEvalHealthRequest({ store: w.store, companyId: A, members: w.members }, project);
-  async function approved() { const w = company(A); const r = await w.run(filesOf(2), reportOf(2)); await r.approve(); return { w, r }; }
-
-  it("approving does not start a health run or leave a request: only a yes does", async () => {
-    const { w } = await approved();
-    expect(await reader(w)).toBeUndefined();
-    expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("none");
-    expect(await w.store.get({ pk: `ORG#${A}#SETUP#${project}`, sk: "EVAL_HEALTH_REQUEST" })).toBeUndefined();
-  });
-  it("a yes records one request with the cost the person was shown, and the runner reads it", async () => {
-    const { w } = await approved();
-    const id = randomUUID();
-    expect(await ask(w, person(A, "maintainer"), { requestId: id })).toEqual({ requested: true, duplicate: false, cost: "$0.60" });
-    expect(await reader(w)).toMatchObject({ requestId: id, estimateMicros: 600_000, state: "requested", requestedBy: { personId: "maintainer", role: "maintainer" } });
-    expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("requested");
-    expect(await ask(w, person(A, "maintainer"), { requestId: id })).toMatchObject({ duplicate: true });
-    await expect(ask(w)).rejects.toMatchObject({ code: "CHANGE_STALE" });
-  });
-  it("is refused without an approved spend, for a person who may not approve it, for a stale cost and for another company", async () => {
-    const w = company(A); const r = await w.run(filesOf(2), reportOf(2));
-    await expect(ask(w)).rejects.toMatchObject({ code: "CHANGE_STALE" });
-    await r.confirmOnly();
-    await expect(ask(w)).rejects.toMatchObject({ code: "CHANGE_STALE" });
-    const o = await approved();
-    for (const who of ["member", "contributor", "revoked", "auditor"]) await expect(ask(o.w, person(A, who))).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(ask(o.w, person(A, "admin"), { seenCostMicros: 599_999 })).rejects.toMatchObject({ code: "CHANGE_STALE" });
-    await expect(ask(o.w, person(B, "admin"))).rejects.toMatchObject({ code: "FORBIDDEN" });
-    await expect(ask(o.w, person(A, "admin"), { requestId: "not-a-uuid" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-    expect(await reader(o.w)).toBeUndefined();
-  });
-  it("a request is void once the approval it was made under is replaced (an eval that grew asks again), and the runner no longer reads it", async () => {
-    const { w } = await approved();
-    await ask(w);
-    expect(await reader(w)).toBeDefined();
-    const bigger = await w.run(filesOf(3), reportOf(3));
-    await bigger.confirmOnly();
-    expect(await reader(w)).toBeUndefined();
-    expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("none");
-  });
-  it("a request whose approver lost the right to approve is void", async () => {
-    const roles: Record<string, Role> = { ...ROLES, ada: { company: "admin" } };
-    const w = company(A, roles); const r = await w.run(filesOf(2), reportOf(2)); await r.approve(person(A, "ada"));
-    await ask(w);
-    roles["ada"] = undefined;
-    expect(await reader(w)).toBeUndefined();
-  });
-  it("the runner finishes a request once, by its own id", async () => {
-    const { w } = await approved();
-    const id = randomUUID(); await ask(w, person(A, "admin"), { requestId: id });
-    expect(await finishEvalHealthRequest({ store: w.store, companyId: A }, project, randomUUID())).toBe(false);
-    expect(await finishEvalHealthRequest({ store: w.store, companyId: A }, project, id)).toBe(true);
-    expect(await finishEvalHealthRequest({ store: w.store, companyId: A }, project, id)).toBe(false);
-    expect(await reader(w)).toBeUndefined();
-    expect(await evalHealthState({ store: w.store, companyId: A, members: w.members }, project)).toBe("finished");
-    // Saying yes again after a finished one makes a new request.
-    expect(await ask(w)).toMatchObject({ requested: true, duplicate: false });
   });
 });

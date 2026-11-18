@@ -75,8 +75,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
-    // L4-EVC (DEC 254zzz20): the eval card, its one approval, a waiting item's decision and the opt-in health check.
-    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health", "full"],
+    // L4-EVC (DEC 254zzz20): the eval card and its one approval.
+    ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -92,7 +92,7 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
       ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
-      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["GET", "/v1/app/projects/payments/setup-agent/eval-health"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
+      ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["POST", "/v1/app/projects/payments/setup-agent/eval"], ["GET", "/v1/app/projects/payments/setup-agent/eval-approve"], ["POST", "/v1/app/projects/payments/setup-agent/eval-decide"], ["POST", "/v1/app/projects/payments/setup-agent/eval-health"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],

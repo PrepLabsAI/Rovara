@@ -9,7 +9,7 @@ import { SubjectRefusal, type DecisionSubject } from "../decisions/approval-gate
 import { localOwnerMembers, type SessionMembers, type SessionPerson } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { setupPartition } from "./keys.js";
-import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalAsksAgainWords, evalHealthButtonLabel } from "./eval-cost.js";
+import { dollarRangeOf, dollarsOf, evalApprovalSentence, evalAsksAgainWords } from "./eval-cost.js";
 
 export const EVAL_SPEND_KIND = "setup-eval-spend";
 /** Cap and membership come from the trusted host, never the proposal or a stored approver role. */
@@ -181,8 +181,6 @@ export interface EvalSpendCardView {
   sentence: string;
   perPr: string;
   monthly: string;
-  /** D5: the opt-in health run's button and what it costs; offered only once the item is approved. */
-  healthRun: { label: string; cost: string };
   /** D6: set on a waiting item that replaced an approval: "Needs approval: your eval set grew past the approved $X". */
   needsApproval?: string;
   /** D6: a changed eval set rode on the earlier approval (it stayed inside the approved limit). */
@@ -207,7 +205,6 @@ export async function readEvalSpendItem(deps: Table, project: string): Promise<E
     const state = row.state === "approved" && await approvedRole(deps, row) === undefined ? "approval needs renewing" as const : row.state;
     const card: EvalSpendCardView | undefined = dollars === undefined ? undefined : {
       sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsOf(dollars.monthlyCapMicros),
-      healthRun: { label: evalHealthButtonLabel(row.plan), cost: dollarsOf(estimate.costMicros) },
       ...(row.state === "waiting" && row.asksAgain !== undefined ? { needsApproval: evalAsksAgainWords(row.asksAgain) } : {}),
       ...(row.state === "approved" && row.carriedFrom !== undefined ? { carried: true } : {}),
       ...(row.setupRevision === undefined ? {} : { setupRevision: row.setupRevision }),
