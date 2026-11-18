@@ -141,12 +141,12 @@ describe("POST eval-wrapper: a person's click opens the pull request", () => {
     await h.reported(FAKE_COMPANY, 2, {}, OFFERED);
     const order: string[] = [];
     const commit = h.codeHost.commitFiles.bind(h.codeHost);
-    h.codeHost.commitFiles = async (input, scope) => { order.push(`write:${h.audit.some((e) => e.action === "eval_wrapper.pull_request_opened") ? "after-audit" : "BEFORE-AUDIT"}`); return commit(input, scope); };
+    h.codeHost.commitFiles = async (input, scope) => { order.push(`write:${h.audit.some((e) => e.action === "eval_wrapper.pull_request_requested") ? "after-audit" : "BEFORE-AUDIT"}`); return commit(input, scope); };
     const who = h.person(`p-${role}`, FAKE_COMPANY, role as OrgRole, grants);
     const answer = await h.call(open(), who);
     expect(answer.status, answer.raw).toBe(200);
     expect(order).toEqual(["write:after-audit"]);
-    expect(h.audit.find((e) => e.action === "eval_wrapper.pull_request_opened")).toMatchObject({ companyId: FAKE_COMPANY, actor: { type: "person", id: `p-${role}` }, subject: { type: "project", id: PROJECT }, details: { by: `p-${role}` } });
+    expect(h.audit.find((e) => e.action === "eval_wrapper.pull_request_requested")).toMatchObject({ companyId: FAKE_COMPANY, actor: { type: "person", id: `p-${role}` }, subject: { type: "project", id: PROJECT }, details: { by: `p-${role}` } });
     expect(h.repo.changeRequests).toHaveLength(1);
     expect(h.repo.revision(h.repo.headOf(h.repo.changeRequests[0]!.sourceBranch)).files.has(WRAPPER_FILE)).toBe(true);
   });
@@ -204,6 +204,9 @@ describe("POST eval-wrapper: a person's click opens the pull request", () => {
     expect(h.audit.find((e) => e.action === "eval_wrapper.reopened")).toMatchObject({ details: { by: "p-admin" } });
     // A person commits the file; a member's Check now finds it on the default branch.
     h.repo.commit("main", { [WRAPPER_FILE]: "their own wrapper\n" });
+    // A first Check now (the read above already looked) is held for a few seconds: nobody can drain the code host's quota with it.
+    expect((await h.call(act("check"), dev)).status).toBe(200);
+    h.world.clock.now += 16_000;
     expect((await h.call(act("check"), dev)).body).toMatchObject({ wrappers: [{ step: "file_found", fileStatus: "edited" }] });
   });
 

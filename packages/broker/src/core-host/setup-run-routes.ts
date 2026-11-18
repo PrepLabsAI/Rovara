@@ -70,6 +70,8 @@ export const SETUP_APPROVAL_UNAVAILABLE = "Approving a project's setup isn't ava
 export const SETUP_NOTHING_WAITING = "There is no setup waiting for a decision. Open the project's setup again.";
 export const SETUP_DECIDE_ON_A_PAGE = "A setup is decided right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
 export const EVAL_WRAPPER_UNAVAILABLE = "Setting up the file Rovara needs to read your eval isn't available on this install yet.";
+/** "Check now" looks at the code host at most once in this long per eval (any member may press it; the host's quota is the company's). */
+const CHECK_NOW_FLOOR_MS = 15_000;
 export const EVAL_WRAPPER_ROLE = "Only a company owner, admin or project maintainer can ask Rovara to open a pull request for the eval's file, set it aside, or approve its test run.";
 export const EVAL_APPROVAL_UNAVAILABLE = "Approving an eval's spend isn't available on this install yet.";
 export const SETUP_NO_HOST_WAITING = "That website is not waiting for a decision any more. Open the project's setup again.";
@@ -338,7 +340,7 @@ async function evalWrapperAct(input: HostedSetupRunInput, project: string, basis
   let outcome: Awaited<ReturnType<typeof openEvalWrapperPullRequest>> | undefined;
   if (body.action === "check") {
     await refreshEvalWrappers(deps, project);
-    await detectEvalWrappers(deps, project, found.report, { force: true });
+    await detectEvalWrappers(deps, project, found.report, { force: true, floorMs: CHECK_NOW_FLOOR_MS });
   } else if (body.action === "dismiss") {
     await dismissEvalWrapper(deps, project, { reportDigest: found.reportDigest, by: input.principal.personId });
   } else if (body.action === "reopen") {

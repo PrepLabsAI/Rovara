@@ -22,7 +22,7 @@ import {
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import type { SetupEvalDiscoveryView } from "../local-pages/views.js";
-import { listEvalWrapperFiles, recordEvalWrapperTest, wrapperFileFor } from "./eval-wrapper.js";
+import { listEvalWrapperFiles, needsOf, recordEvalWrapperTest, wrapperFileFor } from "./eval-wrapper.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { taskKey } from "../task-flow/keys.js";
@@ -234,7 +234,8 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   let run: Pick<typeof suite, "command" | "report"> = suite;
   if (evalOutputNeedsWrapper(suite.output)) {
     const wrapper = evalWrapperFor(suite);
-    const file = wrapper === undefined ? undefined : wrapperFileFor(await listEvalWrapperFiles({ store: deps.store, companyId: company }, project), suite, wrapper.language);
+    const firstOfFile = needsOf(row.report).find((entry) => entry.selection === suite.selection)?.firstOfFile === true;
+    const file = wrapper === undefined ? undefined : wrapperFileFor(await listEvalWrapperFiles({ store: deps.store, companyId: company }, project), { ...(suite.repository === undefined ? {} : { repository: suite.repository }), selection: suite.selection, firstOfFile }, wrapper.language);
     if (wrapper === undefined || file === undefined) refuse(log, "eval_discovery_confirm_refused", "unreadable_output", "CONFIG_INVALID", EVAL_OUTPUT_UNREADABLE_MESSAGE);
     wrapped = { language: wrapper.language };
     run = { command: evalWrapperCommandOf(wrapper.language), report: { cwd: ".", argument: EVAL_WRAPPER_REPORT_PATH } };
@@ -310,7 +311,7 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
     item = await readEvalSpendItem(table, project);
   }
   // The test run of a wrapped eval is approved with its cost: the spend approval the person just gave (or the carried one) is that approval. The file's record keeps it until the run's results are read.
-  if (wrapped !== undefined && item?.state === "approved") await recordEvalWrapperTest({ store: deps.store, companyId: company, now: deps.now }, project, { ...(suite.repository === undefined ? {} : { repository: suite.repository }), language: wrapped.language }, "approved").catch(() => false);
+  if (wrapped !== undefined && item?.state === "approved") await recordEvalWrapperTest({ store: deps.store, companyId: company, now: deps.now }, project, { ...(suite.repository === undefined ? {} : { repository: suite.repository }), selection: suite.selection, language: wrapped.language }, "approved").catch(() => false);
   return { planDigest, evalSpend: item };
 }
 

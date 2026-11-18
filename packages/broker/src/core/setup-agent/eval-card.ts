@@ -1,13 +1,13 @@
 // L4-EVC (DEC 254zzz20 D5, D6, D8): what the setup flow's ONE eval card shows, in plain dollars, read from the broker's own records. Pure reads: no model, no write, no spend. The hosted route serves it and
 // Cloud draws it; every sentence comes from `eval-cost.ts`, so the page never works out a figure of its own. No call counts, tokens or micro-dollar words reach the text; the whole-number figures a
 // person's yes must echo (`seen`) travel as data, never as words.
-import { EVAL_OUTPUT_UNREADABLE_MESSAGE, evalOutputNeedsWrapper, evalWrapperFor, type DocumentStore, type EvalWrapperCard, type OrgId, type Principal } from "@agentx/contracts";
+import { EVAL_OUTPUT_UNREADABLE_MESSAGE, evalOutputNeedsWrapper, type DocumentStore, type EvalOutputShape, type EvalWrapperCard, type OrgId, type Principal } from "@agentx/contracts";
 import { developerIdOf } from "../sessions/create.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { dollarRangeOf, dollarsUpOf, evalApprovalSentence } from "./eval-cost.js";
 import { evalProposalDollars, readEvalDiscovery } from "./eval-discovery.js";
 import { readEvalSpendItem, roleFor } from "./eval-spend.js";
-import { listEvalWrapperFiles, wrapperFileFor } from "./eval-wrapper.js";
+import { listEvalWrapperFiles, needsOf, wrapperFileFor } from "./eval-wrapper.js";
 import { readEvalWrapperCards } from "./eval-wrapper-card.js";
 
 export interface EvalCardDeps {
@@ -48,11 +48,11 @@ export interface EvalCardView {
   unavailable?: string;
 }
 
-/** Whether an eval's results are readable: its output is one Rovara reads as it is, or its wrapper file is on the default branch (present, as offered or edited). */
-function readableThroughFile(files: Parameters<typeof wrapperFileFor>[0], suite: { output?: Parameters<typeof evalWrapperFor>[0]["output"]; repository?: string | undefined; command: Parameters<typeof evalWrapperFor>[0]["command"]; report: Parameters<typeof evalWrapperFor>[0]["report"] }): boolean {
+/** Whether an eval's results are readable: its output is one Rovara reads as it is, or its own wrapper file is on the default branch (present, as offered or edited; see `wrapperFileFor`). */
+function readableThroughFile(files: Parameters<typeof wrapperFileFor>[0], needs: ReturnType<typeof needsOf>, suite: { output?: EvalOutputShape | undefined; selection: string }): boolean {
   if (!evalOutputNeedsWrapper(suite.output)) return true;
-  const file = evalWrapperFor(suite);
-  return file !== undefined && wrapperFileFor(files, suite, file.language) !== undefined;
+  const need = needs.find((entry) => entry.selection === suite.selection);
+  return need !== undefined && wrapperFileFor(files, { repository: need.suite.repository, selection: need.selection, firstOfFile: need.firstOfFile }, need.language) !== undefined;
 }
 
 /** The whole card for a project, as `principal` sees it. Reads only this company's own rows; an unreadable one reads as absent. */
@@ -65,12 +65,13 @@ export async function readEvalCard(deps: EvalCardDeps, project: string, principa
   const [item, found] = await Promise.all([readEvalSpendItem(table, project), readEvalDiscovery({ store: deps.store, companyId: deps.companyId }, project)]);
   const suites: EvalCardSuiteView[] = [];
   const files = await listEvalWrapperFiles({ store: deps.store, companyId: deps.companyId }, project);
+  const needs = found === undefined ? [] : needsOf(found.report);
   if (found?.state === "reported" && monthlyCap !== undefined) {
     for (const suite of found.report.suites) {
       const dollars = evalProposalDollars(suite.questions.length, suite, monthlyCap);
       if (dollars === undefined) continue;
       suites.push({ selection: suite.selection, files: [...new Set(suite.questions.map(q => q.path))], cases: suite.questions.length, sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
-        ...(readableThroughFile(files, suite) ? { readable: true } : { readable: false, needsFile: EVAL_OUTPUT_UNREADABLE_MESSAGE }),
+        ...(readableThroughFile(files, needs, suite) ? { readable: true } : { readable: false, needsFile: EVAL_OUTPUT_UNREADABLE_MESSAGE }),
         seen: { perCheckHighMicros: dollars.perCheckHighMicros, monthlyCapMicros: dollars.monthlyCapMicros } });
     }
   }

@@ -33,7 +33,9 @@ const COPY_WORDS: Readonly<Record<EvalWrapperCopyReason, string>> = Object.freez
 void EVAL_WRAPPER_COPY_REASONS;
 
 function cardOf(need: Need, input: { files: readonly EvalWrapperFileRecord[]; prs: readonly EvalWrapperRecord[]; dismissed: boolean; canManage: boolean }): EvalWrapperCard {
-  const file = input.files.find((row) => row.suiteRepository === (need.suite.repository ?? "") && row.language === need.language);
+  // Only this eval's own row; and an eval that is not the first of its file sees another eval's file only when it is exactly its own text.
+  const own = input.files.find((row) => row.selection === need.selection && row.suiteRepository === (need.suite.repository ?? "") && row.language === need.language);
+  const file = own !== undefined && (need.firstOfFile || own.match === "same" || own.status !== "present") ? own : undefined;
   const pr = input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language && row.digest === need.digest) ?? input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language);
   let step: EvalWrapperStep;
   let copyReason: EvalWrapperCopyReason | undefined;
@@ -75,7 +77,7 @@ export async function readEvalWrapperCards(deps: Pick<EvalWrapperDeps, "store" |
 }
 
 /** Whether a suite's results are readable through a found wrapper file (so the eval may be approved and run through it). */
-export const suiteReadableThroughFile = (files: readonly EvalWrapperFileRecord[], need: Pick<Need, "language" | "suite">): boolean => wrapperFileFor(files, need.suite, need.language) !== undefined;
+export const suiteReadableThroughFile = (files: readonly EvalWrapperFileRecord[], need: Pick<Need, "language" | "suite" | "selection" | "firstOfFile">): boolean => wrapperFileFor(files, { repository: need.suite.repository, selection: need.selection, firstOfFile: need.firstOfFile }, need.language) !== undefined;
 
 /**
  * The one line a task's pull request carries when the project's eval card was set aside ("Not now") and an eval is still not readable: "Eval not read: setup needed". Read from this company's own rows; a read that fails says

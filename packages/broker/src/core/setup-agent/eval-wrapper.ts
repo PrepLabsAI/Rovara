@@ -73,11 +73,15 @@ const FileRecordSchema = z.object({
   entityType: z.literal("EVAL_WRAPPER_FILE"), schemaVersion: z.literal(1),
   company: z.string().min(1).max(100), project: z.string().min(1).max(128), id: hex32,
   language: z.enum(["python", "node"]), repository: z.string().min(1).max(200), place: z.string().min(1).max(300), suiteRepository: z.string().max(200), path: z.string().min(1).max(200),
+  /** The eval this check is for: one row per eval, so an eval never reads another eval's file as its own (a monorepo's second eval shares the path, not the row). */
+  selection: z.string().min(1).max(512),
   /** `present`: a file is there; `absent`: nothing is; `other`: something that is not a file (a folder or a link). */
   status: z.enum(["present", "absent", "other"]),
   /** For a present file: the same text Rovara would offer, a file edited since, or one made by an older template. An edited file is judged by whether a test run can read its results. */
   match: z.enum(["same", "edited", "outdated"]).optional(),
   defaultBranch: z.string().max(200).optional(),
+  /** Of the file's text, so a test result follows exactly the text that was tested (an edited file that changes again starts over). */
+  contentDigest: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   /** The test run (approved with its cost through the eval spend approval, then checked for readable results). */
   test: z.enum(["none", "approved", "readable", "unreadable"]),
   testAt: z.iso.datetime().optional(),
@@ -101,7 +105,7 @@ export interface EvalWrapperDeps {
   /** The project's repositories as targets (the code host that serves each, its scope and the place it pins). Absent or empty: nothing is read from or written to a host. */
   targets(project: string): Promise<EvalWrapperTarget[]>;
   /** The audit record, written BEFORE the host write, naming the person who asked. Throws when it cannot be written: nothing is then done. */
-  audit(event: { action: "eval_wrapper.pull_request_opened" | "eval_wrapper.dismissed" | "eval_wrapper.reopened"; project: string; details: Record<string, string> }): Promise<void>;
+  audit(event: { action: "eval_wrapper.pull_request_requested" | "eval_wrapper.dismissed" | "eval_wrapper.reopened"; project: string; details: Record<string, string> }): Promise<void>;
   /** 12 hex digits for a branch name (tests). */
   randomHex?: () => string;
   log?: (event: string, fields: Record<string, string>) => void;
@@ -129,6 +133,7 @@ function parseFile(company: string, project: string, raw: unknown): EvalWrapperF
   return parsed.success && parsed.data.company === company && parsed.data.project === project ? parsed.data : undefined;
 }
 
+const fileIdOf = (project: string, place: string, language: EvalWrapperLanguage, selection: string): string => createHash("sha256").update(`rovara-eval-wrapper-file-id/v1\n${project}\n${place}\n${language}\n${selection}`, "utf8").digest("hex").slice(0, 32);
 const idOf = (project: string, place: string, language: EvalWrapperLanguage): string => createHash("sha256").update(`rovara-eval-wrapper-id/v1\n${project}\n${place}\n${language}`, "utf8").digest("hex").slice(0, 32);
 
 async function readRecord(deps: Pick<EvalWrapperDeps, "store" | "companyId">, project: string, id: string): Promise<EvalWrapperRecord | undefined> {
@@ -312,7 +317,7 @@ async function openOne(deps: EvalWrapperDeps, project: string, input: { taskId: 
   if (branch === undefined) return { selection: need.selection, state: "failed", failure: "conflict" };
 
   // Audited BEFORE any write, naming the person; a failed audit is no write at all.
-  try { await deps.audit({ action: "eval_wrapper.pull_request_opened", project, details: { repository: raw.name.slice(0, 200), language: need.language, digest: need.digest.slice(0, 16), taskId: input.taskId.slice(0, 160), by: input.by.slice(0, 256) } }); } catch { return { selection: need.selection, state: "failed", failure: "audit" }; }
+  try { await deps.audit({ action: "eval_wrapper.pull_request_requested", project, details: { repository: raw.name.slice(0, 200), language: need.language, digest: need.digest.slice(0, 16), taskId: input.taskId.slice(0, 160), by: input.by.slice(0, 256) } }); } catch { return { selection: need.selection, state: "failed", failure: "audit" }; }
 
   const at = isoOf(deps);
   const claim: EvalWrapperRecord = {
@@ -364,24 +369,26 @@ async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "no
   const kind = await target.host.pathKind!(target.repository, need.file.path, head, target.scope);
   let status: EvalWrapperFileRecord["status"] = kind === "none" ? "absent" : kind === "file" ? "present" : "other";
   let match: EvalWrapperFileRecord["match"];
+  let contentDigest: string | undefined;
   if (status === "present") {
     const text = await target.host.fileAtRevision(target.repository, need.file.path, head, target.scope, { timeoutMs: 15_000, maxBytes: 100_000 });
     if (text === undefined) status = "absent";
     else {
+      contentDigest = createHash("sha256").update(text, "utf8").digest("hex");
       const version = evalWrapperTemplateVersionOf(text);
       // The same text Rovara would offer; else a file an older Rovara template made; else one a person made or changed (judged by whether a test run can read its results, never by its text).
       match = text === need.file.content ? "same" : version !== undefined && version < EVAL_WRAPPER_TEMPLATE_VERSION ? "outdated" : "edited";
     }
   }
-  const id = idOf(project, raw.place, need.language);
+  const id = fileIdOf(project, raw.place, need.language, need.selection);
   const key = fileKeyOf(deps.companyId, project, id);
   const at = new Date(deps.now()).toISOString();
   const before = parseFile(deps.companyId, project, await deps.store.get(key));
   // A test result belongs to the file that was tested: a file that is gone or has changed text since its test starts over.
-  const keep = before !== undefined && before.status === status && before.match === match;
+  const keep = before !== undefined && before.status === status && before.match === match && before.contentDigest === contentDigest;
   const next: EvalWrapperFileRecord = {
-    entityType: "EVAL_WRAPPER_FILE", schemaVersion: 1, company: deps.companyId, project, id, language: need.language, repository: raw.name, place: raw.place, suiteRepository: need.suite.repository ?? "", path: need.file.path, status,
-    ...(match === undefined ? {} : { match }), defaultBranch, test: keep ? before.test : "none", ...(keep && before.testAt !== undefined ? { testAt: before.testAt } : {}), checkedAt: at,
+    entityType: "EVAL_WRAPPER_FILE", schemaVersion: 1, company: deps.companyId, project, id, language: need.language, repository: raw.name, place: raw.place, suiteRepository: need.suite.repository ?? "", path: need.file.path, selection: need.selection, status,
+    ...(match === undefined ? {} : { match }), ...(contentDigest === undefined ? {} : { contentDigest }), defaultBranch, test: keep ? before.test : "none", ...(keep && before.testAt !== undefined ? { testAt: before.testAt } : {}), checkedAt: at,
   };
   await deps.store.put({ item: { ...key, ...next } as unknown as StoredDocument });
 }
@@ -390,7 +397,7 @@ async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "no
  * Looks for each eval's wrapper file on the DEFAULT branch (whoever put it there: a pull request, a person's own commit), reading only. `force` looks now (the "Check now" button); otherwise a check younger than
  * `DETECT_FRESH_MS` is left as it is. Bounded (at most 4 evals); a read that fails changes nothing. Never throws.
  */
-export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now" | "targets">, project: string, report: SetupEvalDiscoveryReport, options: { force?: boolean } = {}): Promise<void> {
+export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now" | "targets">, project: string, report: SetupEvalDiscoveryReport, options: { force?: boolean; floorMs?: number } = {}): Promise<void> {
   try {
     const needs = needsOf(report).slice(0, 4);
     if (needs.length === 0) return;
@@ -400,8 +407,10 @@ export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "
       try {
         const raw = targetFor(targets, need.suite.repository);
         if (raw === undefined) continue;
-        const known = files.find((row) => row.id === idOf(project, raw.place, need.language));
-        if (options.force !== true && known !== undefined && deps.now() - Date.parse(known.checkedAt) < DETECT_FRESH_MS) continue;
+        const known = files.find((row) => row.id === fileIdOf(project, raw.place, need.language, need.selection));
+        const age = known === undefined ? Infinity : deps.now() - Date.parse(known.checkedAt);
+        // A plain read leaves a young check alone; "Check now" looks again, but not more than once in `floorMs` (a person cannot drain the code host's quota).
+        if (age < (options.force === true ? (options.floorMs ?? 0) : DETECT_FRESH_MS)) continue;
         await detectOne(deps, project, need, raw);
       } catch { /* tried again at the next read */ }
     }
@@ -425,16 +434,20 @@ export async function reopenEvalWrapper(deps: Pick<EvalWrapperDeps, "store" | "c
  * The test run of a found file (DEC 254zzz43): `approved` once the person approved the eval's spend (the same approval, in dollars, as every eval), then `readable` or `unreadable` from what the run read. Kept on the file's
  * record, so it follows the text that was tested: a changed file starts over. Returns false when no found file matches (nothing is recorded).
  */
-export async function recordEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, suite: { repository?: string | undefined; language: EvalWrapperLanguage }, result: "approved" | "readable" | "unreadable"): Promise<boolean> {
-  const row = (await listEvalWrapperFiles(deps, project)).find((entry) => entry.suiteRepository === (suite.repository ?? "") && entry.language === suite.language && entry.status === "present" && entry.match !== "outdated");
+export async function recordEvalWrapperTest(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, suite: { repository?: string | undefined; selection: string; language: EvalWrapperLanguage }, result: "approved" | "readable" | "unreadable"): Promise<boolean> {
+  const row = (await listEvalWrapperFiles(deps, project)).find((entry) => entry.selection === suite.selection && entry.suiteRepository === (suite.repository ?? "") && entry.language === suite.language && entry.status === "present" && entry.match !== "outdated");
   if (row === undefined) return false;
   const done = await deps.store.update({ key: fileKeyOf(deps.companyId, project, row.id), ops: [change.set("test", result), change.set("testAt", new Date(deps.now()).toISOString())], condition: when.eq("checkedAt", row.checkedAt) });
   return done.applied;
 }
 
-/** The found file a suite is read through, if one is there and usable: present, same or edited (an out-of-date one asks for the new file first). */
-export function wrapperFileFor(files: readonly EvalWrapperFileRecord[], suite: { repository?: string | undefined }, language: EvalWrapperLanguage): EvalWrapperFileRecord | undefined {
-  return files.find((row) => row.suiteRepository === (suite.repository ?? "") && row.language === language && row.status === "present" && (row.match === "same" || row.match === "edited"));
+/**
+ * The found file THIS eval is read through, if one is there and usable: its own row, present, same or edited (an out-of-date one asks for the new file first). An eval that is not the first of its file (a monorepo's second
+ * eval shares the path) is read through the file only when the text is exactly its own: it is never approved through another eval's file, whose command it would run.
+ */
+export function wrapperFileFor(files: readonly EvalWrapperFileRecord[], suite: { repository?: string | undefined; selection: string; firstOfFile: boolean }, language: EvalWrapperLanguage): EvalWrapperFileRecord | undefined {
+  return files.find((row) => row.selection === suite.selection && row.suiteRepository === (suite.repository ?? "") && row.language === language && row.status === "present"
+    && (row.match === "same" || (row.match === "edited" && suite.firstOfFile)));
 }
 
 /**
