@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { EVAL_NOT_READ_LINE } from "@agentx/contracts";
 import {
   GENERAL_FAKES_MAX_SERVICES, canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, generalFakesPayloadOf, setupMockPrLine,
   type GeneralFakesSetting, type PlanSetupChangeItem, type WorkflowSnapshot,
@@ -12,7 +13,7 @@ import {
 import { approvedCodingPlan } from "../../packages/broker/src/core/build-step/plan-input.js";
 import { fakesFor, flagUnplannedMocks, isUnplannedMock, mockFactsOf, mockPrLines, mocksInPlay, plannedMocksOf, type MockSourceFacts } from "../../packages/broker/src/core/setup-agent/plan-setup.js";
 import { assessRisk, type RiskInput } from "../../packages/broker/src/core/proof/risk.js";
-import { rovaraStatusLines, setupChangeSection } from "../../packages/broker/src/core/proof/pull-request-body.js";
+import { rovaraStatusLines, evalSetupSection, setupChangeSection } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const mock = (over: Record<string, unknown> = {}): PlanSetupChangeItem => ({ id: "s1", kind: "mock", service: "Stripe", variable: "STRIPE_API_URL", spec: "repo/demo/openapi/stripe.yaml", reason: "The refund code calls Stripe.", ...over });
@@ -184,5 +185,25 @@ describe("the pull request says so once per mock", () => {
     expect(section).not.toContain("@everyone");
     expect(setupChangeSection(["a\nb", "", "fine line"]).filter((line) => line.includes("fine line"))).toHaveLength(1);
     expect(setupChangeSection(undefined)).toEqual([]);
+  });
+});
+
+// L4-EVW4 (DEC 254zzz43): the one line the pull request carries while the project's eval card is set aside and an eval is still unread.
+describe("the pull request says an eval was not read", () => {
+  const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: "1".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const workflow = { ...createWorkflowSnapshot({ taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", ownerId: "a".repeat(64), now: "2026-11-13T12:00:00.000Z", definitionVersion: "1.1.0" }), candidate } as unknown as WorkflowSnapshot;
+  const status = (evalSetupLines?: readonly string[]) => rovaraStatusLines(workflow, { ...(evalSetupLines === undefined ? {} : { evalSetupLines }) }, () => ["- no findings"]);
+
+  it("adds an Eval section with the fixed line, and a description without one is what it was", () => {
+    const without = status();
+    expect(without.join("\n")).not.toContain("Eval not read");
+    expect(status([])).toEqual(without);
+    const withLine = status([EVAL_NOT_READ_LINE]);
+    expect(withLine).toContain("## Eval");
+    expect(withLine).toContain("Eval not read: setup needed");
+    expect(evalSetupSection(undefined)).toEqual([]);
+    // Free text cannot ride in it: a line with a break is dropped, a link or mention is made inert.
+    expect(evalSetupSection(["a\nb"])).toEqual([]);
+    expect(evalSetupSection(["[x](https://evil.example) @everyone"]).join("\n")).not.toMatch(/\]\(https:\/\/evil|@everyone/u);
   });
 });

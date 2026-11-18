@@ -345,6 +345,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: a fresh step-up, then the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
+  // L4-EVW2 (DEC 254zzz20 D2): "Try again" for Rovara's proposed wrapper file (a pull request on the repository that a person merges; Rovara never merges it): full access only, then the live owner/admin/maintainer rule.
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-wrapper", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
