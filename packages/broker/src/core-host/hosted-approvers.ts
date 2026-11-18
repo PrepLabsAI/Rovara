@@ -37,6 +37,8 @@ import { taskKey } from "../core/task-flow/keys.js";
 
 /** L4-D: the subject type of a project's setup candidate (apply.ts `createSetupProposalSubject`). */
 export const SETUP_PROPOSAL_SUBJECT = "setup_proposal";
+/** L4-EVC (DEC 254zzz20 D8): the subject type of a project's eval spend item (eval-spend.ts `createEvalSpendSubject`). Its proof is issued for that subject only (`issueEvalSpendStepUpApproval`), by the same rules as the setup candidate's. */
+export const EVAL_SPEND_SUBJECT = "eval_spend";
 /** The one way to answer a decision on a deployed install: a fresh step-up, proved for one act. */
 export const STEP_UP_APPROVAL_METHOD = "rovara-step-up";
 /** How long an issued proof is good for: the act follows the step-up check at once. */
@@ -81,7 +83,7 @@ interface ProofClaims {
   m: string; // step-up factor
   e: number; // expires (ms)
   n: string; // the one-time part
-  t?: typeof SETUP_PROPOSAL_SUBJECT; // the subject type when it is not a task (L4-D)
+  t?: typeof SETUP_PROPOSAL_SUBJECT | typeof EVAL_SPEND_SUBJECT; // the subject type when it is not a task (L4-D, L4-EVC)
 }
 
 const b64 = (value: Buffer | string): string => Buffer.from(value).toString("base64url");
@@ -152,6 +154,14 @@ export function issueSetupStepUpApproval(key: Buffer, input: SetupStepUpApproval
   return signProof(key, { ...claimsOf({ ...rest, taskId: project }, nowMs), t: SETUP_PROPOSAL_SUBJECT });
 }
 
+/** A proof of one act on a project's eval spend item (L4-EVC): as `issueSetupStepUpApproval`, marked for the eval spend subject so neither a task's nor a setup candidate's proof can stand for it, nor the other way round. */
+export function issueEvalSpendStepUpApproval(key: Buffer, input: SetupStepUpApprovalInput, nowMs: number): { method: typeof STEP_UP_APPROVAL_METHOD; token: string } {
+  if (typeof input?.project !== "string" || !PROJECT_NAME.test(input.project)) throw new Error("a step-up approval cannot be issued for this input");
+  const { project, ...rest } = input;
+  checkProofInput({ ...rest, taskId: TASK_ID_FOR_CHECK });
+  return signProof(key, { ...claimsOf({ ...rest, taskId: project }, nowMs), t: EVAL_SPEND_SUBJECT });
+}
+
 /** The signed claims of a token, or undefined for anything this file did not sign or cannot read whole. */
 function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof token !== "string" || token.length > TOKEN_MAX || !token.startsWith(TOKEN_PREFIX)) return undefined;
@@ -172,7 +182,7 @@ function readProof(key: Buffer, token: unknown): ProofClaims | undefined {
   if (typeof c["c"] !== "string" || typeof c["p"] !== "string" || typeof c["r"] !== "string" || typeof c["q"] !== "string" || typeof c["s"] !== "string" || !Number.isSafeInteger(c["v"]) || typeof c["d"] !== "string"
     || !ANSWERS.has(c["o"]) || !Array.isArray(card) || card.length !== 2 || typeof card[0] !== "string" || typeof card[1] !== "string" || typeof c["a"] !== "string"
     || typeof c["m"] !== "string" || !Number.isSafeInteger(c["e"]) || typeof c["n"] !== "string" || !NONCE.test(c["n"])
-    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT)) return undefined;
+    || (Object.hasOwn(c, "t") && c["t"] !== SETUP_PROPOSAL_SUBJECT && c["t"] !== EVAL_SPEND_SUBJECT)) return undefined;
   return c as unknown as ProofClaims;
 }
 
@@ -240,7 +250,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       const companyId = request.companyId;
       const subject = request.subject;
       // A core task (its own person decides), or a project's setup candidate (L4-D: a live member here; the setup subject's rule decides who at the candidate's risk). Nothing else.
-      const setup = subject?.type === SETUP_PROPOSAL_SUBJECT;
+      const setup = subject?.type === SETUP_PROPOSAL_SUBJECT || subject?.type === EVAL_SPEND_SUBJECT;
       if (typeof companyId !== "string" || !OrgIdSchema.safeParse(companyId).success || typeof subject?.id !== "string"
         || !(setup ? PROJECT_NAME.test(subject.id) && request.projectName === subject.id : subject.type === "task" && TASK_ID.test(subject.id))) return refuse("no_rule_for_this_request");
       if (proof.requestId !== request.requestId || typeof request.requestId !== "string") return refuse("other_request");
@@ -251,7 +261,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
       if (claims.c !== companyId) return refuse("wrong_company");
       if (claims.r !== decisionRequestIdOf(request.requestId)) return refuse("other_request");
       if (claims.q !== request.kind) return refuse("other_kind");
-      if (claims.s !== subject.id || (setup ? claims.t !== SETUP_PROPOSAL_SUBJECT : claims.t !== undefined)) return refuse("other_subject");
+      if (claims.s !== subject.id || (setup ? claims.t !== subject.type : claims.t !== undefined)) return refuse("other_subject");
       if (claims.v !== request.revision) return refuse("other_revision");
       if (claims.d !== request.artifactDigest) return refuse("other_content");
       if (claims.o !== (request.outcome ?? "approve")) return refuse("other_answer");

@@ -106,5 +106,11 @@ export const EvalDiscoveryConfirmBodySchema = z.object({
   reportDigest: hash,
   selection: z.string().min(1).max(512),
   paths: z.array(EvalPlanQuestionSchema.shape.path).min(1).max(EVAL_DISCOVERY_FILES_MAX).refine(paths => new Set(paths).size === paths.length, "each file once"),
-}).strict();
+  /**
+   * L4-EVC (DEC 254zzz20 D8): ONE approval. `approve: true` confirms the selection AND approves its spend in the same act, for a person the approval rules allow; `seen` is the dollars the
+   * person was shown (the most a check can cost, and the monthly cap), which the broker holds against its own figures and refuses on any difference, so what is approved is what the card said.
+   */
+  approve: z.literal(true).optional(),
+  seen: z.object({ perCheckHighMicros: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), monthlyCapMicros: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER) }).strict().optional(),
+}).strict().refine(body => (body.approve === true) === (body.seen !== undefined), "an approval names the dollars it was shown");
 export type EvalDiscoveryConfirmBody = z.infer<typeof EvalDiscoveryConfirmBodySchema>;

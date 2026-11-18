@@ -83,6 +83,8 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     if (item === undefined) return "";
     const offer = item.approval;
     const form = (decision: "approve" | "reject"): string => offer === undefined ? "" : `<form method="post" action="${action("eval")}" class="row">${hidden("decision", decision)}${hidden("requestId", offer.requestId)}${hidden("revision", offer.revision)}${hidden("digest", offer.artifactDigest)}${token("eval", { requestId: offer.requestId, revision: offer.revision, artifactDigest: offer.artifactDigest })}${button(decision === "approve" ? "Approve eval spend" : "Not now", decision === "approve" ? "primary" : "")}</form>`;
+    // L4-EVC: an item that carries its approved dollars reads in dollars only; an older one keeps its words.
+    if (item.card !== undefined) return `<div class="panel"><h2>Your evals</h2><p>${esc(item.card.sentence)}</p>${item.card.needsApproval === undefined ? "" : `<p class="notice">${esc(item.card.needsApproval)}</p>`}${item.card.carried === true ? `<p class="muted">Your eval cases changed and stayed inside what you approved.</p>` : ""}<p>Spend approval: ${esc(item.state)}. Approving does not check your evals now; that is a separate yes.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
     return `<div class="panel"><h2>Eval health check</h2><p>${esc(item.label)}</p><p>${esc(item.budget)}</p><p>Later refreshes require current approval and a reservation against the monthly cap. A higher estimate or changed eval inputs needs another approval.</p><p>Spend approval: ${esc(item.state)}. Approving spend does not start a health check.</p><div class="row">${form("approve")}${form("reject")}</div></div>`;
   };
 

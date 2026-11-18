@@ -26,6 +26,7 @@ import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { taskKey } from "../task-flow/keys.js";
 import type { SetupDefinition } from "./agent.js";
+import { evalDollarsOf } from "./eval-cost.js";
 import { proposeEvalSpendApproval, readEvalSpendItem, roleFor } from "./eval-spend.js";
 import { setupAgentKey, setupPartition, type RunScope } from "./keys.js";
 
@@ -127,10 +128,30 @@ export interface EvalDiscoveryConfirmDeps {
    */
   monthlyCap?: ((scope: { company: string; project: string }) => Promise<number | undefined>) | undefined;
   /** The project's latest revision's repositories (for the code host read). */
-  latest(project: string): Promise<{ definition: SetupDefinition } | undefined>;
+  latest(project: string): Promise<{ definition: SetupDefinition; revision?: number } | undefined>;
+  /**
+   * L4-EVC (DEC 254zzz20 D8): how the host approves the waiting spend item in the SAME act as the confirm (one approval). It is the host's own decision path (the approval gate with the person's fresh
+   * proof), never a bypass: the broker calls it only for a body that names `approve`, after the person's live role was read and the dollars they were shown matched, and with exactly the item it just
+   * proposed. It throws for a refusal. Absent: a body that asks to approve is refused before anything is read or marked.
+   */
+  approve?: ((offer: { requestId: string; revision: number; artifactDigest: string }, principal: Principal) => Promise<void>) | undefined;
   /** The code host's read of a whole file at a commit (undefined: not there; throws: the host cannot answer). */
   readFile?: ((repository: SetupDefinition["repositories"][number], path: string, commit: string, options: { timeoutMs: number; maxBytes: number }) => Promise<string | undefined>) | undefined;
   log?: Log;
+}
+
+/**
+ * F3d's whole estimate for `count` questions of a suite: three runs of every question at its caps. The maximum is at least the default and never below the estimate. Shared by the confirm and by
+ * the card shown before it, so the dollars a person reads are the dollars the broker proposes.
+ */
+export function evalEstimateOf(count: number, suite: Pick<SetupEvalDiscoveryReport["suites"][number], "maxCallsPerQuestion" | "maxCostMicrosPerQuestion">) {
+  const estimate = { calls: 3 * count * suite.maxCallsPerQuestion, costMicros: 3 * count * suite.maxCostMicrosPerQuestion };
+  const budget = { usual: estimate, maximum: { calls: Math.max(estimate.calls, EVAL_DEFAULT_CALL_BUDGET), costMicros: Math.max(estimate.costMicros, EVAL_DEFAULT_COST_BUDGET_MICROS) } };
+  return { estimate, budget };
+}
+/** The dollars of a proposal for `count` questions of a suite under the host's monthly cap (undefined: not whole numbers). */
+export function evalProposalDollars(count: number, suite: Pick<SetupEvalDiscoveryReport["suites"][number], "maxCallsPerQuestion" | "maxCostMicrosPerQuestion">, monthlyCapMicros: number) {
+  return evalDollarsOf({ questions: count, costMicrosPerQuestion: suite.maxCostMicrosPerQuestion, maximumMicros: evalEstimateOf(count, suite).budget.maximum.costMicros, monthlyCapMicros });
 }
 
 /** The fixed refusal when the install has no eval budget to hold the spend item to. */
@@ -236,8 +257,14 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   };
   const planDigest = evalPlanDigest(company, project, plan);
   // F3d's whole estimate: three runs of every question at its caps. The maximum is at least the default and never below the estimate.
-  const estimate = { calls: 3 * questions.length * suite.maxCallsPerQuestion, costMicros: 3 * questions.length * suite.maxCostMicrosPerQuestion };
-  const budget = { usual: estimate, maximum: { calls: Math.max(estimate.calls, EVAL_DEFAULT_CALL_BUDGET), costMicros: Math.max(estimate.costMicros, EVAL_DEFAULT_COST_BUDGET_MICROS) } };
+  const { estimate, budget } = evalEstimateOf(questions.length, suite);
+  // L4-EVC: the dollars the card says, from these same numbers and the host's monthly cap (never the request's). A body that approves must have been shown exactly them.
+  const dollars = evalProposalDollars(questions.length, suite, monthlyCapMicros);
+  if (dollars === undefined) refuse(log, "eval_discovery_confirm_refused", "dollars", "CONFIG_INVALID", "The eval's cost could not be worked out, so it can't be approved here.");
+  if (body.approve === true) {
+    if (deps.approve === undefined) refuse(log, "eval_discovery_confirm_refused", "no_approve", "CONFIG_INVALID", "Approving the eval's spend isn't available here. Confirm it, then approve its spend.");
+    if (body.seen?.perCheckHighMicros !== dollars.perCheckHighMicros || body.seen.monthlyCapMicros !== dollars.monthlyCapMicros) refuse(log, "eval_discovery_confirm_refused", "seen", "CHANGE_STALE", "The eval's cost changed since you looked. Read it again.");
+  }
 
   // Confirmed first, once (the row's own state and digest guard it), so two confirms cannot both propose; a proposal that fails puts the row back.
   const confirmed = { personId: principal.personId, provider: principal.provider, role, at: new Date(deps.now()).toISOString(), selection: suite.selection, planDigest };
@@ -249,14 +276,24 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   if (!marked.applied) refuse(log, "eval_discovery_confirm_refused", "stale", "CHANGE_STALE", "That eval report was already confirmed, or a newer setup run replaced it. Read it again.");
   const table = { store: deps.store, companyId: company, ...(deps.members === undefined ? {} : { members: deps.members }), monthlyCapMicros };
   try {
-    await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget }, plan);
+    await proposeEvalSpendApproval(table, project, { selection: suite.selection, inputs, estimate, budget, dollars }, plan, latest?.revision === undefined ? undefined : { setupRevision: latest.revision });
   } catch (error) {
     await deps.store.update({ key, ops: [change.set("state", "reported"), change.remove("confirmed")], condition: when.and(when.eq("state", "confirmed"), when.eq("reportDigest", row.reportDigest)) }).catch(() => undefined);
     log?.({ event: "eval_discovery_confirm_refused", reason: "proposal" });
     throw error;
   }
   log?.({ event: "eval_discovery_confirmed" });
-  return { planDigest, evalSpend: await readEvalSpendItem(table, project) };
+  let item = await readEvalSpendItem(table, project);
+  // One approval: the item this confirm just proposed, approved in the same act through the host's own decision path. A changed eval inside its approved limit is already approved (D6): nothing to ask.
+  if (body.approve === true && item?.state === "waiting" && item.approval !== undefined) {
+    try { await deps.approve!({ requestId: item.approval.requestId, revision: item.approval.revision, artifactDigest: item.approval.artifactDigest }, principal); } catch (error) {
+      // The eval stays confirmed and its spend item stays waiting, so the person can still approve it by itself; nothing is spent.
+      log?.({ event: "eval_discovery_confirm_refused", reason: "approve" });
+      throw error;
+    }
+    item = await readEvalSpendItem(table, project);
+  }
+  return { planDigest, evalSpend: item };
 }
 
 /** What the setup page shows of the latest run's report: the suites as reported (no hashes: none are the run's), its digest to confirm against, and whether it was confirmed. */
