@@ -51,7 +51,7 @@ export function createRovaraPullRequestIndex(deps: RovaraPullRequestIndexDepende
     // The link must belong to THIS company: a pull request number is only unique inside a repository, and a repository belongs to one company's installation.
     if (linked === undefined || linked.workspaceId === undefined) return undefined;
     const task = (await deps.store.get(taskKey(linked.taskId))) as unknown as DeveloperTaskRecord | undefined;
-    if (task === undefined || !belongsTo(task, deps.companyId)) return undefined;
+    if (task === undefined || task.taskId !== linked.taskId || !belongsTo(task, deps.companyId)) return undefined;
     const entry = task.workflow?.pullRequests?.find((pullRequest) => pullRequest.number === number && pullRequest.url === linked.url);
     if (entry?.headSha === undefined) return undefined;
     return { taskId: task.taskId, project: task.project, number, url: linked.url, candidateHeadSha: entry.headSha };

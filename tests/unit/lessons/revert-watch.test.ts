@@ -150,13 +150,34 @@ describe("a merged revert pull request", () => {
       await pass(w);
       expect(w.told, String(legacyRecord)).toHaveLength(1);
     }
-    for (const record of [{ project: "payments" }, { companyId: OTHER_ORG, orgId: ORG, project: "payments" }, { companyId: ORG, orgId: OTHER_ORG, project: "payments" }]) {
+    for (const record of [{ project: "payments" }, { companyId: OTHER_ORG, project: "payments" }, { companyId: OTHER_ORG, orgId: ORG, project: "payments" }, { companyId: ORG, orgId: OTHER_ORG, project: "payments" }]) {
       const w = watch({ commits: [squashRevert(20)], writers: { maya: "write" }, changeRequests: { 20: { title: 'Revert "Add retry"', body: "Reverts #7", mergedBy: "maya" } } });
       await rovaraPullRequest(w.store);
       await w.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, ...record, workflow: { pullRequests: [{ repositoryId: "payments", number: 7, url: "https://github.com/acme/payments/pull/7", headSha: "a".repeat(40) }] } } });
       await pass(w);
       expect(w.told, JSON.stringify(record)).toEqual([]);
     }
+  });
+
+  it("a standing read that is rate limited is not 'unproven': the commit is looked at again after the wait, and a plain fault stays unproven", async () => {
+    let now = NOW_MS;
+    let limited = true;
+    const script: HostScript = {
+      commits: [squashRevert(20)], writers: { maya: "write" }, changeRequests: { 20: { title: 'Revert "Add retry"', body: "Reverts #7", mergedBy: "maya" } },
+      fail: (call) => (limited && call === "standing:maya" ? new HostRateLimitError(NOW_MS + 5 * 60_000) : undefined),
+    };
+    const w = watch(script, { now: () => now });
+    await rovaraPullRequest(w.store);
+    expect(await pass(w)).toMatchObject({ rateLimited: true });
+    expect(w.told).toEqual([]);
+    limited = false;
+    now += 6 * 60_000;
+    await pass(w);
+    expect(w.told).toHaveLength(1);
+    const plain = watch({ ...script, fail: (call) => (call === "standing:maya" ? new Error("host down") : undefined) });
+    await rovaraPullRequest(plain.store);
+    await pass(plain);
+    expect(plain.told).toEqual([]);
   });
 
   it("a merge commit style (Merge pull request #20 ... whose first body line is the revert title) is detected the same way", async () => {
@@ -289,6 +310,13 @@ describe("company binding", () => {
     expect((await store.query({ pk: revertWatchPk(OTHER_ORG) })).items.every((row) => String(row["pk"]).includes(OTHER_ORG))).toBe(true);
   });
 
+  it("a merge row in this company's partition that names another company (a poisoned row) is not read as this company's", async () => {
+    const w = watch({ commits: [ordinary(1)], writers: {}, changeRequests: {} });
+    await w.store.put({ item: { pk: companyScoped(ORG, "GITHUB_MERGE"), sk: `acme/payments#${MERGE}`, entityType: "GITHUB_WORKFLOW_MERGE", orgId: OTHER_ORG, repositoryFullName: "acme/payments", repositoryId: "payments", number: 7, url: "https://github.com/acme/payments/pull/7", taskId: OTHER_TASK, mergeCommit: MERGE, createdAt: NOW } });
+    expect(await pass(w)).toMatchObject({ repositories: 0 });
+    expect(w.asked).toEqual([]);
+  });
+
   it("asks for the host with this company's id and the task of THIS company's merge row", async () => {
     const w = watch({ commits: [ordinary(1)], writers: {}, changeRequests: {} });
     await rovaraPullRequest(w.store);
@@ -415,6 +443,27 @@ describe("progress: the cursor, failures and bounds", () => {
     now += 60_000;
     expect(await pass(w)).toMatchObject({ rateLimited: true });
     expect(w.host.calls.length).toBe(calls);
+  });
+
+  it("a host that says slow down in the middle of a revert check stops the pass too, and the commit is not counted as failed (it is asked again after the wait)", async () => {
+    let now = NOW_MS;
+    let limited = true;
+    const script: HostScript = {
+      commits: [squashRevert(20)], writers: { maya: "write" }, changeRequests: { 20: { title: 'Revert "Add retry"', body: "Reverts #7", mergedBy: "maya" } },
+      fail: (call) => (limited && call === "cr:20" ? new HostRateLimitError(NOW_MS + 5 * 60_000) : undefined),
+    };
+    const w = watch(script, { now: () => now });
+    await rovaraPullRequest(w.store);
+    expect(await pass(w)).toMatchObject({ rateLimited: true, found: 0 });
+    expect(w.logged).not.toContain("revert_watch.commit_failed");
+    const calls = w.host.calls.length;
+    now += 60_000;
+    await pass(w);
+    expect(w.host.calls.length).toBe(calls);
+    limited = false;
+    now += 5 * 60_000;
+    await pass(w);
+    expect(w.told).toHaveLength(1);
   });
 
   it("a host that cannot list commits is skipped without a call; one that fails to answer is 'unavailable', never 'no reverts'", async () => {

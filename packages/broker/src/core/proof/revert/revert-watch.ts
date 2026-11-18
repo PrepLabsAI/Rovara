@@ -11,7 +11,7 @@
 // index finds a Rovara pull request only through the company's own index rows and its own task (a revert of another company's, or of a non-Rovara, pull request matches nothing). Every row this writes sits in the company's own partition.
 //
 // What a found revert does (`onReverted`, called once for each NEWLY recorded revert: the detector's row is written only when absent, so a revert seen again, by another pass or another way, is not told twice): the lessons host records it as
-// an outcome (it takes back a queued "helpful" mark, never adds blame) and puts the lessons the task loaded "under question" only for files of the lesson's own code area. No model is ever called here.
+// an outcome (never blame; where the install can name who reverted, it takes back a queued "helpful" mark, as before this lane) and puts the lessons the task loaded "under question" only for files of the lesson's own code area. No model is ever called here.
 //
 // Progress: one cursor row per repository (the newest commit already looked at). A commit whose check failed (the host was down) is tried again by the next pass; after `STUCK_PASSES_MAX` failed passes on the same commit it is skipped, so one
 // commit can never hold a repository back for good. Every read has a total bound (repositories, commits, requests, time).
