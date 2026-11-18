@@ -75,6 +75,8 @@ describe("CI runs on code/next and checks the port there (docs/porting.md), and 
     const job = jobs["device-runtime"]!;
     expect(job.needs).toBe("plan");
     expect(job.if).toBe("needs.plan.outputs.device == 'true'");
+    // quarantine (DEC 254zn): non-blocking unless the change touches device files
+    expect((job as { "continue-on-error"?: string })["continue-on-error"]).toBe("${{ needs.plan.outputs.device_required != 'true' }}");
     expect(jobs["linux-runtime"]!.if).toBe("needs.plan.outputs.linux == 'true'");
     expect(jobs.local!.needs).not.toContain("device-runtime");
     expect(permissions).toEqual({ contents: "read" });

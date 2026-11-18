@@ -425,6 +425,17 @@ export interface SetupFilesRead { files: Array<{ path: string; id: string }>; co
 /** What a path is at a revision: a file, a directory, a symbolic link (never written to), or nothing. */
 export type PathKind = "file" | "dir" | "symlink" | "none";
 
+/** Wiki W0 (DEC 254zh): the kinds of entry a tree or directory listing reports. A file's CONTENT is never part of a listing. */
+export type TreeEntryKind = "file" | "dir" | "symlink" | "submodule";
+/** One entry of a tree listing: its path from the repository root (`/` between names, no leading slash) and its kind. */
+export interface TreeEntry { path: string; kind: TreeEntryKind }
+/** Every entry at a revision as the host listed it, one request. `complete` is false when the host cut the listing (GitHub: 100,000 entries or 7 MB): what is returned is then NOT the whole tree. */
+export interface RepositoryTreeRead { entries: TreeEntry[]; complete: boolean }
+/** One directory level at a revision. `complete` is false when the host cut the listing (GitHub: 1,000 entries). */
+export interface DirectoryRead { entries: Array<{ name: string; kind: TreeEntryKind }>; complete: boolean }
+/** How many commits reached `revision`'s history and touched `path` (the whole repository when absent) since a time, up to `cap` (at most 100); and when the newest of them was made. `capped` is true when there were more than `cap`. */
+export interface CommitActivityRead { count: number; capped: boolean; latestAt?: string }
+
 export const MergeMethodSchema = z.enum(["squash", "merge"]);
 export type MergeMethod = z.infer<typeof MergeMethodSchema>;
 export const MERGE_REFUSAL_REASONS = ["head_changed", "not_mergeable", "closed", "forbidden"] as const;
@@ -550,6 +561,18 @@ export interface CodeHost {
    * answers "none" for an error, or for a path below a symbolic link or a submodule).
    */
   pathKind?(repository: RepositoryRef, path: string, revision: string, scope: HostScope, options?: { timeoutMs?: number }): Promise<PathKind>;
+  /**
+   * Wiki W0 (DEC 254zh, optional, add-only, read-only): every entry at `revision` (a full commit id), from one request. NO file content. `complete` is false when the host cut the listing; a caller must then say "partial" or walk
+   * folders with `directoryEntries`, never present the cut list as the whole tree. A host that cannot answer THROWS (a refused read is never an empty tree).
+   */
+  repositoryTree?(repository: RepositoryRef, revision: string, scope: HostScope, options?: { timeoutMs?: number }): Promise<RepositoryTreeRead>;
+  /** Wiki W0 (optional, add-only, read-only): the direct children of one directory at `revision` (`""` = the root). Same refusals as `fileAtRevision` for a bad path. A host that cannot answer THROWS. */
+  directoryEntries?(repository: RepositoryRef, path: string, revision: string, scope: HostScope, options?: { timeoutMs?: number }): Promise<DirectoryRead>;
+  /**
+   * Wiki W0 (optional, add-only, read-only): the commits reachable from `revision` (a full commit id) that touched `path` since `since` (an ISO time), counted from ONE page of at most `cap` (1 to 100) commits, and the time of the
+   * newest commit in the window (or, when none, the newest commit that ever touched `path`: `latestAt`). A host that cannot answer THROWS.
+   */
+  commitActivity?(repository: RepositoryRef, revision: string, scope: HostScope, options: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<CommitActivityRead>;
   /** The id of the tree a revision holds. */
   tree(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string>;
   branchHead(repository: RepositoryRef, branch: string, scope: HostScope): Promise<string>;

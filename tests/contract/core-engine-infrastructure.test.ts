@@ -261,11 +261,25 @@ describe("the core job schedules", () => {
     const conditions = json.Conditions!;
     const conditionId = Object.keys(conditions).find((id) => id.includes("CoreEngineIsOn"))!;
     expect(conditions[conditionId]).toEqual({ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] });
+    const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
     for (const [id, schedule] of schedules) {
-      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [conditionId, "ENABLED", "DISABLED"] });
+      const job = (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job;
+      // L4-P1: every row but the upkeep night follows the engine switch alone; the upkeep night follows the engine switch AND the CoreSystemRuns flag (default off, so it is DISABLED until an operator turns it on).
+      expect(schedule.Properties.State, id).toEqual({ "Fn::If": [job === "upkeep-night" ? systemRunsId : conditionId, "ENABLED", "DISABLED"] });
       expect(schedule.Condition, id).toBeUndefined();
     }
     expect(group[1].Condition).toBeUndefined();
+  });
+
+  it("holds the hourly upkeep night off until both the engine and CoreSystemRuns are on, and adds exactly that one schedule (owner DEC 254zzl)", () => {
+    const conditions = json.Conditions!;
+    const systemRunsId = Object.keys(conditions).find((id) => id.includes("CoreSystemRunsIsOn"))!;
+    expect(conditions[systemRunsId]).toEqual({ "Fn::And": [{ "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreEngine" }, "off"] }] }, { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreSystemRuns" }, "off"] }] }] });
+    const night = schedules.filter(([, schedule]) => (JSON.parse(String((schedule.Properties.Target as { Input: string }).Input)) as { job: string }).job === "upkeep-night");
+    expect(night).toHaveLength(1);
+    expect(night[0]![1].Properties.ScheduleExpression).toBe("rate(1 hour)");
+    expect(night[0]![1].Properties.GroupName).toEqual({ Ref: group[0] });
+    expect(json.Parameters.CoreSystemRuns).toMatchObject({ Type: "String", Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 });
   });
 
   it("use a role that only the scheduler can assume, for this group, that can invoke the broker and nothing else", () => {
@@ -342,9 +356,12 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(core[0]![1].Condition).toBe(isOn);
     expect(core[0]![1].Properties.Roles).toEqual([{ Ref: dispatcherRoleId }]);
     const statements = (core[0]![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    expect(statements).toHaveLength(1);
+    // The deleter's start, and the one secret that holds the callback signing key (read by name; exactly that secret's ARN), both only while the switch is not off.
+    expect(statements).toHaveLength(2);
     expect(statements[0]).toMatchObject({ Sid: "CoreStartSessionDeleter", Effect: "Allow", Action: "states:StartExecution" });
     expect(JSON.stringify(statements[0]!.Resource)).toContain("Deleter");
+    const secretId = resources(named, "AWS::SecretsManager::Secret").find(([, secret]) => secret.Properties.Name === "agentx/staging/callback-key")![0];
+    expect(statements[1]).toEqual({ Sid: "ReadCallbackSigningKey", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: secretId } });
     for (const [, policy] of resources(named, "AWS::IAM::Policy").filter(([, p]) => JSON.stringify(p.Properties.Roles).includes(dispatcherRoleId))) {
       expect(JSON.stringify(policy.Properties.PolicyDocument)).not.toContain("ec2:TerminateInstances");
     }
@@ -355,7 +372,9 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_ARN_VARIABLE]).toEqual({ "Fn::GetAtt": [queueId, "Arn"] });
     expect(dispatcherVariables[CORE_DISPATCH_QUEUE_URL_VARIABLE]).toEqual({ Ref: queueId });
     expect(dispatcherVariables[CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE]).toEqual({ Ref: deadId });
-    expect(dispatcherVariables.CALLBACK_SIGNING_KEY).toEqual({ "Fn::If": [isOn, { Ref: "CallbackSigningKey" }, ""] });
+    // The key itself is never an environment value: only the name of its secret, and only while the switch is not off.
+    expect(dispatcherVariables.CALLBACK_SIGNING_KEY_SECRET_ID).toEqual({ "Fn::If": [isOn, "agentx/staging/callback-key", ""] });
+    expect(dispatcherVariables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
     // The install's own workers place a core workspace's worker: the same values the broker places a sign-in client's project with.
     expect(dispatcherVariables.EC2_WORKER_SUBNETS).toEqual({ Ref: "Ec2WorkerSubnets" });
     expect(dispatcherVariables.EC2_WORKER_LAUNCH_TEMPLATE_ID).toEqual({ Ref: "Ec2WorkerLaunchTemplateId" });
@@ -375,7 +394,7 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect((resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("EC2_WORKER_SUBNETS");
     for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name, CORE_ENGINE_VARIABLE]) expect(text).not.toContain(word);
     const legacyDispatcher = resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))!;
-    expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY");
+    expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY_SECRET_ID");
   });
 });
 
@@ -441,11 +460,14 @@ describe("L1a broker environment derivation", () => {
       CoreTaskCapUsd: { Default: "5", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreCompanyDayCapUsd: { Default: "25", AllowedPattern: "^([1-9][0-9]{0,2}|1000)$", MaxLength: 4 },
       CoreLessons: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
+      CoreSystemRuns: { Default: "off", AllowedPattern: "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$", MaxLength: 64 },
       CorePolicyHook: { Default: "", AllowedPattern: "^[ -~]*$", MaxLength: POLICY_HOOK_PARAMETER_MAX_LENGTH },
     });
-    for (const logicalPrefix of ["Broker", "Dispatcher"]) {
+    // L4-P2: the system-runs flag (the operator's ceiling) is given to BOTH functions: the dispatcher's setup gate before a build can retry a re-check, and that retry must stop when the flag goes off. An environment value only; no IAM.
+    for (const [logicalPrefix, holdsSystemRuns] of [["Broker", true], ["Dispatcher", true]] as const) {
       const fn = Object.entries(inApp.Resources).find(([id, resource]) => id.startsWith(logicalPrefix) && resource.Type === "AWS::Lambda::Function")![1];
       const variables = (fn.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(JSON.stringify(variables).includes("CoreSystemRuns"), logicalPrefix).toBe(holdsSystemRuns);
       expect(variables.AGENTX_SETTINGS).toBeDefined();
       expect(variables.ROVARA_POLICY_HOOK).toEqual({ Ref: "CorePolicyHook" });
       expect(variables).not.toHaveProperty("ROVARA_CORE_ALLOWED_COMPANIES");
@@ -458,8 +480,9 @@ describe("L1a broker environment derivation", () => {
     expect(Object.values(inApp.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy")).toHaveLength(Object.values(json.Resources).filter((resource) => resource.Type === "AWS::IAM::Policy").length);
   });
 
+  // DEC 254za: re-pinned for the callback signing key's secret (the legacy template carries it too).
   it("keeps the entire legacy template byte-identical (apart from normalized bundled asset hashes)", () => {
-    expect(digest(legacy.toJSON())).toBe("9a7942afbd5561cef0077003fe43e470ef6b83993bef9ca72068f9e475247b06");
+    expect(digest(legacy.toJSON())).toBe("df258584a9995cd8989583240155bd85fbf0e875351adf46847d450f5a5eb670");
   });
 });
 import { createHash } from "node:crypto";
@@ -471,4 +494,55 @@ it("exposes only the exact core model-access GET without an authorizer on named 
   expect(routes.find((route) => route.RouteKey === "ANY /{proxy+}")).toMatchObject({ AuthorizationType: "JWT" });
   expect(routes.some((route) => route.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
   expect(resources(legacy, "AWS::ApiGatewayV2::Route").some(([, resource]) => resource.Properties.RouteKey === "GET /v1/internal/model-access")).toBe(false);
+});
+
+// DEC 254z-amend3: test services, on by default with the owner's opt-out, kept across upgrades.
+describe("the test services setting (stack parameter TestServices)", () => {
+  const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
+  it("is declared on (\"1\") by default, with exactly the values 1 and 0, named environments only (the legacy template has none)", () => {
+    expect(typed.Parameters.TestServices).toMatchObject({ Default: "1", AllowedValues: ["1", "0"] });
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServices");
+  });
+
+  it("is packed for the broker and the dispatcher (td), never as a variable of their own, and given whole to the session steps", () => {
+    expect(packedSettings(dispatcherVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
+    expect(packedSettings(brokerVariables).get("td")).toStrictEqual({ Ref: "TestServices" });
+    expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES");
+    const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
+    expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES).toStrictEqual({ Ref: "TestServices" });
+    const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServices"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
+  });
+
+  it("is an operator setting an upgrade keeps", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServices");
+  });
+});
+
+// DEC 254zm: whether the install's starter copies are in place, so Code's workers run test services. Off (`none`) by default, kept across upgrades.
+describe("the test service images setting (stack parameter TestServiceImages)", () => {
+  const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
+  it("is declared none by default, with exactly the values none and mirrored, named environments only", () => {
+    expect(typed.Parameters.TestServiceImages).toMatchObject({ Default: "none", AllowedValues: ["none", "mirrored"] });
+    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServiceImages");
+  });
+
+  it("is packed for the broker and the dispatcher (ti), and given whole to the session steps beside the switch", () => {
+    expect(packedSettings(dispatcherVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(packedSettings(brokerVariables).get("ti")).toStrictEqual({ Ref: "TestServiceImages" });
+    expect(brokerVariables).not.toHaveProperty("ROVARA_TEST_SERVICES_HOSTED_IMAGES");
+    const steps = resources(named, "AWS::Lambda::Function").find(([id]) => /^SessionsSteps[0-9A-F]{8}$/u.test(id))!;
+    expect((steps[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.ROVARA_TEST_SERVICES_HOSTED_IMAGES).toStrictEqual({ Ref: "TestServiceImages" });
+    const users = Object.entries(json.Resources).filter(([, resource]) => /"Ref":"TestServiceImages"/u.test(JSON.stringify(resource))).map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""));
+    expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
+  });
+
+  it("is an operator setting an upgrade keeps, set with `agentx config set testServices.images`", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServiceImages");
+    const key = configKey("testServices.images");
+    expect(key.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "TestServiceImages" });
+    expect(key.parse("mirrored")).toBe("mirrored");
+    expect(key.parse("none")).toBe("none");
+    for (const bad of ["Mirrored", "yes", "1", ""]) expect(() => key.parse(bad), bad).toThrow();
+  });
 });

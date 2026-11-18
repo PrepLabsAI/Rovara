@@ -7,6 +7,9 @@
 //   the wait         only the first coding run waits; Understand and Plan go on; a pass is silent and moves the baseline
 //   what blocks      ONLY a setup step failing twice; failing tests and an unclear result never do; nothing here approves a setup
 //   isolation        another project and another company never meet the snapshot, the re-check or the card
+import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
+import { hostedSystemRunsFor } from "../../packages/broker/src/core-host/system-runs.js";
+import { parseCoreSwitch } from "../../packages/broker/src/core-host/flags.js";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -34,7 +37,7 @@ import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const URL_ = "https://examplehost.test/acme/app";
-const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
+const COMPANY_B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 const FILES: Record<string, string> = {
   "README.md": "readme", "src/index.ts": "export {}", "package.json": "{}", "package-lock.json": "lock-1", "docker-compose.yml": "services: {}", "services/api/Dockerfile": "FROM node:22",
   ".devcontainer/devcontainer.json": "{}", ".env.example": "A=", ".nvmrc": "22", "vitest.config.ts": "export default {}", ".github/workflows/ci.yml": "on: push",
@@ -48,15 +51,15 @@ const CLASSES: Array<[string, string]> = [
 const projectOf = (name = "payments", extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({
   ...definition, name, setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }], ...extra,
   repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }],
-} as ProjectDefinition);
+});
 
 interface World { h: Harness; model: FakeHostModel; host: FakeCodeHost; project: ProjectDefinition; modelRoute: ReturnType<typeof vi.fn> }
 
-async function world(options: { companyId?: OrgId; project?: ProjectDefinition; snapshot?: boolean; files?: Record<string, string>; backend?: Parameters<typeof createHarness>[0] extends infer O ? (O extends { backend?: infer B } ? B : never) : never; understandFirst?: boolean } = {}): Promise<World> {
+async function world(options: { companyId?: OrgId; project?: ProjectDefinition; snapshot?: boolean; files?: Record<string, string>; backend?: Parameters<typeof createHarness>[0] extends infer O ? (O extends { backend?: infer B } ? B : never) : never; understandFirst?: boolean; audit?: "recording" } = {}): Promise<World> {
   const modelRoute = vi.fn(async () => undefined);
   const h = createHarness({
     understandFirst: options.understandFirst ?? false, machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] },
-    ...(options.companyId === undefined ? {} : { companyId: options.companyId }), ...(options.backend === undefined ? {} : { backend: options.backend }),
+    ...(options.audit === undefined ? {} : { audit: options.audit }), ...(options.companyId === undefined ? {} : { companyId: options.companyId }), ...(options.backend === undefined ? {} : { backend: options.backend }),
   });
   const project = options.project ?? projectOf();
   await h.registerProject(project);
@@ -168,7 +171,7 @@ describe("the drift check at task start", () => {
 
   it("a website the setup now allows that the snapshot did not is drift, with no file changed", async () => {
     const w = await world();
-    const allowed = projectOf("payments", { revision: 2, network: { allowedDomains: ["api.stripe.com"] } } as Partial<ProjectDefinition>);
+    const allowed = projectOf("payments", { revision: 2, network: { allowedDomains: ["api.stripe.com"] } });
     await w.h.registerProject(allowed);
     await startTask(w);
     expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).map((row) => row.classes)).toEqual([["websites"]]);
@@ -217,7 +220,10 @@ describe("the drift check at task start", () => {
     const task = await startTask(w);
     expect(task.status).toBe("STARTING");
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
-    expect(await linkOf(w, task.taskId)).toBeUndefined();
+    // DEC 254zzl: the task started all the same, and says so quietly.
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", noRecheck: { classes: [] }, recheckKey: "" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup.");
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
 
   it("an install with no code host starts exactly as before", async () => {
@@ -244,7 +250,9 @@ describe("the drift check at task start", () => {
     w.h.deps.log = (entry) => logs.push(entry);
     w.h.deps.codeHosts = { ...w.h.deps.codeHosts!, get: () => { throw new Error("registry fault"); } } as never;
     const items = await setupDriftAtStart(w.h.deps, { project: "payments", taskId: "t1", definition: w.project });
-    expect(items).toEqual([]);
+    // The start goes on with only a released link and the quiet note; nothing is started.
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "put", item: { entityType: "SETUP_DRIFT_TASK", state: "released", noRecheck: { classes: [] } } });
     expect(logs.some((entry) => entry["event"] === "setup_drift.failed" || entry["event"] === "setup_drift.not_checked")).toBe(true);
   });
 });
@@ -258,6 +266,122 @@ async function readyCheckMark(w: World): Promise<{ workspaceId: string; revision
   await finishCheck(w.h, check.workspaceId, { status: "SUCCEEDED" });
   return check.mark;
 }
+
+describe("the company's system-runs switch (DEC 254zzl: hosted default off)", () => {
+  it("off: nothing is started, nothing is spent, the task starts normally, and its page says quietly that the setup may be out of date", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.model.commit("main", { "package-lock.json": "lock-2", "docker-compose.yml": "services: { db: {} }" });
+    const task = await startTask(w);
+    expect(task.status).toBe("STARTING");
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+    expect(await w.h.store.get(recheckCurrentKey(w.h.deps.companyId, "payments"))).toBeUndefined();
+    expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(0);
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", recheckKey: "", noRecheck: { classes: ["lockfile", "compose"], reason: "off" } });
+    const line = "Setup may be out of date after dependency files and a compose file changed.";
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe(line);
+    expect((await taskViewOf(w.h.deps, (await readTask(w.h.deps, task.taskId))!)).setupRecheck).toBe(line);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect(await stagedPreparations(w.h)).toBe(1);
+    expect(w.modelRoute).not.toHaveBeenCalled();
+  });
+
+  it("off: no drift says nothing at all, and a comparison that cannot be told says it without naming a change", async () => {
+    const quiet = await world();
+    quiet.h.deps.systemRuns = { enabled: () => false };
+    const calm = await startTask(quiet);
+    expect(await linkOf(quiet, calm.taskId)).toBeUndefined();
+    expect(await setupRecheckLineOf(quiet.h.deps, "payments", calm.taskId)).toBeUndefined();
+    const w = await world({ snapshot: false });
+    w.h.deps.systemRuns = { enabled: () => false };
+    await w.h.store.put({ item: { ...projectMetaKey(w.h.deps.companyId, "payments"), entityType: "PROJECT_META" } });
+    await w.h.store.update({ key: projectMetaKey(w.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["setupCheck"], value: (await readyCheckMark(w)) as unknown as JsonValue }] });
+    const task = await startTask(w);
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Setup may be out of date.");
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+  });
+
+  it("on (the hosted flag set) and absent (the laptop) both re-check; switching it on later starts re-checks again", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+    w.h.deps.systemRuns = { enabled: () => true };
+    const task = await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(1);
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "pending" });
+    delete w.h.deps.systemRuns;
+    w.model.commit("main", { "package-lock.json": "lock-3" });
+    await finishCheck(w.h, (await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.check.workspaceId, { status: "SUCCEEDED" });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(2);
+  });
+
+  // L4-P2 (owner DEC 254zzt): the gate is the EFFECTIVE one (the operator's ceiling AND the company's consent, read now and async). The dispatcher runs `setupGateBeforeBuild` -> `retryRecheck` with it.
+  // MUTANT: the retry reads an absent/stale gate, or `retryRecheck` stops awaiting it (a Promise is truthy), so a withdrawn consent still lets the retry start.
+  it("the company withdraws its consent after a first attempt began: the retry (asked at Build, as the dispatcher does) is not started, the re-check ends unclear, nothing blocks", async () => {
+    const w = await world();
+    const orgId = w.h.deps.companyId;
+    const consent = async (enabled: boolean): Promise<void> => { await w.h.store.put({ item: { ...systemRunsConsentKey(orgId), entityType: "SYSTEM_RUNS_CONSENT", orgId, enabled, changedAt: "2026-11-17T00:00:00.000Z" } }); };
+    await consent(true);
+    hostedSystemRunsFor(w.h.deps, orgId, parseCoreSwitch("on").value);
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const [first] = await rechecksOf(w.h.store, orgId, "payments");
+    expect(first).toBeDefined();
+    await finishCheck(w.h, first!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    await consent(false);
+    w.h.clock.advance(RECHECK_RETRY_DELAY_MS / 1000 + 1);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect((await rechecksOf(w.h.store, orgId, "payments"))).toHaveLength(1);
+    expect((await rechecksOf(w.h.store, orgId, "payments"))[0]).toMatchObject({ state: "unclear", attempt: 1 });
+  });
+
+  it("a gate that rejects is off: no re-check at task start and no retry", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: async () => { throw new Error("consent unreadable"); } };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
+  });
+
+  it("switched off after a first attempt began: the retry is not started, the re-check ends unclear, and nothing blocks", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => true };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const [first] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+    await finishCheck(w.h, first!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.h.clock.advance(RECHECK_RETRY_DELAY_MS / 1000 + 1);
+    expect(await advanceCurrentRecheck(w.h.deps, "payments")).toMatchObject({ state: "unclear", attempt: 1 });
+    expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(1);
+    expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.check.workspaceId).toBe(first!.check.workspaceId);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
+  });
+
+  it("a re-check is the company's and the project's: its place in the cap and its audit event name them, and the actor is Rovara, not a person", async () => {
+    const w = await world({ audit: "recording" });
+    w.h.deps.systemRuns = { enabled: () => true };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    await startTask(w);
+    const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+    const claim = await w.h.store.get({ pk: `ORG#${w.h.deps.companyId}#PROJECT#payments`, sk: `AUTOMATIC_RUNS#RUN#setup-recheck-${row!.key}-1` });
+    expect(claim).toMatchObject({ orgId: w.h.deps.companyId, project: "payments", job: "scheduled_check" });
+    expect(row).toMatchObject({ orgId: w.h.deps.companyId, project: "payments", check: { startedBy: systemOwnerIdOf(w.h.deps.companyId, "payments") } });
+    const events = w.h.audit.filter((event) => event.action === "setup_recheck.started");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ companyId: w.h.deps.companyId, actor: { type: "system", id: "rovara" }, subject: { type: "project", id: "payments" }, details: { job: "scheduled_check", attempt: 1 } });
+    // The check's own workspace is the company's and the project's too (what machine time is booked by).
+    const workspace = await readWorkspace(w.h.deps, row!.check.workspaceId);
+    expect(workspace).toMatchObject({ companyId: w.h.deps.companyId, projectName: "payments" });
+  });
+});
 
 describe("once per commit, and the monthly cap", () => {
   it("two tasks on one commit share one re-check and one place in the cap; a new commit is a new re-check", async () => {
@@ -334,7 +458,11 @@ describe("once per commit, and the monthly cap", () => {
     const task = await startTask(w);
     expect(task.status).toBe("STARTING");
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toEqual([]);
-    expect(await linkOf(w, task.taskId)).toBeUndefined();
+    // DEC 254zzl: the task started all the same, nothing waits, and its page says quietly that the re-check could not be made.
+    expect(await linkOf(w, task.taskId)).toMatchObject({ state: "released", noRecheck: { classes: ["lockfile"] }, recheckKey: "" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
+    expect((await taskViewOf(w.h.deps, (await readTask(w.h.deps, task.taskId))!)).setupRecheck).toBe("Couldn't re-check setup after dependency files changed.");
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
     const use = await readAutomaticRunsUse(deps, w.h.deps.companyId, "payments");
     expect(use).toMatchObject({ used: 1, cap: 1, paused: true });
     expect(await w.h.store.get({ pk: `ORG#${w.h.deps.companyId}#PROJECT#payments`, sk: `AUTOMATIC_RUNS#PAUSED#${use.month}` }).catch(() => undefined) ?? true).toBeDefined();
@@ -359,6 +487,7 @@ describe("once per commit, and the monthly cap", () => {
     await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
     const settled = await advanceAfterFailure(w.h);
     expect(settled?.state).toBe("unclear");
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
 });
@@ -609,7 +738,8 @@ describe("what the re-check says, and what blocks", () => {
     w.h.clock.advance(SETUP_CHECK_STUCK_MS / 1000 + 60);
     expect(await advanceCurrentRecheck(w.h.deps, "payments")).toMatchObject({ state: "unclear", attempt: 2 });
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
-    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBeUndefined();
+    // DEC 254zzl: it could not be settled, the task went on all the same, and its page says so quietly.
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect((await setupStateOf(w.h.deps, "payments", w.project)).status).not.toBe("failed");
     await w.h.flow.start(w.h.owner, { requestId: newRequestId(), project: "payments", instructions: "Still allowed" });
   });
@@ -675,7 +805,7 @@ describe("what the re-check says, and what blocks", () => {
     const task = await startTask(w);
     const realUpdate = w.h.store.update.bind(w.h.store);
     let failures = 0;
-    w.h.store.update = (async (input: Parameters<DocumentStore["update"]>[0]) => { if (input.key.sk === "META" && input.ops.some((op) => (op as { path?: unknown }).path?.toString() === "setupCheck" || (op as { path?: unknown }).path === "setupCheck") && failures < 1) { failures += 1; throw new Error("store fault"); } return realUpdate(input); }) as DocumentStore["update"];
+    w.h.store.update = (async (input: Parameters<DocumentStore["update"]>[0]) => { if (input.key.sk === "META" && input.ops.some((op) => (op as { path?: unknown }).path?.toString() === "setupCheck" || (op as { path?: unknown }).path === "setupCheck") && failures < 1) { failures += 1; throw new Error("store fault"); } return realUpdate(input); });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const [row] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
       await finishCheck(w.h, row!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
@@ -745,6 +875,7 @@ describe("what the re-check says, and what blocks", () => {
       await advanceAfterFailure(w.h);
     }
     expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.state).toBe("unclear");
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
     expect((await setupStateOf(w.h.deps, "payments", w.project)).status).not.toBe("failed");
     expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
   });
@@ -819,7 +950,7 @@ describe("isolation", () => {
       for (const [index, key] of sourceKeys.entries()) {
         const original = await shared.get(key);
         expect(original, key.sk).toBeDefined();
-        await shared.put({ item: { ...original!, ...targetKeys[index]! } as never });
+        await shared.put({ item: { ...original!, ...targetKeys[index]! } });
       }
     };
     await copyAll({ orgId: COMPANY_B, project: "payments" });

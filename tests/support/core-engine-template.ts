@@ -14,10 +14,11 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreModelGatewayHost", "CoreAgentModel"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
-  expect(conditions).toHaveLength(1);
-  delete synthesized.Conditions[conditions[0]!];
+  // The engine switch's condition, and (L4-P1) the upkeep night's own: the system-runs flag AND the switch.
+  expect(conditions).toHaveLength(2);
+  for (const id of conditions) delete synthesized.Conditions[id];
   const added = Object.entries(synthesized.Resources).filter(([id]) => id.startsWith("CoreEngineJobs"));
   expect(added.map(([, resource]) => resource.Type).sort()).toEqual([
     "AWS::CloudWatch::Alarm", "AWS::IAM::Policy", "AWS::IAM::Role", ...Array<string>(CORE_JOB_SCHEDULES.length).fill("AWS::Scheduler::Schedule"), "AWS::Scheduler::ScheduleGroup",
@@ -30,7 +31,7 @@ export function withoutCoreEngine(template: unknown): unknown {
   const dispatchers = Object.entries(synthesized.Resources).filter(([id, resource]) => /^Dispatcher[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function");
   expect(dispatchers).toHaveLength(1);
   const dispatcherVariables = (dispatchers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "ROVARA_CORE_ENGINE", "CALLBACK_SIGNING_KEY", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+  for (const name of ["CORE_DISPATCH_QUEUE_ARN", "CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "ROVARA_CORE_ENGINE", "CALLBACK_SIGNING_KEY_SECRET_ID", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }
@@ -81,7 +82,7 @@ export function withoutCoreEngine(template: unknown): unknown {
   // Core switch-on blocker (2026-11-17): the switch and the gateway settings are packed in the broker's settings.
   const settingsJoin = JSON.stringify(variables.AGENTX_SETTINGS);
   for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw", "sw"]);
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw", "sw", "sy"]);
   delete variables.ROVARA_POLICY_HOOK;
   delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
 

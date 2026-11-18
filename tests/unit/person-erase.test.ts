@@ -11,11 +11,12 @@ import { S3ObjectStorage } from "../../packages/aws-adapters/src/s3/index.js";
 import { evidencePrefixesOf } from "../../packages/broker/src/core/proof/evidence-erase.js";
 import { taskIndexKey, taskKey, taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import {
-  PERSON_ERASE_RETRY_MAX, erasePerson, noLearningToErase, personErasePendingPartition, personErasedKey, resumePersonErases, unversionedEraseObjects, type PersonEraseDeps,
+  PERSON_ERASE_RETRY_MAX, erasePerson, noLearningToErase, noWikiToErase, personErasePendingPartition, personErasedKey, resumePersonErases, unversionedEraseObjects, type PersonEraseDeps,
 } from "../../packages/broker/src/core/people/erase.js";
 import { VersionedBucket } from "../support/versioned-bucket.js";
 import { prefsKey } from "../../packages/broker/src/core/notify/prefs.js";
 import { notifySentKey } from "../../packages/broker/src/core/notify/attention.js";
+import { inboxKey, inboxPartition, inboxRow } from "../../packages/broker/src/core/notify/inbox-rows.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -34,7 +35,7 @@ function recordingAudit(): AuditSink & { staged: AuditEvent[] } {
   };
 }
 
-interface World { store: MemoryDocumentStore; bucket: VersionedBucket; audit: ReturnType<typeof recordingAudit>; clock: { now: number }; deps: PersonEraseDeps; learning: string[]; logs: Record<string, unknown>[] }
+interface World { store: MemoryDocumentStore; bucket: VersionedBucket; audit: ReturnType<typeof recordingAudit>; clock: { now: number }; deps: PersonEraseDeps; learning: string[]; wiki: string[]; logs: Record<string, unknown>[] }
 
 function world(overrides: Partial<PersonEraseDeps> = {}): World {
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
@@ -42,15 +43,17 @@ function world(overrides: Partial<PersonEraseDeps> = {}): World {
   const audit = recordingAudit();
   const clock = { now: Date.parse("2026-11-15T10:00:00.000Z") };
   const learning: string[] = [];
+  const wiki: string[] = [];
   const logs: Record<string, unknown>[] = [];
   const objects = new S3ObjectStorage({ client: bucket.client, bucket: "artifacts-a", now: () => clock.now });
   const deps: PersonEraseDeps = {
     store, audit, now: () => clock.now, log: (entry) => logs.push(entry),
     objects: { deleteEveryVersion: (prefix, options) => objects.deleteEveryVersion(prefix, options) },
     eraseLearning: async (companyId, personId) => { learning.push(`${companyId}/${personId}`); },
+    eraseWiki: async (companyId, personId) => { wiki.push(`${companyId}/${personId}`); },
     ...overrides,
   };
-  return { store, bucket, audit, clock, deps, learning, logs };
+  return { store, bucket, audit, clock, deps, learning, wiki, logs };
 }
 
 let seq = 0;
@@ -153,6 +156,17 @@ describe("person erase: what it removes", () => {
     expect(await w.store.get(notifySentKey(B, MALLORY))).toBeDefined();
   });
 
+  it("removes the person's in-app inbox rows in this company only, and nobody else's", async () => {
+    const w = world();
+    const session = `ses_${"a".repeat(20)}`;
+    for (const company of [A, B]) for (const person of [MALLORY, "someone-else"]) await w.store.put({ item: inboxRow({ orgId: company, developerId: person, sessionId: session, kind: "needs_you", at: "2026-11-09T10:00:00.000Z", nowMs: Date.parse("2026-11-09T10:00:00.000Z") }) });
+    await w.store.put({ item: inboxRow({ orgId: A, developerId: MALLORY, sessionId: `ses_${"b".repeat(20)}`, kind: "done", at: "2026-11-09T10:00:00.000Z", nowMs: Date.parse("2026-11-09T10:00:00.000Z") }) });
+    await erase(w);
+    expect((await w.store.query({ pk: inboxPartition(A, MALLORY) })).items).toEqual([]);
+    expect(await w.store.get(inboxKey(B, MALLORY, session, "needs_you"))).toBeDefined();
+    expect(await w.store.get(inboxKey(A, "someone-else", session, "needs_you"))).toBeDefined();
+  });
+
   it("removes the person's chat links in this company, but not an actor row a re-link gave someone else, nor their links in another company", async () => {
     const w = world();
     await link(w, A, MALLORY, "U1");
@@ -250,6 +264,42 @@ describe("person erase: refusals and failures (fixed words)", () => {
 
   it("noLearningToErase is a no-op hook", async () => {
     expect(await noLearningToErase()).toBeUndefined();
+    expect(await noWikiToErase()).toBeUndefined();
+  });
+
+  it("runs the wiki erase step for the person in this company (lead 4 W2)", async () => {
+    const w = world();
+    await erase(w);
+    expect(w.wiki).toEqual([`${A}/${MALLORY}`]);
+  });
+
+  it("fails loudly when the wiki erase is not wired (never reads as nothing to erase)", async () => {
+    const w = world({ eraseWiki: undefined as never });
+    await expect(erase(w)).rejects.toThrow(/wiki erase hook is not wired/u);
+    expect(w.audit.staged).toHaveLength(0);
+  });
+
+  it("a wiki erase that fails says so in fixed words, never its cause; the receipt stays and the walk stays owed", async () => {
+    const w = world({ eraseWiki: async () => { throw new Error(`secret ${MALLORY} note text`); } });
+    const failure = await erase(w).then(() => new Error("no failure"), (error: unknown) => error as Error);
+    expect(failure.message).toMatch(/notes in the project wiki could not be cleared/u);
+    expect(failure.message).not.toContain(MALLORY);
+    expect(JSON.stringify(w.logs)).not.toContain(MALLORY);
+    expect(await w.store.get(personErasedKey(A, MALLORY))).toBeDefined();
+    expect(await w.store.get({ pk: personErasePendingPartition(A), sk: MALLORY })).toBeDefined();
+  });
+
+  it("the scheduled resume runs the wiki erase again before an owed walk, and skips the walk when it fails", async () => {
+    const w = world();
+    const real = w.deps.objects;
+    w.deps.objects = { deleteEveryVersion: async () => { w.clock.now += 10_000; return "out_of_time" as const; } };
+    await task(w, MALLORY, A);
+    expect((await erase(w, { budgetMs: 5_000 })).evidence).toBe("owed");
+    w.deps.objects = real;
+    expect(await resumePersonErases({ ...w.deps, eraseWiki: async () => { throw new Error("wiki down"); } }, A, 5_000)).toEqual({ finished: 0, owed: 1 });
+    const seen: string[] = [];
+    expect(await resumePersonErases({ ...w.deps, eraseWiki: async (companyId, personId) => { seen.push(`${companyId}:${personId}`); } }, A, 5_000)).toEqual({ finished: 1, owed: 0 });
+    expect(seen).toEqual([`${A}:${MALLORY}`]);
   });
 });
 

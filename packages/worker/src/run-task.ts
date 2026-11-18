@@ -38,6 +38,7 @@ import type { FileOpsTarget } from "./file-ops-exec.js";
 import { sweepFileOps } from "./sandbox-file-tools.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { runSetupAgentInvocation } from "./setup-agent-invocation.js";
+import { runWikiBuildInvocation } from "./wiki-build-invocation.js";
 import { runNightlyInvocation } from "./nightly-invocation.js";
 import { EventBatcher, redactCredentials, type EventAppendOptions, type EventBatchSink, type WorkerEvent } from "./events.js";
 import {
@@ -51,6 +52,7 @@ import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
 import { LEARNED_LOAD_REPORT_FIELD, type NightlyResultCallbackBody, type SecondReviewContext, type SecondReviewResult } from "@agentx/contracts";
 import { prepareLearnedContext, withLearnedBlock } from "./learned-run.js";
+import { WIKI_READ_REPORT_FIELD, prepareWikiForStep } from "./wiki-agent.js";
 import { placeEvalFiles } from "./eval-files.js";
 import { runAgentStep, type AgentStepResult, type RunAgentStepInput } from "./agent-run/run-agent-step.js";
 import {
@@ -121,7 +123,7 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "UNDERSTAND" | "SETUP_DRAFT" | "SETUP_AGENT" | "SPEC_WRITE";
+  workflowMode?: "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "UNDERSTAND" | "SETUP_DRAFT" | "SETUP_AGENT" | "WIKI_BUILD" | "SPEC_WRITE";
   /** Rovara Code Task 10: the draft a setup-draft run read, already bounded and redacted (the broker reads it again). */
   setupProposal?: SetupProposal;
   /** SH14: how a setup run that ran commands ended (the broker reads it again). */
@@ -189,6 +191,8 @@ export interface TaskInvocationDependencies {
   cancellationController?: WorkerCancellationController;
   /** SH14: the broker's setup callback with this invocation's own capability (callback-client.ts `setupAgent`). A setup run does not run without it. */
   setupAgent?: (body: unknown) => Promise<unknown>;
+  /** W3b: the broker's wiki build callback with this invocation's own capability (callback-client.ts `wikiBuild`). A wiki build does not run without it. */
+  wikiBuild?: (body: unknown) => Promise<unknown>;
   /** NH-1: the broker's nightly action with this invocation's own capability (callback-client.ts `nightlyResult`). A nightly run does not run without it. */
   nightlyResult?: (body: NightlyResultCallbackBody) => Promise<unknown>;
   devcontainerCli?: DevcontainerCli;
@@ -341,6 +345,10 @@ async function runTask(
   if (invocation.payload.workflowMode === "SETUP_AGENT") {
     return runSetupAgentInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, setupAgent: dependencies.setupAgent, docker: dependencies.docker, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
   }
+  // W3b (the broker sends this mode only to a worker that lists "task.wikiBuild.v1"): the wiki build run reads the pinned commits with read-only tools; nothing below applies to it.
+  if (invocation.payload.workflowMode === "WIKI_BUILD") {
+    return runWikiBuildInvocation(invocation, { rootPath: dependencies.rootPath, model: dependencies.model, piAdapter: dependencies.piAdapter, eventSink: dependencies.eventSink, cancellationController: dependencies.cancellationController, wikiBuild: dependencies.wikiBuild, taskShell: dependencies.taskShell }, manifest, canonicalRoot);
+  }
   // A run that looks at a pull request: the workspace must hold the head commit the step was told about, or the step does not run, and nothing is started
   // for it (Task 22 review, M5).
   if (step?.kind === "agent" && step.checkout !== undefined && step.checkout.length > 0) await verifyCheckedOutHeads(dependencies.rootPath, manifest, step.checkout);
@@ -354,6 +362,9 @@ async function runTask(
   // Standing instructions: the broker-built block goes in the SYSTEM prompt of every session of the operation, the reviewers' too; the company part alone is for the second reviewer shown only the change.
   const standingInstructions = invocation.payload.standingInstructions?.text;
   const companyStandingInstructions = invocation.payload.standingInstructions?.company?.text;
+  // Lead 4 A1: the project's wiki for this step, when the broker sent it (its switch is on): placed read-only outside the repositories, re-checked against the base commit, and its index put in the
+  // step's context. Absent, invalid or unsafe to place: the step runs as it would without the wiki.
+  const wiki = step !== undefined && agentStep === undefined ? undefined : await prepareWikiForStep({ raw: invocation.payload.wikiContext, mode: invocation.payload.workflowMode, rootPath: canonicalRoot, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) }).catch(() => undefined);
   const stepSession = {
     ...(agentStep?.tools === undefined ? {} : { agentTools: agentStep.tools }),
     ...(stepSkills === undefined ? {} : { skills: stepSkills }),
@@ -1173,8 +1184,17 @@ async function runTask(
     verificationStop.abort();
     void session.abort().catch(() => undefined);
   };
+  // Which wiki pages the agent opened: told to the broker (a set, so a repeat changes nothing) each time a new page is opened.
+  let wikiPagesRead = 0;
+  const noteWikiRead = (event: unknown): void => {
+    if (wiki === undefined) return;
+    wiki.tracker.observe(event);
+    const report = wiki.tracker.report(wiki.project);
+    if (report !== undefined && report.pages.length > wikiPagesRead) { wikiPagesRead = report.pages.length; void emit("progress", { [WIKI_READ_REPORT_FIELD]: report }).catch(() => undefined); }
+  };
   const unsubscribe = session.subscribe((event) => {
     monitor.observe(event);
+    noteWikiRead(event);
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(stubContextEvent(event)));
     fileChanges.observe(event);
     activeFindings.observe(event);
@@ -1220,8 +1240,12 @@ async function runTask(
     if (invocation.payload.evalFiles !== undefined) await placeEvalFiles(invocation.payload.evalFiles, candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
     const learned = await prepareLearnedContext({ raw: invocation.payload.learnedContext, mode: payloadMode, repositories: candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase) });
     if (learned.report !== undefined) await emit("progress", { [LEARNED_LOAD_REPORT_FIELD]: learned.report }).catch(() => undefined);
+    // The wiki's pages this step was given (and how many paragraphs are marked out of date): the task page's "Wiki pages this task read" starts from it.
+    if (wiki !== undefined) await emit("progress", { [WIKI_READ_REPORT_FIELD]: wiki.report }).catch(() => undefined);
     // Stop & redirect (steer-invocation.ts): the owner's instruction that stopped the previous run is taken from the owner and framed after the broker's prompt (coding only; absent for every other step).
-    const taskPrompt = withLearnedBlock(ownerRedirectPrompt(invocation.payload.prompt, invocation.payload.ownerRedirect, payloadMode === "IMPLEMENT" ? "IMPLEMENT" : undefined, dependencies.cancellationController, invocation.operationId), learned.section)
+    // The wiki's index is an untrusted-data block in the task prompt, beside the lessons' (never in the system prompt's project-instructions slot); reviewers read the same block.
+    const memorySection = [learned.section, wiki?.block ?? ""].filter((part) => part !== "").join("\n\n");
+    const taskPrompt = withLearnedBlock(ownerRedirectPrompt(invocation.payload.prompt, invocation.payload.ownerRedirect, payloadMode === "IMPLEMENT" ? "IMPLEMENT" : undefined, dependencies.cancellationController, invocation.operationId), memorySection)
       + (answerSpec === undefined ? "" : `\n\n${answerToolInstruction(answerSpec.name)}`);
     let outcome: TaskUsageOutcome = "FAILED";
     let taskResult: TaskInvocationResult | undefined;
@@ -1841,7 +1865,8 @@ async function runTask(
           ...(invocation.payload.workflowReviewSpec === undefined ? {} : { reviewSpec: invocation.payload.workflowReviewSpec, onSpecReview: (result: SpecReviewResult) => { specReviewResult = result; } }),
           ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),
           ...(invocation.payload.workflowReviewNote === undefined ? {} : { reviewNote: invocation.payload.workflowReviewNote }),
-          ...(learned.section === "" ? {} : { learnedBlock: learned.section }),
+          ...(memorySection === "" ? {} : { learnedBlock: memorySection }),
+          ...(wiki === undefined ? {} : { onWikiEvent: noteWikiRead }),
           ...(invocation.payload.workflowReviewers === undefined ? {} : { reviewers: invocation.payload.workflowReviewers }),
           ...(invocation.payload.workflowReviewRisk === true ? { reviewRisk: true } : {}),
           ...(sourceSession === undefined ? {} : { sources: { tools: sourceSession.contextTools, ...(sourceSession.contextMcp === undefined ? {} : { mcp: sourceSession.contextMcp }), note: sourceSession.contextNote, labels: sourceSession.labels } }),

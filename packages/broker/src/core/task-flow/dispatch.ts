@@ -35,12 +35,14 @@ import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
+import { testServicesMissingWords } from "../test-env/seam.js";
 import { RUN_START_ACTION, cancelInvocation, isSpendStopCode, queuedCancelOf, spendStopReason } from "./money-stop.js";
 import { isTerminalStatus, readOperation, recordOperationResult } from "./results.js";
 import { readWorkspace } from "./stage-machine.js";
 import { dispatchQueueName, iso, log } from "./support.js";
 import type { OperationRecord, WorkspaceRecord } from "./records.js";
 import type { PlaybookMode } from "../playbook/service.js";
+import { invocationTooBigForWiki, wikiContextForStep } from "./wiki-step.js";
 import { chooseStepModel, heldStepModel, type OperationModelChoice, type StepModelOutcome } from "./step-model.js";
 
 /** How long a capability the worker is given lives: nine hours, as Cloud's. */
@@ -239,7 +241,8 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     // With the per-run stop, a model run goes only to a worker that reports its usage while it runs (never dropped: the stop would not see the run's spend until it ended).
     const checkpoints = deps.moneyStop !== undefined && operation.dispatch.kind === "task";
     const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : []), ...(checkpoints ? [USAGE_CHECKPOINTS_FEATURE] : [])].filter((feature) => !health.features.includes(feature));
-    if (missing.length > 0) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
+    // DEC 254zm: a worker that lacks only test-services features could not start them here (its boot stage or pulls failed): the fixed "not available here" words, not "too old".
+    if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     // The claim: in one transaction, the workspace is still held by this operation at its fence and is not closing, and the operation is handed over.
@@ -330,6 +333,9 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     const learned = await deps.learned({ workspaceId: workspace.id, operationId: operation.id, workflowMode: operation.workflowMode, features }).catch(() => undefined);
     if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
   }
+  // The project's wiki, when its switch is on (lead 4 A1): built now from the task's own project, for a worker that lists the feature; none otherwise.
+  const wikiContext = await wikiContextForStep(deps, workspace, operation, features);
+  if (wikiContext !== undefined) payload = { ...payload, wikiContext };
   // An approved plan's parts for a worker that does not list "task.workflowParallelParts": it would reject the `parallel` setting, and it builds the parts one after another, which the checkpoint rules accept and which
   // costs no more (only time). The setting is the one field of an ordered run that is withheld rather than refused, and only when the older worker can take over the retained progress; otherwise the run is refused.
   const ordered = spec.kind === "task" ? payload["workflowDependencies"] as WorkflowDependencyInvocation | undefined : undefined;
@@ -395,12 +401,19 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     }
   }
   const parsed = WorkerInvocationSchema.safeParse(draft);
-  if (parsed.success) return parsed.data;
-  // Lessons never block a step: a learned context the worker's schema does not take is dropped, and the step is built without it.
-  if (draft.payload["learnedContext"] !== undefined) {
-    const { learnedContext: _dropped, ...withoutLessons } = draft.payload;
-    void _dropped;
-    const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutLessons });
+  if (parsed.success) {
+    if (draft.payload["wikiContext"] === undefined || !invocationTooBigForWiki(parsed.data)) return parsed.data;
+    // The step is already large: the wiki is what is left out, so it is never the reason a worker refuses the body.
+    const { wikiContext: _wiki, ...withoutWiki } = draft.payload;
+    void _wiki;
+    const slim = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutWiki });
+    return slim.success ? slim.data : parsed.data;
+  }
+  // Lessons and the wiki never block a step: a learned or wiki context the worker's schema does not take is dropped, and the step is built without it.
+  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined) {
+    const { learnedContext: _dropped, wikiContext: _droppedWiki, ...withoutMemory } = draft.payload;
+    void _dropped; void _droppedWiki;
+    const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutMemory });
     if (retried.success) return retried.data;
   }
   return "the job could not be built for the worker";

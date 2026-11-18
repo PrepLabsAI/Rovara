@@ -8,6 +8,8 @@
 //               unknown cost), so concurrent starts see each other. Booked usage (core-host/usage-booking.ts, from the workers' usage reports) draws the task's hold down; `settle`
 //               keeps the actual cost (all of the hold when the cost is unknown), `release` gives the rest back, and the hold sweep (`createHostedHoldSweep`) gives back a hold nobody
 //               closed. The task cap is checked on the task's booked spend, in the same transaction. So the adapter declares `enforcesCost: true`.
+//               L2-5 (b): with a project task-cap reader (`projectTaskCap`, the project's own per-task limit `model_budget_usd`), the task cap of a task is the install's cap lowered to
+//               its project's limit when one is set; a limit that cannot be read refuses (spend unknown), never falls back to the install's cap.
 //   metering    The price table over the catalog's list prices (the capped price for a reservation). A model no table prices is charged a cautious fixed price, never $0
 //               (`UNKNOWN_MODEL_PRICE`, DEC 172/216); a cost the provider reported that is higher than the table's is charged instead. No call is made on Rovara's account here:
 //               metering only prices usage the company's own provider reported.
@@ -95,6 +97,8 @@ export function readHostedAdmissionSettings(env: NodeJS.ProcessEnv): { settings:
 export const COMPANY_NOT_ALLOWED = "This company is not on the core engine's list for this install yet.";
 export const COMPANY_DAY_CAP_REACHED = "This company has reached today's spending limit on this install. Try again tomorrow (UTC).";
 export const TASK_CAP_REACHED = "This task has reached its spending limit on this install.";
+/** L2-5 (b): the task cap that bound was its project's own per-task limit: who can raise it. */
+export const PROJECT_TASK_CAP_REACHED = "This task has reached its project's per-task spending limit. A project admin, or a company owner or admin, can raise it in the project's settings.";
 export const SPEND_UNKNOWN = "Today's spending could not be worked out, so nothing new was started. Try again later, or ask whoever runs the install.";
 
 const refuse = (code: string, message: string): AdmissionDecision => ({ allowed: false, code, message });
@@ -112,6 +116,38 @@ export interface HostedAdmissionOptions {
    * `automation.run` is refused.
    */
   runStopWired?: boolean;
+  /** L2-5 (b): the project's own per-task limit (see `ProjectTaskCap`). Absent: every task has the install's cap, exactly as before. */
+  projectTaskCap?: ProjectTaskCap | undefined;
+}
+
+/**
+ * L2-5 (b): a project's own per-task limit in micros (the resolved `model_budget_usd`), or undefined when the project sets none. Throws when it cannot be read: the caller then refuses
+ * (spend unknown), it never falls back to the install's cap alone.
+ */
+export type ProjectTaskCap = (companyId: string, project: string) => Promise<number | undefined>;
+const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u;
+
+/**
+ * The cap that applies to one task: the install's task cap, lowered to the project's own per-task limit when the project sets one. The project is the request's (a start names it; the
+ * task row may not exist yet), else the task's own row, which must be this company's. Without a reader: the install's cap, nothing read. Throws when the project or its limit cannot be read.
+ */
+export async function taskCapOf(deps: { store: DocumentStore; settings: HostedAdmissionSettings; projectTaskCap?: ProjectTaskCap | undefined }, companyId: string, taskId: string, projectName?: string): Promise<{ micros: number; project: boolean }> {
+  const install = deps.settings.taskCapMicros;
+  if (deps.projectTaskCap === undefined) return { micros: install, project: false };
+  // The task's own row names its project; the request's name is used only for a start (its row is written in the same transaction), and must agree with the row when both exist.
+  const task = await readTask({ store: deps.store }, taskId);
+  let project: string;
+  if (task !== undefined) {
+    if (task.companyId !== companyId || typeof task.project !== "string" || !PROJECT_NAME.test(task.project) || (projectName !== undefined && projectName !== task.project)) throw new Error("the task's project is unknown");
+    project = task.project;
+  } else {
+    if (typeof projectName !== "string" || !PROJECT_NAME.test(projectName)) throw new Error("the task's project is unknown");
+    project = projectName;
+  }
+  const limit = await deps.projectTaskCap(companyId, project);
+  if (limit === undefined) return { micros: install, project: false };
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("the project's limit is not readable");
+  return limit < install ? { micros: limit, project: true } : { micros: install, project: false };
 }
 
 /** What a model call of unknown cost holds (an Ask, a diagnosis): never nothing, so a full day refuses it. */
@@ -126,9 +162,9 @@ export function createHostedLedger(deps: { store: DocumentStore; metering: Meter
  * What a request holds on the company's day, in micros: its dollar estimate; for a task start, its path's planning allowance (a Quick path the small one, any other the full one), never
  * more than the task cap or the day cap; for a model call of unknown cost, `UNKNOWN_CALL_HOLD_MICROS`. Anything else (a machine start) holds nothing and is a gate: it needs the day below its cap.
  */
-function holdMicrosOf(request: AdmissionRequest, estimate: Cost | undefined, settings: HostedAdmissionSettings): number {
+function holdMicrosOf(request: AdmissionRequest, estimate: Cost | undefined, settings: HostedAdmissionSettings, taskCapMicros: number): number {
   if (estimate !== undefined) return estimate.micros;
-  if (request.action === "task.start") return Math.min(DEFAULT_PLANNING_LIMIT_USD[request.taskStart?.path === "QUICK" ? "QUICK" : "FULL"] * 1_000_000, settings.taskCapMicros, settings.companyDayCapMicros);
+  if (request.action === "task.start") return Math.min(DEFAULT_PLANNING_LIMIT_USD[request.taskStart?.path === "QUICK" ? "QUICK" : "FULL"] * 1_000_000, taskCapMicros, settings.companyDayCapMicros);
   if (request.action === "model.call") return Math.min(UNKNOWN_CALL_HOLD_MICROS, settings.companyDayCapMicros);
   return 0;
 }
@@ -152,7 +188,14 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
       return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
     }
     if (typeof request.idempotencyKey !== "string" || request.idempotencyKey === "") return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
-    const asked = holdMicrosOf(request, estimate, settings);
+    const taskId = request.subject?.type === "task" && typeof request.subject.id === "string" && request.subject.id !== "" ? request.subject.id : undefined;
+    // L2-5 (b): the task's cap (the install's, or its project's own per-task limit when lower). A limit that cannot be read refuses.
+    let taskCap: { micros: number; project: boolean } = { micros: settings.taskCapMicros, project: false };
+    if (taskId !== undefined) {
+      try { taskCap = await taskCapOf({ store, settings, projectTaskCap: options.projectTaskCap }, companyId, taskId, request.projectName); }
+      catch { return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] }; }
+    }
+    const asked = holdMicrosOf(request, estimate, settings, taskCap.micros);
     // Within a cap: spend plus what is held AT MOST the cap. A task's booked spend holding nothing more needs it BELOW the task cap; the day holding nothing more (a machine start of work
     // already admitted, whose own hold may be what fills the day) needs it at most AT the day cap.
     const fits = (spent: number, cap: number): boolean => (asked === 0 ? spent < cap : spent + asked <= cap);
@@ -163,7 +206,6 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     const load = await readDayLoad(store, companyId, day);
     if (load === "unknown") return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
     if (!dayFits(load)) return { decision: refuse("company_day_cap", COMPANY_DAY_CAP_REACHED), items: [] };
-    const taskId = request.subject?.type === "task" && typeof request.subject.id === "string" && request.subject.id !== "" ? request.subject.id : undefined;
     // A task start's hold is the task's own: the task's booked usage draws it down (the total names it).
     const ownsHold = asked > 0 && request.action === "task.start" && taskId !== undefined;
     const reservationId = asked > 0 ? reservationIdOf(companyId, request.idempotencyKey) : undefined;
@@ -173,9 +215,9 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
     if (taskId !== undefined) {
       const task = await ledger.taskCost(companyId, taskId);
       if (task.unpricedEntries > 0 || (task.currency !== undefined && task.currency !== "USD")) return { decision: refuse("spend_unknown", SPEND_UNKNOWN), items: [] };
-      if (!fits(task.micros, settings.taskCapMicros)) return { decision: refuse("task_cap", TASK_CAP_REACHED), items: [] };
+      if (!fits(task.micros, taskCap.micros)) return { decision: refuse("task_cap", taskCap.project ? PROJECT_TASK_CAP_REACHED : TASK_CAP_REACHED), items: [] };
       const totalKey = { pk: costPartition(companyId, taskId), sk: "TOTAL" };
-      const underCap = when.or(when.absent(), when.and(holdOn("micros", settings.taskCapMicros), when.eq("unpricedEntries", 0)));
+      const underCap = when.or(when.absent(), when.and(holdOn("micros", taskCap.micros), when.eq("unpricedEntries", 0)));
       items.push(ownsHold
         ? {
           kind: "update", key: totalKey, condition: underCap,
@@ -213,8 +255,14 @@ export function createHostedAdmission(options: HostedAdmissionOptions): Admissio
         if (typeof request.companyId !== "string" || !isAllowed(request.companyId)) return refuse("company_not_allowed", COMPANY_NOT_ALLOWED);
         const taskId = request.subject?.type === "task" && typeof request.subject.id === "string" && request.subject.id !== "" ? request.subject.id : undefined;
         if (taskId === undefined) return refuse("spend_unknown", SPEND_UNKNOWN);
-        const state = await runSpendState({ store, ledger, settings, now: options.now }, request.companyId, taskId);
-        return state === "within" ? { allowed: true } : runStopRefusal(state);
+        const state = await runSpendState({ store, ledger, settings, now: options.now, projectTaskCap: options.projectTaskCap }, request.companyId, taskId, request.projectName);
+        if (state === "within") return { allowed: true };
+        // The project's own limit was the one reached: its words say who can raise it.
+        if (state === "task_cap" && options.projectTaskCap !== undefined) {
+          const cap = await taskCapOf({ store, settings, projectTaskCap: options.projectTaskCap }, request.companyId, taskId, request.projectName).catch(() => undefined);
+          if (cap?.project === true) return refuse("task_cap", PROJECT_TASK_CAP_REACHED);
+        }
+        return runStopRefusal(state);
       }
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const earlier = await heldBefore(request);
@@ -259,11 +307,12 @@ export type RunSpendState = "within" | SpendStopCode;
  *     spends there was promised to it when it started, so another task's hold never stops it);
  *   - spend that cannot be read as dollars (the task's or the day's), or a read that fails: `spend_unknown` (fails closed).
  */
-export async function runSpendState(deps: { store: DocumentStore; ledger: Pick<CostLedger, "taskCost">; settings: HostedAdmissionSettings; now: () => Date }, companyId: string, taskId: string): Promise<RunSpendState> {
+export async function runSpendState(deps: { store: DocumentStore; ledger: Pick<CostLedger, "taskCost">; settings: HostedAdmissionSettings; now: () => Date; projectTaskCap?: ProjectTaskCap | undefined }, companyId: string, taskId: string, projectName?: string): Promise<RunSpendState> {
   try {
     const task = await deps.ledger.taskCost(companyId, taskId);
     if (task.unpricedEntries > 0 || (task.currency !== undefined && task.currency !== "USD")) return "spend_unknown";
-    if (task.micros >= deps.settings.taskCapMicros) return "task_cap";
+    // L2-5 (b): the task's cap is its project's own per-task limit when that is lower (read now, so a lowered limit stops the run at its next booking); unreadable is spend unknown.
+    if (task.micros >= (await taskCapOf(deps, companyId, taskId, projectName)).micros) return "task_cap";
     const load = await readDayLoad(deps.store, companyId, utcDayOf(deps.now()));
     if (load === "unknown") return "spend_unknown";
     if (load < deps.settings.companyDayCapMicros) return "within";
@@ -456,6 +505,8 @@ export interface HostedSecurityInputs {
   callbackSigningKey?: string;
   /** The root wires the per-run stop (see `HostedAdmissionOptions.runStopWired`). */
   runStopWired?: boolean;
+  /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
+  projectTaskCap?: ProjectTaskCap | undefined;
 }
 
 /**
@@ -472,7 +523,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
         if ("problem" in read) throw new Error(`the core engine's admission cannot be built: ${read.problem}`);
         const store = registry.require("storage");
         const ledger = createHostedLedger({ store, metering: registry.require("metering"), now: context.now });
-        return createHostedAdmission({ settings: read.settings, store, ledger, now: context.now, ...(inputs.runStopWired === true ? { runStopWired: true } : {}) });
+        return createHostedAdmission({ settings: read.settings, store, ledger, now: context.now, ...(inputs.runStopWired === true ? { runStopWired: true } : {}), ...(inputs.projectTaskCap === undefined ? {} : { projectTaskCap: inputs.projectTaskCap }) });
       },
     }),
     coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: OWNER, create: () => createHostedIdentity(inputs.identity) }),

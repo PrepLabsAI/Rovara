@@ -162,14 +162,14 @@ export async function relayCheck(deps: TaskFlowDeps, started: Pick<StartedCheck,
  * Starts the project's own check at its latest revision. A repeat of the request answers the first check. A check already running for this revision is not started again (`WORKSPACE_BUSY`).
  * The project's `setupCheck` mark is written in the start's transaction and holds only while the mark is the one the start read.
  */
-export async function startProjectSetupCheck(deps: TaskFlowDeps, input: { project: string; requestId: string; startedBy: string }): Promise<{ workspaceId: string; duplicate: boolean }> {
+export async function startProjectSetupCheck(deps: TaskFlowDeps, input: { project: string; requestId: string; startedBy: string; /** A start by the project's system owner keeps its request ids in a namespace of its own, so no person's request id can ever be the system's (L4-P1). */ system?: true }): Promise<{ workspaceId: string; duplicate: boolean }> {
   const latest = await deps.projects.latest(input.project);
   if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${input.project}\` doesn't exist`);
   if (latest.archived === true) throw agentXError("PROJECT_ARCHIVED", `project \`${input.project}\` is archived; unarchive it to start new work`);
   const metaKey = projectMetaKey(deps.companyId, input.project);
   const meta = await deps.store.get(metaKey);
   const seen = meta?.["setupCheck"] as SetupCheckMark | undefined;
-  const requestKey: DocumentKey = { pk: metaKey.pk, sk: `SETUP_CHECK_REQUEST#${input.requestId}` };
+  const requestKey: DocumentKey = { pk: metaKey.pk, sk: `SETUP_CHECK_REQUEST#${input.system === true ? "system#" : ""}${input.requestId}` };
   const replay = await deps.store.get(requestKey);
   if (replay !== undefined) {
     if (replay["by"] !== input.startedBy || typeof replay["workspaceId"] !== "string") throw agentXError("IDEMPOTENCY_CONFLICT", "this request id was already used for another check; use a new one");

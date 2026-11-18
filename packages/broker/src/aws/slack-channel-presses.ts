@@ -32,7 +32,7 @@ import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.j
 import type { SlackIngressLog } from "./slack-ingress.js";
 import { queueItemIdentity, type ChannelActionSurface } from "./channel-ingress.js";
 import { requiredEnvironment } from "./lambda.js";
-import { slackChannelTransport } from "./slack-channel-router.js";
+import { channelItemOnInstallTeam, slackChannelTransport } from "./slack-channel-router.js";
 import { threadPendingCounter } from "./slack-ingress.js";
 import {
   ADMIN_CHANGE_CANCEL_RECEIVED_TEXT, ADMIN_CHANGE_PRESS_FAILED_TEXT, ADMIN_CHANGE_RECEIVED_TEXT, awsAdminChangePress, awsWorkflowSlackHandlers, chatGptActionHandler, createSlackPressDispatcher,
@@ -162,6 +162,12 @@ export function slackCompanyActionSurface(deps: SlackCompanyDependencies, next: 
       return await next(action, context);
     } catch { return refuse(new SlackWorkspaceRefused().message); }
   };
+}
+
+/** DEC 254y(3), L2-2 PR 18e: two press surfaces: the install's team (the presser's, and the conversation's where there is one) keeps today's; anything else goes to the company surface. */
+export function splitChannelActionSurfaceByTenant(legacy: ChannelActionSurface, company: ChannelActionSurface | undefined, legacyTeamId: string): ChannelActionSurface {
+  if (company === undefined) return legacy;
+  return (action, context) => (channelItemOnInstallTeam(action, legacyTeamId, false) ? legacy : company)(action, context);
 }
 
 export function createAwsSlackChannelPresses(company: SlackCompanyDependencies = {}): ChannelActionSurface {

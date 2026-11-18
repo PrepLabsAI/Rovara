@@ -6,6 +6,7 @@
 //      does not happen: a sink that stages nothing still writes the receipt, a transaction that fails writes nothing.
 //   2. The person's chat links in this company (both rows of each link; the actor row only while it still names this person), their notification settings and their last-sent row.
 //   3. The learning data (`eraseLearning`, REQUIRED: a wiring that forgets it fails, it never reads as "nothing to erase").
+//   3b. The project wiki (`eraseWiki`, REQUIRED the same way; lead 4 W2, wiki review fix 7): the person's notes and saved answer records go, their "Mark wrong" reasons are removed.
 //   4. The evidence of the person's tasks in this company: the person's task index (`DEVELOPER#<person>` / `TASK#...`, the tasks they started) -> each task's record -> its owner key and workspace ->
 //      the two evidence prefixes (`evidencePrefixesOf`) -> EVERY stored version under them (DEC 212: current objects, non-current versions and delete markers, `deleteEveryVersion`).
 //
@@ -28,7 +29,7 @@ import { evidencePrefixesOf } from "../proof/evidence-erase.js";
 import { taskKey } from "../../developer/task-records.js";
 import { rowInCompany } from "../../developer/company-rows.js";
 import { prefsKey } from "../notify/prefs.js";
-import { notifySentKey } from "../notify/attention.js";
+import { notifySentKey } from "../notify/attention.js"; import { eraseInboxRows } from "../notify/inbox-rows.js";
 
 /** A person id as a key part: letters, digits, `_`, `.` and `-`, never `#`, `|`, a space or a newline. */
 const PERSON_ID = /^[A-Za-z0-9_.-]{1,100}$/u;
@@ -48,12 +49,16 @@ export interface PersonEraseDeps {
   audit: Pick<AuditSink, "stage">;
   /** Clears the person's learning data in every project of the company. REQUIRED; rejects if it could not. A test with none passes `noLearningToErase`. */
   eraseLearning: (companyId: string, personId: string) => Promise<unknown>;
+  /** Clears the person's words from the project wiki in every project of the company (notes, "Mark wrong" reasons, saved answer records). REQUIRED; rejects if it could not. A test with none passes `noWikiToErase`. */
+  eraseWiki: (companyId: string, personId: string) => Promise<unknown>;
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
 
 /** For a test or an install with no learning data: the hook that erases nothing. */
 export const noLearningToErase = async (): Promise<void> => undefined;
+/** For a test or an install with no wiki: the hook that erases nothing. */
+export const noWikiToErase = async (): Promise<void> => undefined;
 
 export interface PersonEraseInput {
   companyId: string;
@@ -127,6 +132,7 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
   if (!isErasablePersonId(input.by)) throw agentXError("CONFIG_INVALID", "That is not a person's id.");
   if (typeof input.requestId !== "string" || !REQUEST_ID.test(input.requestId)) throw agentXError("CONFIG_INVALID", "The request id is not valid.");
   if (typeof deps.eraseLearning !== "function") throw new Error("the learning erase hook is not wired");
+  if (typeof deps.eraseWiki !== "function") throw new Error("the wiki erase hook is not wired");
   const log = deps.log ?? (() => undefined);
   const started = deps.now();
   const erasedAt = new Date(started).toISOString();
@@ -162,7 +168,7 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
     links = await eraseChatLinks(deps.store, companyId, personId);
     // Their notification settings (contact targets, time zone, unsubscribe) and what was last sent to them, in this company.
     await deps.store.delete({ key: prefsKey(companyId, personId) });
-    await deps.store.delete({ key: notifySentKey(companyId, personId) });
+    await deps.store.delete({ key: notifySentKey(companyId, personId) }); await eraseInboxRows(deps.store, companyId, personId);
   } catch (error) {
     log({ event: "person_erase.links_failed", level: "error", error: errorName(error) });
     throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their chat links or notification settings could not be removed just now. Send the same request again.");
@@ -174,6 +180,14 @@ export async function erasePerson(deps: PersonEraseDeps, input: PersonEraseInput
   } catch (error) {
     log({ event: "person_erase.learning_failed", level: "error", error: errorName(error) });
     throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their suggested-rule data could not be cleared just now. Send the same request again.");
+  }
+
+  // ---- 3b. the project wiki
+  try {
+    await deps.eraseWiki(companyId, personId);
+  } catch (error) {
+    log({ event: "person_erase.wiki_failed", level: "error", error: errorName(error) });
+    throw agentXError("RUNTIME_UNAVAILABLE", "The person is erased, but their notes in the project wiki could not be cleared just now. Send the same request again.");
   }
 
   // ---- 4. evidence
@@ -311,9 +325,9 @@ export async function walkPersonEvidence(deps: Pick<PersonEraseDeps, "store" | "
 /**
  * The scheduled run: finishes the owed walks of one company, oldest try first, each with a small share of the budget. Answers how many finished and how many are still owed.
  * With `eraseLearning` (a deployed install's lessons and team record erase), each owed person's learning data is erased again first (it is idempotent): a request whose learning step
- * failed after its receipt was written is finished here too. When it fails, that person's walk is not run, so the pending row stays and the next run tries both again.
+ * failed after its receipt was written is finished here too. When it fails, that person's walk is not run, so the pending row stays and the next run tries both again. `eraseWiki` is run the same way.
  */
-export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "objects" | "now" | "log"> & Partial<Pick<PersonEraseDeps, "eraseLearning">>, companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> {
+export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "objects" | "now" | "log"> & Partial<Pick<PersonEraseDeps, "eraseLearning" | "eraseWiki">>, companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }> {
   const company = OrgIdSchema.parse(companyId);
   const ends = deps.now() + Math.max(0, budgetMs);
   const pending: StoredDocument[] = [];
@@ -331,6 +345,7 @@ export async function resumePersonErases(deps: Pick<PersonEraseDeps, "store" | "
     if (!isErasablePersonId(personId) || deps.now() >= ends) { owed += 1; continue; }
     try {
       if (deps.eraseLearning !== undefined) await deps.eraseLearning(company, personId);
+      if (deps.eraseWiki !== undefined) await deps.eraseWiki(company, personId);
       const report = await walkPersonEvidence(deps, company, personId, Math.min(ends, deps.now() + PERSON_ERASE_RESUME_SHARE_MS));
       if (report.complete) finished += 1; else owed += 1;
     } catch (error) {

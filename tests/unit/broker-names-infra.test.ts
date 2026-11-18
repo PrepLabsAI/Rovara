@@ -1,6 +1,8 @@
 // ENV-ROOM, the infrastructure side (infra/lib/broker-names.ts): a named environment's broker gets its names and settings packed; a literal or a parameter that could carry a
 // separator is refused at synthesis, and a derived variable whose derivation differs from the value the infrastructure has stops synthesis. The legacy install passes each whole.
 import { App, CfnParameter, Stack, aws_lambda as lambda } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { decodeBrokerNamesParameter } from "../../packages/contracts/src/broker-environment.js";
 import { describe, expect, it } from "vitest";
 import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "../../infra/lib/broker-names.js";
 import { environmentNaming, legacyNaming } from "../../infra/lib/naming.js";
@@ -12,6 +14,23 @@ function broker(): { stack: Stack; fn: lambda.Function } {
 }
 const variablesOf = (stack: Stack, fn: lambda.Function): Record<string, unknown> =>
   (stack.resolve((fn.node.defaultChild as lambda.CfnFunction).environment) as { variables: Record<string, unknown> }).variables;
+/**
+ * Batch 12 (#863, ENV-ROOM 2): a named broker's AGENTX_NAMES list is written to its one SSM String parameter, not the environment; the environment holds the parameter's name and
+ * the revision, which must equal the one in the parameter's value. Returns the list after checking all of that.
+ */
+function namesOf(stack: Stack, fn: lambda.Function): unknown {
+  const variables = variablesOf(stack, fn);
+  expect(variables).not.toHaveProperty("AGENTX_NAMES");
+  expect(variables.AGENTX_NAMES_PARAMETER).toBe("/agentx/staging/broker-names");
+  const parameters = Object.values((Template.fromStack(stack).toJSON() as { Resources: Record<string, { Type: string; Properties: { Name: string; Value: unknown } }> }).Resources)
+    .filter((resource) => resource.Type === "AWS::SSM::Parameter");
+  expect(parameters).toHaveLength(1);
+  expect(parameters[0]!.Properties.Name).toBe("/agentx/staging/broker-names");
+  const decoded = decodeBrokerNamesParameter(parameters[0]!.Properties.Value as string);
+  if ("error" in decoded) throw new Error(decoded.error);
+  expect(variables.AGENTX_NAMES_REVISION).toBe(decoded.revision);
+  return decoded.list;
+}
 
 describe("addBrokerName / addBrokerSetting", () => {
   it("passes the whole value in the legacy install, and packs the bare one in a named environment with the account", () => {
@@ -24,14 +43,14 @@ describe("addBrokerName / addBrokerSetting", () => {
     const variables = variablesOf(named.stack, named.fn);
     expect(variables).not.toHaveProperty("STATE_TABLE_NAME");
     expect(variables.AGENTX_ACCOUNT_ID).toEqual({ Ref: "AWS::AccountId" });
-    expect(variables.AGENTX_NAMES).toEqual("ts=my-table");
+    expect(namesOf(named.stack, named.fn)).toEqual("ts=my-table");
     expect(variables.AGENTX_SETTINGS).toEqual("ss=enabled");
   });
 
   it("gives an empty variable, not an empty Fn::Join, when nothing is packed in it", () => {
     const { stack, fn } = broker();
     addBrokerSetting(fn, environmentNaming("staging"), "signInSlack", "enabled");
-    expect(variablesOf(stack, fn).AGENTX_NAMES).toBe("");
+    expect(namesOf(stack, fn)).toBe("");
   });
 
   it("refuses a literal that could carry a separator, and a name added twice", () => {

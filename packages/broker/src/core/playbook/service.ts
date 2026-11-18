@@ -31,11 +31,11 @@ import { designReviewFileRefusal, readProjectPlaybook, syncProjectPlaybook, type
 import { computeHowWeWork } from "./view.js";
 
 /** The workflow modes a coding operation runs in. */
-export type PlaybookMode = "UNDERSTAND" | "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "SETUP_DRAFT" | "SETUP_AGENT" | "SPEC_WRITE";
+export type PlaybookMode = "UNDERSTAND" | "PLAN" | "PLAN_CRITIQUE" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | "SETUP_DRAFT" | "SETUP_AGENT" | "WIKI_BUILD" | "SPEC_WRITE";
 
 // Understand is not a recipe step: it runs with the plan step's settings (so a recipe cannot remove the question-asking). SETUP_DRAFT and SPEC_WRITE are read-only looks at the code and run as the plan step too.
 const KIND_OF_MODE: Record<PlaybookMode, CodingStepKind> = {
-  UNDERSTAND: "plan", PLAN: "plan", SETUP_DRAFT: "plan", SETUP_AGENT: "plan", SPEC_WRITE: "plan", PLAN_CRITIQUE: "plan_critic", IMPLEMENT: "build", REVIEW: "review", CHECKS: "check", FEEDBACK_REVIEW: "pull_request",
+  UNDERSTAND: "plan", PLAN: "plan", SETUP_DRAFT: "plan", SETUP_AGENT: "plan", WIKI_BUILD: "plan", SPEC_WRITE: "plan", PLAN_CRITIQUE: "plan_critic", IMPLEMENT: "build", REVIEW: "review", CHECKS: "check", FEEDBACK_REVIEW: "pull_request",
 };
 
 /** The recipe step an operation is: the first step of the kind its mode runs; undefined when the recipe has none. */

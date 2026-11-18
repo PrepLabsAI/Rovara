@@ -11,11 +11,11 @@
 // under the variable the broker's code has always read, so no reader changes and none is missed. URLs and ARNs are built from the region Lambda gives every function (AWS_REGION)
 // and the account (AGENTX_ACCOUNT_ID).
 //
-// Nothing here calls AWS. A variable that is already set is never replaced, and an environment without AGENTX_NAMES or AGENTX_SETTINGS (the legacy install, which passes everything
+// Nothing here calls AWS (since ENV-ROOM 2 the names may come from an SSM parameter, which broker-handler.ts reads into AGENTX_NAMES before this runs). A variable that is already set is never replaced, and an environment without AGENTX_NAMES or AGENTX_SETTINGS (the legacy install, which passes everything
 // whole, and every test that sets the variables itself) is left exactly as it is. Anything that cannot be read throws, in fixed words that name the variable and code but never a
 // value, so a broker that cannot name what it needs does not start.
 import {
-  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
+  BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, BROKER_SWITCH_FLAG_VALUES, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
   decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
 } from "@agentx/contracts";
 
@@ -139,11 +139,20 @@ export function hydrateBrokerSettings(env: MutableEnvironment): void {
   // The settings first: they are plain values the rest does not need, and a bad list stops the broker before anything is built from it.
   for (const { spec, value } of brokerSettingsFromEnvironment(env)) {
     // A host setting (the core's model gateway) becomes its https origin; empty stays empty, so an unset gateway reads as unset.
-    if (!isSet(env[spec.variable])) env[spec.variable] = spec.httpsOrigin === true && value !== "" ? `https://${value}` : value;
+    if (isSet(env[spec.variable])) continue;
+    if (spec.switchFlag === true) {
+      // DEC 254zg (a): "1" or "0" only; anything else stops the broker rather than guess the switch.
+      const flag = Object.hasOwn(BROKER_SWITCH_FLAG_VALUES, value) ? BROKER_SWITCH_FLAG_VALUES[value] : undefined;
+      if (flag === undefined) throw new Error(`${BROKER_SETTINGS_VARIABLE} has no switch flag for ${spec.code} (${spec.variable})`);
+      env[spec.variable] = flag;
+    } else env[spec.variable] = spec.httpsOrigin === true && value !== "" ? `https://${value}` : value;
   }
 }
 
 export function hydrateBrokerEnvironment(env: MutableEnvironment): void {
+  // ENV-ROOM 2: where the names are in a parameter, broker-handler.ts reads them into AGENTX_NAMES before this runs. A broker loaded any other way would start with no names
+  // and with nothing derived, and fail only where each is first used: refuse here, at once.
+  if (env[BROKER_NAMES_PARAMETER_VARIABLE] !== undefined && env[BROKER_NAMES_VARIABLE] === undefined) throw new Error(`${BROKER_NAMES_PARAMETER_VARIABLE} is set but the names were not read from it before the broker loaded`);
   hydrateBrokerSettings(env);
   // A named broker always has AGENTX_NAMES (with its account); an empty list still means a packed broker, so the derived variables are still built.
   if (env[BROKER_NAMES_VARIABLE] === undefined) return;

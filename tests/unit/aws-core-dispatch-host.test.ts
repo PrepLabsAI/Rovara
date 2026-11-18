@@ -1,4 +1,6 @@
-import { agentModelIdentity } from "@agentx/contracts";
+import { agentModelIdentity, TestEnvironmentBodySchema, testEnvDigest } from "@agentx/contracts";
+import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 // Engine host (lane E2, step 4): the dispatcher Lambda as the host of the core's dispatch, over Code's EC2 session machines. Ported from the monolith's host test.
@@ -314,17 +316,18 @@ describe("the dispatcher's router", () => {
 describe("the core on the dispatcher", () => {
   const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
     [CORE_ENGINE_VARIABLE]: `on:${COMPANY_A}`, CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
-    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State", CALLBACK_SIGNING_KEY: "k".repeat(48),
+    CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State",
     ARTIFACT_BUCKET_NAME: "artifacts", AWS_REGION: "us-west-2", EC2_WORKER_SUBNETS: "us-west-2a=subnet-0aaaaaaaaaaaaaaaa", EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-0123456789abcdef0", ...overrides,
   });
-  const inputs = (environment: NodeJS.ProcessEnv) => {
+  // The callback signing key is an input (the dispatcher reads it from Secrets Manager), never part of the environment.
+  const inputs = (environment: NodeJS.ProcessEnv, callbackSigningKey = "k".repeat(48)) => {
     const world = createSessionMachinesWorld();
     let clock = Date.now();
     const log = vi.fn();
     return {
       world,
       inputs: {
-        env: environment, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
+        env: environment, callbackSigningKey, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
         machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
         changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
@@ -343,10 +346,13 @@ describe("the core on the dispatcher", () => {
   });
 
   it("refuses to build without the core queue's URLs, the State table, the callback signing key, the artifacts bucket or the workers' placement, in fixed words", () => {
-    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "CALLBACK_SIGNING_KEY", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
+    for (const missing of ["CORE_DISPATCH_QUEUE_URL", "CORE_DISPATCH_DEAD_LETTER_URL", "STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "EC2_WORKER_SUBNETS", "EC2_WORKER_LAUNCH_TEMPLATE_ID"]) {
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: undefined })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
       expect(() => createDispatcherCoreHost(inputs(env({ [missing]: " " })).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     }
+    // The key is an input, not an environment value: none (or a blank one) refuses, and a plain CALLBACK_SIGNING_KEY in the environment is not taken for it.
+    for (const key of ["", " "]) expect(() => createDispatcherCoreHost(inputs(env(), key).inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
+    expect(() => createDispatcherCoreHost(inputs(env({ CALLBACK_SIGNING_KEY: "k".repeat(48) }), "").inputs)).toThrow(DISPATCHER_CORE_NOT_CONFIGURED);
     // A malformed placement refuses too, before anything runs (and its value is not echoed).
     const bad = (() => { try { createDispatcherCoreHost(inputs(env({ EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-secret-ish; rm" })).inputs); return undefined; } catch (error) { return error as Error; } })();
     expect(bad?.message).toBe(DISPATCHER_CORE_NOT_CONFIGURED);
@@ -364,6 +370,39 @@ describe("the core on the dispatcher", () => {
       expect(runtime.flow.deps.learned).toBe(readers.get(company));
     }
     expect(declared.mock.calls.map((call) => call[1])).toEqual([COMPANY_A, COMPANY_B]);
+  });
+
+  it("DEC 254zm: each company's runtime is told its OWN projects' approved test environments (a step's plan), never another company's", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const built = createDispatcherCoreHost({ ...made.inputs, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
+    const a = await built.app.runtimeFor(COMPANY_A);
+    const b = await built.app.runtimeFor(COMPANY_B);
+    expect(a.flow.deps.testEnvironment).toBeDefined();
+    expect(b.flow.deps.testEnvironment).toBeDefined();
+    // Company B approved an environment for its project "shared-name"; company A's runtime reads only A's rows for the same project name.
+    const body = TestEnvironmentBodySchema.parse({
+      tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: [], checks: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 }, kind: "test" }] }],
+      roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [],
+      data: { seeds: [], generator: "faker_seeded", seed: 7 }, accounts: [], prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
+    });
+    const digest = testEnvDigest(body);
+    await b.flow.deps.store.put({ item: documentOf({ ...testEnvRevisionKey(COMPANY_B, "shared-name", 1), entityType: "TEST_ENV_REVISION", orgId: COMPANY_B, project: "shared-name", revision: 1, approvedAt: "2026-11-09T09:00:00.000Z", approvedBy: "owner", digest, requestId: "r1", lessSafe: [], environment: body }) });
+    await b.flow.deps.store.put({ item: documentOf({ ...testEnvLatestKey(COMPANY_B, "shared-name"), entityType: "TEST_ENV_LATEST", orgId: COMPANY_B, project: "shared-name", revision: 1, digest }) });
+    expect(await a.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).toEqual({});
+    expect(await b.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).not.toEqual({});
+  });
+
+  it("lead 4 A1: each company's runtime on the dispatcher carries its own wiki reader, which gives a step nothing for another company's workspace or when no switch is on", async () => {
+    const made = inputs(env({ [CORE_ENGINE_VARIABLE]: "on" }));
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const built = createDispatcherCoreHost({ ...made.inputs, flow: () => ({ standingInstructions: null, modelAccess: null, learned: null }), extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)) });
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(typeof a.flow.deps.wiki).toBe("function");
+    expect(a.flow.deps.wiki).not.toBe(b.flow.deps.wiki);
+    const step = { project: "alpha", taskId: "11111111-1111-4111-8111-111111111111", operationId: "aaaaaaaa-1111-4111-8111-111111111111", workflowMode: "PLAN", repositories: ["web"] };
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_B })).toEqual({});
+    expect(await a.flow.deps.wiki!({ ...step, companyId: COMPANY_A })).toEqual({});
   });
 
   it("builds no company's runtime until every flow input a worker job carries is declared, and places the worker on the install's own workers only", async () => {

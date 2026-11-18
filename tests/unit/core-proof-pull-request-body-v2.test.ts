@@ -6,6 +6,7 @@ import { EVIDENCE_COMPACT_POINTER, NEWER_EVIDENCE_WORDS, readEvidencePack, type 
 import { expectLinearScaling } from "../support/scaling.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { rovaraPullRequestBody, rovaraStatusLines, PULL_REQUEST_BODY_MAX_BYTES, type PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
+import { DRAWER_LEFT_OUT } from "../../packages/broker/src/core/proof/pull-request-layout.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceV2Writer } from "../../packages/broker/src/core/proof/evidence-pack.js";
 import { evidenceV2Lines } from "../../packages/broker/src/core/proof/evidence-v2-lines.js";
 import type { ChangedFileEntry } from "../../packages/broker/src/core/proof/verification-report.js";
@@ -32,30 +33,37 @@ const ORIGIN = "https://rovara.example";
 const evidence = (over: Record<string, unknown> = {}) => ({ pack: v1Pack(), mode: "link" as const, origin: ORIGIN, taskUrl: `${ORIGIN}/tasks/1`, ...over });
 const context = (over: Partial<PullRequestBodyContext> = {}, evidenceOver: Record<string, unknown> = {}): PullRequestBodyContext => ({ proof: { evidence: evidence({ read: v2Read(), ...evidenceOver }) }, changedFiles: { files: [{ repository: "app", path: "src/a.ts", added: 2, removed: 1 }], complete: true }, repositoryKnownPrivate: true, ...over });
 const status = (ctx: PullRequestBodyContext) => rovaraStatusLines(workflow(), ctx, () => ["- no findings"]);
+/** L4-C: where the Evidence block now is: the text of the "Checks" drawer (the renderer's block without its heading, for a private repository with the version 2 writer; the counts-only AI lines for a public one). */
+const checksDrawer = (lines: readonly string[] | string): string => {
+  const text = typeof lines === "string" ? lines : lines.join("\n");
+  const at = text.indexOf("<summary>Checks: ");
+  return at === -1 ? "" : text.slice(at, text.indexOf("</details>", at));
+};
 const body = (ctx: PullRequestBodyContext) => rovaraPullRequestBody({ summary: ["Retry the payment"], fallbackTitle: "t", workflow: workflow(), context: ctx, reviewLines: () => ["- no findings"], pageUrl: undefined });
 
 describe("the writer version is a parameter and the default is version 1", () => {
   it("a v2 pack in the context changes nothing while the writer is not 2: the description is byte for byte what a v1 pack gives", () => {
     const v1Only = status({ ...context(), proof: { evidence: evidence() } });
     for (const ctx of [context(), context({ evidenceWriter: 1 })]) expect(status(ctx)).toEqual(v1Only);
-    expect(v1Only.join("\n")).not.toContain("## Evidence");
+    expect(v1Only.join("\n")).not.toContain("Run by Rovara, not sealed");
   });
-  it("version 2 adds an Evidence block, first in Rovara's block, led by the renderer's first line", () => {
+  it("version 2 adds the Evidence block to the Checks drawer, led by the renderer's first line", () => {
     const lines = status(context({ evidenceWriter: 2 }));
-    expect(lines[0]).toBe("## Evidence");
-    expect(lines[1]).toBe("Verified · Run by Rovara, not sealed");
-    expect(lines[2]).toBe("");
-    expect(lines).toContain("Checked in the agent's sandbox (not sealed)");
-    expect(lines.indexOf("## Evidence")).toBeLessThan(lines.indexOf("## What changed"));
-    expect(lines.join("\n")).toContain("- Tests: pytest -q: passed, 4 tests (1 new)");
+    const drawer = checksDrawer(lines);
+    // No Testing view here (vx is off), so the result is in the fixed words of a task with none, never "Verified".
+    expect(lines[0]!.startsWith("## Checks passed · Low risk · ")).toBe(true);
+    expect(drawer).toContain("Verified · Run by Rovara, not sealed\n\nChecked in the agent's sandbox (not sealed)");
+    expect(drawer).toContain("- Tests: pytest -q: passed, 4 tests (1 new)");
+    expect(drawer).not.toContain("## Evidence");
   });
-  it("golden: the same fixture under the v1 writer and the v2 writer", () => {
+  it("golden: the same fixture under the v1 writer and the v2 writer differs in the Checks drawer only", () => {
     const v1Text = status(context()).join("\n");
     const v2Text = status(context({ evidenceWriter: 2 })).join("\n");
-    expect(v2Text.startsWith("## Evidence\nVerified · Run by Rovara, not sealed\n\nChecked in the agent's sandbox (not sealed)\n\nChecks: 1 (1 passed)\n- Tests: pytest -q: passed, 4 tests (1 new)\n\n")).toBe(true);
-    // Everything v1 said is still said, after the block: the v2 block is added, it takes none of the v1 sections away.
     expect(v2Text).not.toBe(v1Text);
-    expect(v2Text.endsWith(v1Text)).toBe(true);
+    expect(v2Text.replace(checksDrawer(status(context({ evidenceWriter: 2 }))), "").length).toBeGreaterThan(0);
+    // Everything the v1 description said above the fold and in the other drawers is still said, the same.
+    const outside = (text: string) => text.replace(/<summary>Checks: [\s\S]*?<\/details>/u, "");
+    expect(outside(v2Text)).toBe(outside(v1Text));
   });
 });
 
@@ -65,7 +73,7 @@ describe("old data and unknown parts", () => {
     expect(status(ctx)).toEqual(status({ ...context(), proof: { evidence: evidence() } }));
   });
   it("no pack at all with the v2 writer on is the description without evidence", () => {
-    expect(status({ ...context({ evidenceWriter: 2 }), proof: undefined }).join("\n")).not.toContain("## Evidence");
+    expect(status({ ...context({ evidenceWriter: 2 }), proof: undefined }).join("\n")).not.toContain("Run by Rovara");
   });
   it("a v2 pack with parts this build does not know says 'newer evidence' and still renders the rest", () => {
     const wire = JSON.parse(JSON.stringify(evidencePackV2Of(v1Pack(), writer))) as Record<string, unknown>;
@@ -78,11 +86,11 @@ describe("old data and unknown parts", () => {
   it("a v2 pack for other code is not shown, however well it parses", () => {
     const other = JSON.parse(JSON.stringify(evidencePackV2Of(v1Pack(), writer))) as { candidate: { digest: string } };
     other.candidate.digest = "d".repeat(64);
-    expect(status(context({ evidenceWriter: 2 }, { read: readEvidencePack(other) })).join("\n")).not.toContain("## Evidence");
+    expect(status(context({ evidenceWriter: 2 }, { read: readEvidencePack(other) })).join("\n")).not.toContain("Run by Rovara");
   });
   it("a pack that is only 'newer' or unreadable gives no block", () => {
     for (const read of [{ status: "newer", schemaVersion: 3 }, { status: "unreadable", reason: "core_invalid" }]) {
-      expect(status(context({ evidenceWriter: 2 }, { read })).join("\n")).not.toContain("## Evidence");
+      expect(status(context({ evidenceWriter: 2 }, { read })).join("\n")).not.toContain("Run by Rovara");
     }
   });
 });
@@ -91,14 +99,19 @@ describe("the flags and the weakening words are the shared ones, once", () => {
   const files: ChangedFileEntry[] = [{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }];
   it("the v2 block carries them, built from the description's own changed files, and the v1 flags block is not printed a second time", () => {
     const text = status(context({ evidenceWriter: 2, changedFiles: { files, complete: true } })).join("\n");
-    expect(text.match(/Rovara instruction files changed/gu)).toHaveLength(1);
-    expect(text.match(/Snapshot files changed/gu)).toHaveLength(1);
+    // Once above the fold (the list of things to check) and once in the Checks drawer's own block, in the same words; never as a separate flags block.
+    expect(text.match(/Rovara instruction files changed/gu)).toHaveLength(2);
+    expect(text.match(/Snapshot files changed/gu)).toHaveLength(2);
     expect(text).not.toContain("## Flags for the reviewer");
-    expect(text.indexOf("Rovara instruction files changed")).toBeLessThan(text.indexOf("Tests may be weaker:"));
+    expect(text.indexOf("Rovara instruction files changed")).toBeLessThan(text.indexOf("<details>"));
+    expect(text.indexOf("Snapshot files changed")).toBeLessThan(text.indexOf("<details>"));
   });
-  it("under the v1 writer the flags are still Rovara's own block at the top", () => {
+  it("under the v1 writer the flags are above the fold too, once, and the Checks drawer has no block of them", () => {
     const lines = status(context({ changedFiles: { files, complete: true } }));
-    expect(lines[0]).toBe("## Flags for the reviewer");
+    const text = lines.join("\n");
+    expect(text.match(/Rovara instruction files changed/gu)).toHaveLength(1);
+    expect(text.indexOf("Rovara instruction files changed")).toBeLessThan(text.indexOf("<details>"));
+    expect(text).not.toContain("## Flags for the reviewer");
   });
   it("a v2 pack the writer made with the files in it still shows them when the description has no file list", () => {
     const read = v2Read(v1Pack(), { ...writer, changedFiles: files });
@@ -120,16 +133,15 @@ describe("the Evidence block is printed only where the repository is known to be
     return { ...context({ evidenceWriter: 2, ...over }, { pack, read: v2Read(pack) }) };
   };
   it("a private repository gets the block", () => {
-    expect(status(withNames({ repositoryKnownPrivate: true })).join("\n")).toContain("## Evidence");
+    expect(status(withNames({ repositoryKnownPrivate: true })).join("\n")).toContain("Verified · Run by Rovara, not sealed");
   });
   it.each([["public", false], ["unknown", undefined]])("a %s repository gets no block, no check label and no v2 text: the description is the v1 one", (_name, known) => {
     const ctx = withNames({ repositoryKnownPrivate: known });
     const text = status(ctx).join("\n");
-    expect(text).not.toContain("## Evidence");
     expect(text).not.toContain("jane.doe");
     expect(text).not.toContain("Run by Rovara, not sealed");
     expect(status(ctx)).toEqual(status({ ...ctx, evidenceWriter: 1 }));
-    expect(body(ctx)).not.toContain("## Evidence");
+    expect(body(ctx)).not.toContain("Run by Rovara, not sealed");
   });
 });
 
@@ -141,7 +153,6 @@ describe("a stored pack whose producer and level disagree is not shown as a Rova
     const read = readEvidencePack(wire);
     expect(read.status).toBe("v2");
     const text = status(context({ evidenceWriter: 2 }, { read })).join("\n");
-    expect(text).not.toContain("## Evidence");
     expect(text).not.toContain("Run by Rovara");
   });
   it("a laptop pack that is honest about itself (the CI still running) still shows, in the laptop words", () => {
@@ -161,8 +172,9 @@ describe("a proof that could not compare says so in the v2 block too (TE-B3)", (
     expect(v2.match(/Test weakening: could not compare/gu)).toHaveLength(1);
     expect(v2).toContain(LINE);
     expect(v2).not.toContain("## Flags for the reviewer");
-    expect(v2.indexOf(LINE)).toBeLessThan(v2.indexOf("## What changed"));
-    expect(status(withProof({})).join("\n")).toContain(`## Flags for the reviewer\n- ${LINE}`);
+    expect(v2.indexOf(LINE)).toBeLessThan(v2.indexOf("<details>"));
+    expect(status(withProof({})).join("\n")).toContain(`- ${LINE}`);
+    expect(status(withProof({})).join("\n").match(/Test weakening: could not compare/gu)).toHaveLength(1);
   });
   it("no proof context, or a proof that did compare, adds no line", () => {
     expect(status(context({ evidenceWriter: 2 })).join("\n")).not.toContain("Test weakening");
@@ -197,21 +209,21 @@ describe("untrusted text", () => {
     const pack = v1Pack(hostile);
     const text = status(context({ evidenceWriter: 2 }, { pack, read: v2Read(pack) })).join("\n");
     expect(text).not.toMatch(/https:\/\/evil|<img|@everyone|\u200b|\u202e|\]\(/u);
-    expect(text).toContain("## Evidence");
+    expect(text).toContain("Run by Rovara, not sealed");
   });
   it.each(["# heading", "> quote", "---", "```", "~~~"])("a label that starts with %s cannot open a heading, a quote, a rule or a fence", (start) => {
     const pack = v1Pack(`${start} injected`);
     const lines = status(context({ evidenceWriter: 2 }, { pack, read: v2Read(pack) }));
-    const block = lines.slice(0, lines.indexOf("## What changed"));
-    expect(block.filter((line) => /^(#|>|-{3,}|`{3}|~{3})/u.test(line)).length).toBe(1);
-    expect(block.filter((line) => line.startsWith("## ")).length).toBe(1);
+    // No line of the Checks drawer starts a heading, a quote, a rule or a fence, and the page has the one heading it always has.
+    expect(checksDrawer(lines).split("\n").filter((line) => /^(#|>|-{3,}|`{3}|~{3})/u.test(line))).toEqual([]);
+    expect(lines.filter((line) => line.startsWith("## ")).length).toBe(1);
   });
   it("a pack with a __proto__ key (at the top and in a check) renders, reports newer evidence and pollutes nothing", () => {
     const text = JSON.stringify(evidencePackV2Of(v1Pack(), writer)).replace(/^\{/u, '{"__proto__":{"polluted":true},').replace('"kind":"test"', '"__proto__":{"polluted":true},"kind":"test"');
     const read = readEvidencePack(JSON.parse(text));
     expect(read.status).toBe("v2");
     const out = status(context({ evidenceWriter: 2 }, { read })).join("\n");
-    expect(out).toContain("## Evidence");
+    expect(out).toContain("Run by Rovara, not sealed");
     expect(out).toContain(NEWER_EVIDENCE_WORDS);
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
@@ -228,7 +240,7 @@ describe("untrusted text", () => {
     };
     expectLinearScaling(renderWith, { n: 16_000, unitBytes: 2, label: "pull request body with a 1 MB label" });
     const text = renderWith(1_000_000)();
-    expect(text).toContain("## Evidence");
+    expect(text).toContain("Run by Rovara, not sealed");
     expect(text).toContain("rrrr");
     expect(text).not.toContain("z".repeat(500));
     expect(Buffer.byteLength(text, "utf8")).toBeLessThan(PULL_REQUEST_BODY_MAX_BYTES);
@@ -248,9 +260,13 @@ describe("size", () => {
     // With almost no room the block is the compact form, and the instruction-file flag is still there.
     const tight = rovaraStatusLines(workflow(), ctx, () => ["- no findings"], 2_500);
     const text = tight.join("\n");
-    expect(text).toContain(EVIDENCE_COMPACT_POINTER);
-    expect(text).toContain("Rovara instruction files changed");
-    expect(text).not.toContain("Checks: 64");
+    // The drawers' bodies point to the Check and the task page, and what a reader must see stays above the fold.
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(2_500);
+    // Even the smallest budget shows the compact form or the pointer, never the 64 checks one by one.
+    expect(text.includes(DRAWER_LEFT_OUT) || text.includes(EVIDENCE_COMPACT_POINTER)).toBe(true);
+    expect(text.indexOf("Rovara instruction files changed")).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf("Rovara instruction files changed")).toBeLessThan(text.indexOf("<details>"));
+    expect(text).not.toContain("Checks: 64 (");
   });
   it("the whole description with the v2 block stays under the cap", () => {
     expect(Buffer.byteLength(body(context({ evidenceWriter: 2 })), "utf8")).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
@@ -279,12 +295,10 @@ describe("AI evidence public and private descriptions", () => {
       expect(text).toContain("Eval counts: 1000 questions");
       expect(text.includes("CANARY")).toBe(repositoryKnownPrivate === true);
       if (repositoryKnownPrivate !== true) {
-        const start = text.indexOf("## Evidence");
-        const block = text.slice(start, text.indexOf("\n## ", start + 3)).trimEnd();
-        expect(block).toBe("## Evidence\nWorse on eval: 1 question broke\n\nAI checks\n\nEval: Worse on eval\n\nEval counts: 1000 questions; 1 broke; 0 newly fail; 0 newly pass; 0 flaky; 999 unchanged; 0 excluded\n\nReal-model run: Not run (not available yet)");
-        const aiStart = text.indexOf("## Evidence");
-        expect(text.slice(aiStart)).not.toContain("Checks by trust:");
-        expect(text.slice(aiStart)).not.toContain("Checked in a sealed round");
+        const drawer = checksDrawer(text);
+        expect(drawer).toContain("Worse on eval: 1 question broke\n\nAI checks\n\nEval: Worse on eval\n\nEval counts: 1000 questions; 1 broke; 0 newly fail; 0 newly pass; 0 flaky; 999 unchanged; 0 excluded\n\nReal-model run: Not run (not available yet)");
+        expect(drawer).not.toContain("Checks by trust:");
+        expect(drawer).not.toContain("Checked in a sealed round");
       }
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(PULL_REQUEST_BODY_MAX_BYTES);
     }
@@ -297,11 +311,12 @@ describe("AI evidence public and private descriptions", () => {
     const read = v2Read(v1Pack(), { ...writer, evalArtifact });
     for (const repositoryKnownPrivate of [false, undefined]) {
       const text = body(context({ evidenceWriter: 2, repositoryKnownPrivate }, { read }));
-      const start = text.indexOf("## Evidence");
-      const block = text.slice(start, text.indexOf("\n## ", start + 3));
+      const drawer = checksDrawer(text);
+      const block = drawer.slice(drawer.indexOf("AI checks"));
       expect(block).toContain(outcome === "not_run" ? "Eval: Not run." : "Eval: No regression measured (eval)");
-      expect(block.startsWith("## Evidence\nAI checks\n")).toBe(true);
-      expect(block).not.toMatch(/Verified|Checks:|Tests:|Change proof:|Dependencies:|below/u);
+      // A public repository gets the AI lines only (counts and labels): none of the private block's checks, tests, proof or dependency lines.
+      expect(drawer).not.toContain("Run by Rovara");
+      expect(block).not.toMatch(/Verified|Checks: \d|- Tests:|Change proof:|Dependencies:|below/u);
     }
   });
   it("shrinking never sacrifices the label, counts or the broken safety question", () => {

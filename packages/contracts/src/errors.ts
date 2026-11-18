@@ -124,6 +124,9 @@ export const AgentXErrorCodeSchema = z.enum([
   "SLACK_NOT_CONNECTED",
   "SLACK_CHANNEL_TAKEN",
   "SLACK_CHANNEL_REFUSED",
+  // Guided onboarding PR 7: the Linear workspace is already connected to another Rovara company (409), and the company's Linear connection is missing or needs reconnecting (409). Appended: no code changes meaning.
+  "LINEAR_WORKSPACE_TAKEN",
+  "LINEAR_NOT_CONNECTED",
 ]);
 
 export const CSRF_STALE_MESSAGE = "Your sign-in changed in another tab. Trying again.";

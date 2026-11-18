@@ -42,7 +42,7 @@ import type { ModelSelectionService } from "../model-selection/service.js";
 import type { UsableModels } from "../model-selection/usable-models.js";
 import type { ProofContext } from "../proof/proof-section.js";
 import type { E2EVerificationDeps } from "../e2e/authority.js";
-import type { LearnedContext } from "@agentx/contracts";
+import type { LearnedContext, WikiContext } from "@agentx/contracts";
 import type { LessonsUsedSection } from "../proof/pull-request-body.js";
 
 /** Who is acting, as the identity adapter vouched for them. `client` is the surface's own name for itself (an AI tool, the CLI). */
@@ -101,7 +101,11 @@ export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | {
  * project roles. The flow asks `checkStart` at a start and `checkStep` before every step the system starts on its own, and never takes a caller's word for a role.
  */
 export interface TaskAccess {
-  checkStart(principal: Principal, project: string): Promise<StartVerdict>;
+  /**
+   * `origin` is the work origin of the start (`nightly` only for upkeep AI): a system owner's wiki refresh is accepted only with it. `purpose` is what a TASK start is for (`setup_agent`, `wiki_build`, ...): absent for an ordinary task. Only the hosted rule reads it, and only for a project's system owner (L4-P1): the system owner is accepted for
+   * a listed system purpose and for nothing else.
+   */
+  checkStart(principal: Principal, project: string, purpose?: string, origin?: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
@@ -219,6 +223,11 @@ export interface TaskFlowDeps {
   audit: AuditSink;
   projects: ProjectSource;
   access: TaskAccess;
+  /**
+   * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
+   * re-check at task start included. A hosted install fills it from the flag, read for this company.
+   */
+  systemRuns?: { enabled(): boolean | Promise<boolean> };
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */
@@ -351,7 +360,7 @@ export interface TaskFlowDeps {
    * Second review by another AI company: asked when the REVIEW step starts (does this review carry a second reviewer?) and when it ends (what is the opinion of this code?). Absent: no second review, the
    * review is exactly what it was. It only ADDS an opinion beside the reviews; it never changes what the first reviews decide, except that an `on` opinion that blocks holds the step.
    */
-  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold">;
+  secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold"> & Partial<Pick<SecondReview, "prStatus">>;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
   /**
@@ -386,11 +395,22 @@ export interface TaskFlowDeps {
    */
   learned?: (input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[] }) => Promise<{ learnedContext?: LearnedContext }>;
   /**
+   * The project wiki a step is given (lead 4 A1): asked when the step's invocation is built, only for a task step whose worker lists "task.wikiContext.v1". The caller passes the task's OWN project (from the
+   * workspace record), its task id and the repositories of the revision it runs on; the answer is the worker's `wikiContext` or none, built from the company's wiki as it is at that moment. It never throws into the
+   * dispatch, and a slow answer is none (the step then runs as it would without the wiki). Absent: no step is given the wiki.
+   */
+  wiki?: (input: { companyId: string; project: string; taskId: string; operationId: string; workflowMode: string | undefined; repositories: readonly string[] }) => Promise<{ wikiContext?: WikiContext }>;
+  /**
    * Learn on send-back: told after a PERSON's send-back of the task to coding is committed (the owner's send-back action calls it, best effort, after its own write). The lessons host queues one reflection of ids so the
    * correction can help the next task while this one is open; it reads the task itself (company, the send-back's words, the switch and the project's mode), so the caller passes only the task's id. It never throws into the
    * action. Absent: the install has no lessons, and the send-back is learned from only when the task ends.
    */
   lessonsSentBack?: (taskId: string) => Promise<void>;
+  /**
+   * Wiki build (W3b): told after a wiki build run's task ended and its end word was written (by the worker's own last answer, a Stop, or the operation's end), so the wiki store's build record can say how it ended.
+   * Best effort: it never throws into the flow. Absent: the build record keeps what the last page report wrote.
+   */
+  wikiBuildEnded?: (scope: { orgId: string; project: string; taskId: string }) => Promise<void>;
   /**
    * The lighter flow, install-wide: a change whose plan is estimated exactly small skips its planning steps (plan check, design review, the requirements, design and plan approvals) and gets, after each push, the
    * reviewer's fixed questions and the quick checks of what it touched; one that grows after the build stops and gets the grown tier's reviews on its current head before it can merge. Off or absent: today's flow.

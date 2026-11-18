@@ -41,6 +41,7 @@ import { readSetupJournal } from "../core/setup-agent/journal.js";
 import { listHostAsks } from "../core/setup-agent/host-ask.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
+import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
 export const SETUP_RUN_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can run the project's setup.";
@@ -324,6 +325,54 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
   } catch (error) {
     if (error instanceof AgentXError) {
       // The core names a missing project with its name; here every missing or unseen project reads the same.
+      if (error.code === "PROJECT_NOT_FOUND") return errorAnswer(notFound());
+      return errorAnswer(error);
+    }
+    throw error;
+  }
+}
+
+// ---- "Re-check setup" (L4-P1, the Thursday fallback): the project's plain setup check, on a fresh machine, started by a person.
+//
+//   GET  /v1/app/projects/{project}/setup-check    where the project's setup check stands (the core's `SetupState`); any live role on the project reads it
+//   POST /v1/app/projects/{project}/setup-check    start the check ({ requestId } and nothing else): a person who MANAGES the project's setup (a company owner or admin, or the project's administrator), read now.
+//                                                  202 started, 200 a repeat of the same request id, 409 when a check of this project is already running.
+// It is an ordinary PERSON-started check (the person is the starter and the record says so): no system owner, no flag, no AI, no model key. It is the way to prove the re-check on staging and the button a manager
+// presses when the automatic re-check has not run. The audit record is written BEFORE the start, so nothing is started when it cannot be written. A start needs the company on the core for new tasks.
+const SETUP_CHECK_PATH = /^\/v1\/app\/projects\/([^/]+)\/setup-check$/u;
+const SetupCheckBodySchema = z.object({ requestId: z.string().uuid() }).strict();
+
+/** Whether this method and path is the hosted "Re-check setup" route. */
+export function isSetupCheckPath(path: string, method: string): boolean {
+  return SETUP_CHECK_PATH.test(path) && (method === "GET" || method === "POST");
+}
+
+/** One request on the hosted setup-check path (`isSetupCheckPath`), after the dev routes checked the company from membership. Always answers. */
+export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise<BrokerResponse> {
+  try {
+    const match = SETUP_CHECK_PATH.exec(input.path);
+    if (match === null) throw agentXError("NOT_FOUND", "route not found");
+    let project: string;
+    try { project = decodeURIComponent(match[1]!); } catch { throw notFound(); }
+    if (!PROJECT_NAME.test(project)) throw notFound();
+    const standing = await standingOf(input, project);
+    if (standing.access === "none") throw notFound();
+    const { flow, companyId } = input;
+    // The project is read in the caller's company only: another company's project of the same name is never this one.
+    const latest = await flow.projects.latest(project);
+    if (latest === undefined) throw notFound();
+    if (input.request.method === "GET") return json(200, await setupStateOf(flow, project, latest.definition));
+    if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
+    if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);
+    const body = parsed(SetupCheckBodySchema, bodyOf(input.request));
+    if (!input.startsNewTasks) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
+    const personId = input.principal.personId;
+    await recorded(input, auditEvent(input, "setup_check.requested", `setup_check.requested:${companyId}:${project}:${personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));
+    await ensureCoreInUse(flow.store, companyId);
+    const started = await startProjectSetupCheck(flow, { project, requestId: body.requestId, startedBy: personId });
+    return json(started.duplicate ? 200 : 202, { workspaceId: started.workspaceId });
+  } catch (error) {
+    if (error instanceof AgentXError) {
       if (error.code === "PROJECT_NOT_FOUND") return errorAnswer(notFound());
       return errorAnswer(error);
     }

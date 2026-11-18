@@ -17,6 +17,7 @@ import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import type { TaskPersonCheck } from "../developer/task-people.js";
+import { parseTaskPeopleEntry, type TaskPeopleEntry } from "../developer/task-person-rows.js";
 import { taskPersonInviteClaimDigest, type TaskPersonInviteClaimFields } from "../developer/task-people-effects.js";
 import type { TaskPersonRuntime } from "./task-person-runtime.js";
 import { taskPersonInviteStateConditions, type TaskPersonInviteStateCondition, type TaskPersonProjectAuthorityWitness } from "./task-person-invite-authority-fence.js";
@@ -78,7 +79,7 @@ export interface TaskPersonInviteHandlerPorts {
 type Proposal = Record<string, unknown> & TaskPersonInviteClaimFields & {
   pk: string; sk: string; entityType: "TASK_PEOPLE_PROPOSAL"; schemaVersion: 1; invitationStatus: "CLAIMED";
 };
-type People = { pk: string; sk: "PEOPLE"; schemaVersion: 1; revision: number; orphaned: boolean; people: Array<{ developerId: string; slackUserId: string; role: string }> };
+type People = { pk: string; sk: "PEOPLE"; schemaVersion: 1; revision: number; orphaned: boolean; people: TaskPeopleEntry[] };
 
 function resultFor(request: TaskPersonInviteClaimRequest, status: TaskPersonInviteOutcome["status"], values: {
   receiptId?: string; reason?: TaskPersonInviteOutcome["reason"];
@@ -119,11 +120,13 @@ function validPeople(row: Record<string, unknown> | undefined, taskId: string): 
   if (row === undefined || row.pk !== `DEVTASK#${taskId}` || row.sk !== "PEOPLE" || row.schemaVersion !== 1
     || Object.keys(row).sort().join(",") !== "orphaned,people,pk,revision,schemaVersion,sk"
     || !Number.isSafeInteger(row.revision) || Number(row.revision) < 1 || typeof row.orphaned !== "boolean" || !Array.isArray(row.people)) return false;
+  // C1: a PEOPLE list may hold `web` entries beside `slack` ones; each entry still parses strictly. The Slack invite itself still needs
+  // a `slack` actor and target (validRegistry and the slackUserId equality below), so a `web` entry never reaches Slack.
   const seen = new Set<string>();
-  return row.people.every((item) => isRecord(item) && Object.keys(item).sort().join(",") === "developerId,name,role,slackUserId"
-    && HEX64.test(String(item.developerId)) && SlackUserIdSchema.safeParse(item.slackUserId).success
-    && typeof item.name === "string" && ["owner", "commenter", "viewer", "denied"].includes(String(item.role))
-    && !seen.has(String(item.developerId)) && Boolean(seen.add(String(item.developerId))));
+  return row.people.every((item) => {
+    const entry = parseTaskPeopleEntry(item);
+    return entry !== undefined && !seen.has(entry.developerId) && Boolean(seen.add(entry.developerId));
+  });
 }
 
 function validProposal(row: Record<string, unknown> | undefined, taskId: string, requestId: string): row is Proposal {

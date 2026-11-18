@@ -26,7 +26,7 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
   const brokerBucketId = (() => {
     const functions = Object.entries(controlPlane.findResources("AWS::Lambda::Function") as Record<string, { Properties: { Environment?: { Variables?: Record<string, unknown> } } }>);
     const broker = functions.find(([id]) => /^Broker[0-9A-F]{8}$/.test(id));
-    return (unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}).ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
+    return (unpackedBrokerVariables(broker?.[1].Properties.Environment?.Variables ?? {}, controlPlane.toJSON() as never).ARTIFACT_BUCKET_NAME as { Ref?: string } | undefined)?.Ref;
   })();
 
   it("names the tag once, in the contracts, with the 30-day period of the owner's decision", () => {

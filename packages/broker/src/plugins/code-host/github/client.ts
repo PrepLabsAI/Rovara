@@ -2033,6 +2033,70 @@ export class GitHubAppCredentialProvider {
   }
 
   /**
+   * Wiki W0 (DEC 254zh): the direct children of one directory at a commit (`GET /contents/<dir>?ref=<sha>`, the root when `path` is empty), names and kinds only; no file is read. GitHub lists at most 1,000 entries of a
+   * directory, so a listing of that size is reported `complete: false`. Throws when GitHub cannot answer, for a path that is a file, a link or a submodule, and for a commit that is not a full sha.
+   */
+  async listDirectoryAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ entries: Array<{ name: string; type: string }>; complete: boolean }> {
+    if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+    const segments = path === "" ? [] : path.split("/");
+    if (path.length > 512 || path.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) throw agentXError("CONFIG_INVALID", "file path is invalid");
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.readTokenFor(repository, scope);
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/contents${segments.length === 0 ? "" : `/${segments.map(encodeURIComponent).join("/")}`}?ref=${commitSha}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(options?.timeoutMs ?? FILE_AT_COMMIT_TIMEOUT_MS), redirect: "error" },
+    );
+    if (!response.ok) return this.unavailableFileRead(response, `GitHub directory listing failed with HTTP ${response.status}`);
+    if (Number(response.headers.get("content-length")) > PATH_KIND_MAX_BYTES) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", "GitHub's directory answer is too large to read"); }
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub reports a file where a directory was expected");
+    const entries: Array<{ name: string; type: string }> = [];
+    for (const raw of body as unknown[]) {
+      const entry = typeof raw === "object" && raw !== null ? raw as { name?: unknown; type?: unknown } : {};
+      if (typeof entry.name !== "string" || entry.name === "" || entry.name.includes("/") || typeof entry.type !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid directory entry");
+      entries.push({ name: entry.name, type: entry.type });
+    }
+    return { entries, complete: entries.length < PATH_LISTING_MAX_ENTRIES };
+  }
+
+  /**
+   * Wiki W0 (DEC 254zh): how many commits in the history of `commitSha` touched `path` (the whole repository when absent) since a time: ONE page (`GET /commits?sha=<sha>&since=<iso>&path=<p>&per_page=<cap>`), `capped` when GitHub
+   * says more follow. The newest commit's time is `latestAt`; when the window holds none, one more request (`per_page=1`, no `since`) finds the newest commit that ever touched the path. At most two requests. Throws when GitHub cannot answer.
+   */
+  async listCommitActivity(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<{ count: number; capped: boolean; latestAt?: string }> {
+    if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+    if (!Number.isInteger(options.cap) || options.cap < 1 || options.cap > 100) throw agentXError("CONFIG_INVALID", "the commit count limit is invalid");
+    const since = Date.parse(options.since);
+    if (!Number.isFinite(since)) throw agentXError("CONFIG_INVALID", "the start of the window is invalid");
+    const path = options.path;
+    if (path !== undefined) {
+      const segments = path.split("/");
+      if (path.length === 0 || path.length > 512 || path.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) throw agentXError("CONFIG_INVALID", "file path is invalid");
+    }
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
+    const token = await this.readTokenFor(repository, scope);
+    const read = async (extra: string, perPage: number): Promise<{ times: string[]; more: boolean }> => {
+      const response = await this.fetchImplementation(
+        `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/commits?sha=${commitSha}&per_page=${String(perPage)}${path === undefined ? "" : `&path=${encodeURIComponent(path)}`}${extra}`,
+        { headers: githubHeaders(token), signal: AbortSignal.timeout(options.timeoutMs ?? FILE_AT_COMMIT_TIMEOUT_MS), redirect: "error" },
+      );
+      if (!response.ok) return this.unavailableFileRead(response, `GitHub commit listing failed with HTTP ${response.status}`);
+      const body: unknown = await response.json();
+      if (!Array.isArray(body) || body.length > perPage) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid commit listing");
+      const times = (body as unknown[]).map((raw) => {
+        const committer = (raw as { commit?: { committer?: { date?: unknown } } } | null)?.commit?.committer?.date;
+        if (typeof committer !== "string" || !Number.isFinite(Date.parse(committer))) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid commit time");
+        return committer;
+      });
+      return { times, more: (response.headers.get("link") ?? "").split(",").some((link) => /;\s*rel="next"/u.test(link)) };
+    };
+    const inWindow = await read(`&since=${encodeURIComponent(new Date(since).toISOString())}`, options.cap);
+    if (inWindow.times.length > 0) return { count: inWindow.times.length, capped: inWindow.more, latestAt: inWindow.times[0]! };
+    const ever = await read("", 1);
+    return { count: 0, capped: false, ...(ever.times[0] === undefined ? {} : { latestAt: ever.times[0] }) };
+  }
+
+  /**
    * A contents-read token for reading files: reused for 5 minutes per repository, so a run of file reads mints one. The caller has just run
    * `installed(repository, scope)`, so the org check happens on every read, a reused token included.
    */

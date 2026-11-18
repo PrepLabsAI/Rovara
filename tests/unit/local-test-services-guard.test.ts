@@ -13,6 +13,8 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { DOCKER_SOCKET_GUARD_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-source.js";
 import { guardPolicy } from "../../packages/broker/src/local/isolation/stack.js";
+import { DOCKER_SOCKET_GUARD_SERVICES_SOURCE } from "../../packages/broker/src/local/isolation/docker-socket-guard-services-source.js";
+import { TEST_SERVICES_CEILING_MARKER, TEST_SERVICES_LIMIT_DEFAULTS, TEST_SERVICES_LIMIT_SENTENCES } from "@agentx/contracts";
 
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });
@@ -764,6 +766,9 @@ describe("test services: the broker's policy", () => {
     const base = { image: WORKER_IMAGE, labels: [], names: { worker: "w", gateway: "g", guard: "s", workerNet: "wn", sandboxNet: "sn", externalNet: "xn" }, socketPath: "/var/run/docker.sock", socketGroup: "0", workspaceDirectory: WORKSPACE, workspaceKey: KEY, owner: OWNER, sandboxDns: "172.31.0.2" };
     expect("services" in guardPolicy(base)).toBe(false);
     expect(guardPolicy({ ...base, services: { images: [POSTGRES], guardImage: GUARD_IMAGE, runDirectory: RUN_DIRECTORY, bindDirectory: BIND_DIRECTORY, socketGroup: SOCKET_GROUP, maxMemoryMiB: 2048 } })["services"]).toEqual({ images: [POSTGRES], guardImage: GUARD_IMAGE, runDirectory: RUN_DIRECTORY, bindDirectory: BIND_DIRECTORY, socketGroup: SOCKET_GROUP, maxMemoryMiB: 2048 });
+    // DEC 254zm 2: the owner's three limits go through to the guard as given.
+    expect(guardPolicy({ ...base, services: { images: [POSTGRES], guardImage: GUARD_IMAGE, runDirectory: RUN_DIRECTORY, bindDirectory: BIND_DIRECTORY, socketGroup: SOCKET_GROUP, maxContainers: 20, maxMemoryMiB: 2048, maxMemoryPercent: 60 } })["services"])
+      .toMatchObject({ maxContainers: 20, maxMemoryMiB: 2048, maxMemoryPercent: 60 });
   });
 });
 
@@ -1177,5 +1182,112 @@ describe("test services: the owner's list (images by digest only)", () => {
     await using(true, async (w) => {
       expect((await create(w, `${NET}-h0123456789`, ownerBody(STARTER))).status).toBe(403);
     }, withImages([]));
+  });
+});
+
+// DEC 254zm 2: the ceilings are low by default (about 12 service containers, 1 GiB per helper, 40% of the VM's memory), an owner setting raises them (never past the old hard limits), and every stop says so in fixed words.
+describe("test services: the resource ceilings", () => {
+  const unset = { maxContainers: undefined, maxMemoryMiB: undefined, maxMemoryPercent: undefined } as Record<string, unknown>;
+  const withLimits = (extra: Record<string, unknown>) => ({ policyExtra: { ...unset, ...extra } });
+  const helper = (memory: number) => mutated(helperBody, (v) => { v.HostConfig.Memory = memory; v.HostConfig.MemorySwap = memory; });
+  const MIB = 1048576;
+  const fill = (w: World, memory: number): void => { w.state.containers.find((entry) => entry.name === `${NET}-h0123456789`)!.labels["rovara.local.memory"] = String(memory); };
+  const many = (count: number): FakeContainer[] => Array.from({ length: count }, (_, index) => owned({ name: `${NET}-h${String(index).padStart(10, "0")}`, id: String(index).padStart(64, "0"), labels: { ...serviceLabels("helper"), "rovara.local.memory": String(64 * MIB) }, user: "999:999" }));
+
+  it("defaults: 11 service containers leave room for one more, 12 do not", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(201); }, { ...withLimits({}), containers: many(11) });
+    await using(true, async (w) => {
+      const answer = await create(w, `${NET}-h0123456789`, helperBody());
+      expect(answer.status).toBe(429);
+      expect(JSON.parse(answer.text)).toEqual({ message: `rovara: ${TEST_SERVICES_LIMIT_SENTENCES.containers}` });
+      expect(w.forwarded("/containers/create")).toHaveLength(0);
+    }, { ...withLimits({}), containers: many(12) });
+  });
+
+  it("counts the sealed check sandbox and the other plain sandboxes' service containers in the cap, but not a task sandbox", async () => {
+    const sandboxes = Array.from({ length: 20 }, (_, index) => owned({ name: `agentx-task-x-${String(index)}`, id: `${String(index).padStart(2, "a")}`.padEnd(64, "a") }));
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(201); }, { ...withLimits({}), containers: [...sandboxes, ...many(11)] });
+    await using(true, async (w) => {
+      expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(429);
+    }, { ...withLimits({}), containers: [owned({ name: CHECK, id: CHECK_ID, labels: serviceLabels("check") }), ...many(11)] });
+  });
+
+  it("an owner setting raises the container cap, and the guard never goes past the old hard limit of 96", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(201); }, { ...withLimits({ maxContainers: 20 }), containers: many(19) });
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(429); }, { ...withLimits({ maxContainers: 20 }), containers: many(20) });
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helperBody())).status).toBe(429); }, { ...withLimits({ maxContainers: 500 }), containers: many(96) });
+  });
+
+  it("defaults: one helper may have 1 GiB and not a byte more, and says which setting raises it", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(1024 * MIB))).status).toBe(201); }, withLimits({}));
+    await using(true, async (w) => {
+      const answer = await create(w, `${NET}-h0123456789`, helper(1024 * MIB + 1));
+      expect(answer.status).toBe(403);
+      expect(JSON.parse(answer.text)).toEqual({ message: `rovara: ${TEST_SERVICES_LIMIT_SENTENCES.helperMemory}` });
+      expect(w.forwarded("/containers/create")).toHaveLength(0);
+    }, withLimits({}));
+  });
+
+  it("an owner setting raises one helper's memory, and not past 16 GiB", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(2048 * MIB))).status).toBe(201); }, withLimits({ maxMemoryMiB: 2048 }));
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(2048 * MIB + 1))).status).toBe(403); }, withLimits({ maxMemoryMiB: 2048 }));
+  });
+
+  it("a policy number below the smallest allowed is raised to it (one helper never gets less than 64 MiB of ceiling)", async () => {
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(64 * MIB))).status).toBe(201); }, withLimits({ maxMemoryMiB: 10 }));
+    await using(true, async (w) => { expect((await create(w, `${NET}-h0123456789`, helper(64 * MIB + 1))).status).toBe(403); }, withLimits({ maxMemoryMiB: 10 }));
+  });
+
+  it("a program keeps its own 512 MiB ceiling and its old words", async () => {
+    await using(true, async (w) => {
+      const answer = await create(w, `${NET}-p0123456789`, mutated(programBody, (v) => { v.HostConfig.Memory = 513 * MIB; v.HostConfig.MemorySwap = 513 * MIB; }));
+      expect(answer.status).toBe(403);
+      expect(answer.text).not.toContain(TEST_SERVICES_CEILING_MARKER);
+    }, withLimits({ maxMemoryMiB: 4096 }));
+  });
+
+  it("defaults: all the service containers together may be given 40% of the machine's memory, not 75%", async () => {
+    const total = Math.floor(totalmem() * 0.4);
+    await using(true, async (w) => { fill(w, total - 512 * MIB); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201); }, withLimits({}));
+    await using(true, async (w) => {
+      fill(w, total - 512 * MIB + 1);
+      const answer = await create(w, `${NET}-h0000000001`, helper(512 * MIB));
+      expect(answer.status).toBe(429);
+      expect(JSON.parse(answer.text)).toEqual({ message: `rovara: ${TEST_SERVICES_LIMIT_SENTENCES.memory}` });
+      expect(w.forwarded("/containers/create")).toHaveLength(0);
+    }, withLimits({}));
+    await using(true, async (w) => { fill(w, Math.floor(totalmem() * 0.5)); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({}));
+  });
+
+  it("an owner setting raises the memory share, and the guard never goes past the old 75%", async () => {
+    const at = (percent: number) => Math.floor(totalmem() * percent / 100);
+    await using(true, async (w) => { fill(w, at(60) - 512 * MIB); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201); }, withLimits({ maxMemoryPercent: 60 }));
+    await using(true, async (w) => { fill(w, at(60) - 512 * MIB + 1); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({ maxMemoryPercent: 60 }));
+    await using(true, async (w) => { fill(w, at(75) - 512 * MIB + 1); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429); }, withLimits({ maxMemoryPercent: 99 }));
+    await using(true, async (w) => { fill(w, at(75) - 512 * MIB); expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201); }, withLimits({ maxMemoryPercent: 99 }));
+  });
+
+  it("the sealed check sandbox is sized by the sandbox rule, so it counts toward the container cap but not toward the services memory total", async () => {
+    const total = Math.floor(totalmem() * 0.4);
+    // A check sandbox the size the sandbox rule gives (about 80% of the machine) may be made even when the helpers already fill the share.
+    await using(true, async (w) => {
+      fill(w, total);
+      const big = mutated(checkBody, (v) => { v.HostConfig.Memory = Math.floor(totalmem() * 0.8); v.HostConfig.MemorySwap = Math.floor(totalmem() * 0.8); });
+      expect((await create(w, CHECK, big)).status).toBe(201);
+    }, { ...withLimits({}), containers: [owned({ name: "agentx-task-w-1", id: SANDBOX_ID }), owned({ name: `${NET}-h0123456789`, id: HELPER_ID, labels: serviceLabels("helper"), user: "999:999" })] });
+    // And an existing check sandbox is not charged against the helpers (it carries no memory label: the old code charged it 4 GiB).
+    await using(true, async (w) => {
+      fill(w, total - 512 * MIB);
+      expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(201);
+    }, withLimits({}));
+    await using(true, async (w) => {
+      fill(w, total - 512 * MIB + 1);
+      expect((await create(w, `${NET}-h0000000001`, helper(512 * MIB))).status).toBe(429);
+    }, withLimits({}));
+  });
+
+  it("the guard's defaults are the contract's, and its words are the contract's", () => {
+    expect(TEST_SERVICES_LIMIT_DEFAULTS).toEqual({ containers: 12, helperMemoryMiB: 1024, memoryPercent: 40 });
+    expect(DOCKER_SOCKET_GUARD_SERVICES_SOURCE).toContain(JSON.stringify(TEST_SERVICES_LIMIT_SENTENCES));
   });
 });

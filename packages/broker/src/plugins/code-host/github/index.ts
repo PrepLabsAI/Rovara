@@ -9,7 +9,7 @@
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
   agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, DeploymentStatusReadSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
-  type BranchPage, type DeploymentStatusRead, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
+  type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef, type SummaryCheckPost,
 } from "@agentx/contracts";
@@ -262,6 +262,38 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
       }
       return { files, ...(listed.nextPage === undefined ? {} : { nextPage: listed.nextPage }) };
     },
+
+    // Wiki W0 (DEC 254zh): the free file map's reads. Listings only, never a file's content; the whole-tree read is the same company-bound, cached read as `instructionFiles`.
+    ...(provider.listTreeAtCommit === undefined ? {} : {
+      async repositoryTree(repository: RepositoryRef, revision: string, scope: HostScope, readOptions?: { timeoutMs?: number }): Promise<RepositoryTreeRead> {
+        const tree = await fileDetailsRead(() => readTree(repository.url, revision, checkedScope(scope), readOptions));
+        const entries: TreeEntry[] = [];
+        for (const entry of tree.entries.values()) {
+          const kind: TreeEntryKind | undefined = entry.type === "tree" ? "dir" : entry.type === "commit" ? "submodule" : entry.type === "blob" ? (entry.mode === "120000" ? "symlink" : "file") : undefined;
+          if (kind === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an unknown tree entry type");
+          entries.push({ path: entry.path, kind });
+        }
+        return { entries, complete: !tree.truncated };
+      },
+    }),
+    ...(provider.listDirectoryAtCommit === undefined ? {} : {
+      async directoryEntries(repository: RepositoryRef, path: string, revision: string, scope: HostScope, readOptions?: { timeoutMs?: number }): Promise<DirectoryRead> {
+        const listed = await fileDetailsRead(() => provider.listDirectoryAtCommit!(repository.url, path, revision, checkedScope(scope), readOptions));
+        return {
+          entries: listed.entries.map((entry) => {
+            const kind: TreeEntryKind | undefined = entry.type === "dir" ? "dir" : entry.type === "file" ? "file" : entry.type === "symlink" ? "symlink" : entry.type === "submodule" ? "submodule" : undefined;
+            if (kind === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an unknown directory entry type");
+            return { name: entry.name, kind };
+          }),
+          complete: listed.complete,
+        };
+      },
+    }),
+    ...(provider.listCommitActivity === undefined ? {} : {
+      async commitActivity(repository: RepositoryRef, revision: string, scope: HostScope, activityOptions: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<CommitActivityRead> {
+        return fileDetailsRead(() => provider.listCommitActivity!(repository.url, revision, checkedScope(scope), activityOptions));
+      },
+    }),
 
     ...(provider.listTreeAtCommit === undefined ? {} : {
       async instructionFiles(repository: RepositoryRef, revision: string, scope: HostScope, readOptions?: { max?: number; timeoutMs?: number }) {

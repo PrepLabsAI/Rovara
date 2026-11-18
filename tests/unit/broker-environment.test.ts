@@ -38,8 +38,8 @@ const NAMES = {
 const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
-  coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off",
-  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6",
+  coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
+  coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", testServiceImages: "mirrored",
 } as const satisfies Record<BrokerSettingKey, string>;
 
 const names = (entries: Partial<Record<BrokerNameKey, string>> = NAMES): string => Object.entries(entries).map(([key, value]) => `${BROKER_NAMES[key as BrokerNameKey].code}=${value}`).join(",");
@@ -77,6 +77,16 @@ describe("awsPartitionOf", () => {
 });
 
 describe("hydrateBrokerEnvironment: nothing packed", () => {
+  it("DEC 254z-amend3: the test services setting `td` is unpacked as ROVARA_TEST_SERVICES (on by default with \"1\", the opt-out \"0\"), never under Cloud's `tx`", () => {
+    expect(BROKER_SETTINGS.testServices).toEqual({ code: "td", variable: "ROVARA_TEST_SERVICES" });
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=0" })["ROVARA_TEST_SERVICES"]).toBe("0");
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "td=1" })["ROVARA_TEST_SERVICES"]).toBe("1");
+    // DEC 254zm: whether the starter copies are in place, packed as `ti`.
+    expect(BROKER_SETTINGS.testServiceImages).toEqual({ code: "ti", variable: "ROVARA_TEST_SERVICES_HOSTED_IMAGES" });
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: "ti=mirrored" })["ROVARA_TEST_SERVICES_HOSTED_IMAGES"]).toBe("mirrored");
+    expect(Object.values(BROKER_SETTINGS).some((spec) => (spec.code as string) === "tx")).toBe(false);
+  });
+
   it("leaves the legacy install's environment exactly as it is (no AGENTX_NAMES, no AGENTX_SETTINGS), even with AGENTX_ENV set", () => {
     const legacy: MutableEnvironment = { AWS_REGION: "us-east-1", AGENTX_ENV: "production", STATE_TABLE_NAME: "State", PROVISIONER_ARN: "arn:aws:states:us-east-1:1:stateMachine:P", SLACK_TEAM_ID: "" };
     const copy = { ...legacy };
@@ -131,7 +141,20 @@ describe("hydrateBrokerEnvironment: a named environment's broker", () => {
       DEVELOPER_SIGNIN_SLACK_SINCE: "1794693600", DEVELOPER_OIDC_SINCE: "0", MCP_CONFIRM_ELICITATION: "enabled",
       // DEC 254h: GitHub sign-in's switch and since, and the channel adapters' switch packed to make room for them.
       DEVELOPER_SIGNIN_GITHUB: "disabled", DEVELOPER_GITHUB_SINCE: "0", CHANNEL_ADAPTERS: "enabled",
+      // DEC 254zg (a), 254zk: the two switch flags, packed as 1/0.
+      SLACK_COMPANY_WORKSPACES: "disabled", COMPANY_SIGNIN: "enabled",
     });
+  });
+
+  // DEC 254zg (a), 254zk: a switch flag reads only "1" (enabled) or "0" (disabled); anything else stops the broker, in fixed words without the value.
+  it.each([["1", "enabled"], ["0", "disabled"]])("a switch flag packed as %s reads as %s", (flag, value) => {
+    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: `si=${flag},cw=${flag}` })).toMatchObject({ COMPANY_SIGNIN: value, SLACK_COMPANY_WORKSPACES: value });
+  });
+  it.each(["enabled", "disabled", "true", "2", "", "10", "constructor", "__proto__", "toString", "hasOwnProperty"])("a switch flag packed as %j stops the broker", (flag) => {
+    expect(() => hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: `si=${flag}` })).toThrow(/^AGENTX_SETTINGS has no switch flag for si \(COMPANY_SIGNIN\)$/u);
+  });
+  it("a switch flag never replaces a variable already set", () => {
+    expect(hydrated({ ...SCOPE, COMPANY_SIGNIN: "disabled", [BROKER_SETTINGS_VARIABLE]: "si=1" }).COMPANY_SIGNIN).toBe("disabled");
   });
 
   it("derives what the environment's name decides, with the functions the infrastructure names those things with", () => {

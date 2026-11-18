@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { pathToFileURL } from "node:url";
 import { createWorkspaceSlackClients, type ServiceSlackWorkspaces } from "./slack-workspace-clients.js";
+import { serviceSlackWorkspacesFromEnvironment } from "./slack-company-workspaces.js";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -57,7 +58,7 @@ export function createSlackServiceDelivery(options: Parameters<typeof createWork
 }
 
 /** The integrated deployment supplies company dependencies; absent dependencies preserve the installation path. */
-export async function runSlackService(workspaces?: ServiceSlackWorkspaces) {
+export async function runSlackService(workspaces?: ServiceSlackWorkspaces, legacyTeamId?: string) {
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
 
@@ -134,7 +135,7 @@ function slackBotToken(): Promise<string> {
   return botToken.value;
 }
 
-const slackDelivery = createSlackServiceDelivery({ legacyToken: slackBotToken, ...(workspaces === undefined ? {} : { workspaces }) });
+const slackDelivery = createSlackServiceDelivery({ legacyToken: slackBotToken, ...(workspaces === undefined ? {} : { workspaces, ...(legacyTeamId === undefined ? {} : { legacyTeamId }) }) });
 const requestThread = new AsyncLocalStorage<SlackThread>();
 const slackUserName = (thread: Pick<SlackThread, "teamId">, userId: string) => slackDelivery.userName(thread, userId);
 function postToSlack(thread: SlackThread, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
@@ -585,4 +586,10 @@ log("service.stopped", {});
 // written synchronously for the awslogs driver's pipe on Linux.
 process.exit(0);
 }
-if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) await runSlackService();
+/** L2-2 PR 18d: Slack company mode (slack-company-workspaces.ts); off, nothing is built and the service runs exactly as before. */
+export function slackServiceCompanyFromEnvironment(env: NodeJS.ProcessEnv): Parameters<typeof runSlackService> {
+  const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const company = serviceSlackWorkspacesFromEnvironment(env, { documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(region)), secrets: new SecretsManagerClient(region) });
+  return company === undefined ? [] : [company.workspaces, company.legacyTeamId];
+}
+if (process.argv[1] !== undefined && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) await runSlackService(...slackServiceCompanyFromEnvironment(process.env));

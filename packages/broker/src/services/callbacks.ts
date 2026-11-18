@@ -41,6 +41,7 @@ import type { ContextSourcesRuntime } from "../context-sources/runtime.js";
 import { readDesignTemplate } from "../core/design-review/template.js";
 import { DESIGN_REVIEW_RESULT_MAX_BYTES } from "../core/design-review/outcome.js";
 import { handleSetupAgentCallback, type SetupAgentCallbackDeps } from "../core/setup-agent/callback.js";
+import { handleWikiBuildCallback, type WikiBuildCallbackDeps } from "../core/wiki-build/callback.js";
 import type { RepositoryCredential, RepositoryGrantService } from "../repository-access.js";
 
 import { handleModelAccess, MODEL_ACCESS_PATH, type ModelGateway } from "../core/model-gateway/route.js";
@@ -81,6 +82,8 @@ export interface CallbackDeps {
   onEvents?: ((operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>) => Promise<void>) | undefined;
   /** A setup run's callback (`core/setup-agent`): what it needs beyond the flow's store. Absent: the action is not served. */
   setupAgent?: Omit<SetupAgentCallbackDeps, "store" | "companyId" | "now"> | undefined;
+  /** A wiki build run's callback (`core/wiki-build`, W3b): the standing read, the code host's file read and the wiki store's seams. Absent: the action is not served (W4 wires the store). */
+  wikiBuild?: Omit<WikiBuildCallbackDeps, "store" | "companyId" | "now"> | undefined;
   /** The project's context sources (the monitoring connections and MCP servers the owner ticked). Absent: a stage is told there are none. */
   contextSources?: ContextSourcesRuntime;
   /**
@@ -111,7 +114,7 @@ async function operationOf(deps: CallbackDeps, workspaceId: string, operationId:
 }
 
 /** The actions this install answers; any other the worker can make is "not available". */
-const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", EVAL_PLAN_DELIVERY_ACTION]);
+const SERVED_ACTIONS: ReadonlySet<string> = new Set(["events", "artifacts", "result", "candidate-export", "candidate-build-source", "baseline-source", "e2e-admission", "e2e-evidence", "browser-evidence", "browser-evidence-sign-in", "pull-request", "pull-request-update", "setup-agent", "wiki-build", EVAL_PLAN_DELIVERY_ACTION]);
 export const TERMINAL_OUTPUT_REFUSAL = "terminal operations cannot publish more output";
 
 /**
@@ -235,6 +238,8 @@ export async function readOutcome(deps: CallbackDeps, operation: OperationRecord
     return { kind: "prepared", ...(base.success ? { base: base.data } : {}), ...(knowledgeCommit === undefined ? {} : { knowledgeCommit }) };
   }
   if (operation.workflowMode === "SETUP_AGENT") return { kind: "setup-run", result: result ?? {} };
+  // A wiki build's result carries nothing the broker reads: how the run ended is the build pointer's own word, written by the page loop (or by the task's end).
+  if (operation.workflowMode === "WIKI_BUILD") return { kind: "ended" };
   if (operation.workflowMode === "UNDERSTAND") {
     const saved = await readArtifactText(deps, operation, UNDERSTAND_ARTIFACT_NAME, 32_768 + 1);
     if (saved === undefined) return undefined;
@@ -307,7 +312,7 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
       if (action === "repository-credentials") return json(200, { credential: await exchangeCredential(deps, request, workspaceId, operationId) });
       const token = request.headers[CAPABILITY_HEADER];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
+      if (!SERVED_ACTIONS.has(action) || (action === "setup-agent" && deps.setupAgent === undefined) || (action === "wiki-build" && deps.wikiBuild === undefined) || (action === "browser-evidence-sign-in" && deps.browserEvidenceSignIn === undefined)
         || (action === EVAL_PLAN_DELIVERY_ACTION && deps.evalPlan === undefined)) {
         // A callback this install does not serve yet. The capability is still checked, so the answer tells an unauthorised caller nothing.
         capabilities.verify(token, action as CallbackAction);
@@ -364,6 +369,10 @@ export function createCallbackHandler(deps: CallbackDeps): (request: BrokerReque
         const run = deps.setupAgent!;
         return json(200, await handleSetupAgentCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime(),
           log: (entry) => deps.flow.log?.({ component: "setup-agent", ...entry }) }, operation, bodyOf(request)));
+      }
+      if (action === "wiki-build") {
+        const run = deps.wikiBuild!;
+        return json(200, await handleWikiBuildCallback({ ...run, store: deps.flow.store, companyId: deps.flow.companyId, now: () => (deps.flow.now?.() ?? new Date()).getTime() }, operation, bodyOf(request)));
       }
       const body = bodyOf(request);
       if (action === "events") {

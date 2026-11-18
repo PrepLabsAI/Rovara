@@ -31,7 +31,7 @@ export const CORE_SERVICES = {
   "admission-hold-sweep": "flow",
 } as const satisfies Record<string, CoreArea>;
 /** The required services (above) and the optional ones: a runtime without an optional one skips its job (`service_not_wired`), and the switch is never refused for it. */
-export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons" | "person-erase-resume" | "after-merge";
+export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons" | "person-erase-resume" | "after-merge" | "upkeep";
 
 export interface CoreRuntime {
   companyId: OrgId;
@@ -44,6 +44,8 @@ export interface CoreRuntime {
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
   ciMode?: CheckedCiReporting["ciMode"] | undefined;
+  /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
+  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean> } | undefined;
 }
 
 export interface CoreRuntimeOptions {

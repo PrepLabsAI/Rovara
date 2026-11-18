@@ -13,9 +13,13 @@ import { readApprovedTestEnvironment } from "./environment.js";
 import { dependenciesStartableNow } from "./dependency-plan.js";
 import { DEPENDENCIES_WITH_DEVCONTAINER_WORDS, projectUsesDevcontainer } from "./devcontainer-check.js";
 import { testEnvironmentEnabled } from "./switch.js";
-import { testServicesEnabled } from "./test-services-switch.js";
+import { TEST_SERVICES_UNAVAILABLE_WORDS, testServicesEnabled, testServicesUnavailable, type TestServicesUnavailableReason } from "./test-services-switch.js";
 
-export const UNUSED_REASONS = ["none", "unreadable", "names_production", "recording_not_allowed", "services_not_connected", "accounts_not_connected", "tier_not_connected", "dependencies_not_connected", "dependencies_not_available_yet", "dependencies_with_devcontainer"] as const;
+export const UNUSED_REASONS = [
+  "none", "unreadable", "names_production", "recording_not_allowed", "services_not_connected", "accounts_not_connected", "tier_not_connected", "dependencies_not_connected", "dependencies_not_available_yet", "dependencies_with_devcontainer",
+  // DEC 254z-amend3: test services are switched on but the host cannot run them (test-services-switch.ts), one reason each.
+  "dependencies_unavailable_workers", "dependencies_unavailable_network", "dependencies_unavailable_images", "dependencies_unavailable_other",
+] as const;
 export type UnusedReason = (typeof UNUSED_REASONS)[number];
 
 /** What a person reads when the approved environment was not used (fixed words). */
@@ -30,6 +34,14 @@ export const UNUSED_WORDS: Record<UnusedReason, string> = {
   dependencies_not_connected: "The approved test environment lists dependencies, which tasks do not start yet",
   dependencies_not_available_yet: "The approved test environment asks for a kind of backing that tasks do not start yet",
   dependencies_with_devcontainer: DEPENDENCIES_WITH_DEVCONTAINER_WORDS,
+  dependencies_unavailable_workers: TEST_SERVICES_UNAVAILABLE_WORDS.workers,
+  dependencies_unavailable_network: TEST_SERVICES_UNAVAILABLE_WORDS.network,
+  dependencies_unavailable_images: TEST_SERVICES_UNAVAILABLE_WORDS.images,
+  dependencies_unavailable_other: TEST_SERVICES_UNAVAILABLE_WORDS.other,
+};
+
+const UNAVAILABLE_REASON: Readonly<Record<TestServicesUnavailableReason, UnusedReason>> = {
+  workers: "dependencies_unavailable_workers", network: "dependencies_unavailable_network", images: "dependencies_unavailable_images", other: "dependencies_unavailable_other",
 };
 
 /** `judged` is the environment the refusal is about, so a pin names the revision that was judged and not one approved a moment later. */
@@ -47,6 +59,9 @@ export function environmentUnusedReason(environment: TestEnvironment, env: NodeJ
   if (body.services.length > 0) return "services_not_connected";
   if (body.accounts.length > 0) return "accounts_not_connected";
   if (body.dependencies !== undefined && body.dependencies.length > 0) {
+    // Switched on, but the host said it cannot run them: the task runs the project's own checks and its evidence says, in fixed words, why.
+    const unavailable = testServicesUnavailable(env);
+    if (unavailable !== undefined) return UNAVAILABLE_REASON[unavailable];
     if (!testServicesEnabled(env)) return "dependencies_not_connected";
     if (!dependenciesStartableNow(body.dependencies)) return "dependencies_not_available_yet";
   }

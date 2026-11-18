@@ -228,7 +228,8 @@ describe("the pull request line", () => {
       expect(lines).toContain(line);
       expect(lines.at(-1)).toBe("Full evidence is in Rovara (sign-in needed).");
     }
-    expect(evidenceLines({ pack: bound, mode: "summary", baseline: words }, "e".repeat(64), 0)).toEqual({ lines: [], notTested: [] });
+    // DEC 254zzh (owner-approved, #894): evidenceLines also returns its checks and setup lists; for a pack bound to other code all four stay empty.
+    expect(evidenceLines({ pack: bound, mode: "summary", baseline: words }, "e".repeat(64), 0)).toEqual({ lines: [], notTested: [], checks: [], setup: [] });
     // Without words (gate off, no claim, old engine) the lines are exactly what they were.
     const plain = evidenceLines({ pack: bound, mode: "summary" }, DIGEST, 0).lines;
     expect(plain).not.toContain(line);

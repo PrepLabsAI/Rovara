@@ -2,7 +2,7 @@
 // content ids only; a host that cannot be read never fails or delays an approval; a rejection saves nothing; another company's snapshot is never read.
 import { describe, expect, it } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, SetupSnapshotSchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type DocumentStore, type JsonValue, type OrgId, type Principal, type ProjectDefinition, type TransactItem,
+  IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, SetupSnapshotSchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type JsonValue, type OrgId, type Principal, type ProjectDefinition, type TransactItem,
 } from "@agentx/contracts";
 import { SETUP_APPLY_KIND, createSetupProposalSubject, setupApplyDigest, setupApplyKey, type SetupApplyRow } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { buildSetupCheck, relayCheck } from "../../packages/broker/src/core/setup-agent/check.js";
@@ -21,8 +21,8 @@ const TOKEN_URL_LOCK = `{"resolved":"https://user:${SEEDED_SECRET}@registry.exam
 const base: ProjectDefinition = {
   ...definition, repositories: [{ ...definition.repositories[0]!, url: URL_, host: { kind: "fake" } }],
   setup: [{ cwd: "repo/demo", executable: "npm", args: ["ci"], timeoutSeconds: 60 }], readiness: [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 }],
-} as ProjectDefinition;
-const candidateOf = (extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({ ...base, revision: 2, ...extra } as ProjectDefinition);
+};
+const candidateOf = (extra: Partial<ProjectDefinition> = {}): ProjectDefinition => ({ ...base, revision: 2, ...extra });
 
 async function waiting(options: { files?: Record<string, string>; candidate?: ProjectDefinition; withHost?: boolean; baseCommits?: "none" } = {}) {
   const h = createHarness({ machines: { startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] } });
@@ -65,18 +65,18 @@ async function approve(w: Awaited<ReturnType<typeof waiting>>, approval?: Parame
   const subject = createSetupProposalSubject({ flow: w.h.deps, ...(approval === undefined ? {} : { approval }) });
   const loaded = await subject.load(w.h.deps.companyId, "payments");
   expect(loaded?.waiting).toBe(true);
-  return subject.apply(loaded!, attempt(w.digest, "approve") as never, [owner()], "2026-11-09T10:05:00.000Z");
+  return subject.apply(loaded!, attempt(w.digest, "approve"), [owner()], "2026-11-09T10:05:00.000Z");
 }
 const snapshotPut = (extra: readonly TransactItem[] | undefined, w: { h: Harness }): TransactItem | undefined =>
   extra?.find((item) => item.kind === "put" && item.item.pk === setupSnapshotKey(w.h.deps.companyId, "payments").pk && item.item.sk === "SNAPSHOT");
 
 describe("the approval saves the setup snapshot", () => {
   it("saves, in the approval's own transaction, the watched files by path and content id at the head, and the websites the candidate allows", async () => {
-    const w = await waiting({ candidate: candidateOf({ network: { allowedDomains: ["api.stripe.com", "registry.npmjs.org"] } } as Partial<ProjectDefinition>) });
+    const w = await waiting({ candidate: candidateOf({ network: { allowedDomains: ["api.stripe.com", "registry.npmjs.org"] } }) });
     const applied = await approve(w);
     const put = snapshotPut(applied.extra, w);
     expect(put).toBeDefined();
-    const saved = SetupSnapshotSchema.parse((put as { item: { snapshot: unknown } }).item.snapshot);
+    const saved = SetupSnapshotSchema.parse((put as unknown as { item: { snapshot: unknown } }).item.snapshot);
     expect(saved.setupRevision).toBe(2);
     expect(saved.takenAt).toBe("2026-11-09T10:05:00.000Z");
     expect(saved.hosts).toEqual(["api.stripe.com", "registry.npmjs.org"]);
@@ -131,7 +131,7 @@ describe("the approval saves the setup snapshot", () => {
     const w = await waiting();
     const prepared = w.model.headOf("main");
     w.model.commit("main", { "package-lock.json": "changed after the check", "docker-compose.yml": "services: {}" });
-    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(w)).extra, w) as { item: { snapshot: unknown } }).item.snapshot);
+    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(w)).extra, w) as unknown as { item: { snapshot: unknown } }).item.snapshot);
     expect(saved.repositories[0]!.commit).toBe(prepared);
     expect(saved.repositories[0]!.files.map((file) => file.path)).not.toContain("docker-compose.yml");
   });
@@ -148,8 +148,8 @@ describe("the approval saves the setup snapshot", () => {
     const subject = createSetupProposalSubject({ flow: w.h.deps });
     const loaded = await subject.load(w.h.deps.companyId, "payments");
     const real = w.h.deps.store;
-    w.h.deps.store = { ...real, get: async (key: { pk: string; sk: string }) => { if (key.sk.startsWith("REVISION") || key.sk.includes("REV")) throw new Error("store fault"); return real.get(key); } } as never;
-    const applied = await subject.apply(loaded!, attempt(w.digest, "approve") as never, [owner()], "2026-11-09T10:05:00.000Z");
+    w.h.deps.store = { ...real, get: async (key: { pk: string; sk: string }) => { if (key.sk.startsWith("REVISION") || key.sk.includes("REV")) throw new Error("store fault"); return real.get(key); } };
+    const applied = await subject.apply(loaded!, attempt(w.digest, "approve"), [owner()], "2026-11-09T10:05:00.000Z");
     w.h.deps.store = real;
     expect(snapshotPut(applied.extra, w)).toBeUndefined();
     expect(applied.extra?.some((item) => item.kind === "update")).toBe(true);
@@ -163,7 +163,7 @@ describe("the approval saves the setup snapshot", () => {
 
   it("a project of two repositories saves both, and saves neither when one listing was cut (a partial baseline is never kept)", async () => {
     const URL2 = "https://examplehost.test/acme/web";
-    const two = candidateOf({ repositories: [base.repositories[0]!, { name: "web", url: URL2, path: "repo/web", defaultBranch: "main", credentialRef: "host-app", host: { kind: "fake2" } }] } as Partial<ProjectDefinition>);
+    const two = candidateOf({ repositories: [base.repositories[0]!, { name: "web", url: URL2, path: "repo/web", defaultBranch: "main", credentialRef: "host-app", host: { kind: "fake2" } }] });
     const attach = (w: Awaited<ReturnType<typeof waiting>>) => {
       const model2 = new FakeHostModel({ url: URL2, id: "2", fullName: "acme/web", initialFiles: { "package.json": "{}", "yarn.lock": "lock" } });
       const registry = createAdapterRegistry();
@@ -175,7 +175,7 @@ describe("the approval saves the setup snapshot", () => {
     const whole = await waiting({ candidate: two });
     const model2Whole = attach(whole);
     await whole.h.store.update({ key: setupApplyKey(whole.h.deps.companyId, "payments"), ops: [{ op: "set", path: ["baseCommits"], value: { demo: whole.model.headOf("main"), web: model2Whole.headOf("main") } as JsonValue }] });
-    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(whole)).extra, whole) as { item: { snapshot: unknown } }).item.snapshot);
+    const saved = SetupSnapshotSchema.parse((snapshotPut((await approve(whole)).extra, whole) as unknown as { item: { snapshot: unknown } }).item.snapshot);
     expect(saved.repositories.map((repository) => repository.name).sort()).toEqual(["demo", "web"]);
     expect(saved.repositories.find((repository) => repository.name === "web")!.files.map((file) => file.path)).toEqual(["package.json", "yarn.lock"]);
     const cut = await waiting({ candidate: two });
@@ -189,7 +189,7 @@ describe("the approval saves the setup snapshot", () => {
     const w = await waiting();
     const subject = createSetupProposalSubject({ flow: w.h.deps });
     const loaded = await subject.load(w.h.deps.companyId, "payments");
-    const rejected = await subject.apply(loaded!, attempt(w.digest, "reject") as never, [owner()], "2026-11-09T10:05:00.000Z");
+    const rejected = await subject.apply(loaded!, attempt(w.digest, "reject"), [owner()], "2026-11-09T10:05:00.000Z");
     expect(snapshotPut(rejected.extra, w)).toBeUndefined();
   });
 
@@ -197,10 +197,10 @@ describe("the approval saves the setup snapshot", () => {
     const w = await waiting();
     const applied = await approve(w);
     await w.h.store.transact([...(applied.extra ?? [])]);
-    const other: OrgId = "org_cccccccccccccccccccc" as OrgId;
+    const other: OrgId = "org_cccccccccccccccccccc";
     const mine = await w.h.store.get(setupSnapshotKey(w.h.deps.companyId, "payments"));
-    await w.h.store.put({ item: { ...mine!, ...setupSnapshotKey(other, "payments") } as never });
-    expect(await readSetupSnapshot(w.h.store as DocumentStore, other, "payments")).toBeUndefined();
-    expect(await readSetupSnapshot(w.h.store as DocumentStore, w.h.deps.companyId, "billing")).toBeUndefined();
+    await w.h.store.put({ item: { ...mine!, ...setupSnapshotKey(other, "payments") } });
+    expect(await readSetupSnapshot(w.h.store, other, "payments")).toBeUndefined();
+    expect(await readSetupSnapshot(w.h.store, w.h.deps.companyId, "billing")).toBeUndefined();
   });
 });

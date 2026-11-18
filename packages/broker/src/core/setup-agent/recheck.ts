@@ -19,8 +19,8 @@
 //                  card, and a task waiting at Build is paused with fixed words. A fix is a NEW setup candidate: a person approves it (never automatic); approving it moves the project to a new revision, which ends the pause.
 import { createHash } from "node:crypto";
 import {
-  INDEX_EXPIRY_ATTRIBUTE, canonicalJson, change, compareSetupSnapshot, projectMetaKey, setupDriftWords, systemOwnerIdOf, when,
-  type DocumentKey, type OrgId, type ProjectDefinition, type SetupDriftClass, type TransactItem,
+  canonicalJson, change, compareSetupSnapshot, projectMetaKey, systemOwnerIdOf, when,
+  type ProjectDefinition, type SetupDriftClass, type TransactItem,
 } from "@agentx/contracts";
 import { claimAutomaticRun, eventIdOf, releaseAutomaticRun, type AutomaticRunsDeps } from "../automatic-runs/cap.js";
 import { overwriteRow, putRow } from "../automation/kit.js";
@@ -29,13 +29,15 @@ import { iso, log } from "../task-flow/support.js";
 import { classifyNightlyHealth, type NightlyHealth } from "../test-env/nightly-health.js";
 import { buildSetupCheck, relayCheck, setupStateOf, setupStateOfCheck, type SetupCheckMark, type SetupState } from "./check.js";
 import {
-  SETUP_CHECKING_WORDS, driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, setupRepairCardOf, setupStillWorksWords, setupTestsFailingWords,
+  driftTaskKey, isRow, recheckCurrentKey, recheckRowKey, repairNoticeKey, setupBrokenTaskWords, setupRepairCardOf,
   type DriftTaskRow, type RecheckRow, type RecheckState, type RepairNoticeRow, type SetupRepairCard,
 } from "./recheck-rows.js";
+import { expiryAfter } from "./keys.js";
+import { recordSystemRunUsage } from "../system-runs/usage.js";
 import { commitsOf, readCurrentSetupFiles, readSetupSnapshot, snapshotItem, takeSetupSnapshot, allowedHostsOf } from "./snapshot.js";
 
 export * from "./recheck-rows.js";
-const expiry = (deps: Pick<TaskFlowDeps, "now">): { [INDEX_EXPIRY_ATTRIBUTE]: number } => ({ [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(((deps.now?.() ?? new Date()).getTime()) / 1000) + KEEP_SECONDS });
+const expiry = (deps: Pick<TaskFlowDeps, "now">) => expiryAfter((deps.now?.() ?? new Date()).getTime(), KEEP_SECONDS);
 const automaticDeps = (deps: TaskFlowDeps): AutomaticRunsDeps => ({ store: deps.store, now: () => (deps.now?.() ?? new Date()).getTime(), companyId: deps.companyId, audit: deps.audit });
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
 /** As long as the cap's own claim lives (62 days), so a re-check key that comes back is never answered by a claim whose row is gone. */
@@ -96,12 +98,19 @@ async function driftAtStart(deps: TaskFlowDeps, input: { project: string; taskId
   // A project whose setup nobody ever approved (and checked) has no promise to keep. One whose setup was checked before snapshots existed has no baseline yet: it is re-checked once, and the pass saves it.
   if (stored === undefined && (await setupStateOf(deps, project, definition)).status !== "ready") return [];
   const read = await readCurrentSetupFiles(deps, definition);
-  if (read.status === "not_checked") { log(deps, { event: "setup_drift.not_checked", taskId }); return []; }
+  // The code host cannot be asked (down, no such read): the task starts (DEC 254zzl); a project that has a baseline says so quietly, since the check it promised could not be made.
+  if (read.status === "not_checked") { log(deps, { event: "setup_drift.not_checked", taskId }); return stored === undefined ? [] : [uncheckedLink(deps, project, taskId, [])]; }
   const drift = compareSetupSnapshot(stored, read.repositories, allowedHostsOf(definition));
   if (drift.drift === "none") { log(deps, { event: "setup_drift.none", taskId }); return []; }
+  // DEC 254zzl: with the company's system runs OFF (hosted default) Rovara starts nothing by itself. The comparison above only read names, so it still says quietly that the setup may be out of date; the task starts
+  // normally, and a person starts "Re-check setup". The laptop has no such switch (absent: on).
+  if (await systemRunsAreOff(deps)) {
+    log(deps, { event: "setup_drift.system_runs_off", taskId, classes: drift.drift === "changed" ? drift.classes.length : 0 });
+    return [uncheckedLink(deps, project, taskId, drift.drift === "changed" ? drift.classes : [], "off")];
+  }
   const commits = commitsOf(read.repositories);
   // No commit to pin means no stable identity for a re-check: the task goes on, and a later start tries again.
-  if (commits === undefined) { log(deps, { event: "setup_drift.not_checked", taskId }); return []; }
+  if (commits === undefined) { log(deps, { event: "setup_drift.not_checked", taskId }); return [uncheckedLink(deps, project, taskId, drift.drift === "changed" ? drift.classes : [])]; }
   const classes = drift.drift === "changed" ? drift.classes : [];
   // A change that can be told is one re-check per commit; one that cannot (no baseline, a listing over the limits) is one per revision per day, so a baseline that can never be saved cannot burn the cap on every commit.
   const key = drift.drift === "changed" ? recheckKeyOf(definition.revision, commits) : recheckKeyOf(definition.revision, { "~unknown": iso(deps).slice(0, 10) });
@@ -109,7 +118,8 @@ async function driftAtStart(deps: TaskFlowDeps, input: { project: string; taskId
   const running = await runningRecheckOf(deps, project, definition.revision);
   const outcome = running !== undefined ? "joined" : await ensureRecheck(deps, { project, definition, key, commits, classes });
   const linkKey = running?.key ?? key;
-  if (outcome === "capped") { log(deps, { event: "setup_drift.capped", taskId }); return []; }
+  // The cap is used: the re-check cannot run, the task STILL STARTS (DEC 254zzl), released at once, with the quiet note.
+  if (outcome === "capped") { log(deps, { event: "setup_drift.capped", taskId }); return [uncheckedLink(deps, project, taskId, classes)]; }
   log(deps, { event: "setup_drift.recheck", taskId, outcome, classes: classes.length });
   const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId, project, taskId, recheckKey: linkKey, state: "pending", at: iso(deps) };
   return [putRow(driftTaskKey(orgId, project, taskId), row.entityType, { ...row, ...expiry(deps) })];
@@ -122,6 +132,12 @@ async function runningRecheckOf(deps: TaskFlowDeps, project: string, revision: n
   const row = await readRecheck(deps, project, pointer["key"]);
   if (row === undefined || row.state !== "running" || row.setupRevision !== revision) return undefined;
   return (deps.now?.() ?? new Date()).getTime() - Date.parse(row.startedAt) > RECHECK_WAIT_MAX_MS ? undefined : row;
+}
+
+/** The link of a task whose re-check could not be made: nothing to wait on (released at once), and the quiet note on its page. */
+function uncheckedLink(deps: TaskFlowDeps, project: string, taskId: string, classes: SetupDriftClass[], reason?: "off"): TransactItem {
+  const row: DriftTaskRow = { entityType: "SETUP_DRIFT_TASK", orgId: deps.companyId, project, taskId, recheckKey: "", state: "released", at: iso(deps), releasedAt: iso(deps), noRecheck: { classes, ...(reason === undefined ? {} : { reason }) } };
+  return putRow(driftTaskKey(deps.companyId, project, taskId), row.entityType, { ...row, ...expiry(deps) });
 }
 
 type Ensured = "started" | "joined" | "capped";
@@ -144,7 +160,7 @@ async function ensureRecheck(deps: TaskFlowDeps, input: { project: string; defin
       putRow(recheckRowKey(orgId, project, key), row.entityType, { ...row, ...expiry(deps) }),
       overwriteRow(recheckCurrentKey(orgId, project), "SETUP_RECHECK_CURRENT", { orgId, project, key, ...expiry(deps) }),
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { attempt: 1, classes: input.classes } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, key), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 1, classes: input.classes, kind: "setup_check", reason: "task_start" } }),
     ]);
     if (!result.applied) {
       // Another start put the same re-check there first: the task joins that one. The place in the cap is that start's (the claim is one per re-check, so this call's claim WAS its own), and only a start that
@@ -157,6 +173,8 @@ async function ensureRecheck(deps: TaskFlowDeps, input: { project: string; defin
     throw error;
   }
   await relayCheck(deps, started);
+  // L4-P1 (DEC 254zzl 4): the company pays this check's machine time: attributed to the company and project like every system run.
+  await recordSystemRunUsage(deps, { project, kind: "setup_check", workspaceId: started.workspaceId, requestId: uuidOf(claimId) }).catch((error: unknown) => log(deps, { event: "system_run.usage_not_recorded", kind: "setup_check", error: errorName(error) }));
   return "started";
 }
 
@@ -260,8 +278,13 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
   const orgId = deps.companyId;
   const auto = automaticDeps(deps);
   const claimId = claimIdOf(row.key, 2);
-  const claim = await claimAutomaticRun(auto, { orgId, project, requestId: claimId, job: "scheduled_check" });
   const at = iso(deps);
+  // The company's system runs were switched OFF after the first attempt began: nothing more is started by itself. The re-check ends unclear (it never blocks) and the task page says it could not be made.
+  if (await systemRunsAreOff(deps)) {
+    await deps.store.transact([{ kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("state", "unclear"), change.set("decidedAt", at)], condition: still }]);
+    return readRecheck(deps, project, row.key);
+  }
+  const claim = await claimAutomaticRun(auto, { orgId, project, requestId: claimId, job: "scheduled_check" });
   if (!claim.claimed) {
     await deps.store.transact([{ kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("state", "unclear"), change.set("decidedAt", at)], condition: still }]);
     return readRecheck(deps, project, row.key);
@@ -271,7 +294,7 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
     const result = await deps.store.transact([
       { kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("attempt", 2), change.set("check", { ...started.mark })], condition: still },
       ...started.items,
-      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { attempt: 2, classes: row.classes } }),
+      ...deps.audit.stage({ eventId: eventIdOf("setup-recheck-started", orgId, project, row.key, "2"), companyId: orgId, at, actor: { type: "system", id: "rovara" }, action: "setup_recheck.started", subject: { type: "project", id: project }, details: { job: "scheduled_check", attempt: 2, classes: row.classes, kind: "setup_check", reason: "task_start" } }),
     ]);
     if (!result.applied) {
       // The claim is one per re-check and attempt, so another caller's live second attempt holds it too: it goes back only when no second attempt was left behind.
@@ -283,6 +306,7 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
     throw error;
   }
   await relayCheck(deps, started);
+  await recordSystemRunUsage(deps, { project, kind: "setup_check", workspaceId: started.workspaceId, requestId: uuidOf(claimId) }).catch((error: unknown) => log(deps, { event: "system_run.usage_not_recorded", kind: "setup_check", error: errorName(error) }));
   return readRecheck(deps, project, row.key);
 }
 
@@ -311,7 +335,7 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
     // Never over a mark of a newer setup (an approval writes its own candidate's check), and never for a revision that is no longer the project's.
     if (typeof seen?.revision === "number" && seen.revision > row.check.revision) return;
     if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision) return;
-    if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) <= Date.parse(row.check.startedAt))) return;
+    if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) < Date.parse(row.check.startedAt))) return;
     await deps.store.update({ key, ops: [change.set("setupCheck", { ...row.check })], condition: seen?.workspaceId === undefined ? when.notExists("setupCheck") : when.eq(["setupCheck", "workspaceId"], seen.workspaceId) });
   } catch (error) {
     log(deps, { event: "setup_drift.mark_failed", error: errorName(error) });
@@ -373,3 +397,11 @@ export async function setupGateBeforeBuild(deps: TaskFlowDeps, input: { project:
   }
 }
 
+/**
+ * Whether this company's system runs are OFF for this flow. An ABSENT gate is the laptop's rule (on); a PRESENT gate is on only when it explicitly says `true` (L4-P2: the operator's ceiling AND the company's consent;
+ * a gate that throws or rejects is off, so a re-check never starts or retries on a read that failed).
+ */
+async function systemRunsAreOff(deps: Pick<TaskFlowDeps, "systemRuns">): Promise<boolean> {
+  if (deps.systemRuns === undefined) return false;
+  try { return (await deps.systemRuns.enabled()) !== true; } catch { return true; }
+}
