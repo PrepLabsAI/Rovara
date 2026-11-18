@@ -316,6 +316,23 @@ describe("the company's system-runs switch (DEC 254zzl: hosted default off)", ()
     expect(await rechecksOf(w.h.store, w.h.deps.companyId, "payments")).toHaveLength(2);
   });
 
+  it("switched off after a first attempt began: the retry is not started, the re-check ends unclear, and nothing blocks", async () => {
+    const w = await world();
+    w.h.deps.systemRuns = { enabled: () => true };
+    w.model.commit("main", { "package-lock.json": "lock-2" });
+    const task = await startTask(w);
+    const [first] = await rechecksOf(w.h.store, w.h.deps.companyId, "payments");
+    await finishCheck(w.h, first!.check.workspaceId, { status: "FAILED", error: SETUP_FAILS });
+    await advanceCurrentRecheck(w.h.deps, "payments");
+    w.h.deps.systemRuns = { enabled: () => false };
+    w.h.clock.advance(RECHECK_RETRY_DELAY_MS / 1000 + 1);
+    expect(await advanceCurrentRecheck(w.h.deps, "payments")).toMatchObject({ state: "unclear", attempt: 1 });
+    expect((await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.h.deps.companyId, "payments")).used).toBe(1);
+    expect((await rechecksOf(w.h.store, w.h.deps.companyId, "payments"))[0]!.check.workspaceId).toBe(first!.check.workspaceId);
+    expect(await setupGateBeforeBuild(w.h.deps, { project: "payments", taskId: task.taskId })).toEqual({ answer: "go" });
+    expect(await setupRecheckLineOf(w.h.deps, "payments", task.taskId)).toBe("Couldn't re-check setup after dependency files changed.");
+  });
+
   it("a re-check is the company's and the project's: its place in the cap and its audit event name them, and the actor is Rovara, not a person", async () => {
     const w = await world({ audit: "recording" });
     w.h.deps.systemRuns = { enabled: () => true };
