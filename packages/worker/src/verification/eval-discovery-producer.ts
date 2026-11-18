@@ -54,6 +54,8 @@ export interface EvalDiscoveryProducerInput {
   tracked: ReadonlyMap<string, ReadonlySet<string>>;
   /** The worker's own image (`AGENTX_WORKER_IMAGE`). */
   image: string | undefined;
+  /** DEC 254zzz43: the setup sandbox's dry-run of each wrapper file, by the suite's selection (`dryRunEvalWrappers`). Absent: no suite carries a pass, so no wrapper is offered. The agent's draft can never carry it (the schema is strict). */
+  dryRuns?: ReadonlyMap<string, "passed" | "failed"> | undefined;
   /** F4's discovery of one checkout (test seam; `discoverEvals` in production). */
   discover?: ((root: string) => Promise<EvalDiscovery>) | undefined;
 }
@@ -99,7 +101,7 @@ export async function produceEvalDiscoveryReport(input: EvalDiscoveryProducerInp
     suites.push({
       selection: draft.selection, ...(draft.repository === undefined ? {} : { repository: draft.repository }),
       questions: [...draft.questions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-      command: draft.command, report: draft.report, ...(draft.output === undefined ? {} : { output: draft.output }), commandFingerprint, judge: draft.judge, subsetSupported: draft.subsetSupported,
+      command: draft.command, report: draft.report, ...(draft.output === undefined ? {} : { output: draft.output }), ...(input.dryRuns?.get(draft.selection) === undefined ? {} : { wrapperDryRun: input.dryRuns.get(draft.selection)! }), commandFingerprint, judge: draft.judge, subsetSupported: draft.subsetSupported,
       catalogRowId: EVAL_PRODUCT_ROW, model: draft.model, modelVersion: draft.modelVersion, image, route: EVAL_PRODUCT_ROUTE,
       maxCallsPerQuestion: draft.maxCallsPerQuestion, maxCostMicrosPerQuestion: draft.maxCostMicrosPerQuestion,
     });

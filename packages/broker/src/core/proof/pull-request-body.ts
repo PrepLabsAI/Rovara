@@ -96,6 +96,8 @@ export interface PullRequestBodyContext {
   browserEvidenceLines?: readonly string[] | undefined;
   /** L4-SC (DEC 254z c): one line per mock the approved plan made for this task (`mockPrLines`). Absent or empty: the description is exactly what it was. */
   setupLines?: readonly string[] | undefined;
+  /** L4-EVW4 (DEC 254zzz43): "Eval not read: setup needed", when the project's eval card was set aside ("Not now") and an eval is still not readable. Absent or empty: the description is exactly what it was. */
+  evalSetupLines?: readonly string[] | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -235,6 +237,12 @@ export function setupChangeSection(lines: readonly string[] | undefined): string
   return kept.length === 0 ? [] : ["## Setup change", ...kept, ""];
 }
 
+/** The "Eval" section: the project's one fixed line about an eval Rovara could not read, under a heading and a blank line after; nothing for none. */
+export function evalSetupSection(lines: readonly string[] | undefined): string[] {
+  const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line)).map((line) => inertLine(line, ITEM_MAX));
+  return kept.length === 0 ? [] : ["## Eval", ...kept, ""];
+}
+
 /** The "Browser evidence" section: its fixed lines under a heading and a blank line after; nothing for none. Each line is one line (a line with a break in it is dropped, so a section never carries other markup). */
 export function browserEvidenceSection(lines: readonly string[] | undefined): string[] {
   const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line));
@@ -255,7 +263,7 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     const built = layoutBlockLines({
       workflow, context, risk, parts, reviewLines, checksExtra: extra.lines, testsAdded: extra.testsAdded, reviewExtra, linearCloseLine: closeLine, asOf: context.asOf ?? workflow.updatedAt,
       // L4-SC (#916, merged over the PR redesign in batch 14): the plan's "Setup change" lines, after the verdict list and before the drawers.
-      setupChange: setupChangeSection(context.setupLines),
+      setupChange: [...setupChangeSection(context.setupLines), ...evalSetupSection(context.evalSetupLines)],
     }, level);
     // The last guard: whatever a path let through, no line has a Linear magic word before a key but Rovara's own Fixes line. No email address on GitHub; hidden before the size is checked.
     lines = sealLinearText(built.lines, linearKey).map((line) => hideEmailAddresses(line));

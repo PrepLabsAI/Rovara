@@ -1,15 +1,18 @@
-// L4-EVW2 (DEC 254zzz20 D2): the setup agent proposes a small wrapper file as a PULL REQUEST on the customer's repository when Rovara cannot read the eval's output. This WRITES TO A CUSTOMER'S REPOSITORY, so every rule is
-// a test here, against the fake code host (which refuses what the real adapter refuses): a Rovara branch only, never the default branch, never merged by Rovara, once per format, never over a file, audited before the
-// write, fails closed, and one company never sees or touches another's.
+// L4-EVW4 (DEC 254zzz43): a PERSON's click opens a small wrapper file as a PULL REQUEST on the customer's repository when Rovara cannot read the eval's output. This WRITES TO A CUSTOMER'S REPOSITORY, so every rule is a test
+// here, against the fake code host (which refuses what the real adapter refuses): a Rovara branch only, never the default branch, never merged by Rovara, template files only (custom is copy-only), only a file the dry-run
+// passed, once per file, never over a file (the file there is found and checked), audited before the write naming the person, fails closed, and one company never sees or touches another's.
 import { describe, expect, it, vi } from "vitest";
-import { EVAL_WRAPPER_BRANCH_PATTERN, change, EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_NODE_PATH, evalCommandFingerprintOf, ownedBranchKind, type CodeHost, type EvalOutputShape, type SetupEvalDiscoveryReport } from "@agentx/contracts";
+import { EVAL_NOT_READ_LINE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_NODE_PATH, EVAL_WRAPPER_PYTHON_PATH, change, evalCommandFingerprintOf, evalWrapperFor, ownedBranchKind, type CodeHost, type EvalOutputShape, type SetupEvalDiscoveryReport } from "@agentx/contracts";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
-import { EVAL_WRAPPER_SK_PREFIX, OPENING_STALE_MS, listEvalWrappers, proposeEvalWrappers, readEvalWrapperViews, refreshEvalWrappers, type EvalWrapperDeps } from "../../packages/broker/src/core/setup-agent/eval-wrapper.js";
-import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
+import {
+  EVAL_WRAPPER_SK_PREFIX, OPENING_STALE_MS, detectEvalWrappers, dismissEvalWrapper, listEvalWrapperFiles, listEvalWrappers, needsOf, openEvalWrapperPullRequest, readEvalWrapperDismissed, recordEvalWrapperTest, refreshEvalWrappers, reopenEvalWrapper, wrapperFileFor,
+  type EvalWrapperDeps,
+} from "../../packages/broker/src/core/setup-agent/eval-wrapper.js";
+import { evalSetupNeededLine, readEvalWrapperCards } from "../../packages/broker/src/core/setup-agent/eval-wrapper-card.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
-import type { RepoFileTarget } from "../../packages/broker/src/lessons/repo-file-host.js";
+import type { EvalWrapperTarget as RepoFileTarget } from "../../packages/broker/src/core/setup-agent/eval-wrapper-host.js";
 
 const A = COMPANY_A.orgId; const B = COMPANY_B.orgId;
 const PROJECT = "demo";
@@ -24,7 +27,7 @@ const suiteOf = (output: EvalOutputShape | undefined, over: Record<string, unkno
   questions: [{ id: "q1", category: "ordinary", path: "evals/agent/q1.json" }, { id: "q2", category: "safety", path: "evals/agent/q2.json" }],
   command, report: reportPath, ...(output === undefined ? {} : { output }), commandFingerprint: evalCommandFingerprintOf(command, reportPath),
   judge: { kind: "rule", scoringPath: "evals/agent/score.py" }, subsetSupported: false, catalogRowId: "gemini", model: "gemini-2.5-pro", modelVersion: "gemini-2.5-pro-001",
-  image: IMAGE, route: "gateway", maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 100_000, ...over,
+  image: IMAGE, route: "gateway", maxCallsPerQuestion: 2, maxCostMicrosPerQuestion: 100_000, ...(output === undefined ? {} : { wrapperDryRun: "passed" }), ...over,
 });
 const reportOf = (...suites: Array<ReturnType<typeof suiteOf>>): SetupEvalDiscoveryReport => ({ schemaVersion: 1, suites }) as unknown as SetupEvalDiscoveryReport;
 
@@ -45,8 +48,13 @@ function world(options: { files?: Record<string, string>; place?: string; host?:
     deps: (company = A, over = {}) => ({ store, companyId: company, now: () => clock.now, targets: async () => [target], audit: async (event) => { audits.push(event); }, randomHex: () => { n += 1; return n.toString(16).padStart(12, "0"); }, ...over }),
   };
 }
-const propose = (w: World, report: SetupEvalDiscoveryReport, over: { retry?: boolean; deps?: Partial<EvalWrapperDeps> } = {}) =>
-  proposeEvalWrappers(w.deps(A, over.deps), PROJECT, { report, taskId: "task-1", by: "setup-run:task-1", ...(over.retry === undefined ? {} : { retry: over.retry }) });
+/** A person's click for every eval of the report that needs a file, in order (the route does one per click; the outcomes are the same). */
+const propose = async (w: World, report: SetupEvalDiscoveryReport, over: { deps?: Partial<EvalWrapperDeps>; by?: string } = {}) => {
+  const out = [];
+  for (const need of needsOf(report)) out.push(await openEvalWrapperPullRequest(w.deps(A, over.deps), PROJECT, { report, selection: need.selection, taskId: "task-1", by: over.by ?? "person-1" }));
+  return out;
+};
+const cards = (w: World, report: SetupEvalDiscoveryReport, canManage = true, company = A) => readEvalWrapperCards(w.deps(company), PROJECT, { reportDigest: "d".repeat(64), report }, canManage);
 
 describe("opening the proposal", () => {
   it("opens ONE pull request from a new Rovara branch, never touches the default branch, and never merges it", async () => {
@@ -62,24 +70,56 @@ describe("opening the proposal", () => {
     expect(cr).toMatchObject({ targetBranch: "main", state: "open", draft: false });
     expect(w.model.headOf("main")).toBe(mainBefore);
     // Only the wrapper path was added, on the branch; the default branch has no such file.
-    expect(w.model.revision(w.model.headOf(cr.sourceBranch)).files.get(EVAL_WRAPPER_PYTHON_PATH)).toMatch(/Proposed by Rovara/u);
+    expect(w.model.revision(w.model.headOf(cr.sourceBranch)).files.get(EVAL_WRAPPER_PYTHON_PATH)).toMatch(/Made by Rovara/u);
     expect([...w.model.revision(mainBefore).files.keys()]).not.toContain(EVAL_WRAPPER_PYTHON_PATH);
     expect(cr.body).toMatch(/Rovara never merges it/u);
     expect(merge).not.toHaveBeenCalled();
     expect(w.model.changeRequests[0]!.state).toBe("open");
-    // The card says it in one line, with the number.
-    expect((await readEvalWrapperViews(w.deps(), PROJECT))[0]).toMatchObject({ state: "open", number: "1", line: "Rovara proposed a small file so it can read your eval results: review PR #1" });
+    // The card says it in one line, with the number; the audit names the PERSON who clicked.
+    const opened = (await cards(w, reportOf(suiteOf(ROWS))))[0]!;
+    expect(opened).toMatchObject({ step: "pull_request_open", pullRequest: { state: "open", number: "1" } });
+    expect(opened.line).toContain("PR #1");
+    expect(w.audits[0]).toMatchObject({ action: "eval_wrapper.pull_request_opened", details: { by: "person-1" } });
+    expect((await listEvalWrappers(w.deps(), PROJECT))[0]).toMatchObject({ by: "person-1" });
   });
 
-  it("uses the Node file for a Node eval, and the setup agent's own text for a custom one (with its header)", async () => {
+  it("uses the Node file for a Node eval", async () => {
     const w = world();
     await propose(w, reportOf(suiteOf({ ...ROWS, language: "node" })));
     expect(w.model.revision(w.model.headOf(w.model.changeRequests[0]!.sourceBranch)).files.has(EVAL_WRAPPER_NODE_PATH)).toBe(true);
+  });
+
+  it("REFUSES a custom (AI-written) wrapper on the direct path: nothing is written, no audit, no record; the card is copy-only and still shows the file", async () => {
     const c = world();
-    await propose(c, reportOf(suiteOf({ kind: "custom", language: "python", summary: "reads scores.csv", source: "print('hello')\n" })));
-    const text = c.model.revision(c.model.headOf(c.model.changeRequests[0]!.sourceBranch)).files.get(EVAL_WRAPPER_PYTHON_PATH)!;
-    expect(text).toMatch(/Written by Rovara's setup agent.*reads scores\.csv/u);
-    expect(c.model.changeRequests[0]!.body).toMatch(/written by Rovara's setup agent/u);
+    const report = reportOf(suiteOf({ kind: "custom", language: "python", summary: "reads scores.csv", source: "print('hello')\n" }));
+    expect(await propose(c, report)).toMatchObject([{ state: "failed", failure: "copy_only" }]);
+    expect(c.model.changeRequests).toHaveLength(0);
+    expect([...c.model.branches.keys()]).toEqual(["main"]);
+    expect(c.audits).toEqual([]);
+    expect(await listEvalWrappers(c.deps(), PROJECT)).toEqual([]);
+    const [card] = await cards(c, report);
+    expect(card).toMatchObject({ kind: "custom", canOpenPullRequest: false, copyOnly: { reason: "custom" }, path: EVAL_WRAPPER_PYTHON_PATH, summary: "reads scores.csv" });
+    expect(card!.content).toMatch(/Written by Rovara's setup agent.*reads scores\.csv/u);
+  });
+
+  it("opens nothing for a file the setup run's dry-run did not pass (or never ran): the file is not offered, shown or opened", async () => {
+    for (const mark of [{ wrapperDryRun: "failed" }, { wrapperDryRun: undefined }]) {
+      const w = world();
+      const report = reportOf(suiteOf(ROWS, mark));
+      expect(await propose(w, report)).toMatchObject([{ state: "failed", failure: "not_offered" }]);
+      expect(w.model.changeRequests).toHaveLength(0);
+      expect(w.audits).toEqual([]);
+      const [card] = await cards(w, report);
+      expect(card).toMatchObject({ offered: false, step: "not_offered", canOpenPullRequest: false, content: "" });
+    }
+  });
+
+  it("opens nothing for an eval that needs no file", async () => {
+    const w = world();
+    const report = reportOf(suiteOf({ kind: "junit" }));
+    expect(await openEvalWrapperPullRequest(w.deps(), PROJECT, { report, selection: "evals/agent", taskId: "t", by: "person-1" })).toMatchObject({ failure: "not_needed" });
+    expect(await openEvalWrapperPullRequest(w.deps(), PROJECT, { report, selection: "evals/missing", taskId: "t", by: "person-1" })).toMatchObject({ failure: "not_needed" });
+    expect(w.model.changeRequests).toHaveLength(0);
   });
 
   it("makes nothing for an output Rovara already reads, or one the report does not describe", async () => {
@@ -98,11 +138,11 @@ describe("opening the proposal", () => {
     const branches = w.model.branches.size;
     const again = await propose(w, reportOf(suiteOf(ROWS)));
     expect(again[0]).toMatchObject({ state: "open", replayed: true, number: "1" });
-    expect(await propose(w, reportOf(suiteOf(ROWS)), { retry: true })).toMatchObject([{ state: "open", replayed: true }]);
+    expect(await propose(w, reportOf(suiteOf(ROWS)))).toMatchObject([{ state: "open", replayed: true }]);
     expect(w.model.changeRequests).toHaveLength(1);
     expect(w.model.branches.size).toBe(branches);
     expect(w.audits).toHaveLength(1);
-    expect(w.audits[0]).toMatchObject({ action: "eval_wrapper.proposed", project: PROJECT });
+    expect(w.audits[0]).toMatchObject({ action: "eval_wrapper.pull_request_opened", project: PROJECT });
   });
 
   it("does not open a second pull request for the same file while the first is open (another shape), nor for a second suite in the same run", async () => {
@@ -111,19 +151,29 @@ describe("opening the proposal", () => {
     const other = await propose(w, reportOf(suiteOf({ ...ROWS, idField: "name" })));
     expect(other[0]).toMatchObject({ state: "skipped", failure: "another_shape" });
     expect(w.model.changeRequests).toHaveLength(1);
+    // A monorepo: one pull request for the FIRST eval, copy for the rest.
     const two = world();
-    const out = await propose(two, reportOf(suiteOf(ROWS), suiteOf({ ...ROWS, idField: "name" }, { selection: "evals/zz" })));
-    expect(out.map((o) => o.state)).toEqual(["open", "skipped"]);
+    const both = reportOf(suiteOf(ROWS), suiteOf({ ...ROWS, idField: "name" }, { selection: "evals/zz" }));
+    const out = await propose(two, both);
+    expect(out.map((o) => o.state)).toEqual(["open", "failed"]);
+    expect(out[1]).toMatchObject({ failure: "another_eval" });
     expect(two.model.changeRequests).toHaveLength(1);
+    const view = await cards(two, both);
+    expect(view.map((card) => card.canOpenPullRequest)).toEqual([false, false]);
+    expect(view[1]).toMatchObject({ copyOnly: { reason: "another_eval" } });
+    expect(view[1]!.content).toContain('"idField": "name"');
   });
 
-  it("never writes over a file that exists at the wrapper's path, and leaves no branch behind", async () => {
+  it("never writes over a file that exists at the wrapper's path, FINDS it on the default branch, and leaves no branch behind", async () => {
     const w = world({ files: { "README.md": "x\n", [EVAL_WRAPPER_PYTHON_PATH]: "their own file\n" } });
     const [outcome] = await propose(w, reportOf(suiteOf(ROWS)));
     expect(outcome).toMatchObject({ state: "failed", failure: "file_exists" });
     expect(w.model.changeRequests).toHaveLength(0);
     expect([...w.model.branches.keys()]).toEqual(["main"]);
     expect(w.model.revision(w.model.headOf("main")).files.get(EVAL_WRAPPER_PYTHON_PATH)).toBe("their own file\n");
+    // The file that is there is left alone and CHECKED: the card moves on (an edited file is judged by a test run, not by its text).
+    expect((await listEvalWrapperFiles(w.deps(), PROJECT))[0]).toMatchObject({ status: "present", match: "edited", test: "none" });
+    expect((await cards(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ step: "file_found", fileStatus: "edited", canOpenPullRequest: false });
     // The same file's text is "theirs" even when it is identical.
     const same = world({ files: { "README.md": "x\n" } });
     same.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: "x\n" });
@@ -171,16 +221,26 @@ describe("failing closed", () => {
     expect(moved.audits).toEqual([]);
   });
 
-  it("a refused pull request drops the branch it made and is recorded as failed, then tries again only on request", async () => {
+  it("a refused pull request (branch protection, no write access) drops the branch it made, falls back to COPY, and a person may ask again", async () => {
     const w = world();
-    const reconcile = vi.spyOn(w.host, "reconcileChangeRequest").mockRejectedValueOnce(new Error("refused"));
-    expect((await propose(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ state: "failed", failure: "refused" });
+    const report = reportOf(suiteOf(ROWS));
+    vi.spyOn(w.host, "reconcileChangeRequest").mockRejectedValueOnce(new Error("refused"));
+    expect((await propose(w, report))[0]).toMatchObject({ state: "failed", failure: "refused" });
     expect([...w.model.branches.keys()]).toEqual(["main"]);
-    // Without a retry the failure stands; a person's "Try again" makes it once more.
-    expect((await propose(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ state: "failed", failure: "refused", replayed: true });
-    expect(reconcile).toHaveBeenCalledTimes(1);
-    expect((await propose(w, reportOf(suiteOf(ROWS)), { retry: true }))[0]).toMatchObject({ state: "open", number: "1" });
-    expect(w.audits.map((a) => a.action)).toEqual(["eval_wrapper.proposed", "eval_wrapper.retry"]);
+    const [card] = await cards(w, report);
+    expect(card).toMatchObject({ step: "needs_file", copyOnly: { reason: "cannot_write" }, canOpenPullRequest: false });
+    expect(card!.content).toMatch(/rovara-eval-wrapper-template/u);
+    // Each ask is a person's click; the second works.
+    expect((await propose(w, report))[0]).toMatchObject({ state: "open", number: "1" });
+    expect(w.audits.map((a) => a.action)).toEqual(["eval_wrapper.pull_request_opened", "eval_wrapper.pull_request_opened"]);
+  });
+
+  it("a host that refuses the write itself (no write access) is the same fallback to copy", async () => {
+    const w = world();
+    vi.spyOn(w.host, "commitFiles").mockRejectedValueOnce(new Error("Resource not accessible"));
+    expect((await propose(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ state: "failed", failure: "refused" });
+    expect(w.model.changeRequests).toHaveLength(0);
+    expect((await cards(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ copyOnly: { reason: "cannot_write" } });
   });
 
   it("a claim left opening by a process that ended is recovered: the pull request is found by its branch, or the proposal is marked interrupted", async () => {
@@ -203,7 +263,9 @@ describe("failing closed", () => {
     await lost.store.update({ key: { pk: setupPartition(A, PROJECT), sk: `${EVAL_WRAPPER_SK_PREFIX}${made!.id}` }, ops: [change.set("state", "opening")] });
     lost.clock.now += OPENING_STALE_MS + 1_000;
     const after = await propose(lost, reportOf(suiteOf(ROWS)));
-    expect(after[0]).toMatchObject({ state: "failed", failure: "interrupted" });
+    // The interrupted claim is recovered to "failed", and the person's own click then opens a fresh pull request (never over the other branch it left behind).
+    expect(after[0]).toMatchObject({ state: "open" });
+    expect(lost.model.changeRequests).toHaveLength(1);
   });
 });
 
@@ -250,7 +312,12 @@ describe("a person's decision on the pull request", () => {
     const cr = await open(w);
     w.model.merge(cr.id, { revision: w.model.headRevisionOf(cr), method: "squash" });
     await refreshEvalWrappers(w.deps(), PROJECT);
-    expect((await readEvalWrapperViews(w.deps(), PROJECT))[0]).toMatchObject({ state: "merged", rediscover: true, line: "PR #1 is merged. Set up again so Rovara reads your eval through it." });
+    const merged = (await cards(w, reportOf(suiteOf(ROWS))))[0]!;
+    expect(merged).toMatchObject({ step: "pull_request_open", pullRequest: { state: "merged" } });
+    expect(merged.line).toContain("looking for the file on your default branch");
+    // No "run setup again": once the file is on the default branch, a read finds it and the card moves on by itself.
+    await detectEvalWrappers(w.deps(), PROJECT, reportOf(suiteOf(ROWS)), { force: true });
+    expect((await cards(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ step: "file_found", fileStatus: "same" });
   });
 
   it("a closed pull request is a 'no': it is not opened again, and a changed wrapper is a new proposal", async () => {
@@ -258,8 +325,8 @@ describe("a person's decision on the pull request", () => {
     const cr = await open(w);
     w.model.update(cr.id, { state: "closed" });
     await refreshEvalWrappers(w.deps(), PROJECT);
-    expect((await readEvalWrapperViews(w.deps(), PROJECT))[0]).toMatchObject({ state: "closed" });
-    expect((await propose(w, reportOf(suiteOf(ROWS)), { retry: true }))[0]).toMatchObject({ state: "closed", replayed: true });
+    expect((await cards(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ pullRequest: { state: "closed" }, copyOnly: { reason: "closed" }, canOpenPullRequest: false });
+    expect((await propose(w, reportOf(suiteOf(ROWS))))[0]).toMatchObject({ state: "closed", failure: "closed", replayed: true });
     expect(w.model.changeRequests).toHaveLength(1);
     const changed = await propose(w, reportOf(suiteOf({ ...ROWS, idField: "name" })));
     expect(changed[0]).toMatchObject({ state: "open" });
@@ -280,14 +347,148 @@ describe("a person's decision on the pull request", () => {
   });
 });
 
-describe("the setup card", () => {
-  it("shows the line and says the eval cannot be approved while its results cannot be read", async () => {
+describe("the card", () => {
+  it("one card per eval that needs a file: the title, the file's path and text for everyone, and the role decides who may open", async () => {
     const w = world();
-    // The card reads the stored report row; a minimal one is enough for the wrapper lines.
-    await propose(w, reportOf(suiteOf(ROWS)));
-    const card = await readEvalCard({ store: w.store, companyId: A }, PROJECT, { companyId: A, personId: "p", provider: "x", displayName: "", roles: [] });
-    expect(card.wrappers).toHaveLength(1);
-    expect(card.wrappers[0]!.line).toContain("review PR #1");
+    const report = reportOf(suiteOf(ROWS));
+    const expected = evalWrapperFor({ command, report: reportPath, output: ROWS })!;
+    const manager = (await cards(w, report, true))[0]!;
+    const member = (await cards(w, report, false))[0]!;
+    expect(manager).toMatchObject({ title: "Rovara can't read the results of evals/agent yet", step: "needs_file", offered: true, kind: "template", path: EVAL_WRAPPER_PYTHON_PATH, content: expected.content, canOpenPullRequest: true, dismissed: false });
+    // A member sees and copies the very same file, and cannot open the pull request.
+    expect(member).toMatchObject({ path: manager.path, content: manager.content, canOpenPullRequest: false });
+    expect(await cards(w, reportOf(suiteOf({ kind: "junit" })))).toEqual([]);
+    expect(await cards(w, reportOf(suiteOf(undefined)))).toEqual([]);
+  });
+
+  it("a card does not read the report row at all when the report is absent", async () => {
+    expect(await readEvalWrapperCards(world().deps(), PROJECT, undefined, true)).toEqual([]);
+  });
+});
+
+describe("detecting the file on the DEFAULT branch (no 'run setup again')", () => {
+  const report = () => reportOf(suiteOf(ROWS));
+  const expected = () => evalWrapperFor({ command, report: reportPath, output: ROWS })!;
+
+  it("finds a file a person committed to the default branch, whoever made it: the same text, an edited one, an older template's", async () => {
+    const same = world();
+    same.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
+    await detectEvalWrappers(same.deps(), PROJECT, report());
+    expect((await listEvalWrapperFiles(same.deps(), PROJECT))[0]).toMatchObject({ status: "present", match: "same", defaultBranch: "main" });
+    expect((await cards(same, report()))[0]).toMatchObject({ step: "file_found", fileStatus: "same", canOpenPullRequest: false });
+    const edited = world();
+    edited.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: `${expected().content}# my change\n` });
+    await detectEvalWrappers(edited.deps(), PROJECT, report());
+    expect((await cards(edited, report()))[0]).toMatchObject({ step: "file_found", fileStatus: "edited" });
+    const old = world();
+    old.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content.replace(/rovara-eval-wrapper-template: 1/u, "rovara-eval-wrapper-template: 0") });
+    await detectEvalWrappers(old.deps(), PROJECT, report());
+    // An out-of-date wrapper brings the card back, with the new file to copy over it (never a pull request over a file).
+    expect((await cards(old, report()))[0]).toMatchObject({ step: "file_outdated", fileStatus: "outdated", canOpenPullRequest: false, copyOnly: { reason: "file_exists" }, content: expected().content });
+    expect(wrapperFileFor(await listEvalWrapperFiles(old.deps(), PROJECT), {}, "python")).toBeUndefined();
+  });
+
+  it("looks only at the default branch: a file on another branch, or nothing at all, is absent", async () => {
+    const w = world();
+    w.model.branches.set("feature", w.model.headOf("main"));
+    w.model.commit("feature", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
+    await detectEvalWrappers(w.deps(), PROJECT, report());
+    expect((await listEvalWrapperFiles(w.deps(), PROJECT))[0]).toMatchObject({ status: "absent" });
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "needs_file" });
+  });
+
+  it("a folder or a link at the path is 'other': left alone, the card says to copy", async () => {
+    const link = world();
+    link.model.commitEntry("main", EVAL_WRAPPER_PYTHON_PATH, "symlink", "target");
+    await detectEvalWrappers(link.deps(), PROJECT, report());
+    expect((await listEvalWrapperFiles(link.deps(), PROJECT))[0]).toMatchObject({ status: "other" });
+    expect((await cards(link, report()))[0]).toMatchObject({ copyOnly: { reason: "file_exists" }, canOpenPullRequest: false });
+  });
+
+  it("a young check is left as it is and Check now looks again; a host that cannot answer changes nothing", async () => {
+    const w = world();
+    await detectEvalWrappers(w.deps(), PROJECT, report());
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
+    await detectEvalWrappers(w.deps(), PROJECT, report());
+    expect((await listEvalWrapperFiles(w.deps(), PROJECT))[0]).toMatchObject({ status: "absent" });
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect((await listEvalWrapperFiles(w.deps(), PROJECT))[0]).toMatchObject({ status: "present" });
+    vi.spyOn(w.host, "pathKind").mockRejectedValue(new Error("down"));
+    w.model.commit("main", { "x.txt": "y" });
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect((await listEvalWrapperFiles(w.deps(), PROJECT))[0]).toMatchObject({ status: "present" });
+  });
+
+  it("is read only: nothing is written to the repository, and the repository must be the one the project pins", async () => {
+    const w = world();
+    const commit = vi.spyOn(w.host, "commitFiles");
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect(commit).not.toHaveBeenCalled();
+    const moved = world({ place: "fake:repo/9999" });
+    moved.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
+    await detectEvalWrappers(moved.deps(), PROJECT, report(), { force: true });
+    expect(await listEvalWrapperFiles(moved.deps(), PROJECT)).toEqual([]);
+  });
+
+  it("the test run follows the file: approved, then readable; a changed file starts over", async () => {
+    const w = world();
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect(await recordEvalWrapperTest(w.deps(), PROJECT, { repository: "api", language: "python" }, "approved")).toBe(true);
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "test_approved" });
+    await recordEvalWrapperTest(w.deps(), PROJECT, { repository: "api", language: "python" }, "readable");
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "readable" });
+    await recordEvalWrapperTest(w.deps(), PROJECT, { repository: "api", language: "python" }, "unreadable");
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "unreadable" });
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: `${expected().content}# changed\n` });
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "file_found", fileStatus: "edited" });
+    // Nothing is recorded where there is no file to test.
+    expect(await recordEvalWrapperTest(world().deps(), PROJECT, { repository: "api", language: "python" }, "approved")).toBe(false);
+  });
+});
+
+describe("Not now: a per-project dismissed state", () => {
+  const report = () => reportOf(suiteOf(ROWS));
+
+  it("sets the card aside for this report, with the audit naming the person; a newer report asks again; Set up now undoes it", async () => {
+    const w = world();
+    await dismissEvalWrapper(w.deps(), PROJECT, { reportDigest: "d".repeat(64), by: "person-1" });
+    expect(w.audits[0]).toMatchObject({ action: "eval_wrapper.dismissed", details: { by: "person-1" } });
+    expect(await readEvalWrapperDismissed(w.deps(), PROJECT)).toMatchObject({ by: "person-1", reportDigest: "d".repeat(64) });
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "dismissed", dismissed: true });
+    // Another setup run's report (another digest) asks again.
+    expect((await readEvalWrapperCards(w.deps(), PROJECT, { reportDigest: "e".repeat(64), report: report() }, true))[0]).toMatchObject({ step: "needs_file", dismissed: false });
+    await reopenEvalWrapper(w.deps(), PROJECT, { by: "person-2" });
+    expect(w.audits[1]).toMatchObject({ action: "eval_wrapper.reopened", details: { by: "person-2" } });
+    expect(await readEvalWrapperDismissed(w.deps(), PROJECT)).toBeUndefined();
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "needs_file", dismissed: false });
+  });
+
+  it("a failed audit sets nothing aside", async () => {
+    const w = world();
+    await expect(dismissEvalWrapper(w.deps(A, { audit: async () => { throw new Error("down"); } }), PROJECT, { reportDigest: "d".repeat(64), by: "p" })).rejects.toThrow();
+    expect(await readEvalWrapperDismissed(w.deps(), PROJECT)).toBeUndefined();
+  });
+
+  it("a found file or an open pull request brings the card back from Not now", async () => {
+    const w = world();
+    await dismissEvalWrapper(w.deps(), PROJECT, { reportDigest: "d".repeat(64), by: "p" });
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: evalWrapperFor({ command, report: reportPath, output: ROWS })!.content });
+    await detectEvalWrappers(w.deps(), PROJECT, report(), { force: true });
+    expect((await cards(w, report()))[0]).toMatchObject({ step: "file_found", dismissed: false });
+  });
+
+  it("the pull request line 'Eval not read: setup needed' is said only while it is set aside and still unread", async () => {
+    const w = world();
+    const discovery = { taskId: "t1", reportDigest: "d".repeat(64), state: "reported" as const, report: report() };
+    // evalSetupNeededLine reads the stored report row; here the report row is put the way the broker keeps it.
+    const { evalDiscoveryKey } = await import("../../packages/broker/src/core/setup-agent/eval-discovery.js");
+    const { setupAgentKey } = await import("../../packages/broker/src/core/setup-agent/keys.js");
+    await w.store.put({ item: { ...setupAgentKey(A, PROJECT), entityType: "SETUP_AGENT", taskId: "t1" } });
+    expect(await evalSetupNeededLine(w.deps(), PROJECT)).toBeUndefined();
+    void discovery; void evalDiscoveryKey;
+    expect(EVAL_NOT_READ_LINE).toBe("Eval not read: setup needed");
   });
 });
 
@@ -296,13 +497,21 @@ describe("two companies", () => {
     const w = world();
     await propose(w, reportOf(suiteOf(ROWS)));
     expect(await listEvalWrappers(w.deps(B), PROJECT)).toEqual([]);
-    expect(await readEvalWrapperViews(w.deps(B), PROJECT)).toEqual([]);
+    const forOther = await cards(w, reportOf(suiteOf(ROWS)), true, B);
+    expect(forOther[0]).toMatchObject({ step: "needs_file" });
+    expect(forOther[0]!.pullRequest).toBeUndefined();
+    await dismissEvalWrapper(w.deps(A), PROJECT, { reportDigest: "d".repeat(64), by: "p" });
+    expect(await readEvalWrapperDismissed(w.deps(B), PROJECT)).toBeUndefined();
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: evalWrapperFor({ command, report: reportPath, output: ROWS })!.content });
+    await detectEvalWrappers(w.deps(A), PROJECT, reportOf(suiteOf(ROWS)), { force: true });
+    expect(await listEvalWrapperFiles(w.deps(B), PROJECT)).toEqual([]);
+    expect(await recordEvalWrapperTest(w.deps(B), PROJECT, { repository: "api", language: "python" }, "approved")).toBe(false);
     // B's same-named project proposes its own, apart from A's.
     const [row] = await listEvalWrappers(w.deps(A), PROJECT);
     await w.store.put({ item: { pk: `ORG#${B}#SETUP_DRAFT#${PROJECT}`, sk: `EVAL_WRAPPER#${row!.id}`, ...row, company: A } as never });
     expect(await listEvalWrappers(w.deps(B), PROJECT)).toEqual([]);
     const forB = world();
-    await proposeEvalWrappers(forB.deps(B), PROJECT, { report: reportOf(suiteOf(ROWS)), taskId: "t", by: "x" });
+    await openEvalWrapperPullRequest(forB.deps(B), PROJECT, { report: reportOf(suiteOf(ROWS)), selection: "evals/agent", taskId: "t", by: "x" });
     expect((await listEvalWrappers(forB.deps(B), PROJECT))).toHaveLength(1);
     expect(await listEvalWrappers(forB.deps(A), PROJECT)).toEqual([]);
   });

@@ -34,6 +34,7 @@ import type { RunNetwork } from "./setup-network.js";
 import { SANDBOX_TARGET, executionFor } from "./execution-target.js";
 import type { TaskSandbox } from "./task-sandbox.js";
 import { EVAL_DRAFT_REFUSAL_WORDS, produceEvalDiscoveryReport } from "./verification/eval-discovery-producer.js";
+import { dryRunEvalWrappers } from "./verification/eval-wrapper-dryrun.js";
 import type { EvalDiscovery } from "./verification/eval-discovery.js";
 
 /** What the preparation manifest says about a repository (the broker's own record of the default branch's head). */
@@ -120,6 +121,8 @@ async function withinMs<T>(work: Promise<T>, ms: number): Promise<T | undefined>
 /** A cache write costs 1.25 times the input price: the extra quarter, on top of the input price already counted for it. */
 export const SETUP_CACHE_WRITE_EXTRA = 0.25;
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
+/** The whole time the wrapper dry-runs of one setup run may take (a few small scripts; a suite that does not finish in time is not offered). */
+const DRY_RUN_TOTAL_MS = 90_000;
 
 /**
  * Runs `base` one command at a time: a second `exec` waits for the first to end. The agent's shell and a person's command both run through the same serialized base, so two commands never share the
@@ -368,6 +371,20 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     let evalReport: SetupEvalDiscoveryReport | undefined;
     const finishRun = async (): Promise<{ proposal: SetupProposal | undefined; summary: SetupRunSummary }> => {
       governor.dispose();
+      // DEC 254zzz43: the wrapper file the agent described is dry-run in THIS sandbox (a scratch folder under /tmp, sample rows, no repository file, no network, no model) BEFORE the sandbox is removed, so only a file that
+      // read its samples is offered. Skipped for a stopped or failed run; any fault leaves the suite without a pass (= not offered).
+      let dryRuns: Awaited<ReturnType<typeof dryRunEvalWrappers>> | undefined;
+      if (!cancelled && governor.ended() === undefined && shell.ended() === undefined) {
+        const answer = setupProposalAnswerOf(finalText);
+        const draft = typeof answer === "object" && answer !== null && !Array.isArray(answer) ? (answer as Record<string, unknown>)["eval"] : undefined;
+        if (draft !== undefined) {
+          dryRuns = await withinMs(dryRunEvalWrappers(draft, async (command, options) => {
+            let output = "";
+            const result = await base.exec(command, resolve(input.rootPath), { timeout: options.timeoutSeconds, onData: (data) => { if (output.length < 200_000) output += data.toString("utf8"); } });
+            return { exitCode: result.exitCode, output };
+          }), DRY_RUN_TOTAL_MS).catch(() => undefined);
+        }
+      }
       await sandbox!.dispose();
       const verdict = await lastFiles();
       if (governor.ended() === undefined && shell.ended() === undefined) {
@@ -381,7 +398,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
           if (finished.end === "proposed" && !cancelled) {
             const answer = setupProposalAnswerOf(finalText);
             const draft = typeof answer === "object" && answer !== null && !Array.isArray(answer) ? (answer as Record<string, unknown>)["eval"] : undefined;
-            const produced = await produceEvalDiscoveryReport({ draft, repositories, tracked, image: input.evalImage, ...(input.discoverEvals === undefined ? {} : { discover: input.discoverEvals }) }).catch(() => ({ refused: "unreadable" as const }));
+            const produced = await produceEvalDiscoveryReport({ draft, repositories, tracked, image: input.evalImage, ...(dryRuns === undefined ? {} : { dryRuns }), ...(input.discoverEvals === undefined ? {} : { discover: input.discoverEvals }) }).catch(() => ({ refused: "unreadable" as const }));
             if ("report" in produced) evalReport = produced.report;
             // A draft that could not be used is said in fixed words on the run's live view (never the draft or a path), so "no eval" on the page is not a silent drop.
             else if (produced.refused !== "none") await ports.progress(`Rovara did not use the eval the setup drafted (${EVAL_DRAFT_REFUSAL_WORDS[produced.refused]}).`).catch(() => undefined);

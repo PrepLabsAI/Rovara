@@ -139,6 +139,17 @@ describe("what the eval writes (output)", () => {
     expect("report" in without && "output" in without.report.suites[0]!).toBe(false);
     for (const output of [{ kind: "junit" }, { kind: "promptfoo" }, { kind: "measures" }]) expect("report" in (await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output })] } })))).toBe(true);
   });
+  it("carries the setup sandbox's dry-run of each file by the suite's selection (never the draft's own claim), and an absent one stays absent", async () => {
+    const dryRuns = new Map<string, "passed" | "failed">([["evals/demo", "passed"]]);
+    const ok = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS })] }, dryRuns }));
+    expect("report" in ok && ok.report.suites[0]!.wrapperDryRun).toBe("passed");
+    const failed = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS })] }, dryRuns: new Map([["evals/demo", "failed"]]) }));
+    expect("report" in failed && failed.report.suites[0]!.wrapperDryRun).toBe("failed");
+    const none = await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS })] } }));
+    expect("report" in none && "wrapperDryRun" in none.report.suites[0]!).toBe(false);
+    // The draft cannot say it passed.
+    expect(await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output: ROWS, wrapperDryRun: "passed" })] } }))).toEqual({ refused: "unreadable" });
+  });
   it("refuses a draft whose output is not exactly one of the shapes: whole or nothing", async () => {
     for (const output of [{ kind: "rows" }, { ...ROWS, extra: 1 }, { ...ROWS, language: "ruby" }, { ...ROWS, idField: "a b" }, { kind: "custom", language: "python", summary: "x", source: "x".repeat(12_001) }, { kind: "shell", command: "rm -rf /" }, "junit"]) {
       expect(await produceEvalDiscoveryReport(input({ draft: { suites: [draftSuite({ output })] } })), JSON.stringify(output).slice(0, 50)).toEqual({ refused: "unreadable" });

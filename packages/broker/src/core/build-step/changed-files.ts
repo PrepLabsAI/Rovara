@@ -25,6 +25,7 @@ import type { TaskRecord } from "../task-flow/records.js";
 import { iso, log } from "../task-flow/support.js";
 import { approvedCodingPlan } from "./plan-input.js";
 import { flagUnplannedMocks, mockFactsOf, mockPrLines } from "../setup-agent/plan-setup.js";
+import { evalSetupNeededLine } from "../setup-agent/eval-wrapper-card.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
 
 export const WORKSPACE_DIFF_ARTIFACT = "workspace.diff";
@@ -197,6 +198,8 @@ export interface DescriptionInputs {
   browserLines: readonly string[];
   /** L4-SC (#916): one line per mock the plan approved for this task (task-only, made by Rovara, not yet the project's setup). */
   setupLines: readonly string[];
+  /** L4-EVW4 (DEC 254zzz43): "Eval not read: setup needed", when the project's eval card was set aside with "Not now" and an eval is still not readable. */
+  evalSetupLines: readonly string[];
 }
 
 /**
@@ -216,14 +219,16 @@ export async function descriptionInputsOf(deps: TaskFlowDeps, task: TaskRecord, 
   // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
   const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidateDigest).catch((): readonly string[] => []) ?? [];
   const setupLines = mockPrLines(plan?.setupChanges);
-  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines };
+  const evalSetupLine = await evalSetupNeededLine(deps, task.project);
+  return { plan, proof, secondLines, secondStatus, linearIssueKey, acceptedBy, browserLines, setupLines, evalSetupLines: evalSetupLine === undefined ? [] : [evalSetupLine] };
 }
 
 /** The description's context for one repository: the inputs, plus what depends on the repository (its changed files, the order lines, the lessons its readers may read). */
 export function descriptionContextOf(inputs: DescriptionInputs, own: { changedFiles?: ChangedFilesRead | undefined; mergeOrderLines: readonly string[]; lessonsUsed: LessonsUsedSection | undefined }): PullRequestBodyContext {
-  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines } = inputs;
+  const { acceptedBy, linearIssueKey, secondLines, secondStatus, proof, browserLines, setupLines, evalSetupLines } = inputs;
   return {
     ...(setupLines.length === 0 ? {} : { setupLines }),
+    ...(evalSetupLines.length === 0 ? {} : { evalSetupLines }),
     ...(own.changedFiles === undefined ? {} : { changedFiles: own.changedFiles }),
     ...(own.mergeOrderLines.length === 0 ? {} : { mergeOrderLines: own.mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }),
     ...(own.lessonsUsed === undefined ? {} : { lessonsUsed: own.lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }),

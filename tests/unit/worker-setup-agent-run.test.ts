@@ -722,6 +722,45 @@ describe("DEC 253q(a): the eval the agent drafts goes to the broker through the 
     await runSetupAgent(none.input);
     expect(none.w.progress.join("\n")).not.toContain("did not use the eval");
   });
+  // DEC 254zzz43: the wrapper file is dry-run in THIS sandbox, before the sandbox is removed, and only a pass makes it offered.
+  const ROWS_OUTPUT = { kind: "rows", format: "jsonl", language: "python", idField: "case_id", pass: { field: "passed", equals: true } };
+  const GOOD_REPORT = "---REPORT---\n<testsuite name=\"rovara-eval\" tests=\"2\" failures=\"1\">\n  <testcase classname=\"eval\" name=\"rovara-dry-run-pass\"/>\n  <testcase classname=\"eval\" name=\"rovara-dry-run-fail\"><failure message=\"did not pass\"/></testcase>\n</testsuite>\n";
+  const wrapperWorld = async (exec: (command: string) => { exitCode: number; output: string }) => {
+    const t = await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], output: ROWS_OUTPUT }] } }) });
+    t.w.base.exec = async (command, _cwd, opts) => {
+      if (!command.includes("rovara-wrapper-dryrun")) return { exitCode: 0 };
+      t.w.order.push("dry-run");
+      const done = exec(command);
+      opts.onData(Buffer.from(done.output));
+      return { exitCode: done.exitCode };
+    };
+    return t;
+  };
+  it("dry-runs the wrapper in the setup sandbox BEFORE it is removed, and a pass is carried into the report (mutants: the order, the carry)", async () => {
+    const t = await wrapperWorld(() => ({ exitCode: 0, output: GOOD_REPORT }));
+    await runSetupAgent(t.input);
+    expect(t.w.order.indexOf("dry-run")).toBeGreaterThanOrEqual(0);
+    expect(t.w.order.indexOf("dry-run")).toBeLessThan(t.w.order.indexOf("sandbox.dispose"));
+    expect(sent(t)[0]!.report.suites[0]).toMatchObject({ output: ROWS_OUTPUT, wrapperDryRun: "passed" });
+  });
+  it("a failed dry-run is carried as failed (not offered), and a wrapper whose report does not read the samples is failed too", async () => {
+    for (const exec of [() => ({ exitCode: 98, output: "" }), () => ({ exitCode: 0, output: "---REPORT---\n<testsuite/>" })]) {
+      const t = await wrapperWorld(exec);
+      await runSetupAgent(t.input);
+      expect(sent(t)[0]!.report.suites[0]).toMatchObject({ wrapperDryRun: "failed" });
+    }
+  });
+  it("runs nothing for an eval that needs no file, and the draft can never carry its own pass (the schema is strict)", async () => {
+    const plain = await evalWorld();
+    let ran = 0;
+    plain.w.base.exec = async (command) => { if (command.includes("rovara-wrapper-dryrun")) ran += 1; return { exitCode: 0 }; };
+    await runSetupAgent(plain.input);
+    expect(ran).toBe(0);
+    expect(sent(plain)[0]!.report.suites[0]).not.toHaveProperty("wrapperDryRun");
+    const forged = await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], output: ROWS_OUTPUT, wrapperDryRun: "passed" }] } }) });
+    await runSetupAgent(forged.input);
+    expect(sent(forged)).toEqual([]);
+  });
   it("a broker that refuses the report does not fail the run", async () => {
     const t = await evalWorld();
     const ports = t.input.ports;

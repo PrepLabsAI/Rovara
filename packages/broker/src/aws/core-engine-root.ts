@@ -50,6 +50,7 @@ import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
+import { createEvalWrapperTargets } from "../core/setup-agent/eval-wrapper-targets.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -611,6 +612,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     return { gate, administers, pauses };
   };
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // L4-EVW4 (DEC 254zzz43, folded in from #1025): the project's repositories as the eval wrapper card reads and (on a person's click) writes them. One per company, over that company's own flow, registry view and scope:
+  // the pinned address, the host that serves it and `{ orgId: company }`. The setup run's callback gets NO wrapper wiring: nothing but a person's POST opens a pull request.
+  const wrapperTargetsByCompany = new Map<string, ReturnType<typeof createEvalWrapperTargets>>();
+  const wrapperTargetsOf = (companyId: OrgId, flow: Parameters<typeof createEvalWrapperTargets>[0]["flow"], registry: Parameters<typeof createEvalWrapperTargets>[0]["registry"]): ReturnType<typeof createEvalWrapperTargets> => {
+    let found = wrapperTargetsByCompany.get(companyId);
+    if (found === undefined) { found = createEvalWrapperTargets({ flow, registry, companyId, now: () => now().getTime() }); wrapperTargetsByCompany.set(companyId, found); }
+    return found;
+  };
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
@@ -788,6 +797,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
+              wrapperTargets: (project) => wrapperTargetsOf(runtime.companyId, runtime.flow.deps, registry)(project),
             },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
             approval: createHostedSetupApproval({
