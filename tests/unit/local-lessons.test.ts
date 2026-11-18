@@ -2,7 +2,7 @@
 // checks that they are joined to what `rovara up` has, with the install's one owner, the document store and the queue point.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type ExternalAccountRef, type IdentityProvider } from "@agentx/contracts";
+import { LEARNED_CONTEXT_FEATURE, change, companyScoped, type ApprovalProof, type Approvers, type CommitIdentity, type ExternalAccountRef, type IdentityProvider } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createMemoryModelKeyStore } from "../../packages/broker/src/ports/model-key-stores.js";
@@ -737,10 +737,10 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
   const HEAD = sha(2);
   const URL = "https://github.com/example/demo/pull/7";
   const FIVE = ["@@ -1,1 +1,5 @@ function load()", "-load()", "+await withRetry(() => load())", "+await withRetry(() => save())", "+await withRetry(() => sync())", "+const a = 1", "+const b = 2"].join("\n");
-  const by = (id: string) => ({ author: { login: `user-${id}`, hostUserId: id, accountType: "person" as const }, committer: { login: `user-${id}`, hostUserId: id, accountType: "person" as const }, webFlow: false });
+  const by = (id: string): CommitIdentity => ({ author: { login: `user-${id}`, hostUserId: id, accountType: "person" }, committer: { login: `user-${id}`, hostUserId: id, accountType: "person" }, webFlow: false });
   const candidate = { type: "pitfall", title: "Network calls use withRetry", description: "Retries go through the retry helper.", body: "Wrap network calls in withRetry from the retry helper instead of a hand-written loop.", scope: {}, stages: ["IMPLEMENT"], citations: [], evidenceSpanIds: ["S1"] };
 
-  async function editWorld(identityOf: ReturnType<typeof by> | undefined) {
+  async function editWorld(identityOf: CommitIdentity | undefined) {
     const host = {
       kind: "github",
       repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true, defaultBranch: "main" }),
@@ -778,7 +778,7 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
   });
 
   it("a bot's push, and the switch off, queue nothing", async () => {
-    const bot = { author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" as const }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" as const }, webFlow: false };
+    const bot: CommitIdentity = { author: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, committer: { login: "rovara[bot]", hostUserId: "9001", accountType: "bot" }, webFlow: false };
     const { w, push } = await editWorld(bot);
     await w.lessons.noteHumanEdit(push);
     await w.lessons.tick();

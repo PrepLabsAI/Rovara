@@ -20,7 +20,7 @@ const bot: CommitIdentity = { author: acct("rovara[bot]", "9001", "bot"), commit
 const file = (path: string): ChangeRequestFile => ({ path, status: "modified", additions: 2, deletions: 1, patch: EDIT });
 const commit = (parents: string[], identity: CommitIdentity, path = "src/fetch.ts"): CommitChanges => ({ files: [file(path)], complete: true, parents, identity });
 
-function setup(over: { table?: Record<string, CommitChanges>; liveHead?: string; liveBranch?: string; members?: Record<string, string>; repoFullName?: string; task?: Partial<TaskRecord> | null; noRepo?: boolean } = {}) {
+function setup(over: { table?: Record<string, CommitChanges>; liveHead?: string; liveBranch?: string; members?: Record<string, string>; repoFullName?: string; task?: Record<string, unknown> | null; noRepo?: boolean; recorded?: string } = {}) {
   const table = over.table ?? { [HEAD]: commit([BASE], rae) };
   const handed: HumanEditInput[] = [];
   let requests = 0;
@@ -30,14 +30,14 @@ function setup(over: { table?: Record<string, CommitChanges>; liveHead?: string;
     getChangeRequest: async () => { requests += 1; return { ref: { repository: { url: "https://github.com/acme/api" }, id: "7", url: URL }, state: "open", sourceBranch: over.liveBranch ?? "agentx/branch", targetBranch: "main", headRevision: over.liveHead ?? HEAD, title: "t", body: "" }; },
   };
   const repository: HumanEditRepository = { url: "https://github.com/acme/api", place: "github:repo/4242", fullName: over.repoFullName ?? "acme/api", codeHost: codeHost as unknown as HumanEditRepository["codeHost"], repository: { url: "https://github.com/acme/api" }, scope: { orgId: A } };
-  const task = over.task === null ? undefined : { taskId: "task-1", companyId: A, project: "payments", startingRevision: 1, workflow: { pullRequests: [{ repositoryId: "api", number: 7, url: URL }] }, ...over.task } as unknown as TaskRecord;
+  const task = over.task === null ? undefined : { taskId: "task-1", companyId: A, project: "payments", startingRevision: 1, workflow: { pullRequests: [{ repositoryId: "api", number: 7, url: URL, headSha: BASE }] }, workspaceId: "ws-1", ...over.task } as unknown as TaskRecord;
   const extractor: HumanEditExtractorPort = { async extract(input) { handed.push(input); return { candidates: 1 }; } };
   const members = over.members ?? { "1001": "member-rae", "1002": "member-kim" };
   const asked: string[] = [];
   const deps: HumanEditRunDeps = {
     companyId: A, ownTask: async (taskId) => (taskId === "task-1" ? task : undefined),
     repos: { ofTask: async (project, _revision, name) => { asked.push(`${project}/${name}`); return over.noRepo === true ? undefined : repository; } },
-    personOf: async (account) => members[account.hostUserId], extractor, now: () => Date.parse("2026-11-17T10:00:00.000Z"),
+    personOf: async (account) => members[account.hostUserId], extractor, recordedHead: async () => over.recorded, now: () => Date.parse("2026-11-17T10:00:00.000Z"),
   };
   const job = (extra: Partial<HumanEditJob> = {}): HumanEditJob => ({
     repo: { host: "github", id: "4242", fullName: "acme/api", isPrivate: true, workspaceId: A, project: "payments" }, project: "payments", taskId: "task-1", pullRequest: { number: 7, url: URL },
@@ -95,6 +95,15 @@ describe("a queued human-edit job", () => {
     // The repository's name is compared the way the host cases it.
     const cased = setup({ repoFullName: "Acme/API" });
     expect(await cased.run(cased.job())).toBe("handed_on");
+  });
+  it("the job's base must be where Rovara's own work ends (the task's recorded head, or the pull request record's): a base the message names on its own is skipped", async () => {
+    const forged = setup({ table: { [HEAD]: commit([sha(3)], rae), [sha(3)]: commit([sha(7)], kim, "src/save.ts"), [sha(7)]: commit([BASE], kim, "src/early.ts") } });
+    // sha(7) is an earlier commit on the branch, not the commit Rovara pushed: widening the range to it would pull another person's earlier work in.
+    expect(await forged.run(forged.job({ candidateHeadSha: sha(7) }))).toBe("skipped");
+    expect(forged.handed).toEqual([]);
+    // The pull request record's own head is also where Rovara's work ended (a fix pushed after the workflow's head).
+    const recorded = setup({ recorded: sha(3), table: { [HEAD]: commit([sha(3)], rae) } });
+    expect(await recorded.run(recorded.job({ candidateHeadSha: sha(3) }))).toBe("handed_on");
   });
   it("a head the host no longer shows (it moved on, or another branch) is skipped: the newer push has its own job", async () => {
     const moved = setup({ liveHead: sha(9) });

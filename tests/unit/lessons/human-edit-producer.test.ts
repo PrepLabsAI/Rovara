@@ -23,7 +23,7 @@ const person: CommitIdentity = { author: acct("rae", "1001"), committer: acct("r
 const bot: CommitIdentity = { author: acct("rovara[bot]", "9001", "bot"), committer: acct("rovara[bot]", "9001", "bot"), webFlow: false };
 const commit = (parents: string[], identity: CommitIdentity, files: ChangeRequestFile[] = [file("src/fetch.ts", 2, 1, EDIT)], complete = true): CommitChanges => ({ files, complete, parents, identity });
 
-function setup(over: { table?: Record<string, CommitChanges>; mode?: "Off" | "Collect" | "Suggest" | "On"; enabled?: boolean; queueFails?: { count: number }; identity?: boolean } = {}) {
+function setup(over: { table?: Record<string, CommitChanges>; mode?: "Off" | "Collect" | "Suggest" | "On"; enabled?: boolean; canPlace?: boolean; queueFails?: { count: number }; identity?: boolean } = {}) {
   const table = over.table ?? { [sha(2)]: commit([BASE], person) };
   const asked: string[] = [];
   let identityReads = 0;
@@ -38,7 +38,7 @@ function setup(over: { table?: Record<string, CommitChanges>; mode?: "Off" | "Co
   const logs: string[] = [];
   const tasks = new Map<string, TaskRecord>([["task-1", { taskId: "task-1", companyId: A, project: "payments" } as unknown as TaskRecord]]);
   const deps: HumanEditProducerDeps = {
-    companyId: A, store, settings: settings({ mode: over.mode ?? "Suggest" }), enabled: () => over.enabled !== false,
+    companyId: A, store, settings: settings({ mode: over.mode ?? "Suggest" }), enabled: () => over.enabled !== false, canPlaceAuthors: () => over.canPlace !== false,
     ownTask: async (taskId) => { const found = tasks.get(taskId); return found?.companyId === A ? found : undefined; },
     queue: async () => queue, now: () => Date.parse("2026-11-17T10:00:00.000Z"), log: (event) => { logs.push(event); },
   };
@@ -170,6 +170,15 @@ describe("what is ignored", () => {
     // With learning On the same push does queue.
     const on = setup({ mode: "On" });
     expect(await on.produce(on.push())).toBe("queued");
+  });
+
+  it("an install that can place no author as a member (its identity point links no accounts) reads nothing and queues nothing, so no host request is spent for a job that could only end skipped", async () => {
+    const w = setup({ canPlace: false });
+    expect(await w.produce(w.push())).toBe("no_identity");
+    expect(w.asked).toEqual([]);
+    expect(w.identityReads()).toBe(0);
+    expect(w.sent).toEqual([]);
+    expect(await w.store.get(humanEditRowKey(A, "task-1", sha(2)))).toBeUndefined();
   });
 
   it("a head that is the base, or not a commit id, is not read", async () => {

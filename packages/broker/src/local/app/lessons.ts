@@ -62,7 +62,7 @@ export interface LocalLessonsOptions {
   metering: Metering;
   approvers: Approvers;
   /** Who a code host account is: a person's `/rovara lesson` comment is theirs, not the owner's. */
-  identity: Pick<IdentityProvider, "resolveExternalAccount">;
+  identity: Pick<IdentityProvider, "resolveExternalAccount"> & Partial<Pick<IdentityProvider, "capabilities">>;
   /** The model the install's steps use, and what the call needs (the same pieces an Ask's call has). */
   model: { choice: () => Promise<LocalModelChoice | undefined>; keys: ModelKeyStore; providers: ModelProviderBook; endpoints?: Partial<ProviderEndpoints> | undefined; fetch?: typeof fetch | undefined };
   learning?: LearningAdapter | undefined;
@@ -203,6 +203,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       },
       standing: async (_orgId, developerId) => (developerId === ownerId ? "member" : "outsider"),
       isErased: async () => false,
+      // A laptop's identity point that says it links no accounts places nobody (an edit by anyone is then skipped, so none is read).
+      canPlaceAuthors: () => options.identity.capabilities?.externalAccounts !== false,
     },
     now, log: (event, fields) => log(event, fields),
   });

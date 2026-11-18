@@ -174,6 +174,11 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
         return (await options.people.resolveMember?.(companyId, principal.personId)) ?? principal.personId;
       },
       standing: async (orgId, developerId, project) => (orgId === companyId && await options.people.onProjectRoster(companyId, project, developerId) ? "member" : "outsider"),
+      // The identity point must be one that links code host accounts to people: the hosted identity point of an install without account links places nobody, so no push is read.
+      canPlaceAuthors() {
+        if (options.identity !== undefined) return true;
+        try { return registry.require("identity").capabilities.externalAccounts === true; } catch { return false; }
+      },
       // Another company's person is never "not erased": the answer for it is yes (nothing is learned).
       isErased: async (orgId, developerId) => (orgId !== companyId ? true : await options.people.isErased(companyId, developerId)),
     },

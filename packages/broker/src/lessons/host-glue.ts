@@ -33,6 +33,7 @@ import { isHumanSendBack } from "./human-send-backs.js";
 import { NO_REASON_TEXT } from "./task-subject.js";
 import { retryDelayFor, runReflectMessage, type ReflectWorkerDeps } from "./reflect-worker.js";
 import { createHumanEditExtractor, learnFromHumanEdit } from "./human-edit.js";
+import { recordedHeadOf } from "../core/build-step/head-check.js";
 import { createHumanEditProducer } from "./human-edit-producer.js";
 import { createHumanEditRun, type HumanEditRunDeps } from "./human-edit-work.js";
 import type { HumanEditSink } from "../core/merge/seams.js";
@@ -77,6 +78,8 @@ export interface LessonsHostInput {
     personOf: HumanEditRunDeps["personOf"];
     standing(orgId: string, developerId: string, project: string): Promise<"member" | "outsider">;
     isErased(orgId: string, developerId: string, project: string): Promise<boolean>;
+    /** Whether this install can place a code host account as a member at all (its identity point links accounts). False: no push is read or queued, since no author could ever be named. */
+    canPlaceAuthors(): boolean;
   } | undefined;
   now: () => number;
   log: (event: string, fields?: Record<string, unknown>) => void;
@@ -241,7 +244,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       isErased: (orgId, developerId, project) => edit.isErased(orgId, developerId, project),
       log: (event, fields) => log(event, fields),
     });
-    return createHumanEditRun({ companyId, ownTask, repos: edit.repos, personOf: edit.personOf, extractor, now });
+    return createHumanEditRun({ companyId, ownTask, repos: edit.repos, personOf: edit.personOf, extractor, now, recordedHead: recordedHeadOf(flow) });
   })();
   const workerDeps = (visibility?: ReflectWorkerDeps["visibility"], deadlineMs = LESSONS_WORKER_DEADLINE_SECONDS * 1000): ReflectWorkerDeps => ({
     claims, now, deadlineMs: Math.min(deadlineMs, LESSONS_WORKER_DEADLINE_SECONDS * 1000), ...(visibility === undefined ? {} : { visibility }), log: (event, fields) => log(event, fields),
@@ -253,7 +256,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   });
 
   /** A person's push to a pull request of this company's task (L4-LM1c). Never throws except for a code host's "slow down" and a spent allowance, which the pass owns. */
-  const produceHumanEdit = humanEditWork === undefined ? undefined : createHumanEditProducer({ companyId, store: flow.store, settings: runtime.settings, enabled, ownTask, queue: sender, now, log: (event, fields) => log(event, fields) });
+  const produceHumanEdit = humanEditWork === undefined ? undefined : createHumanEditProducer({ companyId, store: flow.store, settings: runtime.settings, enabled, canPlaceAuthors: () => input.humanEdit?.canPlaceAuthors() === true, ownTask, queue: sender, now, log: (event, fields) => log(event, fields) });
   const noteHumanEdit: HumanEditSink = async (push) => { await produceHumanEdit?.(push); };
 
   /** One message of the reflection queue, for this company (the caller routed it here by its company). */

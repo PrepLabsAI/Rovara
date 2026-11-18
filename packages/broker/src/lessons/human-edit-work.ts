@@ -38,6 +38,8 @@ export interface HumanEditRunDeps {
   /** The canonical developer id of the member of THIS company a code host account is, or undefined (not linked, not in this company). THROWS when it cannot tell. */
   personOf(account: HostPerson, provider: string): Promise<string | undefined>;
   extractor: HumanEditExtractorPort;
+  /** The head the pull request's record says Rovara last pushed (the tracking pass's own read). */
+  recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
   now: () => number;
 }
 
@@ -52,6 +54,9 @@ export function createHumanEditRun(deps: HumanEditRunDeps): (job: HumanEditJob) 
     const repo = await deps.repos.ofTask(task.project, task.startingRevision, pullRequest.repositoryId);
     if (repo === undefined || repo.fullName.toLowerCase() !== job.repo.fullName.toLowerCase()) return "skipped";
     const provider = providerOf(repo.codeHost);
+    // The job's base is where Rovara's own work ends: the commit the task or the pull request's record says Rovara pushed last, never a commit the message names on its own (an older one would pull earlier people's commits in).
+    const recorded = await deps.recordedHead?.(task.workspaceId, pullRequest.repositoryId, pullRequest.number);
+    if (job.candidateHeadSha !== pullRequest.headSha && job.candidateHeadSha !== recorded) return "skipped";
     // The head the host shows now must be the job's.
     const budget = allowanceBudget(undefined, HUMAN_EDIT_WORK_REQUESTS_MAX);
     budget.beforeRequest();

@@ -211,9 +211,9 @@ describe("what is ignored or refused", () => {
       ["an account of no member", { author: acct("zed", "7777"), committer: acct("zed", "7777"), webFlow: false } as CommitIdentity, undefined],
       ["a member of another company (even from a careless identity point)", { author: acct("lou", "1003"), committer: acct("lou", "1003"), webFlow: false } as CommitIdentity, { identity: careless }],
       ["a member off the roster", personKim, undefined],
-      ["an erased member", personRae, { erased: ["member-rae"] }],
+      ["an erased member", personRae, { people: { erased: ["member-rae"] } }],
     ] as const) {
-      const s = await setup(over === undefined ? {} : "identity" in over ? over : { people: over });
+      const s = await setup(over ?? {});
       const head = personPush(s, identityOf);
       await s.a.lessons.host.noteHumanEdit(s.push(head));
       const [message] = await queued(s.fake);
@@ -243,13 +243,16 @@ describe("what is ignored or refused", () => {
     expect(s.model.calls).toEqual([]);
   });
 
-  it("with no identity option the registry's own identity point is asked (the fake world's links nobody): nothing is learned", async () => {
+  it("with no identity option the registry's own identity point is asked: the fake world's links no accounts, so no push is read from the host and nothing is queued (the hosted identity point of an install without account links is the same)", async () => {
     const s = await setup({ identity: null });
+    let hostReads = 0;
     const head = personPush(s);
+    const host = s.fake.host;
+    const original = host.commitChanges.bind(host);
+    host.commitChanges = async (...args) => { hostReads += 1; return original(...args); };
     await s.a.lessons.host.noteHumanEdit(s.push(head));
-    const [message] = await queued(s.fake);
-    expect(message).toBeDefined();
-    await s.a.lessons.host.reflectOne(JSON.stringify(message));
+    expect(await queued(s.fake)).toEqual([]);
+    expect(hostReads).toBe(0);
     expect(s.model.calls).toEqual([]);
   });
 

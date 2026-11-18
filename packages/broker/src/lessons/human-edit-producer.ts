@@ -39,6 +39,8 @@ export interface HumanEditProducerDeps {
   settings: LearningSettingsReader;
   /** Whether lessons are on for this company now (read at every ask). */
   enabled: () => boolean;
+  /** Whether an author could be named as a member of this company at all on this install. False: nothing is read from the host and nothing is queued (the job could only end skipped, after costing host requests). */
+  canPlaceAuthors: () => boolean;
   /** The task, when it is this company's. */
   ownTask(taskId: string): Promise<TaskRecord | undefined>;
   /** The reflection queue's sender. Throws when the queue does not take the message. */
@@ -48,7 +50,7 @@ export interface HumanEditProducerDeps {
 }
 
 /** What the producer did, for a test and the log line: fixed words. */
-export type HumanEditProduced = "off" | "other_company" | "already" | "queued" | "skipped" | "not_queued" | "unread";
+export type HumanEditProduced = "off" | "no_identity" | "other_company" | "already" | "queued" | "skipped" | "not_queued" | "unread";
 
 export function createHumanEditProducer(deps: HumanEditProducerDeps): (push: HumanEditPush) => Promise<HumanEditProduced> {
   const { companyId, store } = deps;
@@ -56,6 +58,7 @@ export function createHumanEditProducer(deps: HumanEditProducerDeps): (push: Hum
   return async (push) => {
     // The install's switch, then the task: the company's own, on the project the pass named.
     if (!deps.enabled()) return "off";
+    if (!deps.canPlaceAuthors()) return "no_identity";
     if (push.task.orgId !== companyId) return "other_company";
     const task = await deps.ownTask(push.task.taskId);
     if (task === undefined || task.project !== push.task.project) return "other_company";

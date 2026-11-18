@@ -116,7 +116,7 @@ describe("a person's push, through the producer, becomes one job", () => {
     const sent: ReflectQueueMessage[] = [];
     const task = { taskId: TASK_ID, companyId: ORG, project: "web" } as unknown as TaskRecord;
     const produce = createHumanEditProducer({
-      companyId: ORG, store: world.store, settings: settings({ mode: over.mode ?? "Suggest" }), enabled: () => true, ownTask: async (taskId) => (taskId === TASK_ID ? task : undefined),
+      companyId: ORG, store: world.store, settings: settings({ mode: over.mode ?? "Suggest" }), enabled: () => true, canPlaceAuthors: () => true, ownTask: async (taskId) => (taskId === TASK_ID ? task : undefined),
       queue: async () => ({ async send(message) { sent.push(message); } }), now: () => world.now.value, log: () => undefined,
     });
     return { sent, deps: withHook(world, async (event) => { await produce(event); }) };

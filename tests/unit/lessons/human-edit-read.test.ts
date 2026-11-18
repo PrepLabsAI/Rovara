@@ -44,6 +44,7 @@ describe("who is a person", () => {
     expect(personOfCommit(commit([BASE], { author: account("rovara[bot]", "9001", "person"), committer: account("rovara[bot]", "9001", "person"), webFlow: false }))).toBeUndefined();
     expect(personOfCommit(commit([BASE], unlinked()))).toBeUndefined();
     expect(personOfCommit(commit([BASE], { author: account("rae", undefined), committer: account("rae", undefined), webFlow: false }))).toBeUndefined();
+    expect(personOfCommit(commit([BASE], { author: account("rae", ""), committer: account("rae", ""), webFlow: false }))).toBeUndefined();
     expect(personOfCommit(commit([BASE], { author: account("rae", "1001"), committer: account("kim", "1002"), webFlow: false }))).toBeUndefined();
     expect(personOfCommit(commit([BASE], { author: account("rae", "1001"), committer: account("rae", "1001", "other"), webFlow: false }))).toBeUndefined();
     expect(personOfCommit(commit([BASE], { author: account("org-account", "1003", "other"), committer: account("org-account", "1003", "other"), webFlow: false }))).toBeUndefined();
@@ -128,6 +129,7 @@ describe("reading the person's edit", () => {
     expect(odd).toEqual({ kind: "skip", reason: "host_cannot_read" });
     // A force push: the history from the head never meets the commit Rovara pushed.
     expect(await read({ [sha(2)]: commit([sha(50)], byPerson()), [sha(50)]: commit([], byPerson()) }, sha(2)).result).toEqual({ kind: "skip", reason: "base_not_reached" });
+    expect(await read({ [sha(2)]: { files: "nope" as unknown as ChangeRequestFile[], complete: true, parents: [BASE], identity: byPerson() } }, sha(2)).result).toEqual({ kind: "skip", reason: "host_cannot_read" });
     expect(await read({}, "not-a-sha").result).toEqual({ kind: "skip", reason: "base_not_reached" });
     const long: Record<string, CommitChanges> = {};
     for (let n = 0; n <= HUMAN_EDIT_COMMITS_MAX; n += 1) long[sha(1_000 + n)] = commit([sha(1_001 + n)], byPerson());
@@ -182,6 +184,8 @@ describe("what teaches nothing is ignored", () => {
     for (const path of ["package-lock.json", "web/yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "dist/app.js", "src/__generated__/types.ts", "vendor/lib/x.go", "assets/app.min.js", "src/__snapshots__/a.snap", "go.sum"]) {
       expect(await edit([file(path, 4, 0, lines)]), path).toEqual({ kind: "skip", reason: "trivial" });
     }
+    // A file renamed OUT of an ignored path is ignored too.
+    expect(await edit([file("src/new-name.ts", 4, 0, lines, { status: "renamed", previousPath: "package-lock.json" })])).toEqual({ kind: "skip", reason: "trivial" });
     const mixed = await edit([file("package-lock.json", 40, 0, lines), file("src/fetch.ts", 2, 1, EDIT)]);
     if (mixed.kind !== "edit") throw new Error("expected an edit");
     expect(mixed.files.map((entry) => entry.path)).toEqual(["src/fetch.ts"]);
