@@ -1,7 +1,7 @@
 // agentx doctor's Sign in with ChatGPT checks (#343): the admin's switch, how many people are
 // connected, and whether the control plane reaches OpenAI. The control plane alone knows these, so
 // they are read through this computer's admin sign-in; without one they are skipped, with how to sign in.
-import { CLI_PACKAGE_NAME, ChatGptHealthSchema, type ChatGptHealth } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, ChatGptHealthSchema, type ChatGptHealth, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
 export type ChatGptHealthRead = { kind: "health"; health: ChatGptHealth } | { kind: "signed-out" } | { kind: "not-set-up" };
@@ -27,7 +27,7 @@ export async function chatGptChecks(context: DoctorContext): Promise<DoctorCheck
   if (read === undefined) return [check("chatgpt", name, "skip", "not checked by this agentx")];
   const result = await read();
   if (result.kind === "signed-out") {
-    return [check("chatgpt", name, "skip", `not checked: this computer has no working admin sign-in for ${context.env}`, `run ${cli} login --admin, then run agentx doctor again`)];
+    return [check("chatgpt", name, "skip", `not checked: this computer has no working admin sign-in for ${context.env}`, `run ${cli} login --admin, then run ${CLI_COMMAND_NAME} doctor again`)];
   }
   if (result.kind === "not-set-up") return [check("chatgpt", name, "skip", "not set up in this deployment")];
   const { health } = result;
@@ -36,7 +36,7 @@ export async function chatGptChecks(context: DoctorContext): Promise<DoctorCheck
     ? check("chatgpt", `reach ${host}`, "ok", "the control plane reaches it")
     // Only a problem while the switch is on: off, nothing uses OpenAI.
     : check("chatgpt", `reach ${host}`, health.enabled ? "fail" : "warn", `the control plane could not reach ${host} over HTTPS`,
-      "check the control plane's outbound internet access (the broker Lambda), then run agentx doctor again");
+      `check the control plane's outbound internet access (the broker Lambda), then run ${CLI_COMMAND_NAME} doctor again`);
   return [
     health.enabled
       ? check("chatgpt", name, "ok", `on; tasks prefer ${health.preferredModel} where a person's plan allows it`)

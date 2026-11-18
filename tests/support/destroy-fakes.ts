@@ -1,4 +1,4 @@
-// An AWS account in memory for agentx destroy: stacks that take simulated minutes to delete,
+// An AWS account in memory for rovara destroy: stacks that take simulated minutes to delete,
 // worker instances and volumes, retained resources with tags, and secrets. Every mutating call is
 // recorded in order in `calls`.
 import { environmentStackName, type StackPart } from "@agentx/contracts";

@@ -79,7 +79,7 @@ const base = (secrets: AuthorizeSecrets, fetchImplementation: typeof fetch, play
   secrets, fetchImplementation, openBrowser: play.openBrowser, onListening: play.onListening, listenPort: 0, showUrl: () => undefined,
 });
 
-describe("agentx admin credential authorize", () => {
+describe("rovara admin credential authorize", () => {
   it("signs in with PKCE S256 and a state, stores the refresh token beside the client, tags the secret and registers it", async () => {
     const secrets = secretsWith(JSON.stringify(CLIENT));
     const { fetchImplementation, exchanges, registrations } = vendorAndControlPlane();
@@ -108,21 +108,21 @@ describe("agentx admin credential authorize", () => {
     const order: string[] = [];
     const { fetchImplementation } = vendorAndControlPlane({ tokenBody: {
       access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer",
-      data: { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" },
+      data: { id: 1210000000000555, gid: "1210000000000555", name: "Rovara Bot", email: "agentx-bot@example.test" },
     } });
     secrets.write = vi.fn(async (name: string, next: string) => { order.push("write"); secrets.writes.push([name, next]); });
     const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
     const lines: string[] = [];
     await authorizeCredential({ ...base(secrets, fetchImplementation, play), showAccount: (line: string) => { order.push("account"); lines.push(line); } });
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^Signed in to Asana as AgentX Bot <agentx-bot@example\.test>\. /);
+    expect(lines[0]).toMatch(/^Signed in to Asana as Rovara Bot <agentx-bot@example\.test>\. /);
     expect(lines[0]).toContain("bot user");
     expect(lines[0]).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
     expect(order).toEqual(["account", "write"]);
   });
 
   it("still succeeds, saying the account could not be shown, when the token response has no usable user", async () => {
-    for (const data of [undefined, "AgentX Bot", { id: 1 }, { name: "\u0007\u001b\u0000", email: 42 }]) {
+    for (const data of [undefined, "Rovara Bot", { id: 1 }, { name: "\u0007\u001b\u0000", email: 42 }]) {
       const secrets = secretsWith(JSON.stringify(CLIENT));
       const { fetchImplementation, registrations } = vendorAndControlPlane({ tokenBody: { access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, ...(data === undefined ? {} : { data }) } });
       const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
@@ -250,7 +250,7 @@ describe("agentx admin credential authorize", () => {
     const secrets = secretsWith(JSON.stringify(CLIENT));
     const { fetchImplementation, registrations } = vendorAndControlPlane({ tokenBody: {
       access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer",
-      data: { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" },
+      data: { id: 1210000000000555, gid: "1210000000000555", name: "Rovara Bot", email: "agentx-bot@example.test" },
     } });
     const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
     let stdout = "";
@@ -267,7 +267,7 @@ describe("agentx admin credential authorize", () => {
     expect(registrations).toHaveLength(1);
     expect(stderr).toContain("https://app.asana.com/-/oauth_authorize?");
     expect(stderr).toContain("(the Asana app's redirect URL must be exactly http://localhost:8765/callback)");
-    expect(stderr).toContain("Signed in to Asana as AgentX Bot <agentx-bot@example.test>. This must be the connector's bot user");
+    expect(stderr).toContain("Signed in to Asana as Rovara Bot <agentx-bot@example.test>. This must be the connector's bot user");
     expect(stderr).toContain(`Stored the refresh token in ${SECRET} and registered asana-bot as oauth-refresh-token.`);
     expect(JSON.parse(stdout)).toMatchObject({ credential: { ref: "asana-bot", type: "oauth-refresh-token" } });
     expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
@@ -416,11 +416,11 @@ describe("agentx admin credential authorize", () => {
       expect(registrations).toHaveLength(1);
       expect(secrets.writes).toHaveLength(1);
       expect(secrets.tags).toEqual([SECRET]);
-      expect(stderr).toContain(`AgentX error [${failure.code}]: ${failure.message}; the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
+      expect(stderr).toContain(`Rovara error [${failure.code}]: ${failure.message}; the refresh token is stored and tagged in secret ${SECRET}; finish with \`rovara admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
       expect(stderr).not.toContain("Stored the refresh token in");
       // The account is shown before registration, so a failed registration still shows who signed in.
       expect(stderr).toContain("Signed in to Asana (the account could not be shown).");
-      expect(stderr.indexOf("Signed in to Asana")).toBeLessThan(stderr.indexOf("AgentX error"));
+      expect(stderr.indexOf("Signed in to Asana")).toBeLessThan(stderr.indexOf("Rovara error"));
       expect(`${stdout}${stderr}`).not.toMatch(new RegExp(`${REFRESH}|${ACCESS}|${CODE}|${CLIENT.clientSecret}`));
     }
   });
@@ -435,21 +435,21 @@ describe("agentx admin credential authorize", () => {
       const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), ...(region === undefined ? {} : { region }) }).catch((error: unknown) => error) as Error & { code?: string };
       expect(failure.code).toBe("CONFIG_INVALID");
       const where = region === undefined ? "your default AWS region" : region;
-      expect(failure.message).toBe(`CONFIG_INVALID: credential asana-bot: secret ${SECRET} was not found; the refresh token is stored and tagged in secret ${SECRET} in ${where}, but the control plane reads secrets in its own AWS region: if that is a different region, run the command again with --region set to the control plane's region; otherwise finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
+      expect(failure.message).toBe(`CONFIG_INVALID: credential asana-bot: secret ${SECRET} was not found; the refresh token is stored and tagged in secret ${SECRET} in ${where}, but the control plane reads secrets in its own AWS region: if that is a different region, run the command again with --region set to the control plane's region; otherwise finish with \`rovara admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
     }
   });
 
-  it("reports a registration that fails outside AgentX by the error's class name only, with the same recovery hint", async () => {
+  it("reports a registration that fails outside Rovara by the error's class name only, with the same recovery hint", async () => {
     const secrets = secretsWith(JSON.stringify(CLIENT));
     const { fetchImplementation } = vendorAndControlPlane({ registration: Object.assign(new Error(`socket closed after ${REFRESH}`), { name: "TypeError" }) });
     const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
     const failure = await authorizeCredential(base(secrets, fetchImplementation, play)).catch((error: unknown) => error) as Error;
     expect(failure).not.toHaveProperty("code");
-    expect(failure.message).toBe(`could not register the credential (TypeError); the refresh token is stored and tagged in secret ${SECRET}; finish with \`agentx admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
+    expect(failure.message).toBe(`could not register the credential (TypeError); the refresh token is stored and tagged in secret ${SECRET}; finish with \`rovara admin credential register --ref asana-bot --type oauth-refresh-token --secret ${SECRET}\` (no new sign-in needed)`);
   });
 
   describe("--expect-account and --no-browser", () => {
-    const BOT = { id: 1210000000000555, gid: "1210000000000555", name: "AgentX Bot", email: "agentx-bot@example.test" };
+    const BOT = { id: 1210000000000555, gid: "1210000000000555", name: "Rovara Bot", email: "agentx-bot@example.test" };
     const OWNER = { name: "App Owner", email: "owner@example.test" };
     const withUser = (data: unknown) => vendorAndControlPlane({ tokenBody: {
       access_token: ACCESS, refresh_token: REFRESH, expires_in: 3600, token_type: "bearer", ...(data === undefined ? {} : { data }),
@@ -459,7 +459,7 @@ describe("agentx admin credential authorize", () => {
 
     it("stores and registers when the signed-in email matches, ignoring case and surrounding spaces", async () => {
       const secrets = secretsWith(JSON.stringify(CLIENT));
-      const { fetchImplementation, registrations } = withUser({ ...BOT, email: " AgentX-Bot@Example.TEST " });
+      const { fetchImplementation, registrations } = withUser({ ...BOT, email: " Agentx-Bot@Example.TEST " });
       const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
       await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: "  agentx-bot@EXAMPLE.test " });
       expect(secrets.writes).toHaveLength(1);
@@ -481,13 +481,13 @@ describe("agentx admin credential authorize", () => {
     });
 
     it("refuses when the signed-in account cannot be shown or has no email", async () => {
-      for (const data of [undefined, { id: 1 }, { name: "AgentX Bot" }]) {
+      for (const data of [undefined, { id: 1 }, { name: "Rovara Bot" }]) {
         const secrets = secretsWith(JSON.stringify(CLIENT));
         const { fetchImplementation, registrations } = withUser(data);
         const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
         const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: BOT.email }).catch((error: unknown) => error) as Error & { code?: string };
         expect(failure.code).toBe("AUTH_REQUIRED");
-        const shown = data && "name" in data ? "AgentX Bot" : "an account that could not be shown";
+        const shown = data && "name" in data ? "Rovara Bot" : "an account that could not be shown";
         expect(failure.message).toBe(`AUTH_REQUIRED: ${mismatch(shown)}`);
         expect(secrets.writes).toEqual([]);
         expect(secrets.tags).toEqual([]);
@@ -500,7 +500,7 @@ describe("agentx admin credential authorize", () => {
       expect(long).toHaveLength(128);
       for (const [email, expected] of [["agentx-bot@exa\u200bmple.test", BOT.email], [`${long}x`, long]] as const) {
         const secrets = secretsWith(JSON.stringify(CLIENT));
-        const { fetchImplementation, registrations } = withUser({ name: "AgentX Bot", email });
+        const { fetchImplementation, registrations } = withUser({ name: "Rovara Bot", email });
         const play = browser((authorize) => [{ code: CODE, state: authorize.searchParams.get("state")! }]);
         const failure = await authorizeCredential({ ...base(secrets, fetchImplementation, play), expectAccount: expected }).catch((error: unknown) => error) as Error & { code?: string };
         expect(failure.code).toBe("AUTH_REQUIRED");
@@ -587,7 +587,7 @@ describe("agentx admin credential authorize", () => {
       const run = await cli(["--expect-account", BOT.email], OWNER);
       expect(run.openBrowser).toHaveBeenCalledTimes(1);
       expect(run.exitCode).toBe(3);
-      expect(run.stderr).toContain(`AgentX error [AUTH_REQUIRED]: ${mismatch("App Owner <owner@example.test>")}`);
+      expect(run.stderr).toContain(`Rovara error [AUTH_REQUIRED]: ${mismatch("App Owner <owner@example.test>")}`);
       expect(run.secrets.writes).toEqual([]);
       expect(run.secrets.tags).toEqual([]);
       expect(run.registrations).toEqual([]);
@@ -596,7 +596,7 @@ describe("agentx admin credential authorize", () => {
     it("refuses an empty --expect-account before logging in or reading the secret", async () => {
       const run = await cli(["--no-browser", "--expect-account", "  "], BOT, { loggedIn: false });
       expect(run.exitCode).toBe(exitCodeForError("CONFIG_INVALID"));
-      expect(run.stderr).toContain("AgentX error [CONFIG_INVALID]: --expect-account must be the bot user's email");
+      expect(run.stderr).toContain("Rovara error [CONFIG_INVALID]: --expect-account must be the bot user's email");
       expect(run.secrets.reads).toEqual([]);
       expect(run.fetchImplementation).not.toHaveBeenCalled();
       expect(run.openBrowser).not.toHaveBeenCalled();
@@ -605,7 +605,7 @@ describe("agentx admin credential authorize", () => {
     it("exits AUTH_REQUIRED from the command line on a mismatch, storing and registering nothing and printing no secret", async () => {
       const run = await cli(["--no-browser", "--expect-account", BOT.email], OWNER);
       expect(run.exitCode).toBe(3);
-      expect(run.stderr).toContain(`AgentX error [AUTH_REQUIRED]: ${mismatch("App Owner <owner@example.test>")}`);
+      expect(run.stderr).toContain(`Rovara error [AUTH_REQUIRED]: ${mismatch("App Owner <owner@example.test>")}`);
       expect(run.stderr).not.toContain("Stored the refresh token in");
       expect(run.secrets.writes).toEqual([]);
       expect(run.secrets.tags).toEqual([]);

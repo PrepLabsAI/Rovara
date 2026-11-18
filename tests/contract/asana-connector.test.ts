@@ -66,7 +66,7 @@ describe("asana connector type", () => {
     const resolve = (records: Array<{ ref: string; type: string }>) => resolveConnectors(ProjectDefinitionSchema.parse(project([asana()])), { credentialRegistry: registry(records) })[0]!;
     expect(await resolve([]).definition()).toEqual({ notConnected: "credential asana-bot is not registered" });
     expect(await resolve([{ ref: "asana-bot", type: "static-secret" }]).definition())
-      .toEqual({ notConnected: "credential asana-bot is static-secret; an Asana connector needs an oauth-refresh-token credential from agentx admin credential authorize" });
+      .toEqual({ notConnected: "credential asana-bot is static-secret; an Asana connector needs an oauth-refresh-token credential from rovara admin credential authorize" });
     expect(await resolve([{ ref: "asana-bot", type: "static-secret" }]).configured()).toBe(false);
     const connected = resolve([{ ref: "asana-bot", type: "oauth-refresh-token" }]);
     expect(await connected.configured()).toBe(true);
@@ -81,7 +81,7 @@ describe("asana connector type", () => {
       return { credentials, resolved: resolveConnectors(ProjectDefinitionSchema.parse(project([asana()])), { credentialRegistry: credentials }) };
     };
     const unregistered = connectors([]);
-    expect(await credentialRefusals(unregistered.resolved, unregistered.credentials)).toEqual(["connector asana: credential asana-bot is not registered; run agentx admin credential authorize first"]);
+    expect(await credentialRefusals(unregistered.resolved, unregistered.credentials)).toEqual(["connector asana: credential asana-bot is not registered; run rovara admin credential authorize first"]);
     const wrong = connectors([{ ref: "asana-bot", type: "static-secret" }]);
     expect(await credentialRefusals(wrong.resolved, wrong.credentials)).toEqual(["connector asana: credential asana-bot is static-secret; an Asana connector needs oauth-refresh-token"]);
     const right = connectors([{ ref: "asana-bot", type: "oauth-refresh-token" }]);
@@ -101,9 +101,9 @@ describe("the setup command named for an unregistered credential", () => {
 
   it("is authorize for a connector that needs an oauth-refresh-token credential and register for any other", async () => {
     expect(await credentialRefusals([connectorAccepting("bot", ["oauth-refresh-token"]), connectorAccepting("keyed", ["static-secret"]), connectorAccepting("client", ["oauth-client-credentials"])], registry())).toEqual([
-      "connector bot: credential bot-cred is not registered; run agentx admin credential authorize first",
-      "connector keyed: credential keyed-cred is not registered; run agentx admin credential register first",
-      "connector client: credential client-cred is not registered; run agentx admin credential register first",
+      "connector bot: credential bot-cred is not registered; run rovara admin credential authorize first",
+      "connector keyed: credential keyed-cred is not registered; run rovara admin credential register first",
+      "connector client: credential client-cred is not registered; run rovara admin credential register first",
     ]);
   });
 
@@ -115,8 +115,8 @@ describe("the setup command named for an unregistered credential", () => {
     // Spec 055: a built-in connector also refuses a credential pinned to a host other than its endpoint's.
     expect(provider).toHaveBeenCalledWith("asana-bot", { tokenEndpoint: ASANA_TOKEN_ENDPOINT, accepts: ["oauth-refresh-token"], pin: { host: "mcp.asana.com", required: false } });
     await expect(registry().provider("asana-bot", { tokenEndpoint: ASANA_TOKEN_ENDPOINT, accepts: ["oauth-refresh-token"] }).issue(undefined, "read"))
-      .rejects.toThrow(new CredentialUnavailable("credential asana-bot is not registered; run agentx admin credential authorize"));
+      .rejects.toThrow(new CredentialUnavailable("credential asana-bot is not registered; run rovara admin credential authorize"));
     await expect(registry().provider("linear-key", { accepts: ["static-secret"] }).issue(undefined, "read"))
-      .rejects.toThrow(new CredentialUnavailable("credential linear-key is not registered; run agentx admin credential register"));
+      .rejects.toThrow(new CredentialUnavailable("credential linear-key is not registered; run rovara admin credential register"));
   });
 });

@@ -18,7 +18,7 @@ describe("clash checks", () => {
   it("refuses an install name that already has a stack here, naming the stacks only in the details", async () => {
     const stack = environmentStackName("staging", "access");
     const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: { status: async (each) => (each === stack ? "CREATE_COMPLETE" : undefined) }, github: fakeGitHubApi(), audience: "page", installUsed: free });
-    expect(name).toEqual({ label: "Install name", ok: false, detail: "This AWS account and region already have an AgentX install named staging. Choose another install name.", technical: stack });
+    expect(name).toEqual({ label: "Install name", ok: false, detail: "This AWS account and region already have a Rovara install named staging. Choose another install name.", technical: stack });
   });
 
   it("does not attach the stack name as a separate terminal detail", async () => {
@@ -37,7 +37,7 @@ describe("clash checks", () => {
   it("Review Focus 3: an unreachable GitHub is could not check, never no such owner", async () => {
     const offline = { ...fakeGitHubApi(), owner: async () => { throw new Error("GitHub owner lookup failed with HTTP 403"); } };
     const [, owner] = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: offline, audience: "page", installUsed: free });
-    expect(owner).toEqual({ label: "GitHub owner", ok: false, detail: "AgentX could not reach GitHub to check acme. Check your network, then check again.", technical: "GitHub owner lookup failed with HTTP 403" });
+    expect(owner).toEqual({ label: "GitHub owner", ok: false, detail: "Rovara could not reach GitHub to check acme. Check your network, then check again.", technical: "GitHub owner lookup failed with HTTP 403" });
     expect(owner?.detail).not.toMatch(/has no organization/);
   });
 
@@ -45,7 +45,7 @@ describe("clash checks", () => {
     const long = sampleAnswers({ github: { account: "acme", accountType: "organization", appName: "x".repeat(35) } });
     expect((await clashChecks({ answers: long, stackStatus: nothing, github: fakeGitHubApi(), audience: "page", installUsed: free }))[2]?.ok).toBe(false);
     const taken = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: { ...fakeGitHubApi(), appBySlug: async () => ({ owner: { login: "someone-else" } }) }, audience: "page", installUsed: free });
-    expect(taken[2]).toEqual({ label: "App name", ok: false, detail: "GitHub already has an app named AgentX acme (staging). Choose another app name.", technical: "agentx-acme-staging" });
+    expect(taken[2]).toEqual({ label: "App name", ok: false, detail: "GitHub already has an app named Rovara acme (staging). Choose another app name.", technical: "rovara-acme-staging" });
   });
 
   it("Fix round 1: a failed stack read is could not check the install name, for the page", async () => {
@@ -53,7 +53,7 @@ describe("clash checks", () => {
     const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: broken, github: fakeGitHubApi(), audience: "page", installUsed: free });
     expect(name).toEqual({
       label: "Install name", ok: false,
-      detail: "AgentX could not check whether the install name is free. Check your access to AWS, then check again.",
+      detail: "Rovara could not check whether the install name is free. Check your access to AWS, then check again.",
       technical: "AccessDenied: not authorized to perform cloudformation:DescribeStacks",
     });
   });
@@ -63,12 +63,12 @@ describe("clash checks", () => {
     const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: fakeGitHubApi(), audience: "terminal", installUsed: broken });
     expect(name).toEqual({
       label: "Install name", ok: false,
-      detail: "could not check whether environment staging is free (AccessDenied: not authorized to read the parameter); check your AWS access and run agentx init again",
+      detail: "could not check whether environment staging is free (AccessDenied: not authorized to read the parameter); check your AWS access and run rovara init again",
     });
   });
 
   it("names the slug as GitHub makes it", () => {
-    expect(githubAppSlug("AgentX acme (staging)")).toBe("agentx-acme-staging");
-    expect(githubAppSlug("Our  AgentX!")).toBe("our-agentx");
+    expect(githubAppSlug("Rovara acme (staging)")).toBe("rovara-acme-staging");
+    expect(githubAppSlug("Our  Rovara!")).toBe("our-rovara");
   });
 });

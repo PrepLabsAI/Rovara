@@ -36,7 +36,7 @@ const expectUnauthorized = async (promise: Promise<unknown>) => {
   const error = await refusal(promise);
   expect(error.code).toBe("AUTH_REQUIRED");
   // One answer for every failure: nothing that tells an attacker which check failed.
-  expect(error.message).toBe("AUTH_REQUIRED: this route needs an AgentX developer sign-in; run agentx login <url>");
+  expect(error.message).toBe("AUTH_REQUIRED: this route needs a Rovara developer sign-in; run rovara login <url>");
 };
 
 describe("the broker's developer token check (D17)", () => {

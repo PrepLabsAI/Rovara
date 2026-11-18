@@ -380,7 +380,7 @@ describe("settling a turn's confirmations", () => {
 
   it("adds the doubt note only when the classifier doubted the call, and never shows a tool name (#215)", () => {
     const calls = [
-      { tool: "agentx_submit_task", argumentsHash: "1".repeat(64), summary: 'Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"', kind: "unchecked" as const },
+      { tool: "rovara_submit_task", argumentsHash: "1".repeat(64), summary: 'Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"', kind: "unchecked" as const },
       { tool: "tracker__save_item", argumentsHash: "2".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "classifier" as const },
     ];
     const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
@@ -396,7 +396,7 @@ describe("settling a turn's confirmations", () => {
     const calls = [
       { tool: "tracker__save_item", argumentsHash: "3".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "deny" as const },
       { tool: "tracker__save_item", argumentsHash: "4".repeat(64), summary: "Use tracker to save item: id TRK-6", kind: "classifier" as const },
-      { tool: "agentx_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
+      { tool: "rovara_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
     ];
     const text = confirmationMessage({ ...pending, calls }, SLACK_FORMAT);
     expect(text.split("\n").slice(1, 4)).toEqual([

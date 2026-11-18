@@ -14,13 +14,13 @@ export async function previewCompanyImport(session: { controlPlaneUrl: string; a
   try {
     response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/company-import?${query.toString()}`, { headers: { authorization: `Bearer ${session.accessToken}` } });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach AgentX to preview the company import; nothing was written, try again");
+    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach Rovara to preview the company import; nothing was written, try again");
   }
   const body = await adminResponseBody(response);
   const { requestId: _requestId, ...rest } = (body ?? {}) as Record<string, unknown>;
   void _requestId;
   const preview = CompanyImportPreviewSchema.safeParse(rest);
-  if (!preview.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with a preview this version of the CLI cannot read; upgrade the CLI");
+  if (!preview.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered with a preview this version of the CLI cannot read; upgrade the CLI");
   return preview.data;
 }
 

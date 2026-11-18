@@ -20,7 +20,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["choose", "AWS_PROFILE", "AWS profile"],
   ["choose", "--region", "AWS region"],
   // Spec 048 FR-020: the settings form's fields that are new in phase 2.
-  ["ask", "--admin-email", "Your email, for your AgentX admin user and alerts"],
+  ["ask", "--admin-email", "Your email, for your Rovara admin user and alerts"],
   ["ask", "--env", "Install name"],
   ["ask", "--github-app-name", "App name for GitHub and Slack (unique on GitHub)"],
   ["choose", "--worker-model", "Worker model"],
@@ -30,13 +30,13 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["choose", "--orchestrator-model", "Orchestrator model"],
   ["choose", "--classifier-model", "Action-gate classifier model"],
   ["ask", "--worker-model", "Worker model id"],
-  ["ask", "--permission-boundary", "Permission boundary policy ARN (Enter for AgentX's default boundary)"],
-  ["ask", "--operator-principal", "IAM principal allowed to assume the AgentX operator role (Enter for this account)"],
-  ["choose", ALERT_FLAG, "Where should AgentX send alerts?"],
+  ["ask", "--permission-boundary", "Permission boundary policy ARN (Enter for Rovara's default boundary)"],
+  ["ask", "--operator-principal", "IAM principal allowed to assume the Rovara operator role (Enter for this account)"],
+  ["choose", ALERT_FLAG, "Where should Rovara send alerts?"],
   ["ask", ALERT_FLAG, "Alert email address"],
   ["ask", "--budget", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)"],
   ["choose", "--budget-scope", "Which costs should the budget count?"],
-  ["ask", "--github-account", "GitHub organization or user that will own the AgentX GitHub App"],
+  ["ask", "--github-account", "GitHub organization or user that will own the Rovara GitHub App"],
   ["choose", "--github-account-type", "Is acme an organization or a personal account?"],
   ["ask", "--github-app-name", "GitHub App name (must be unique on GitHub)"],
   ["ask", "--slack-app-name", "Slack app name"],
@@ -46,18 +46,18 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["choose", "--slack-install", "Is the Slack app installed in your workspace?"],
   ["secret", "--slack-bot-token", "Slack bot token"],
   ["secret", "--slack-signing-secret", "Slack signing secret"],
-  ["confirm", undefined, "Is this the AgentX bot in the right workspace?"],
+  ["confirm", undefined, "Is this the Rovara bot in the right workspace?"],
   ["confirm", undefined, "Does Slack show the Request URL as Verified?"],
-  ["choose", "--signin", "How will developers sign in to AgentX from their AI tools?"],
+  ["choose", "--signin", "How will developers sign in to Rovara from their AI tools?"],
   ["ask", "--slack-client-id", "Slack app Client ID (Basic Information, App Credentials)"],
   ["secret", "--slack-client-secret", "Slack client secret"],
   ["confirm", undefined, "Apply this change?"],
-  ["ask", "--admin-email", "Your email address, for your AgentX admin user"],
+  ["ask", "--admin-email", "Your email address, for your Rovara admin user"],
   ["choose", "--repository", "Which repository is the first project's?"],
   ["ask", "--project-name", "Project name"],
   ["confirm", undefined, "Use these commands? (npm ci, npm test)"],
   ["ask", "--channel", "Which Slack channel should the project use?"],
-  ["confirm", undefined, "Connect Linear to payments-api now? (You can add it later with agentx connector add linear)"],
+  ["confirm", undefined, "Connect Linear to payments-api now? (You can add it later with rovara connector add linear)"],
   ["confirm", undefined, "Did a test alarm named agentx-staging-test arrive at ops@example.com?"],
   ["confirm", undefined, "Check the prerequisites again?"],
   ["confirm", undefined, "Paste the Slack values again?"],
@@ -107,7 +107,7 @@ describe("the page's words for each question", () => {
 
   it("FR-010: says what an empty field means, and never an empty Leave empty for", () => {
     expect(pageHint(undefined, {})).toBeUndefined();
-    expect(pageHint("", {})).toBe("Optional. Leave empty to use AgentX's default.");
+    expect(pageHint("", {})).toBe("Optional. Leave empty to use Rovara's default.");
     expect(pageHint("production", {})).toBe("Leave empty to use production.");
     expect(pageHint("us.anthropic.claude-sonnet-4-6", { defaultText: "Claude Sonnet 4.6" })).toBe("Leave empty to use Claude Sonnet 4.6.");
     expect(pageHint("", { hint: "Optional. Leave empty if the project needs none." })).toBe("Optional. Leave empty if the project needs none.");
@@ -117,13 +117,13 @@ describe("the page's words for each question", () => {
 describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
   it("names the form's forward button, and says what turning alerts off gives up", () => {
     expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
-    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when AgentX stops working.");
-    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell AgentX, and keeps apps in a different place for each.");
+    expect(questionHelp({ kind: "choose", text: "Where should Rovara send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when Rovara stops working.");
+    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell Rovara, and keeps apps in a different place for each.");
   });
 
   it("does not tell the later admin-user question that it still chooses the alert address", () => {
-    expect(questionHelp({ kind: "ask", text: "Your email address, for your AgentX admin user", flag: "--admin-email" }).why)
-      .toBe("AgentX creates your admin sign-in with it.");
+    expect(questionHelp({ kind: "ask", text: "Your email address, for your Rovara admin user", flag: "--admin-email" }).why)
+      .toBe("Rovara creates your admin sign-in with it.");
   });
 });
 
@@ -131,10 +131,10 @@ describe("browserPrompter with help", () => {
   it("shows the page label, why line, example and hint, and keeps the terminal's text", async () => {
     const hub = createWizardHub("staging");
     const prompter = browserPrompter(hub);
-    const answer = prompter.ask("GitHub organization or user that will own the AgentX GitHub App", { flag: "--github-account" });
+    const answer = prompter.ask("GitHub organization or user that will own the Rovara GitHub App", { flag: "--github-account" });
     expect(shown(hub)).toMatchObject({
-      kind: "ask", text: "GitHub organization or user that will own the AgentX GitHub App",
-      label: "GitHub owner", why: "The GitHub organization or user that will own AgentX's GitHub app.", example: "acme",
+      kind: "ask", text: "GitHub organization or user that will own the Rovara GitHub App",
+      label: "GitHub owner", why: "The GitHub organization or user that will own Rovara's GitHub app.", example: "acme",
     });
     expect(shown(hub).hint).toBeUndefined();
     hub.answer(shown(hub).id, "acme");
@@ -145,7 +145,7 @@ describe("browserPrompter with help", () => {
     const hub = createWizardHub("staging");
     const answer = browserPrompter(hub).confirm("Create all of this?", { defaultValue: false });
     expect(shown(hub).buttons).toEqual([
-      { value: "yes", label: "Create AgentX", primary: true },
+      { value: "yes", label: "Create Rovara", primary: true },
       { value: "no", label: "Cancel the install", primary: false },
     ]);
     hub.answer(shown(hub).id, "yes");
@@ -172,17 +172,17 @@ describe("browserPrompter with help", () => {
     const hub = createWizardHub("staging");
     const answer = browserPrompter(hub).choose("Deploy engine", [
       { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
-      { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
+      { value: "cdk", label: "cdk: deploy from Rovara's CDK code at the release tag" },
     ], { flag: "--engine", defaultValue: "templates" });
     expect(shown(hub).choices).toEqual([
       { value: "templates", label: "Published templates (recommended)" },
-      { value: "cdk", label: "From AgentX's source code, for contributors" },
+      { value: "cdk", label: "From Rovara's source code, for contributors" },
     ]);
     hub.answer(shown(hub).id, "");
     await expect(answer).resolves.toBe("templates");
   });
 
   it("the terminal ignores help", async () => {
-    await expect(unattendedPrompter().ask("Slack app name", { flag: "--slack-app-name", defaultValue: "AgentX", help: { label: "x" } })).resolves.toBe("AgentX");
+    await expect(unattendedPrompter().ask("Slack app name", { flag: "--slack-app-name", defaultValue: "Rovara", help: { label: "x" } })).resolves.toBe("Rovara");
   });
 });

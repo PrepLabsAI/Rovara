@@ -20,7 +20,7 @@ const cases = readFileSync(new URL("cases/linear.jsonl", root), "utf8").split("\
 describe("Linear evaluation cases", () => {
   it("has unique ids and at least one read, write, comment, not-connected and cross-vendor case", () => {
     expect(new Set(cases.map((entry) => entry.id)).size).toBe(cases.length);
-    for (const tool of ["linear__list_issues", "linear__save_issue", "linear__save_comment", "linear__get_issue", "github__list_issues", "agentx_submit_task", null]) {
+    for (const tool of ["linear__list_issues", "linear__save_issue", "linear__save_comment", "linear__get_issue", "github__list_issues", "rovara_submit_task", null]) {
       expect(cases.some((entry) => entry.expect.tool === tool)).toBe(true);
     }
   });

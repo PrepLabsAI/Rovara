@@ -2,7 +2,7 @@
 
 Most installs use the one command in [Installing Rovara](install.md). This page covers the other
 ways: with the CDK, through a platform team, and from a source checkout. Every one runs the same
-`agentx init` steps, asks the same questions and ends with Rovara answering in Slack, so read
+`rovara init` steps, asks the same questions and ends with Rovara answering in Slack, so read
 [Before you start](install.md#before-you-start) and [The install page](install.md#the-install-page)
 first.
 
@@ -23,7 +23,7 @@ Use this when you want CDK's own diffs. It deploys the same release.
    git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/Rovara.git agentx-<version>
    ```
 
-   `<version>` is the version of the `agentx` you run (`npx @preplabsai/rovara-code --version`).
+   `<version>` is the version of the `rovara` you run (`npx @preplabsai/rovara-code --version`).
 
 3. Run `init` with the cdk engine:
 
@@ -35,7 +35,7 @@ Use this when you want CDK's own diffs. It deploys the same release.
    parameters each stack takes, then `cdk deploy` one stack at a time. The steps and questions are
    the same as in [Installing Rovara](install.md).
 
-   A published `agentx` downloads its own release for the images and notes. An `agentx` built from
+   A published `rovara` downloads its own release for the images and notes. A `rovara` built from
    source needs no release when you pass `--engine cdk` and `--source` on the command line:
 
    - The version is the checkout's release tag (`v<version>`). The checkout must be clean and at
@@ -51,12 +51,12 @@ Use this when you want CDK's own diffs. It deploys the same release.
 
 **The one difference in secret handling.** The CDK CLI takes the callback signing key only as a
 `cdk deploy --parameters` argument. So while that command runs, the key is visible in your own
-computer's process list. `agentx` never prints it: it shows `<redacted>` in the command, in errors
+computer's process list. `rovara` never prints it: it shows `<redacted>` in the command, in errors
 and in the output. The templates engine passes the key to CloudFormation without it ever being on
 a command line.
 
 An environment keeps its engine. Upgrades of a cdk environment need `--source` and admin
-credentials (see [docs/day-two.md](day-two.md)). An `agentx` built from source upgrades to the
+credentials (see [docs/day-two.md](day-two.md)). A `rovara` built from source upgrades to the
 checkout's tag, with no `--release` or `--to`.
 
 ## Through your platform team (export)

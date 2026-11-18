@@ -52,6 +52,6 @@ describe("the budget default", () => {
     expect(estimate.lines.at(-1)).toEqual({ item: "Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0)", usd: undefined, basis: "not priced: price not on file for us.anthropic.claude-opus-4-1-20250805-v1:0" });
     expect(estimate.totalUsd).toBe(138.44);
     expect(suggestedBudgetUsd(estimate)).toBe(170);
-    expect(budgetWhy(estimate)).toBe("AgentX's estimate is about $138.44 a month, not counting Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0), whose price is not on file. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.");
+    expect(budgetWhy(estimate)).toBe("Rovara's estimate is about $138.44 a month, not counting Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0), whose price is not on file. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.");
   });
 });

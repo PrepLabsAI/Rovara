@@ -19,7 +19,7 @@ import { randomBytes } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  agentXError, AgentXNameSchema, channelBindingAttributes, channelBindingKey, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackChannelIdSchema,
+  agentXError, AgentXNameSchema, channelBindingAttributes, channelBindingKey, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackChannelIdSchema, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { projectGrant } from "./admin-actions.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
@@ -43,7 +43,7 @@ export const CHANNEL_UNAVAILABLE = "Slack could not be checked just now; try aga
 export const CHANNEL_NOT_LINKED = "This project has no Slack channel linked.";
 export const CHANNEL_TOO_MANY = "This project has too many linked channels to change here. Unlink some with the CLI first.";
 const PROJECT_NOT_FOUND = "project not found";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 /** At most this many links one team's partition is read for (as #836's disconnect); more refuses before anything changes. */
 const TEAM_LINKS_MAX = 500;

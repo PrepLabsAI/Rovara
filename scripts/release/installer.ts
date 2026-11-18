@@ -29,7 +29,7 @@ export const INSTALLER_TEMPLATE = "installer.template.json";
 /** The quick-create address for a published installer (the README's Launch in AWS button). */
 export function launchUrl(bucket: string, path = `latest/${INSTALLER_TEMPLATE}`): string {
   const templateUrl = `https://${bucket}.s3.${INSTALLER_REGION}.amazonaws.com/${path}`;
-  return `https://console.aws.amazon.com/cloudformation/home?region=${INSTALLER_REGION}#/stacks/quickcreate?templateURL=${encodeURIComponent(templateUrl)}&stackName=agentx-installer`;
+  return `https://console.aws.amazon.com/cloudformation/home?region=${INSTALLER_REGION}#/stacks/quickcreate?templateURL=${encodeURIComponent(templateUrl)}&stackName=rovara-installer`;
 }
 
 interface TemplateJson { Parameters?: Record<string, { Default?: string }>; [section: string]: unknown }

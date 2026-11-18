@@ -75,7 +75,7 @@ describe("registry providers", () => {
   it("resolves the record on each issue and reports unregistered or unusable references as unavailable", async () => {
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     const provider = registry!.provider("jira-sa");
-    await expect(provider.issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential jira-sa is not registered; run agentx admin credential register"));
+    await expect(provider.issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential jira-sa is not registered; run rovara admin credential register"));
     await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "jira-sa", type: "static-secret", secretName: "agentx/connectors/jira-sa" } });
     expect(await provider.issue(undefined, "read")).toEqual({ token: "jira-key-value", bindings: {} });
     await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "linear", type: "oauth-client-credentials", secretName: "agentx/connectors/linear" } });
@@ -208,7 +208,7 @@ describe("registry failure modes", () => {
   it("treats a malformed stored record as unregistered and skips it in the list with a log line", async () => {
     const { db, handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     db.set({ pk: "CREDENTIALS", sk: "REF#broken", entityType: "CREDENTIAL", ref: "broken", type: "static-secret" });
-    await expect(registry!.provider("broken").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential broken is not registered; run agentx admin credential register"));
+    await expect(registry!.provider("broken").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential broken is not registered; run rovara admin credential register"));
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
       const listed = await adminCall(handler, { method: "GET", path: "/v1/admin/credentials" });

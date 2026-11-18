@@ -127,7 +127,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       treeComplete: true, treePaths: ["package.json"], sources: [{ path: "package.json", sha256: createHash("sha256").update(manifestText).digest("hex"), bytes: Buffer.from(manifestText), kind: "blob" }] };
     const candidates = await stageCandidates(root);
 
-    // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `agentx admin` makes them).
+    // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `rovara admin` makes them).
     const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const runtimeBinding = projectRow().runtimeBinding as typeof projectBinding;

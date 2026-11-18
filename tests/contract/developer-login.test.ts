@@ -43,7 +43,7 @@ const browser = (answer: Record<string, string>) => async (authorizationUrl: str
   await fetch(callback);
 };
 
-describe("agentx login <url> (FR-011)", () => {
+describe("rovara login <url> (FR-011)", () => {
   it("reads the configuration, runs PKCE with a loopback on any port, stores the tokens and the environment", async () => {
     const dir = await home();
     const store = new InMemoryTokenStore();
@@ -84,9 +84,9 @@ describe("agentx login <url> (FR-011)", () => {
       url: URL_, allowLoopback: false, browser: true, home: dir, tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined, timeoutMs: 60_000,
       openBrowser: async (link) => {
         redirect = new URL(link).searchParams.get("redirect_uri") ?? "";
-        await browser({ error: "access_denied", error_description: "you signed in to Slack workspace T0OTHER1, but this AgentX serves T0TEAM1\u0007" })(link);
+        await browser({ error: "access_denied", error_description: "you signed in to Slack workspace T0OTHER1, but this Rovara serves T0TEAM1\u0007" })(link);
       },
-    })).rejects.toThrow("AUTH_REQUIRED: sign-in refused: you signed in to Slack workspace T0OTHER1, but this AgentX serves T0TEAM1");
+    })).rejects.toThrow("AUTH_REQUIRED: sign-in refused: you signed in to Slack workspace T0OTHER1, but this Rovara serves T0TEAM1");
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(await readDeveloperConfig(dir)).toEqual({ environments: {} });
     await expect(fetch(redirect)).rejects.toThrow();
@@ -95,7 +95,7 @@ describe("agentx login <url> (FR-011)", () => {
   it("says a Slack outage is temporary", async () => {
     await expect(developerLogin({
       url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined,
-      openBrowser: browser({ error: "temporarily_unavailable", error_description: "Slack could not be reached; run agentx login again in a minute" }),
+      openBrowser: browser({ error: "temporarily_unavailable", error_description: "Slack could not be reached; run rovara login again in a minute" }),
     })).rejects.toThrow(/^RUNTIME_UNAVAILABLE: sign-in could not finish: Slack could not be reached/);
   });
 
@@ -162,7 +162,7 @@ describe("agentx login <url> (FR-011)", () => {
   it.each([
     ["an endpoint on another origin", configuration({ tokenEndpoint: "https://evil.example.test/token" }), /must be on https:\/\/abc123/],
     ["a newer major API version", configuration({ apiVersion: "2.0" }), /upgrade: npx @preplabsai\/rovara-code@latest login/],
-    ["no enabled method", configuration({ methods: { slack: false, oidc: null } }), /no developer sign-in method is enabled.*agentx signin enable/],
+    ["no enabled method", configuration({ methods: { slack: false, oidc: null } }), /no developer sign-in method is enabled.*rovara signin enable/],
   ])("refuses %s before opening a browser (R20)", async (_name, config, message) => {
     const openBrowser = vi.fn<(url: string) => Promise<void>>();
     await expect(developerLogin({ url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server({ configuration: config }), write: () => undefined, openBrowser })).rejects.toThrow(message);
@@ -175,7 +175,7 @@ describe("agentx login <url> (FR-011)", () => {
 
   it.each(["http://127.0.0.1:4010", "http://localhost:4010", "http://[::1]:4010"])("allows %s with --allow-loopback (fix 7)", async (url) => {
     const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({}, { status: 404 }));
-    await expect(developerLogin({ url, allowLoopback: true, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: fetchImpl, write: () => undefined })).rejects.toThrow(/does not look like an AgentX environment/);
+    await expect(developerLogin({ url, allowLoopback: true, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: fetchImpl, write: () => undefined })).rejects.toThrow(/does not look like a Rovara environment/);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -190,8 +190,8 @@ describe("agentx login <url> (FR-011)", () => {
     const store = new InMemoryTokenStore();
     await expect(developerLogin({
       url: URL_, allowLoopback: false, browser: true, home: dir, tokenStore: store, write: () => undefined, openBrowser: browser({ code: "agxc_code" }),
-      fetch: server({ token: () => Response.json({ error: "invalid_grant", error_description: "this sign-in link was already used; run agentx login again" }, { status: 400 }) }),
-    })).rejects.toThrow("AUTH_REQUIRED: sign-in failed: this sign-in link was already used; run agentx login again");
+      fetch: server({ token: () => Response.json({ error: "invalid_grant", error_description: "this sign-in link was already used; run rovara login again" }, { status: 400 }) }),
+    })).rejects.toThrow("AUTH_REQUIRED: sign-in failed: this sign-in link was already used; run rovara login again");
     expect(await store.get(developerTokenKey(ISSUER))).toBeUndefined();
     expect(await readDeveloperConfig(dir)).toEqual({ environments: {} });
   });
@@ -207,7 +207,7 @@ describe("agentx login <url> (FR-011)", () => {
 });
 
 describe("sanitizeServerText (fix 3)", () => {
-  it("strips control characters, hides AgentX tokens and cuts to 300 characters", () => {
+  it("strips control characters, hides Rovara tokens and cuts to 300 characters", () => {
     expect(sanitizeServerText(`a\u001b[31mred\u0007\u007f\n${REFRESH}!agxc_${"x".repeat(43)}`)).toBe("a[31mred[hidden]![hidden]");
     expect(sanitizeServerText("y".repeat(400))).toHaveLength(300);
   });

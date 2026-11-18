@@ -1,4 +1,4 @@
-// FR-036 to FR-039: agentx connector add asana. The bot user signs in once, with no browser opened
+// FR-036 to FR-039: rovara connector add asana. The bot user signs in once, with no browser opened
 // here and only --expect-account's sign-in kept (FR-037). One refresh gets an access token (a
 // rotated refresh token is written back at once), then get_project as the bot is the test read
 // (FR-038); the project gets a new revision only after that read (C3: the sign-in itself stores
@@ -25,7 +25,7 @@ beforeEach(async () => {
   await writeProjectFile(configDir, {
     name: "payments-api", revision: 1,
     repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
   });
 });
 afterEach(async () => { await rm(configDir, { recursive: true, force: true }); });
@@ -72,7 +72,7 @@ function withAuthorize(base: ReturnType<typeof input>, secrets: ReturnType<typeo
   return { ...base, services: { ...base.services, authorize, authorizeSecrets: authorizeSecretsOver(secrets) } };
 }
 
-describe("agentx connector add asana (FR-036 to FR-039)", () => {
+describe("rovara connector add asana (FR-036 to FR-039)", () => {
   it("stores the app's client, signs the bot in with --no-browser and --expect-account, reads the project, then scopes it", async () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
@@ -118,7 +118,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaProject: undefined }), script: [CLIENT_ID, SECRET, BOT, GID] });
     await expect(addAsana({ ...base, services: { ...base.services, authorize: fakeAuthorize().authorize, authorizeSecrets: authorizeSecretsOver(secrets) } }))
-      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: agentx --env staging connector add asana --project payments-api`);
+      .rejects.toThrow(`the bot cannot see, or could not read, project ${GID}; invite it to the project (${BOT}, as a guest with Editor access: docs/connectors/asana.md, Step 1) or try again: rovara --env staging connector add asana --project payments-api`);
     expect(plane.registered).toEqual([]);
   });
 
@@ -227,7 +227,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaRefuses: "refresh" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana refused to renew the bot user's sign-in, so the project was not changed; run agentx --env staging connector add asana --project payments-api again to sign in again");
+    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana refused to renew the bot user's sign-in, so the project was not changed; run rovara --env staging connector add asana --project payments-api again to sign in again");
     expect(plane.registered).toEqual([]);
   });
 
@@ -235,7 +235,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const plane = fakeControlPlane();
     const secrets = memoryInitSecrets();
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaRefuses: "read" }), script: [CLIENT_ID, SECRET, BOT, GID] });
-    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run agentx --env staging connector add asana --project payments-api again");
+    await expect(addAsana(withAuthorize(base, secrets))).rejects.toThrow("Asana MCP refused the bot user's access token, so the project was not changed; check the app type is Asana MCP (docs/connectors/asana.md, Step 2), then run rovara --env staging connector add asana --project payments-api again");
     expect(plane.registered).toEqual([]);
   });
 
@@ -245,7 +245,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
     const raw = "MCP tool not allowed or unavailable: vendor said secret-ish things";
     const base = input({ plane, secrets, vendors: fakeVendors({ asanaReadError: raw }), script: [CLIENT_ID, SECRET, BOT, GID] });
     const failure = addAsana(withAuthorize(base, secrets));
-    await expect(failure).rejects.toThrow(`could not read Asana project ${GID} through Asana MCP (Error), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun agentx --env staging connector add asana --project payments-api`);
+    await expect(failure).rejects.toThrow(`could not read Asana project ${GID} through Asana MCP (Error), so the project was not changed; check that the Asana app type is Asana MCP (see the Asana guide, docs/connectors/asana.md, Step 2), then rerun rovara --env staging connector add asana --project payments-api`);
     await expect(failure).rejects.not.toThrow(/vendor said/);
     expect(plane.registered).toEqual([]);
   });
@@ -256,7 +256,7 @@ describe("agentx connector add asana (FR-036 to FR-039)", () => {
       await writeProjectFile(legacyDir, {
         name: "payments-api", revision: 1,
         repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
         integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } },
       });
       const secrets = memoryInitSecrets();
@@ -336,7 +336,7 @@ describe("the Asana vendor calls", () => {
   });
 });
 
-describe("agentx connector add asana, the command", () => {
+describe("rovara connector add asana, the command", () => {
   it("takes the client secret only from a file or an environment variable, and --project from the root program (F9)", () => {
     const asana = createCliProgram().commands.find((command) => command.name() === "connector")
       ?.commands.find((command) => command.name() === "add")?.commands.find((command) => command.name() === "asana");

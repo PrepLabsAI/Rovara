@@ -39,7 +39,7 @@ async function connect(offer: { current: AdminOffer }) {
   const names = async () => (await client.listTools()).tools.map((tool) => tool.name);
   return { client, names, changes: () => changes, server };
 }
-const signedOut = { admin: new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", "run npx @preplabsai/rovara-code login --admin") };
+const signedOut = { admin: new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for Rovara", "run npx @preplabsai/rovara-code login --admin") };
 
 describe("the admin tool offer (FR-028, A15)", () => {
   it("offers only the developer tools without an admin sign-in", async () => {
@@ -52,7 +52,7 @@ describe("the admin tool offer (FR-028, A15)", () => {
     const { client, names, changes } = await connect(offer);
     offer.current = { admin: undefined };
     // A15: any tool call rechecks, so the change shows at once.
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
+    await client.callTool({ name: "rovara_whoami", arguments: {} }).catch(() => undefined);
     await expect.poll(async () => (await names()).includes("agentx_admin_probe")).toBe(true);
     expect(changes()).toBeGreaterThanOrEqual(1);
     offer.current = signedOut;
@@ -65,11 +65,11 @@ describe("the admin tool offer (FR-028, A15)", () => {
     const { client } = await connect({ current: signedOut });
     const result = await client.callTool({ name: "agentx_admin_probe", arguments: {} });
     expect(result.isError).toBe(true);
-    expect(toolError(result)).toEqual({ code: "ADMIN_REQUIRED", message: "this computer holds no unexpired admin sign-in for AgentX", next_step: "run npx @preplabsai/rovara-code login --admin" });
+    expect(toolError(result)).toEqual({ code: "ADMIN_REQUIRED", message: "this computer holds no unexpired admin sign-in for Rovara", next_step: "run npx @preplabsai/rovara-code login --admin" });
   });
 
-  it("says UPGRADE_REQUIRED when AgentX is too old for the admin tools", async () => {
-    const tooOld = { admin: new ToolError("UPGRADE_REQUIRED", "AgentX at https://x has no admin API", "ask your AgentX admin to upgrade AgentX, or use an older CLI") };
+  it("says UPGRADE_REQUIRED when Rovara is too old for the admin tools", async () => {
+    const tooOld = { admin: new ToolError("UPGRADE_REQUIRED", "Rovara at https://x has no admin API", "ask your Rovara admin to upgrade Rovara, or use an older CLI") };
     const { client, names } = await connect({ current: tooOld });
     expect(await names()).not.toContain("agentx_admin_probe");
     expect(toolError(await client.callTool({ name: "agentx_admin_probe", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
@@ -82,7 +82,7 @@ describe("the admin tool offer (FR-028, A15)", () => {
     const { names, client } = await connect(flaky);
     await expect.poll(async () => (await names()).includes("agentx_admin_probe")).toBe(true);
     failing = true;
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
+    await client.callTool({ name: "rovara_whoami", arguments: {} }).catch(() => undefined);
     expect(await names()).toContain("agentx_admin_probe");
   });
 });
@@ -98,7 +98,7 @@ describe("the offer without an admin check, and its timer (A15)", () => {
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "1.0.0" });
     await client.connect(clientSide);
-    await client.callTool({ name: "agentx_whoami", arguments: {} }).catch(() => undefined);
+    await client.callTool({ name: "rovara_whoami", arguments: {} }).catch(() => undefined);
     expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
     expect(toolError(await client.callTool({ name: "agentx_admin_probe", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
     await server.close();
@@ -125,7 +125,7 @@ describe("the offer without an admin check, and its timer (A15)", () => {
       offer.stop();
       await vi.advanceTimersByTimeAsync(90_000);
       expect(read).toHaveBeenCalledTimes(3);
-      expect(offer.refusal("agentx_whoami")).toBeUndefined();
+      expect(offer.refusal("rovara_whoami")).toBeUndefined();
       expect(offer.refusal("agentx_admin_probe")).toBeUndefined();
     } finally {
       vi.useRealTimers();
@@ -214,7 +214,7 @@ describe("the hidden-tool guard (A15)", () => {
     const messages: JSONRPCMessage[] = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } } },
       { jsonrpc: "2.0", method: "notifications/initialized" },
-      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "agentx_whoami", arguments: {} } },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "rovara_whoami", arguments: {} } },
       { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agentx_admin_probe", arguments: {} } },
       { jsonrpc: "2.0", id: 4, method: "tools/list" },
       { jsonrpc: "2.0", id: 9, result: {} },
@@ -356,7 +356,7 @@ describe("the first tools/list and list_changed (issue 203)", () => {
     expect(listChanged()).toBe(0);
     offer.current = allOffered;
     // A15: any tool call rechecks.
-    await request("tools/call", { name: "agentx_whoami", arguments: {} });
+    await request("tools/call", { name: "rovara_whoami", arguments: {} });
     await vi.waitFor(async () => expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]));
     await settle();
     expect(listChanged()).toBe(1);
@@ -443,7 +443,7 @@ describe("the guard's hold on the first tools/list (issue 203)", () => {
     guarded.onmessage = (message) => { seen.push(message); };
     const before: JSONRPCMessage = { jsonrpc: "2.0", method: "notifications/initialized" };
     const list: JSONRPCMessage = { jsonrpc: "2.0", id: 2, method: "tools/list" };
-    const after: JSONRPCMessage = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agentx_whoami", arguments: {} } };
+    const after: JSONRPCMessage = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "rovara_whoami", arguments: {} } };
     inner.onmessage?.(before);
     inner.onmessage?.(list);
     inner.onmessage?.(after);

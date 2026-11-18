@@ -76,7 +76,7 @@ describe("config keys (FR-048)", () => {
   });
 
   it("refuses an unknown key and points at config list", () => {
-    expect(() => configKey("models.checker")).toThrow("unknown config key models.checker; agentx config list shows every key");
+    expect(() => configKey("models.checker")).toThrow("unknown config key models.checker; rovara config list shows every key");
   });
 
   it("says where each key lives", () => {

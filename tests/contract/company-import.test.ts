@@ -515,7 +515,7 @@ describe("an install administrator's preview and changes", () => {
   });
 });
 
-describe("agentx admin company import", () => {
+describe("rovara admin company import", () => {
   const CHANGE = "55555555-5555-4555-8555-555555555555";
   const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
   const view = (status: string) => ({ changeId: CHANGE, kind: "import_install_company", status, effect: `Copy company ${A}.`, methodsOffered: ["cli"], createdAt: "2026-11-12T09:00:00.000Z", expiresAt: "2026-11-12T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });

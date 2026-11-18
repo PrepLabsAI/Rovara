@@ -108,7 +108,7 @@ describe("closing a task (R15)", () => {
     expect(closePhases(db, taskId)).toEqual(["accepted:accepted"]);
   });
 
-  it("shows the refused close on the task itself, so the AI tool can check back with agentx_get_task (R22)", async () => {
+  it("shows the refused close on the task itself, so the AI tool can check back with rovara_get_task (R22)", async () => {
     const { dev, close, task, taskId, active, finish } = await finished();
     await close(randomUUID());
     await finish(task.workspaceId, active(), "SUCCEEDED", { result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["unpushed_head"] }] } });
@@ -203,7 +203,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
   it("answers continue and pull requests on a closing task with the closing message, not TASK_BUSY", async () => {
     const { dev, taskId, close } = await finished();
     await close(randomUUID());
-    const closing = { code: "CONFIG_INVALID", message: "this task is closing; check it with agentx_get_task, and if the close is refused for unpublished work you can continue it" };
+    const closing = { code: "CONFIG_INVALID", message: "this task is closing; check it with rovara_get_task, and if the close is refused for unpublished work you can continue it" };
     expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "more" })).body.error).toEqual(closing);
     expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/pull-requests`, { requestId: randomUUID(), title: "x" })).body.error).toEqual(closing);
   });
@@ -213,7 +213,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "more" });
     const busy = await close(randomUUID());
     expect(busy.body.error).toMatchObject({ code: "TASK_BUSY" });
-    expect(String((busy.body.error as { message: string }).message)).toContain("agentx_cancel_task");
+    expect(String((busy.body.error as { message: string }).message)).toContain("rovara_cancel_task");
   });
 
   it("writes one accepted close record for a task that never started, and none on a repeat (ruling F15)", async () => {
@@ -284,7 +284,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     Object.assign(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`) as Record<string, unknown>, { count: 1, tasks: new Set([taskId]) });
     (organization(db) as Record<string, unknown>).count = 0;
     const refused = await close();
-    expect(refused.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing" });
+    expect(refused.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "Rovara could not close this task just now; try rovara_close_task again, and ask an admin if it keeps failing" });
     expect(db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("closedAt");
     expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close")).toHaveLength(0);
   });
@@ -293,7 +293,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     const { db, close, taskId, deleteEc2Session } = await setupFailed();
     deleteEc2Session!.mockRejectedValueOnce(agentXError("WORKSPACE_BUSY", "workspace compute is starting or stopping; retry the close"));
     const busy = await close();
-    expect(busy.body.error).toEqual({ code: "TASK_BUSY", message: "the task's compute is still stopping; try agentx_close_task again shortly" });
+    expect(busy.body.error).toEqual({ code: "TASK_BUSY", message: "the task's compute is still stopping; try rovara_close_task again shortly" });
     expect(db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("closedAt");
     expect((await close()).body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
     expect(organization(db)).toMatchObject({ count: 0 });
@@ -344,22 +344,22 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
   it("always says why when it did not close", async () => {
     const { close, task, active, finish, deleteEc2Session } = await finished();
     const refusedId = randomUUID();
-    expect((await close(refusedId)).body).toMatchObject({ closed: false, message: "AgentX is checking the task's workspace for unpublished work before closing it; check back with agentx_get_task" });
+    expect((await close(refusedId)).body).toMatchObject({ closed: false, message: "Rovara is checking the task's workspace for unpublished work before closing it; check back with rovara_get_task" });
     await finish(task.workspaceId, active(), "SUCCEEDED", { result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["unpushed_head"] }] } });
     expect((await close(refusedId)).body).toMatchObject({
       closed: false, unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }],
-      message: "not closed: some work is not published; push it or open a pull request with agentx_open_pull_request, then close the task again",
+      message: "not closed: some work is not published; push it or open a pull request with rovara_open_pull_request, then close the task again",
     });
     const failedId = randomUUID();
     await close(failedId);
     await finish(task.workspaceId, active(), "FAILED", { error: "git status exited 128" });
-    expect((await close(failedId)).body).toMatchObject({ closed: false, message: "the check for unpublished work did not finish; try agentx_close_task again with a new request_id" });
+    expect((await close(failedId)).body).toMatchObject({ closed: false, message: "the check for unpublished work did not finish; try rovara_close_task again with a new request_id" });
     const starting = () => Object.assign(new Error("starting"), { name: "AgentXError" });
     deleteEc2Session!.mockRejectedValueOnce(starting()).mockRejectedValueOnce(starting());
     const safeId = randomUUID();
     await close(safeId);
     await finish(task.workspaceId, active(), "SUCCEEDED", SAFE);
-    expect((await close(safeId)).body).toMatchObject({ closed: false, message: "the workspace has no unpublished work, but its compute is not removed yet; try agentx_close_task again shortly" });
+    expect((await close(safeId)).body).toMatchObject({ closed: false, message: "the workspace has no unpublished work, but its compute is not removed yet; try rovara_close_task again shortly" });
     expect((await close(safeId)).body).toMatchObject({ closed: true });
   });
 
@@ -379,7 +379,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
       };
       return () => { db.send = send; };
     };
-    const closing = { code: "CONFIG_INVALID", message: "this task is closing; check it with agentx_get_task, and if the close is refused for unpublished work you can continue it" };
+    const closing = { code: "CONFIG_INVALID", message: "this task is closing; check it with rovara_get_task, and if the close is refused for unpublished work you can continue it" };
     const workspace = structuredClone(db.get(`WORKSPACE#${task.workspaceId}`, "META")!);
     let restore = closingOnSecondRead();
     expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "more" })).body.error).toEqual(closing);

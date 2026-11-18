@@ -40,7 +40,7 @@ export function changeError(change: AdminChangeViewWire): ToolError {
   if (!KNOWN_STATUSES.has(change.status)) {
     // R1: a newer control plane's status. Neither applied nor pending, so say what is known.
     const status = plainText(change.status, "unknown").slice(0, 40);
-    return new ToolError("UPGRADE_REQUIRED", named(`AgentX reports its status as ${status}, which this version of the CLI does not know; list it with agentx_admin_changes to see its outcome`));
+    return new ToolError("UPGRADE_REQUIRED", named(`Rovara reports its status as ${status}, which this version of the CLI does not know; list it with rovara_admin_changes to see its outcome`));
   }
   const code = change.error?.code;
   const message = named(plainText(change.error?.message, "it was not applied"));

@@ -4,7 +4,7 @@ This guide connects one Rovara project to a remote MCP server that Rovara has no
 for, such as Sentry, PagerDuty, Datadog or Confluence. It is written for the administrator of your
 own Rovara deployment. You create the credential in the vendor's own account.
 
-`agentx connector add mcp --project <name>` walks you through it:
+`rovara connector add mcp --project <name>` walks you through it:
 
 1. It asks for the endpoint and the credential.
 2. It lists the server's tools as its test read, and asks which ones to approve.
@@ -27,7 +27,7 @@ those for them.
 - **A credential**, either:
   - an API key or token, sent in a header; or
   - an OAuth sign-in by a dedicated bot user, done once in a browser.
-- The Rovara administration client (`agentx`) logged in, and AWS credentials that can create
+- The Rovara administration client (`rovara`) logged in, and AWS credentials that can create
   secrets in the deployment's account and region.
 
 ## How access works
@@ -68,7 +68,7 @@ request is made with the credential.
 2. Run:
 
    ```sh
-   agentx --env <env> connector add mcp --project <name> \
+   rovara --env <env> connector add mcp --project <name> \
      --endpoint https://mcp.sentry.dev/mcp --auth key --key-file ./sentry-key.txt
    ```
 
@@ -96,7 +96,7 @@ sign-in fresh on its own.
 2. Run:
 
    ```sh
-   agentx --env <env> connector add mcp --project <name> \
+   rovara --env <env> connector add mcp --project <name> \
      --endpoint https://mcp.vendor.example/mcp --auth oauth --register-client
    ```
 
@@ -118,7 +118,7 @@ sign-in fresh on its own.
 or lists. A server that publishes no metadata can be given its endpoints directly:
 
 ```sh
-agentx admin credential authorize --ref mcp-<name> --secret agentx/<env>/connectors/mcp-<name> \
+rovara admin credential authorize --ref mcp-<name> --secret agentx/<env>/connectors/mcp-<name> \
   --endpoint <mcp url> --authorize-url <url> --token-url <url>
 ```
 
@@ -171,7 +171,7 @@ preflight warns about an approved tool outside the rule whose input names an ite
 
 ## Check it
 
-`agentx doctor --env <env>` checks every `mcp` connector it set up:
+`rovara doctor --env <env>` checks every `mcp` connector it set up:
 - **API key:** the secret exists, and the key still reaches every approved tool.
 - **OAuth:** the bot's sign-in is stored. It is not refreshed, since a refresh would rotate the
   token Rovara holds.
@@ -184,10 +184,10 @@ The wizard's steps, for a connector set up without it:
 2. Register the credential:
 
    ```sh
-   agentx admin credential register --ref <ref> --type static-secret --secret agentx/<env>/connectors/<ref> --host mcp.sentry.dev
+   rovara admin credential register --ref <ref> --type static-secret --secret agentx/<env>/connectors/<ref> --host mcp.sentry.dev
    ```
 
-   For OAuth, use `agentx admin credential authorize --endpoint` instead.
+   For OAuth, use `rovara admin credential authorize --endpoint` instead.
 3. Add the connector to the project file's `integrations.connectors`:
 
    ```yaml

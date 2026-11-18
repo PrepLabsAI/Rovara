@@ -25,7 +25,7 @@ import { locateWorkspace, workspaceKeys } from "./workspace-location.js";
 
 export const STOP_NOT_YOURS = "Only the task's owner or a company admin can stop this task.";
 /** The legacy cancel's own words for a closed task (aws/developer-tasks.ts CLOSED_TASK), so the route answers as it always has. */
-export const LEGACY_CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
+export const LEGACY_CLOSED_TASK = "this task is closed; start a new one with rovara_start_task";
 /** The admin cancel's answer for a workspace that is not this company's core task's: the legacy route's own words for a missing workspace. */
 export const WORKSPACE_NOT_FOUND = "workspace not found";
 export const STOP_REQUEST_REUSED = "this request_id was already used for another action on this task; use a new request_id";

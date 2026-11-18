@@ -75,9 +75,9 @@ describe("GET /v1/dev/tasks/{taskId} (FR-016, FR-025)", () => {
       const response = await dev(who, "GET", `/v1/dev/tasks/${id}`);
       expect(response.status).toBe(404);
       expect(response.body.error).toMatchObject({ code: "TASK_NOT_FOUND" });
-      // The broker names what is wrong; the MCP server adds "run agentx_list_tasks" once, as its next step.
+      // The broker names what is wrong; the MCP server adds "run rovara_list_tasks" once, as its next step.
       expect((response.body.error as { message: string }).message).toBe(id === "not-a-task" ? "that is not a task ID of yours" : `no task ${id} of yours`);
-      expect(NEXT_STEPS.TASK_NOT_FOUND).toContain("agentx_list_tasks");
+      expect(NEXT_STEPS.TASK_NOT_FOUND).toContain("rovara_list_tasks");
     }
   });
 

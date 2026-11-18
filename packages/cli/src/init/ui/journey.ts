@@ -48,13 +48,13 @@ export const STEP_PLAN: Readonly<Record<InitStepId, StepPlan>> = {
   "github-app": { phase: "connect", title: "Create the GitHub app", usualSeconds: 120, needsYou: true },
   access: { phase: "build", title: "Set up AWS permissions", usualSeconds: 60, needsYou: false },
   core: { phase: "build", title: "Build the network and sign-in", usualSeconds: 240, needsYou: false },
-  "control-plane": { phase: "build", title: "Start the AgentX service", usualSeconds: 780, needsYou: false },
+  "control-plane": { phase: "build", title: "Start the Rovara service", usualSeconds: 780, needsYou: false },
   "slack-service": { phase: "build", title: "Start the Slack connection", usualSeconds: 180, needsYou: false },
   "slack-app": { phase: "connect", title: "Create the Slack app", usualSeconds: 240, needsYou: true },
-  "slack-check": { phase: "connect", title: "Check that Slack reaches AgentX", usualSeconds: 60, needsYou: true },
+  "slack-check": { phase: "connect", title: "Check that Slack reaches Rovara", usualSeconds: 60, needsYou: true },
   // FR-030: part of the confirmed plan; it asks nothing (Task 13).
   "developer-signin": { phase: "connect", title: "Turn on developer sign-in", usualSeconds: 120, needsYou: false },
-  "admin-user": { phase: "finish", title: "Sign in to AgentX", usualSeconds: 120, needsYou: true },
+  "admin-user": { phase: "finish", title: "Sign in to Rovara", usualSeconds: 120, needsYou: true },
   "first-project": { phase: "finish", title: "Set up your first project", usualSeconds: 120, needsYou: true },
   connectors: { phase: "finish", title: "Connect your issue trackers", usualSeconds: 60, needsYou: true },
   alerts: { phase: "finish", title: "Turn on alerts", usualSeconds: 60, needsYou: true },
@@ -152,7 +152,7 @@ export function journeyOf(input: { stage: JourneyPhaseId; steps: readonly Journe
 /** FR-006: what the first screen says. */
 export function welcomeLines(): string[] {
   return [
-    "AgentX installs into your AWS account and connects to GitHub and Slack, in five parts:",
+    "Rovara installs into your AWS account and connects to GitHub and Slack, in five parts:",
     ...JOURNEY_PHASE_IDS.map((id) => `${PHASE_TITLES[id]}: ${minutesText(toMinutes(phaseSeconds(id)))}.`),
     `In all, ${minutesText(totalMinutes())}. You are needed for about ${needsYouMinutes()} of them, and this page tells you when.`,
     "Keep the terminal open and your computer awake until the install is done.",
@@ -172,7 +172,7 @@ export function terminalStepLine(id: InitStepId): string {
 /** FR-070: the line for a phase that starts with questions, before any step runs. */
 export const stageLine = (phase: JourneyPhaseId): string => `${prefix(phase)} ${PHASE_TITLES[phase]}: waiting for you in the browser`;
 
-export const READY_LINE = "[5/5] Finish: done. AgentX is ready. The browser has the next steps.";
+export const READY_LINE = "[5/5] Finish: done. Rovara is ready. The browser has the next steps.";
 
 /** FR-070: the one line a failure gets in the terminal. `problem` is a plain sentence ending in a full stop. */
 export const stoppedLine = (input: { phase: JourneyPhaseId; problem: string; logPath: string }): string =>

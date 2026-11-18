@@ -95,7 +95,7 @@ describe("rovara doctor's Sign in with ChatGPT checks (#343)", () => {
   });
 
   it("skips, saying how to sign in, without an admin sign-in, and skips where the deployment has none", async () => {
-    expect(await lines({ kind: "signed-out" })).toEqual([{ name: "Sign in with ChatGPT", status: "skip", detail: "not checked: this computer has no working admin sign-in for staging", fix: "run npx @preplabsai/rovara-code --env staging login --admin, then run agentx doctor again" }]);
+    expect(await lines({ kind: "signed-out" })).toEqual([{ name: "Sign in with ChatGPT", status: "skip", detail: "not checked: this computer has no working admin sign-in for staging", fix: "run npx @preplabsai/rovara-code --env staging login --admin, then run rovara doctor again" }]);
     expect(await lines({ kind: "not-set-up" })).toEqual([{ name: "Sign in with ChatGPT", status: "skip", detail: "not set up in this deployment" }]);
     expect((await chatGptChecks(context(undefined)))[0]).toMatchObject({ status: "skip" });
   });

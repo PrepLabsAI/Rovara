@@ -350,7 +350,7 @@ describe("the hosted runtime and the lazy worker", () => {
       { stateDirectory: await createFixtureDirectory("agentx-lazy-runtime-"), api, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } },
     );
     try {
-      const result = await runtime.session.getToolDefinition("agentx_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);
+      const result = await runtime.session.getToolDefinition("rovara_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);
       expect(access.ensureReady).toHaveBeenCalledOnce();
       expect(api.submitTask).not.toHaveBeenCalled();
       expect(result.content).toEqual([{ type: "text", text: JSON.stringify(unavailableRefusal("no workspace")) }]);

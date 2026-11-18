@@ -31,8 +31,8 @@ async function connect(admin: Partial<AdminControlPlaneClient> | undefined) {
 describe("the admin read tools (FR-030)", () => {
   it("are exactly FR-030's eight, each with an output schema and no em dash", async () => {
     expect(ADMIN_READ_TOOLS.map((tool) => tool.name)).toEqual([
-      "agentx_admin_health", "agentx_admin_failed_tasks", "agentx_admin_turns", "agentx_admin_usage",
-      "agentx_admin_list_projects", "agentx_admin_list_channels", "agentx_admin_list_credentials", "agentx_admin_list_workspaces",
+      "rovara_admin_health", "rovara_admin_failed_tasks", "rovara_admin_turns", "rovara_admin_usage",
+      "rovara_admin_list_projects", "rovara_admin_list_channels", "rovara_admin_list_credentials", "rovara_admin_list_workspaces",
     ]);
     const tools = (await (await connect({})).listTools()).tools.filter((tool) => tool.name.startsWith("agentx_admin_"));
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
@@ -47,7 +47,7 @@ describe("the admin read tools (FR-030)", () => {
         category: "setup_failed" as const, error: "npm ci exited 1", endedAt: "2026-09-30T07:00:00.000Z", taskId: "33333333-3333-4333-8333-333333333333" }],
     }));
     const client = await connect({ failures });
-    const result = await client.callTool({ name: "agentx_admin_failed_tasks", arguments: { project: "payments", limit: 10 } });
+    const result = await client.callTool({ name: "rovara_admin_failed_tasks", arguments: { project: "payments", limit: 10 } });
     expect(failures).toHaveBeenCalledWith({ project: "payments", limit: 10 });
     expect(result.structuredContent).toEqual({
       failures: [{ time: "2026-09-30T07:00:00.000Z", project: "payments", source: "ai_tool", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "22222222-2222-4222-8222-222222222222",
@@ -60,7 +60,7 @@ describe("the admin read tools (FR-030)", () => {
   it("passes the turn filters through, with task_id as task, and hands back the next cursor", async () => {
     const turns = vi.fn(async () => ({ turns: [{ origin: "ai_tool", taskId: "33333333-3333-4333-8333-333333333333", requestText: `echo ${PLANTED}` }], cursor: "next-page" }));
     const client = await connect({ turns });
-    const result = await client.callTool({ name: "agentx_admin_turns", arguments: { since: "2026-09-29T00:00:00.000Z", task_id: "33333333-3333-4333-8333-333333333333", limit: 5 } });
+    const result = await client.callTool({ name: "rovara_admin_turns", arguments: { since: "2026-09-29T00:00:00.000Z", task_id: "33333333-3333-4333-8333-333333333333", limit: 5 } });
     expect(turns).toHaveBeenCalledWith({ since: "2026-09-29T00:00:00.000Z", task: "33333333-3333-4333-8333-333333333333", limit: 5 });
     expect(result.structuredContent).toMatchObject({ next_cursor: "next-page" });
     // FR-029: every result is redacted, whatever the control plane sent.
@@ -69,8 +69,8 @@ describe("the admin read tools (FR-030)", () => {
 
   it("refuses thread and task_id together, and a time that is not ISO", async () => {
     const client = await connect({ turns: vi.fn() });
-    expect(toolError(await client.callTool({ name: "agentx_admin_turns", arguments: { since: "2026-09-29T00:00:00.000Z", thread: "T0/C0/1.1", task_id: "33333333-3333-4333-8333-333333333333" } }))).toMatchObject({ code: "INVALID_REQUEST" });
-    expect((await client.callTool({ name: "agentx_admin_turns", arguments: { since: "yesterday" } })).isError).toBe(true);
+    expect(toolError(await client.callTool({ name: "rovara_admin_turns", arguments: { since: "2026-09-29T00:00:00.000Z", thread: "T0/C0/1.1", task_id: "33333333-3333-4333-8333-333333333333" } }))).toMatchObject({ code: "INVALID_REQUEST" });
+    expect((await client.callTool({ name: "rovara_admin_turns", arguments: { since: "yesterday" } })).isError).toBe(true);
   });
 
   it("shows usage, projects, channels, credentials and workspaces in snake_case", async () => {
@@ -81,21 +81,21 @@ describe("the admin read tools (FR-030)", () => {
       credentials: async () => ({ credentials: [{ ref: "github-app", type: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:gh", builtIn: true }] }),
       workspaces: async () => ({ workspaces: [], limits: { perPerson: 3, perOrganization: 20, source: "parameters" as const }, counts: { organization: 0 }, truncated: false }),
     });
-    expect((await client.callTool({ name: "agentx_admin_usage", arguments: { group_by: "project" } })).structuredContent).toMatchObject({ groups: [{ key: "payments", turns: 2, tasks: 1, task_duration_ms: 60_000, input_tokens: 10, output_tokens: 2, cost_usd: 0.5, cost_unknown: 0 }] });
-    expect((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })).structuredContent).toMatchObject({ projects: [{ name: "payments", latest_revision: 2, runtime_mode: "ec2-ebs", developer_tasks: { share: "optional" } }] });
-    expect((await client.callTool({ name: "agentx_admin_list_channels", arguments: {} })).structuredContent).toMatchObject({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", project: "payments" }] });
-    expect((await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} })).structuredContent).toMatchObject({ references: [{ ref: "github-app", type: "github-app", secret_name: "gh", built_in: true }] });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ limits: { per_person: 3, per_organization: 20, source: "parameters" } });
+    expect((await client.callTool({ name: "rovara_admin_usage", arguments: { group_by: "project" } })).structuredContent).toMatchObject({ groups: [{ key: "payments", turns: 2, tasks: 1, task_duration_ms: 60_000, input_tokens: 10, output_tokens: 2, cost_usd: 0.5, cost_unknown: 0 }] });
+    expect((await client.callTool({ name: "rovara_admin_list_projects", arguments: {} })).structuredContent).toMatchObject({ projects: [{ name: "payments", latest_revision: 2, runtime_mode: "ec2-ebs", developer_tasks: { share: "optional" } }] });
+    expect((await client.callTool({ name: "rovara_admin_list_channels", arguments: {} })).structuredContent).toMatchObject({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", project: "payments" }] });
+    expect((await client.callTool({ name: "rovara_admin_list_credentials", arguments: {} })).structuredContent).toMatchObject({ references: [{ ref: "github-app", type: "github-app", secret_name: "gh", built_in: true }] });
+    expect((await client.callTool({ name: "rovara_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ limits: { per_person: 3, per_organization: 20, source: "parameters" } });
   });
 
   it("answers ADMIN_REQUIRED when the server holds no admin client", async () => {
     const client = await connect(undefined);
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
   });
 
   it("passes a refusal through as its tool error", async () => {
-    const client = await connect({ health: async () => { throw new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", "run npx @preplabsai/rovara-code login --admin"); } });
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
+    const client = await connect({ health: async () => { throw new ToolError("ADMIN_REQUIRED", "Rovara refused this computer's admin sign-in, or it has expired", "run npx @preplabsai/rovara-code login --admin"); } });
+    expect(toolError(await client.callTool({ name: "rovara_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 
   it("shows the dead-letter queues' own check (ruling R18), and says their status", async () => {
@@ -105,13 +105,13 @@ describe("the admin read tools (FR-030)", () => {
       slack: { status: "ok" as const }, github: { status: "ok" as const }, workerModes: [{ mode: "ec2-ebs", configured: true }], workspaces: { READY: 2 }, workspacesTruncated: false,
     };
     const client = await connect({ health: async () => health });
-    const result = await client.callTool({ name: "agentx_admin_health", arguments: {} });
+    const result = await client.callTool({ name: "rovara_admin_health", arguments: {} });
     expect(result.structuredContent).toMatchObject({ dead_letter_queues: [{ name: "agentx-staging-dlq", depth: 3 }], dead_letter_queues_check: { status: "warn", detail: "3 messages waiting" } });
     expect(JSON.stringify(result.content)).toContain("Dead-letter queues: warn");
     // An older control plane sends no queue check: the answer still reads, without the field.
     const older: Partial<typeof health> = { ...health };
     delete older.deadLetterQueuesCheck;
-    const olderResult = await (await connect({ health: async () => older as never })).callTool({ name: "agentx_admin_health", arguments: {} });
+    const olderResult = await (await connect({ health: async () => older as never })).callTool({ name: "rovara_admin_health", arguments: {} });
     expect(olderResult.isError).toBeFalsy();
     expect(olderResult.structuredContent).not.toHaveProperty("dead_letter_queues_check");
   });
@@ -122,11 +122,11 @@ describe("the admin read tools (FR-030)", () => {
       workerModes: [], workspaces: {}, workspacesTruncated: false,
     };
     const rows = [{ point: "channel", name: "teams", status: "ok" as const }, { point: "code-host", name: "gitlab", status: "failed" as const, detail: "token refused" }];
-    const neutral = await (await connect({ health: async () => ({ ...base, plugins: rows }) })).callTool({ name: "agentx_admin_health", arguments: {} });
+    const neutral = await (await connect({ health: async () => ({ ...base, plugins: rows }) })).callTool({ name: "rovara_admin_health", arguments: {} });
     expect(neutral.structuredContent).toMatchObject({ plugins: rows });
     expect(neutral.structuredContent).not.toHaveProperty("slack");
     expect(JSON.stringify(neutral.content)).toContain("Plug-ins: teams ok, gitlab failed.");
-    const older = await (await connect({ health: async () => ({ ...base, slack: { status: "ok" as const }, github: { status: "warn" as const, detail: "no installs" } }) })).callTool({ name: "agentx_admin_health", arguments: {} });
+    const older = await (await connect({ health: async () => ({ ...base, slack: { status: "ok" as const }, github: { status: "warn" as const, detail: "no installs" } }) })).callTool({ name: "rovara_admin_health", arguments: {} });
     expect(older.structuredContent).toMatchObject({
       plugins: [{ point: "channel", name: "slack", status: "ok" }, { point: "code-host", name: "github", status: "warn", detail: "no installs" }],
       slack: { status: "ok" }, github: { status: "warn" },
@@ -140,11 +140,11 @@ describe("the admin read tools (FR-030)", () => {
       alarmsCheck: { status: "warn" as const, detail: "2 alarms missing" },
       deadLetterQueues: [], slack: { status: "ok" as const }, github: { status: "ok" as const }, workerModes: [], workspaces: {}, workspacesTruncated: false,
     };
-    const result = await (await connect({ health: async () => health })).callTool({ name: "agentx_admin_health", arguments: {} });
+    const result = await (await connect({ health: async () => health })).callTool({ name: "rovara_admin_health", arguments: {} });
     expect(JSON.stringify(result.content)).toContain("Alarms: none firing; missing: agentx-staging-SlackDeadLetters, agentx-staging-TestAlarm.");
     expect(result.structuredContent).toMatchObject({ alarms_check: { status: "warn", detail: "2 alarms missing" } });
     const firing = { ...health, alarms: [{ name: "agentx-staging-TurnErrors", state: "ALARM" }] };
-    const firingResult = await (await connect({ health: async () => firing })).callTool({ name: "agentx_admin_health", arguments: {} });
+    const firingResult = await (await connect({ health: async () => firing })).callTool({ name: "rovara_admin_health", arguments: {} });
     expect(JSON.stringify(firingResult.content)).toContain("Alarms: in ALARM: agentx-staging-TurnErrors. ");
   });
 
@@ -153,19 +153,19 @@ describe("the admin read tools (FR-030)", () => {
       failures: async () => ({ since: "s", until: "u", failures: [], skipped: 2 }),
       usage: async () => ({ groupBy: "day" as const, since: "s", until: "u", truncated: false, groups: [], skipped: 4 }),
     });
-    expect((await client.callTool({ name: "agentx_admin_failed_tasks", arguments: {} })).structuredContent).toMatchObject({ skipped: 2 });
-    expect((await client.callTool({ name: "agentx_admin_usage", arguments: { group_by: "day" } })).structuredContent).toMatchObject({ skipped: 4 });
+    expect((await client.callTool({ name: "rovara_admin_failed_tasks", arguments: {} })).structuredContent).toMatchObject({ skipped: 2 });
+    expect((await client.callTool({ name: "rovara_admin_usage", arguments: { group_by: "day" } })).structuredContent).toMatchObject({ skipped: 4 });
     const without = await connect({
       failures: async () => ({ since: "s", until: "u", failures: [] }),
       usage: async () => ({ groupBy: "day" as const, since: "s", until: "u", truncated: false, groups: [] }),
     });
-    expect((await without.callTool({ name: "agentx_admin_failed_tasks", arguments: {} })).structuredContent).not.toHaveProperty("skipped");
-    expect((await without.callTool({ name: "agentx_admin_usage", arguments: { group_by: "day" } })).structuredContent).not.toHaveProperty("skipped");
+    expect((await without.callTool({ name: "rovara_admin_failed_tasks", arguments: {} })).structuredContent).not.toHaveProperty("skipped");
+    expect((await without.callTool({ name: "rovara_admin_usage", arguments: { group_by: "day" } })).structuredContent).not.toHaveProperty("skipped");
   });
 
   it("lists credentials under references, so FR-029's redaction keeps the list and its secret names", async () => {
     const client = await connect({ credentials: async () => ({ credentials: [{ ref: "jira", type: "static-secret", secretName: "agentx/staging/connectors/jira", registeredAt: "2026-09-01T00:00:00.000Z" }] }) });
-    const result = await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} });
+    const result = await client.callTool({ name: "rovara_admin_list_credentials", arguments: {} });
     expect(result.structuredContent).toEqual({ references: [{ ref: "jira", type: "static-secret", secret_name: "agentx/staging/connectors/jira", registered_at: "2026-09-01T00:00:00.000Z" }] });
     expect(JSON.stringify(result.content)).toContain("1 connector credential registered: jira (static-secret).");
   });
@@ -177,21 +177,21 @@ describe("the admin read tools (FR-030)", () => {
         limits: { perPerson: 3, perOrganization: 20, source: "setting" as const }, counts: { organization: 1 }, truncated: false,
       }),
     });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { task_id: "33333333-3333-4333-8333-333333333333", developer_id: "d".repeat(64), developer: "`Maya Chen`" } }] });
+    expect((await client.callTool({ name: "rovara_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { task_id: "33333333-3333-4333-8333-333333333333", developer_id: "d".repeat(64), developer: "`Maya Chen`" } }] });
   });
 
   it("shows a Slack workspace owner's identity and keeps their name inert", async () => {
     const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { slack_team_id: "T0123456789", slack_user_id: "U0123456789", slack_name: "`Priya Shah`" } }] });
+    expect((await client.callTool({ name: "rovara_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { slack_team_id: "T0123456789", slack_user_id: "U0123456789", slack_name: "`Priya Shah`" } }] });
   });
 
   it("shows the neutral source and owner fields beside the older slack ones (item I2)", async () => {
     const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({
+    expect((await client.callTool({ name: "rovara_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({
       workspaces: [{ source: "chat", origin: "slack", owner: { channel_team_id: "T0123456789", channel_user_id: "U0123456789", channel_user_name: "`Priya Shah`", slack_user_id: "U0123456789" } }],
     });
     const failures = vi.fn(async () => ({ since: "s", until: "u", failures: [{ operationId: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack" as const, requester: { kind: "slack" as const, teamId: "T0123456789", userId: "U0123456789" }, kind: "prepare", status: "FAILED" as const, category: "setup_failed" as const, error: "x", endedAt: "t" }] }));
-    const failed = (await (await connect({ failures })).callTool({ name: "agentx_admin_failed_tasks", arguments: {} })).structuredContent as { failures: Array<Record<string, unknown>> };
+    const failed = (await (await connect({ failures })).callTool({ name: "rovara_admin_failed_tasks", arguments: {} })).structuredContent as { failures: Array<Record<string, unknown>> };
     expect(failed.failures[0]).toMatchObject({ source: "chat", origin: "slack", requester: "chat member U0123456789" });
   });
 
@@ -199,13 +199,13 @@ describe("the admin read tools (FR-030)", () => {
     const turns = vi.fn<(filter: Record<string, unknown>) => Promise<{ turns: Array<Record<string, unknown>> }>>(async () => ({ turns: [{ origin: "slack", requestText: "hello" }, { origin: "ai_tool", requestText: "hi" }] }));
     const client = await connect({ turns });
     const since = "2026-09-29T00:00:00.000Z";
-    const chat = await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "chat" } });
-    await client.callTool({ name: "agentx_admin_turns", arguments: { since, origin: "slack" } });
-    await client.callTool({ name: "agentx_admin_turns", arguments: { since, origin: "chat" } });
-    await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "ai_tool" } });
+    const chat = await client.callTool({ name: "rovara_admin_turns", arguments: { since, source: "chat" } });
+    await client.callTool({ name: "rovara_admin_turns", arguments: { since, origin: "slack" } });
+    await client.callTool({ name: "rovara_admin_turns", arguments: { since, origin: "chat" } });
+    await client.callTool({ name: "rovara_admin_turns", arguments: { since, source: "ai_tool" } });
     expect(turns.mock.calls.map(([filter]) => filter.origin)).toEqual(["slack", "slack", "slack", "ai_tool"]);
     expect(chat.structuredContent).toMatchObject({ turns: [{ source: "chat", origin: "slack" }, { source: "ai_tool", origin: "ai_tool" }] });
-    expect((await client.callTool({ name: "agentx_admin_turns", arguments: { since, source: "ai_tool", origin: "slack" } })).isError).toBe(true);
+    expect((await client.callTool({ name: "rovara_admin_turns", arguments: { since, source: "ai_tool", origin: "slack" } })).isError).toBe(true);
     expect(turns).toHaveBeenCalledTimes(4);
   });
 
@@ -215,7 +215,7 @@ describe("the admin read tools (FR-030)", () => {
       expect(tool.description, tool.name).toMatch(/\b(then|next|Next|after|before)\b/);
     }
     // When to use it comes before what to do next.
-    const failed = ADMIN_READ_TOOLS.find((tool) => tool.name === "agentx_admin_failed_tasks")!.description;
+    const failed = ADMIN_READ_TOOLS.find((tool) => tool.name === "rovara_admin_failed_tasks")!.description;
     expect(failed.indexOf("Use it")).toBeLessThan(failed.indexOf("pass its turn_record"));
   });
 
@@ -224,7 +224,7 @@ describe("the admin read tools (FR-030)", () => {
       { ref: "github-app", type: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/github-app-AbCdEf", builtIn: true },
       { ref: "gov", type: "static-secret", secretName: "arn:aws-us-gov:secretsmanager:us-gov-west-1:111122223333:secret:agentx/staging/connectors/jira-Q1w2E3" },
     ] }) });
-    const result = await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} });
+    const result = await client.callTool({ name: "rovara_admin_list_credentials", arguments: {} });
     expect(result.structuredContent).toEqual({ references: [
       { ref: "github-app", type: "github-app", secret_name: "agentx/staging/github-app-AbCdEf", built_in: true },
       { ref: "gov", type: "static-secret", secret_name: "agentx/staging/connectors/jira-Q1w2E3" },

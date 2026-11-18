@@ -37,14 +37,14 @@ describe("the admin client (A14)", () => {
   it("answers INVALID_REQUEST for CONFIG_INVALID, UPGRADE_REQUIRED for an unknown route, and retries an outage", async () => {
     const invalid = httpAdminClient({ session, fetch: answering(400, { error: { code: "CONFIG_INVALID", message: "limit must be a whole number from 1 to 100" } }) });
     await expect(invalid.failures({ limit: 0 })).rejects.toMatchObject({ code: "INVALID_REQUEST", message: "limit must be a whole number from 1 to 100" });
-    const old = httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "AgentX developer workflows run in the project's Slack channel; this endpoint serves administration only" } }) });
+    const old = httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "Rovara developer workflows run in the project's Slack channel; this endpoint serves administration only" } }) });
     await expect(old.health()).rejects.toMatchObject({ code: "UPGRADE_REQUIRED" });
     const flaky = vi.fn().mockRejectedValueOnce(new TypeError("fetch failed")).mockResolvedValueOnce(new Response(JSON.stringify({ projects: [] }), { status: 200 }));
     expect(await httpAdminClient({ session, fetch: flaky as never, sleep: async () => undefined }).projects()).toEqual({ projects: [] });
   });
 
   it("says ADMIN_REQUIRED when there is no admin sign-in at all", async () => {
-    const client = httpAdminClient({ session: async () => { throw new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP); }, fetch: vi.fn() as never });
+    const client = httpAdminClient({ session: async () => { throw new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for Rovara", ADMIN_SIGN_IN_STEP); }, fetch: vi.fn() as never });
     await expect(client.projects()).rejects.toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 });
@@ -54,7 +54,7 @@ describe("the admin client's refusals and outages (A14, secrets)", () => {
   const planted = async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: PLANTED });
   const everywhere = (failure: unknown) => JSON.stringify({ failure, message: (failure as Error).message, nextStep: (failure as ToolError).nextStep, stack: (failure as Error).stack });
 
-  it("never repeats the token, even when AgentX's answer quotes it", async () => {
+  it("never repeats the token, even when Rovara's answer quotes it", async () => {
     const answers: Array<[number, unknown]> = [
       [401, { error: { code: "AUTH_REQUIRED", message: `token ${PLANTED} expired` } }],
       [403, { error: { code: "FORBIDDEN", message: `token ${PLANTED} lacks the administrator claim` } }],

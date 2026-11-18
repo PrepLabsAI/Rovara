@@ -20,7 +20,7 @@ You need:
   `aws login` or an SSO profile). The platform team path needs them only on the platform team's
   side. Later, day-2 commands use the narrower operator role that the install creates.
 - **From a terminal only: Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
-  [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
+  [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `rovara` stops
   before it does anything and says what to install.
 - **A GitHub organization or personal account** that will own the Rovara GitHub App. Only repositories on
   github.com (including GitHub Enterprise Cloud) are supported. GitHub Enterprise Server, GitLab, Bitbucket and
@@ -44,7 +44,7 @@ You need:
 ### Node 22 in AWS CloudShell
 
 AWS CloudShell has Node 20, and Rovara needs Node 22. `npm install` only warns about it
-(`EBADENGINE`); `agentx` itself stops with this command in its message. Run it once in
+(`EBADENGINE`); `rovara` itself stops with this command in its message. Run it once in
 CloudShell's default Bash shell:
 
 ```sh
@@ -68,13 +68,13 @@ sed -i '/local\/node22\/bin/d' ~/.bashrc
 ```
 
 Pick an environment name: lower-case letters, digits and hyphens, such as `prod` or `staging`.
-Every command takes it as `--env <env>`. Always pass it: without it, `agentx` means the
+Every command takes it as `--env <env>`. Always pass it: without it, `rovara` means the
 environment named `production`.
 
 ## Install with the Launch in AWS button (recommended)
 
 <p align="center">
-  <a href="https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&amp;stackName=agentx-installer"><img src="assets/launch-in-aws.svg" alt="Launch in AWS" width="232" height="52" /></a>
+  <a href="https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&amp;stackName=rovara-installer"><img src="assets/launch-in-aws.svg" alt="Launch in AWS" width="232" height="52" /></a>
 </p>
 
 The button opens the AWS console's Create stack page for the Rovara installer, in `us-east-1` (the
@@ -94,10 +94,10 @@ one region Rovara runs in today), with everything filled in but three answers.
 5. **Finish on the page:** pick the first project's repository and Slack channel, confirm the
    alert email, and mention the bot in the channel. The install ends at its first reply.
 
-The installer is one CloudFormation stack, `agentx-installer`: a CodeBuild job that runs
-`agentx init` in your account, as an administrator role that is deleted with the stack, and the
+The installer is one CloudFormation stack, `rovara-installer`: a CodeBuild job that runs
+`rovara init` in your account, as an administrator role that is deleted with the stack, and the
 setup page. Everything the install makes is in its own `agentx-<name>-*` stacks. Once Rovara
-answers in Slack, delete the `agentx-installer` stack: that removes only the installer, and Rovara
+answers in Slack, delete the `rovara-installer` stack (`agentx-installer` for an install made before the rename): that removes only the installer, and Rovara
 keeps running. To remove Rovara itself, see [docs/teardown.md](teardown.md).
 
 ## Install from a terminal
@@ -111,7 +111,7 @@ npx @preplabsai/rovara-code --env <env> init --region <region>
 In a terminal on your own computer, `init` opens a page in your browser, served from this computer
 only (`127.0.0.1`). The page shows the five parts of the install (Get started, Your choices, Build
 in AWS, Connect GitHub and Slack, Finish), how long each usually takes, which one you are in, and the time
-left. The browser tab's title reads "(Action needed) Install AgentX" whenever the install waits for
+left. The browser tab's title reads "(Action needed) Install Rovara" whenever the install waits for
 you.
 
 The page walks you through five parts, and tells you when it needs you:
@@ -155,9 +155,9 @@ answers, so it needs `--yes` (or `--ui`); without either, it stops. Over SSH, in
 Linux with no display, on Windows, or with `--no-browser`, `init` asks in the terminal. In an
 interactive terminal without `--yes`, it first prints this line:
 
-> No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).
+> No browser here, so rovara init asks in this terminal. To use the install page instead, run rovara init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).
 
-Over SSH, run `agentx init --ui --no-browser`. It prints the page's address and the command that
+Over SSH, run `rovara init --ui --no-browser`. It prints the page's address and the command that
 forwards its port. Run that command on your own computer (`ssh -L <port>:127.0.0.1:<port> <host>`)
 and open the address there.
 
@@ -182,7 +182,7 @@ npx @preplabsai/rovara-code --env <env> init --region <region> --yes \
   --admin-email <email> --repository <owner/name> --channel <channel> --connectors none
 ```
 
-`agentx init --help` lists every flag. `--yes` still prints the plan, and answers yes to checks
+`rovara init --help` lists every flag. `--yes` still prints the plan, and answers yes to checks
 such as "Request URL Verified?", so read the printed summary afterwards.
 
 **The cost estimate.** The plan shows an estimated monthly cost for your models at a stated use:
@@ -194,7 +194,7 @@ allocation tags; until then the budget reads 0.
 
 ## After the install
 
-- Check it any time with `agentx --env <env> doctor --region <region>`.
+- Check it any time with `rovara --env <env> doctor --region <region>`.
 - Upgrades, settings, more projects, channels and connectors: [docs/day-two.md](day-two.md).
 - Removing it: [docs/teardown.md](teardown.md).
 - Moving it to another AWS account: [docs/move-account.md](move-account.md).

@@ -12,7 +12,7 @@ import { ToolError } from "./errors.js";
 import type { ToolContext, ToolDefinition } from "./tools.js";
 
 export function adminOf(context: ToolContext): AdminControlPlaneClient {
-  if (context.admin === undefined) throw new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
+  if (context.admin === undefined) throw new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for Rovara", ADMIN_SIGN_IN_STEP);
   return context.admin;
 }
 
@@ -51,9 +51,9 @@ function requesterText(requester: AdminRequester): string {
 
 export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
-    name: "agentx_admin_health",
-    title: "Check AgentX health",
-    description: "Shows whether AgentX is healthy: the API versions, the environment's alarms and their states, dead-letter queue depths, whether each installed plug-in (chat tool, code host) works, the worker mode and its latest dispatch failure, and open workspaces by status. Use it first when something seems wrong; then look at agentx_admin_failed_tasks for what failed.",
+    name: "rovara_admin_health",
+    title: "Check Rovara health",
+    description: "Shows whether Rovara is healthy: the API versions, the environment's alarms and their states, dead-letter queue depths, whether each installed plug-in (chat tool, code host) works, the worker mode and its latest dispatch failure, and open workspaces by status. Use it first when something seems wrong; then look at rovara_admin_failed_tasks for what failed.",
     inputSchema: {},
     outputSchema: {
       version: z.object({ developer_api: z.string(), admin_api: z.string(), release: z.string().optional() }),
@@ -82,14 +82,14 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
           worker_modes: health.workerModes.map((mode) => given({ mode: mode.mode, configured: mode.configured, latest_dispatch_failure: mode.latestDispatchFailure === undefined ? undefined : { at: mode.latestDispatchFailure.at, operation_id: mode.latestDispatchFailure.operationId, error: mode.latestDispatchFailure.error } })),
           workspaces: health.workspaces, workspaces_truncated: health.workspacesTruncated,
         },
-        text: `AgentX API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this AgentX"}. Plug-ins: ${pluginHealth(health).map((row) => `${row.name} ${row.status}`).join(", ") || "none reported"}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
+        text: `Rovara API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this Rovara"}. Plug-ins: ${pluginHealth(health).map((row) => `${row.name} ${row.status}`).join(", ") || "none reported"}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
       };
     },
   },
   {
-    name: "agentx_admin_failed_tasks",
-    title: "List failed AgentX tasks",
-    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (source: chat or ai_tool; origin is the older name and says slack for chat), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; AgentX keeps 30 days. Use it when a task or a chat turn went wrong, or after agentx_admin_health shows a problem. To see what happened around a failure, pass its turn_record's thread or task_id to agentx_admin_turns.",
+    name: "rovara_admin_failed_tasks",
+    title: "List failed Rovara tasks",
+    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (source: chat or ai_tool; origin is the older name and says slack for chat), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; Rovara keeps 30 days. Use it when a task or a chat turn went wrong, or after rovara_admin_health shows a problem. To see what happened around a failure, pass its turn_record's thread or task_id to rovara_admin_turns.",
     inputSchema: {
       since: time.optional().describe("ISO time to start from; 24 hours ago by default"),
       until: time.optional().describe("ISO time to stop at; now by default"),
@@ -119,9 +119,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_turns",
-    title: "Read AgentX turn records",
-    description: "Reads turn records, newest first: what each chat turn was asked, offered, chose and answered, and each action from an AI tool. They hold request and response text, already redacted. Narrow them with until, project, source (chat or ai_tool), thread (a chat thread subject) or task_id (a task's own records and its channel turns); send next_cursor back as cursor for more. since is required; AgentX keeps 30 days. Use it to see what a failure's thread or task asked and answered; then compare with agentx_admin_failed_tasks.",
+    name: "rovara_admin_turns",
+    title: "Read Rovara turn records",
+    description: "Reads turn records, newest first: what each chat turn was asked, offered, chose and answered, and each action from an AI tool. They hold request and response text, already redacted. Narrow them with until, project, source (chat or ai_tool), thread (a chat thread subject) or task_id (a task's own records and its channel turns); send next_cursor back as cursor for more. since is required; Rovara keeps 30 days. Use it to see what a failure's thread or task asked and answered; then compare with rovara_admin_failed_tasks.",
     inputSchema: {
       since: time.describe("ISO time to start from, within the last 30 days"),
       until: time.optional().describe("ISO time to stop at"),
@@ -150,9 +150,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_usage",
-    title: "Show AgentX usage",
-    description: "Adds up AgentX usage per project, requester, origin or day: chat turns, worker tasks, total task time, model input and output tokens, and cost in US dollars as the usage records carry it (a cost the provider did not give is counted in cost_unknown). since defaults to 7 days ago; AgentX keeps 30 days. Use it to see who and what is spending; then look at agentx_admin_turns or agentx_admin_list_workspaces for the detail.",
+    name: "rovara_admin_usage",
+    title: "Show Rovara usage",
+    description: "Adds up Rovara usage per project, requester, origin or day: chat turns, worker tasks, total task time, model input and output tokens, and cost in US dollars as the usage records carry it (a cost the provider did not give is counted in cost_unknown). since defaults to 7 days ago; Rovara keeps 30 days. Use it to see who and what is spending; then look at rovara_admin_turns or rovara_admin_list_workspaces for the detail.",
     inputSchema: {
       group_by: AdminUsageGroupBySchema.describe("project, requester, origin or day"),
       since: time.optional().describe("ISO time to start from; 7 days ago by default"),
@@ -174,9 +174,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_list_projects",
-    title: "List AgentX projects (admin)",
-    description: "Lists every registered project an admin can see: its latest revision, when it was registered, its repositories, worker mode, connectors, and its policy for tasks from AI tools. Use it before changing a project, or to find why a developer cannot use one; then see its channels with agentx_admin_list_channels.",
+    name: "rovara_admin_list_projects",
+    title: "List Rovara projects (admin)",
+    description: "Lists every registered project an admin can see: its latest revision, when it was registered, its repositories, worker mode, connectors, and its policy for tasks from AI tools. Use it before changing a project, or to find why a developer cannot use one; then see its channels with rovara_admin_list_channels.",
     inputSchema: {},
     outputSchema: {
       projects: z.array(z.object({
@@ -197,9 +197,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_list_channels",
-    title: "List AgentX channel bindings",
-    description: "Lists the chat channels bound to projects: the channel's ID, its name when it is public or when your linked chat user is a member of the private channel (otherwise a private channel is shown by ID only), the project, and when the binding last changed. Use it to find which channel a project answers in, or why a channel does not answer; then check the project with agentx_admin_list_projects.",
+    name: "rovara_admin_list_channels",
+    title: "List Rovara channel bindings",
+    description: "Lists the chat channels bound to projects: the channel's ID, its name when it is public or when your linked chat user is a member of the private channel (otherwise a private channel is shown by ID only), the project, and when the binding last changed. Use it to find which channel a project answers in, or why a channel does not answer; then check the project with rovara_admin_list_projects.",
     inputSchema: {},
     outputSchema: { bindings: z.array(z.object({ channel_id: z.string(), channel_name: z.string().optional(), private: z.boolean().optional(), project: z.string(), updated_at: z.string() })), notices: z.array(z.string()) },
     async handler(context) {
@@ -210,9 +210,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_list_credentials",
-    title: "List AgentX connector credentials",
-    description: "Lists connector credentials by reference, type and secret name, and when each was registered. It never shows a secret's value. Use it when a connector cannot reach its service; then check which projects use the connector with agentx_admin_list_projects.",
+    name: "rovara_admin_list_credentials",
+    title: "List Rovara connector credentials",
+    description: "Lists connector credentials by reference, type and secret name, and when each was registered. It never shows a secret's value. Use it when a connector cannot reach its service; then check which projects use the connector with rovara_admin_list_projects.",
     inputSchema: {},
     // Keyed `references`, not `credentials`: FR-029's redactSecrets replaces any value under a
     // credential-named key, so a `credentials` list would always read [REDACTED]. secret_name is
@@ -228,9 +228,9 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
-    name: "agentx_admin_list_workspaces",
-    title: "List AgentX workspaces",
-    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (chat user ID and captured name, or developer ID and name), thread link or task ID, status and last activity, with the current workspace limits and counts. A chat owner is the charged starter, or the creator before preparation. Missing identity or name is unknown, never guessed. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with agentx_admin_turns.",
+    name: "rovara_admin_list_workspaces",
+    title: "List Rovara workspaces",
+    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (chat user ID and captured name, or developer ID and name), thread link or task ID, status and last activity, with the current workspace limits and counts. A chat owner is the charged starter, or the creator before preparation. Missing identity or name is unknown, never guessed. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with rovara_admin_turns.",
     inputSchema: {
       project: projectInput,
       status: WorkspaceStatusSchema.optional().describe("only workspaces with this status"),

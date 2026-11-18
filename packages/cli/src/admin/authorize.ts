@@ -4,7 +4,7 @@ import {
   GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand, type SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import {
-  AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, mcpEndpointProblem, oauthProfile,
+  AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, mcpEndpointProblem, oauthProfile, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { createPkceParameters } from "../auth.js";
 import { registerCredential } from "./credential.js";
@@ -184,7 +184,7 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   } catch (error) {
     // The sign-in already succeeded: say how to finish without signing in again.
     const flags = generic === undefined ? "" : ` --host ${generic.host} --token-url ${generic.tokenUrl}${generic.resource === undefined ? "" : ` --resource ${generic.resource}`}`;
-    const register = `finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}${flags}\` (no new sign-in needed)`;
+    const register = `finish with \`${CLI_COMMAND_NAME} admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}${flags}\` (no new sign-in needed)`;
     // The control plane refusing the secret itself (CONFIG_INVALID) is most often a secret written in
     // another region than the control plane's, where registering again would only fail the same way.
     const wrongRegion = error instanceof AgentXError && error.code === "CONFIG_INVALID";
@@ -281,7 +281,7 @@ async function exchangeCode(input: {
     throw agentXError("AUTH_REQUIRED", `the token endpoint refused the sign-in with HTTP ${response.status}${code}; nothing was stored`);
   }
   if (typeof record.refresh_token !== "string" || record.refresh_token.length === 0) {
-    throw agentXError("AUTH_REQUIRED", "the token endpoint returned no refresh token, so AgentX could not stay signed in; check the app type in the setup guide. Nothing was stored");
+    throw agentXError("AUTH_REQUIRED", "the token endpoint returned no refresh token, so Rovara could not stay signed in; check the app type in the setup guide. Nothing was stored");
   }
   return { refreshToken: record.refresh_token, account: accountOf(record.data) };
 }
@@ -354,7 +354,7 @@ async function listenForCallback(options: { redirectUri: URL; redirectRequiremen
     if (request.method !== "GET" || url.pathname !== redirectUri.pathname) { response.writeHead(404).end(); return; }
     if (settled) { response.writeHead(410, { "content-type": "text/plain" }).end("This sign-in has already finished. You can close this tab."); return; }
     if (!matches(url.searchParams.get("state"))) {
-      response.writeHead(400, { "content-type": "text/plain" }).end("This sign-in link is not the one AgentX is waiting for. Use the link the command printed.");
+      response.writeHead(400, { "content-type": "text/plain" }).end("This sign-in link is not the one Rovara is waiting for. Use the link the command printed.");
       return;
     }
     const error = url.searchParams.get("error");
@@ -365,7 +365,7 @@ async function listenForCallback(options: { redirectUri: URL; redirectRequiremen
       finish({ error: agentXError("AUTH_REQUIRED", `the sign-in was refused or cancelled${shown}; nothing was stored`) });
       return;
     }
-    response.writeHead(200, { "content-type": "text/plain" }).end("AgentX received the sign-in. You can close this tab.");
+    response.writeHead(200, { "content-type": "text/plain" }).end("Rovara received the sign-in. You can close this tab.");
     finish({ code: authorizationCode });
   });
   await new Promise<void>((resolve, reject) => {

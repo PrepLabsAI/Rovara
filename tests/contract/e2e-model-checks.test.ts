@@ -283,7 +283,7 @@ describe("GET: reading a check", () => {
     answer(h, asCheck(checkId, drive({ outcome: "failed", failure: { class: "limit-or-rate-limited", signal: "ThrottlingException" }, caseVerdict: "none", reported: null }, [failed])));
     const view = await readModelCheck(h.deps, checkId);
     expect(view.status).toBe("failed");
-    expect(view.sentence).toContain("Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks");
+    expect(view.sentence).toContain("Raise the limit, or choose another model and run its driving test (rovara project model-check test --model <id>), then retry the checks");
     expect(rows(h)).toEqual(["E2E_MODEL_TEST"]);
     expect(h.db.get("E2E_MODEL_ROUTES", e2eModelRouteTestKey(route.routeId, MODEL).sk)).toMatchObject({ outcome: "failed", failureClass: "limit-or-rate-limited", signal: "ThrottlingException" });
   });

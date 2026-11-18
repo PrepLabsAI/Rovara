@@ -27,7 +27,7 @@ import {
   type EvalRunMeasure,
   type ModelIdentifier,
   type SlackThread,
-  type ThinkingLevel,
+  type ThinkingLevel, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { ZodError } from "zod";
 import {
@@ -73,7 +73,7 @@ export async function startSlackBatch(dependencies: EvalBatchDependencies, conte
     const deployment = await dependencies.deployment();
     if (deployment === undefined) return refused("Eval runs are not installed in this deployment. Ask an administrator to deploy the eval stack and runner image.");
     const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
-    if (channel === undefined) return refused("Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`.");
+    if (channel === undefined) return refused(`Eval runs are not enabled in this channel. An administrator can enable them with \`${CLI_COMMAND_NAME} admin eval enable\`.`);
     const providers = deployment.environment.AGENTX_OPENROUTER_PROVIDERS?.split(",").filter((slug) => slug.length > 0) ?? [];
     const models: EvalBatchModel[] = [];
     for (const requested of request.models) {

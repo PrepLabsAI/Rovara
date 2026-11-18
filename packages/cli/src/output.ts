@@ -36,7 +36,7 @@ export function formatError(error: unknown, json: boolean): FormattedError {
       : { code: "INTERNAL_ERROR", message: error instanceof Error ? error.message : "unexpected error" };
   const text = json
     ? `${JSON.stringify({ ok: false, error: normalized })}\n`
-    : `AgentX error [${normalized.code}]: ${normalized.message}\n`;
+    : `Rovara error [${normalized.code}]: ${normalized.message}\n`;
   return {
     text,
     exitCode: normalized.code === "INTERNAL_ERROR" ? 1 : exitCodeForError(normalized.code),

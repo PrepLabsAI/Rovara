@@ -71,7 +71,7 @@ export interface OrchestratorOptions {
 }
 
 /** What the model hears for a tool call made after its turn was handed off (issue 157). */
-export const HANDOFF_TOOL_REASON = "AgentX is restarting, so this call was not run. Do not call any more tools; the request will be picked up again.";
+export const HANDOFF_TOOL_REASON = "Rovara is restarting, so this call was not run. Do not call any more tools; the request will be picked up again.";
 /** The custom message type of a turn note (issue 157). */
 export const TURN_NOTE_MESSAGE_TYPE = "agentx-turn-note";
 
@@ -79,7 +79,7 @@ export const TURN_NOTE_MESSAGE_TYPE = "agentx-turn-note";
 export type ReplySurface = "slack" | "plain";
 
 /** What an answer-only turn is told (trusted text). */
-export const ANSWER_ONLY_INSTRUCTIONS = "You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.";
+export const ANSWER_ONLY_INSTRUCTIONS = "You are answering a question about this Rovara task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning Rovara is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.";
 
 export interface ExtensionFailure {
   extension: string;
@@ -189,7 +189,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     factory: (pi) => {
       pi.on("user_bash", () => ({
         result: {
-          output: "Shell execution is disabled in the orchestrator. Delegate the work to AgentX.",
+          output: "Shell execution is disabled in the orchestrator. Delegate the work to Rovara.",
           exitCode: 126,
           cancelled: false,
           truncated: false,
@@ -397,7 +397,7 @@ function sessionStats(runtime: AgentSessionRuntime, recorder: TurnRecorder): Usa
 }
 
 /** What a turn answers when the model said nothing. */
-export const NO_TEXT_RESPONSE = "AgentX completed the request without returning a textual response.";
+export const NO_TEXT_RESPONSE = "Rovara completed the request without returning a textual response.";
 
 export function lastAssistantText(messages: readonly unknown[]): string {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -426,15 +426,16 @@ export function lastAssistantText(messages: readonly unknown[]): string {
 export function orchestratorSystemPrompt(projectInstructions: string, manifest?: string, surface?: ReplySurface, answerOnly = false, toolSearchNote?: string): string {
   return [
     ...(manifest === undefined ? [] : [manifest, ""]),
-    "You are the AgentX orchestrator.",
-    "Never inspect, edit, or execute project source yourself. Use only AgentX orchestration tools and approved connector tools.",
+    "You are the Rovara orchestrator.",
+    "Never inspect, edit, or execute project source yourself. Use only Rovara orchestration tools and approved connector tools.",
     "Report an action as completed only when a tool result confirms it. A user's request, your intent, or your reply is not evidence that an action ran.",
     "You cannot close a workspace yourself: you have no workspace-close tool. If asked to close, shut down or delete this workspace, tell the user to send the exact command `close this workspace` in this conversation. Do not claim it is closed, promise to close it, or delegate closing it to a coding worker or connector. The command handler runs the unpublished-work safety check and reports the outcome.",
     "You cannot select or change the project's coding model yourself. Tell the user to send `models` to see approved choices, then `use <model>` with an approved model's name or identifier. Do not invent the current or approved models, claim a switch succeeded, or delegate model selection to a tool.",
     "For any action available only through a command or button, explain the required user action; never claim to have performed it. Only the command or button handler can confirm its outcome.",
-    "agentx_submit_task and agentx_follow_up wait for the remote worker and return its final response.",
-    "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request. Call it directly: AgentX commits and publishes the workspace's changes itself, so never start a worker task to inspect, commit or summarise them first.",
-    `Retired tool names (renamed in feature 013): ${Object.entries(RETIRED_PULL_REQUEST_TOOLS).map(([tool, action]) => `${tool} → agentx_manage_pull_request action "${action}"`).join("; ")}. If a call to a retired name fails, use agentx_manage_pull_request instead.`,
+    "rovara_submit_task and rovara_follow_up wait for the remote worker and return its final response.",
+    "Use rovara_create_pull_request only when the user explicitly asks to create or raise a pull request. Call it directly: Rovara commits and publishes the workspace's changes itself, so never start a worker task to inspect, commit or summarise them first.",
+    `Retired tool names (renamed in feature 013): ${Object.entries(RETIRED_PULL_REQUEST_TOOLS).map(([tool, action]) => `${tool} → rovara_manage_pull_request action "${action}"`).join("; ")}. If a call to a retired name fails, use rovara_manage_pull_request instead.`,
+    "Earlier calls in this conversation may show tool names that start with agentx_; the same tool is now named rovara_ followed by the rest of the name, so use the rovara_ name.",
     "Never publish automatically after a coding task. For ordinary coding requests, call one task tool exactly once; do not poll, resubmit, or ask the worker to read its session file.",
     "Use connector tools (named <connector>__<tool>) directly for issues and tickets; do not start a coding worker for them. Create, comment, update or assign only as the user asked. Never guess a username.",
     ...(toolSearchNote === undefined ? [] : [toolSearchNote]),

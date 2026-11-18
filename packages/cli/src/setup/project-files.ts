@@ -7,7 +7,7 @@
 // this file writes itself. No file content ever becomes part of a command's executable or args, and
 // no file content, private key or installation token is ever logged.
 import { createHash } from "node:crypto";
-import { agentXError, createCandidateManifest, type CandidateManifest, type CandidateRepository, type ProjectCommand } from "@agentx/contracts";
+import { agentXError, createCandidateManifest, type CandidateManifest, type CandidateRepository, type ProjectCommand, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { InitSecrets } from "../init/context.js";
 import { githubAppJwt, githubAppSecretName, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 
@@ -267,7 +267,7 @@ export async function installationToken(input: {
   const name = githubAppSecretName(input.env);
   const raw = await input.secrets.get(name);
   if (raw === undefined) {
-    throw agentXError("CONFIG_INVALID", `secret ${name} does not exist; run agentx init again so the GitHub App step stores it`);
+    throw agentXError("CONFIG_INVALID", `secret ${name} does not exist; run ${CLI_COMMAND_NAME} init again so the GitHub App step stores it`);
   }
   const app = parseAppSecret(raw, name);
   const jwt = githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: input.nowSeconds });
@@ -277,7 +277,7 @@ export async function installationToken(input: {
     if (installations.length !== 1) {
       throw agentXError("CONFIG_INVALID", installations.length === 0
         ? "the GitHub App is not installed anywhere; install it on your organization and choose repositories, then run this again"
-        : `the GitHub App is installed on ${installations.length} accounts (${installations.map((entry) => entry.account.login).join(", ")}); AgentX uses one, so uninstall the others`);
+        : `the GitHub App is installed on ${installations.length} accounts (${installations.map((entry) => entry.account.login).join(", ")}); Rovara uses one, so uninstall the others`);
     }
     installationId = String(installations[0]!.id);
   }

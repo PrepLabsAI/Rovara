@@ -1,4 +1,4 @@
-// Evaluation fix RUN-3: the browser and API runtime registration expires after seven days and when an image changes; an operator's script renews it by hand, and with AUTOREQUALIFY (AR-5) the product renews it by itself. agentx doctor and the TEST
+// Evaluation fix RUN-3: the browser and API runtime registration expires after seven days and when an image changes; an operator's script renews it by hand, and with AUTOREQUALIFY (AR-5) the product renews it by itself. rovara doctor and the TEST
 // deploy check warn ahead of time, naming the expiry time and the exact renew command; the control plane tells an administrator state and times (and nothing else of a row).
 import { describe, expect, it } from "vitest";
 import {
@@ -107,7 +107,7 @@ describe("readRuntimeStatus", () => {
   });
 });
 
-describe("agentx doctor's browser and API runtime checks", () => {
+describe("rovara doctor's browser and API runtime checks", () => {
   const row = (kind: "web" | "api", overrides: Partial<{ state: string; expiresAt: string }> = {}) =>
     ({ kind, profileId: PROFILE, state: "READY", qualifiedAt: at(-24), expiresAt: at(24 * 6), ...overrides });
   const context = (read: (() => Promise<RuntimeStatusRead>) | undefined) => ({ env: "agentxlivetest123", services: { now: () => NOW, ...(read === undefined ? {} : { runtime: read }) } }) as unknown as DoctorContext;
@@ -138,7 +138,7 @@ describe("agentx doctor's browser and API runtime checks", () => {
     expect(web!.fix).toBe("renew it with: npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile <aws-profile> --apply");
   });
 
-  it("skips, saying why, with no sign-in, no deployment support, no rows, or an agentx that cannot check", async () => {
+  it("skips, saying why, with no sign-in, no deployment support, no rows, or a rovara that cannot check", async () => {
     expect((await lines({ kind: "signed-out" }))[0]!.fix).toContain("login --admin");
     expect((await lines({ kind: "signed-out" }))[0]!.status).toBe("skip");
     expect((await lines({ kind: "not-set-up" }))[0]).toMatchObject({ status: "skip" });

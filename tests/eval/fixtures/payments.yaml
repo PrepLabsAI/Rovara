@@ -25,5 +25,5 @@ integrations:
         - { name: issue_read, access: read }
         - name: issue_write
           access: write
-          description: Create or update a GitHub issue. Not for pull requests (agentx_create_pull_request).
+          description: Create or update a GitHub issue. Not for pull requests (rovara_create_pull_request).
         - { name: add_issue_comment, access: write }

@@ -1,4 +1,4 @@
-// agentx init end to end through executeCli, with every AWS, GitHub, Slack, browser and clock
+// rovara init end to end through executeCli, with every AWS, GitHub, Slack, browser and clock
 // dependency injected. Nothing here reaches AWS, GitHub or Slack; the GitHub manifest listener is
 // real, on 127.0.0.1.
 import { createHash } from "node:crypto";
@@ -114,7 +114,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
       init: { ...deps, ...overrides },
     });
   const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) => runWithoutRegion(["--region", "us-east-1", ...argv], overrides);
-  /** Issue 152: no --release (and no --region unless argv gives one), as a source-built agentx runs with --engine cdk --source. */
+  /** Issue 152: no --release (and no --region unless argv gives one), as a source-built rovara runs with --engine cdk --source. */
   const runWithoutRelease = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
     executeCli(["--env", "staging", "init", ...argv], {
       stdout: { write: (text: string) => out.push(text) },
@@ -168,7 +168,7 @@ const without = (argv: readonly string[], flag: string): string[] => argv.filter
 const UNATTENDED_ENV = { GH_KEY: TEST_PRIVATE_KEY, BOT: TEST_BOT_TOKEN, SIGNING: TEST_SIGNING_SECRET, SLACK_CLIENT_SECRET: "fedcba9876543210fedcba9876543210" };
 const WEBHOOK = "https://events.pagerduty.com/integration/0123SECRETintegrationKEY/enqueue";
 
-describe("agentx init", () => {
+describe("rovara init", () => {
   it("lists its steps in the recorded order", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
   });
@@ -196,7 +196,7 @@ describe("agentx init", () => {
     const github = { ...fakeGitHubApi(), owner: async () => { throw new Error("GitHub owner lookup failed with HTTP 403"); } };
     expect(await h.run([...YES], { github })).not.toBe(0);
     const line = h.printed().split("\n").find((each) => each.startsWith("- could not check the GitHub owner"));
-    expect(line).toBe("- could not check the GitHub owner acme (GitHub owner lookup failed with HTTP 403); check your network and run agentx init again");
+    expect(line).toBe("- could not check the GitHub owner acme (GitHub owner lookup failed with HTTP 403); check your network and run rovara init again");
   });
 
   it("FR-028: an app made beforehand (--github-app-id) is this install's own, so its name is no clash", async () => {
@@ -212,7 +212,7 @@ describe("agentx init", () => {
     const progress = await readInstallProgress(h.store, "staging");
     expect(progress?.steps["developer-signin"]?.status).toBe("done");
     expect(progress?.steps["admin-user"]).toBeUndefined();
-    expect(h.printed()).toContain("Stopped after the developer-signin step, as --stop-after asked. Run agentx init --env staging --region us-east-1 again to finish.");
+    expect(h.printed()).toContain("Stopped after the developer-signin step, as --stop-after asked. Run rovara init --env staging --region us-east-1 again to finish.");
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
   });
 
@@ -284,9 +284,9 @@ describe("agentx init", () => {
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     const printed = h.printed();
     expect(printed).toContain("Estimated monthly total");
-    // The manual next steps of earlier installs (create the admin user, agentx login, register
+    // The manual next steps of earlier installs (create the admin user, rovara login, register
     // and bind a project) are gone: init did them.
-    expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).");
+    expect(printed).toContain("Rovara environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).");
     expect(printed).not.toContain("aws cognito-idp admin-create-user");
     expect(printed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
     const everywhere = await everywhereButSecrets(h);
@@ -312,7 +312,7 @@ describe("agentx init", () => {
     expect(prompter.remaining()).toBe(0);
     const resumed = h.printedSince(mark);
     expect(resumed).toContain("already done: Turn on developer sign-in");
-    expect(resumed).toContain("AgentX environment staging is ready.");
+    expect(resumed).toContain("Rovara environment staging is ready.");
     expect(resumed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
@@ -321,15 +321,15 @@ describe("agentx init", () => {
     const answered = h.plane.turns;
     h.plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString(), disposition: "error" })];
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).not.toBe(0);
-    expect(h.printed()).toContain("then run agentx --env staging init again");
+    expect(h.printed()).toContain("then run rovara --env staging init again");
     h.plane.turns = answered;
     const mark = h.mark();
     const prompter = scriptedPrompter([]);
     expect(await h.run([], { prompter })).toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).toContain("already done: Sign in to AgentX");
+    expect(rerun).toContain("already done: Sign in to Rovara");
     expect(rerun).toContain("already done: Set up your first project");
-    expect(rerun).toContain("AgentX environment staging is ready.");
+    expect(rerun).toContain("Rovara environment staging is ready.");
     expect(h.cognito.created).toEqual([ADMIN_EMAIL]);
     expect(h.plane.registered).toHaveLength(1);
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
@@ -339,7 +339,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": Resource limit exceeded. Run rovara init --env staging --region us-east-1 again to continue from this step.');
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
@@ -356,7 +356,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": the person chose not to continue. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": the person chose not to continue. Run rovara init --env staging --region us-east-1 again to continue from this step.');
   });
 
   it("changes nothing when run again after it finished", async () => {
@@ -428,15 +428,15 @@ describe("agentx init", () => {
     expect(h.store.calls).toEqual([]);
   });
 
-  // Init deploys through agentx deploy's engine, but its errors must never send the engineer to agentx deploy or an answers file.
-  it("reports an engine error in a deploy step without mentioning agentx deploy or an answers file", async () => {
+  // Init deploys through rovara deploy's engine, but its errors must never send the engineer to rovara deploy or an answers file.
+  it("reports an engine error in a deploy step without mentioning rovara deploy or an answers file", async () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "access"), agentXError("CONFIG_INVALID", "stack agentx-staging-access failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-access --region us-east-1)"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).toBe(2);
     const printed = h.printed();
     expect(printed).toContain('init stopped at "Set up AWS permissions": stack agentx-staging-access failed to create earlier');
-    expect(printed).toContain("Run agentx init --env staging --region us-east-1 again to continue from this step.");
-    expect(printed).not.toContain("agentx deploy");
+    expect(printed).toContain("Run rovara init --env staging --region us-east-1 again to continue from this step.");
+    expect(printed).not.toContain("rovara deploy");
     expect(printed).not.toContain("answers file");
   });
 
@@ -451,18 +451,18 @@ describe("agentx init", () => {
     const legacy = await harness();
     await legacy.store.put(settingsParameterName("staging"), JSON.stringify({ ...stagingSettings, naming: "legacy" }));
     expect(await legacy.run([], { prompter: scriptedPrompter([]) })).toBe(2);
-    expect(legacy.printed()).toContain("environment staging is the deployment adopted with fixed stack names; agentx init cannot install over it");
+    expect(legacy.printed()).toContain("environment staging is the deployment adopted with fixed stack names; rovara init cannot install over it");
 
     const deployed = await harness();
     await deployed.store.put(settingsParameterName("staging"), JSON.stringify(stagingSettings));
     expect(await deployed.run([], { prompter: scriptedPrompter([]) })).toBe(2);
-    expect(deployed.printed()).toContain("environment staging is already installed, but not by agentx init");
+    expect(deployed.printed()).toContain("environment staging is already installed, but not by rovara init");
   });
 
   it("with --resume and nothing to resume, says how to start", async () => {
     const h = await harness();
     expect(await h.run(["--resume"], { prompter: scriptedPrompter([]) })).toBe(2);
-    expect(h.printed()).toContain("there is no install of environment staging to resume in account 123456789012 (us-east-1); run agentx init without --resume to start one");
+    expect(h.printed()).toContain("there is no install of environment staging to resume in account 123456789012 (us-east-1); run rovara init without --resume to start one");
   });
 
   it("runs with no prompts at all under --yes and flags, with a GitHub App made beforehand", async () => {
@@ -477,7 +477,7 @@ describe("agentx init", () => {
     // The finishing steps took their answers from the flags, and --connectors none offered nothing.
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
     expect((await readInstallProgress(h.store, "staging"))?.connectors ?? []).toEqual([]);
-    expect(h.printed()).toContain("AgentX environment staging is ready.");
+    expect(h.printed()).toContain("Rovara environment staging is ready.");
     expect(h.printed()).toContain("No connectors yet.");
   });
 
@@ -486,7 +486,7 @@ describe("agentx init", () => {
     expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com", "--json"], { processEnv: UNATTENDED_ENV })).toBe(0);
     const data = (JSON.parse(h.out.join("")) as { data: { status: string; ready?: string } }).data;
     expect(data.status).toBe("complete");
-    expect(data.ready).toContain("AgentX environment staging is ready.");
+    expect(data.ready).toContain("Rovara environment staging is ready.");
     expect(data.ready).toContain("Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com");
   });
 
@@ -495,9 +495,9 @@ describe("agentx init", () => {
     const argv = UNATTENDED.filter((_, index) => UNATTENDED[index] !== "--connectors" && UNATTENDED[index - 1] !== "--connectors");
     expect(argv).not.toContain("--connectors");
     expect(await h.run([...argv, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(0);
-    expect(h.printed()).toContain("No connectors added; add them later with agentx --env staging connector add linear|jira|asana");
+    expect(h.printed()).toContain("No connectors added; add them later with rovara --env staging connector add linear|jira|asana");
     expect((await readInstallProgress(h.store, "staging"))?.connectors ?? []).toEqual([]);
-    expect(h.printed()).toContain("AgentX environment staging is ready.");
+    expect(h.printed()).toContain("Rovara environment staging is ready.");
   });
 
   it("under --yes, a first run refuses before anything is created when a finishing flag is missing, naming it", async () => {
@@ -505,7 +505,7 @@ describe("agentx init", () => {
       const h = await harness();
       const argv = without(UNATTENDED, flag);
       expect(await h.run([...argv, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV })).toBe(2);
-      expect(h.printed()).toContain(`agentx init --yes needs ${flag}`);
+      expect(h.printed()).toContain(`rovara init --yes needs ${flag}`);
       expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
       expect(h.secrets.values.has("agentx/staging/github-app")).toBe(false);
       expect(h.deployer.requests).toEqual([]);
@@ -522,7 +522,7 @@ describe("agentx init", () => {
     expect(await h.run(without(without(UNATTENDED, "--admin-email"), "--channel"), { processEnv: UNATTENDED_ENV })).toBe(0);
     const rerun = h.printedSince(mark);
     expect(rerun).not.toContain("needs --");
-    expect(rerun).toContain("AgentX environment staging is ready.");
+    expect(rerun).toContain("Rovara environment staging is ready.");
   });
 
   it("under --yes, a resume that still needs the channel is refused at that step, naming --channel", async () => {
@@ -533,7 +533,7 @@ describe("agentx init", () => {
     const mark = h.mark();
     expect(await h.run(without(UNATTENDED, "--channel"), { processEnv: UNATTENDED_ENV })).not.toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).not.toContain("agentx init --yes needs");
+    expect(rerun).not.toContain("rovara init --yes needs");
     expect(rerun).toContain('init stopped at "Set up your first project"');
     expect(rerun).toContain("with --yes, pass --channel");
     const progress = await readInstallProgress(h.store, "staging");
@@ -620,7 +620,7 @@ describe("agentx init", () => {
     expect(await h.run(["--json"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
     expect(JSON.parse(h.out.join(""))).toMatchObject({
       ok: true,
-      data: { status: "complete", env: "staging", resumed: false, controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", ready: expect.stringContaining("AgentX environment staging is ready.") as unknown },
+      data: { status: "complete", env: "staging", resumed: false, controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", ready: expect.stringContaining("Rovara environment staging is ready.") as unknown },
     });
   });
 
@@ -632,7 +632,7 @@ describe("agentx init", () => {
       cleanup: async () => { throw new Error("directory busy"); },
     });
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN), prepareDeployment: prepare })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded.');
+    expect(h.printed()).toContain('init stopped at "Start the Rovara service": Resource limit exceeded.');
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 
@@ -643,7 +643,7 @@ describe("agentx init", () => {
       cleanup: async () => { throw new Error("directory busy"); },
     });
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), prepareDeployment: prepare })).toBe(0);
-    expect(h.printed()).toContain("AgentX environment staging is ready.");
+    expect(h.printed()).toContain("Rovara environment staging is ready.");
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 
@@ -666,8 +666,8 @@ describe("agentx init", () => {
     expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
   });
 
-  // Issue 152: a source-built agentx with --engine cdk --source needs no release directory.
-  describe("a source-built agentx with --engine cdk --source (issue 152)", () => {
+  // Issue 152: a source-built rovara with --engine cdk --source needs no release directory.
+  describe("a source-built rovara with --engine cdk --source (issue 152)", () => {
     const HEAD = "e".repeat(40);
     const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"d".repeat(64)}`;
     const SLACK_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/slack@sha256:${"e".repeat(64)}`;
@@ -703,7 +703,7 @@ describe("agentx init", () => {
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES], {
         releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
-      expect(h.printed()).not.toContain("AgentX error");
+      expect(h.printed()).not.toContain("Rovara error");
       expect(code).toBe(0);
       expect(fetchWithGitHub.github).toEqual([]);
       expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ engine: "cdk", releaseVersion: "1.4.0", images: { worker: WORKER, slack: SLACK_IMAGE } });
@@ -718,7 +718,7 @@ describe("agentx init", () => {
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
-      expect(h.printed()).not.toContain("AgentX error");
+      expect(h.printed()).not.toContain("Rovara error");
       expect(code).toBe(0);
       expect(prompter.asked[0]).toBe("AWS region");
       expect(fetchWithGitHub.github).toEqual([MANIFEST_URL]);
@@ -731,7 +731,7 @@ describe("agentx init", () => {
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
-      expect(h.printed()).not.toContain("AgentX error");
+      expect(h.printed()).not.toContain("Rovara error");
       expect(code).toBe(0);
       expect(prompter.asked).not.toContain("AWS region");
       expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
@@ -745,7 +745,7 @@ describe("agentx init", () => {
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch, publishedManifest), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
-      expect(h.printed()).not.toContain("AgentX error");
+      expect(h.printed()).not.toContain("Rovara error");
       expect(code).toBe(0);
       expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
     });
@@ -761,7 +761,7 @@ describe("agentx init", () => {
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
-      expect(h.printedSince(mark)).not.toContain("AgentX error");
+      expect(h.printedSince(mark)).not.toContain("Rovara error");
       expect(code).toBe(0);
       expect(h.printedSince(mark)).toContain("Resuming the install of environment staging.");
       expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.4.0");
@@ -798,7 +798,7 @@ describe("agentx init", () => {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...CDK_FIRST_RUN]),
         deploy: { ...deploy, commandRunner: runner, stackOutputs: async () => undefined },
       });
-      expect(h.printed()).not.toContain("AgentX error");
+      expect(h.printed()).not.toContain("Rovara error");
       expect(code).toBe(0);
       const lines = calls.filter((call) => call.line.startsWith("npm") || call.line.startsWith("npx")).map((call) => call.line);
       expect(lines).toEqual(["npm ci", "npm run build", "npx --no-install cdk synth", "npx --no-install cdk deploy"]);
@@ -862,7 +862,7 @@ describe("agentx init", () => {
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "deploy install", acquiredAt: new Date(T0).toISOString() }));
     const code = await h.run([...UNATTENDED, "--alert-webhook-env", "HOOK"], { processEnv: { ...UNATTENDED_ENV, HOOK: WEBHOOK } });
     expect(code).toBe(2);
-    expect(h.printed()).toContain(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "deploy install" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
+    expect(h.printed()).toContain(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "deploy install" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same rovara command again`);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.secrets.values.has("agentx/staging/alert-endpoint")).toBe(false);
   });
@@ -872,7 +872,7 @@ describe("agentx init", () => {
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: HOLDER, command: "init", acquiredAt: new Date(T0 - 60_000).toISOString() }));
     const prompter = scriptedPrompter([...FIRST_RUN, true, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run([], { prompter })).toBe(0);
-    expect(prompter.asked).toContain("Environment staging is locked by your own earlier agentx init since 2026-09-26T23:59:00.000Z. Take the lock over? Say yes only if that run is no longer going.");
+    expect(prompter.asked).toContain("Environment staging is locked by your own earlier rovara init since 2026-09-26T23:59:00.000Z. Take the lock over? Say yes only if that run is no longer going.");
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
   });
 
@@ -926,7 +926,7 @@ function recordingOpenRouterChecks() {
   return { calls, checks: passingChecks({ openRouter: async (modelId, config, key) => { calls.push({ modelId, ...(config.secretArn === undefined ? {} : { secretArn: config.secretArn }), ...(key === undefined ? {} : { key }) }); } }) };
 }
 
-describe("agentx init with an Anthropic API key (spec 054)", () => {
+describe("rovara init with an Anthropic API key (spec 054)", () => {
   const ANTHROPIC_KEY = "sk-ant-api03-0123456789abcdefKEYSECRET";
   const ANTHROPIC_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/anthropic-AbCdEf";
 
@@ -961,7 +961,7 @@ describe("agentx init with an Anthropic API key (spec 054)", () => {
   });
 });
 
-describe("agentx init with OpenRouter", () => {
+describe("rovara init with OpenRouter", () => {
   it("asks for the key hidden, stores it raw in agentx/<env>/openrouter before any stack, and passes only its ARN on", async () => {
     const h = await harness();
     const { calls, checks } = recordingOpenRouterChecks();
@@ -1114,7 +1114,7 @@ describe("init --resume --from-bundle (FR-026)", () => {
     const mark = h.mark();
     expect(await h.run(["--resume", "--from-bundle", dir], { prompter: scriptedPrompter([]), stackStatus: ACCESS_DEPLOYED, deploy })).not.toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).not.toContain("you are using the AgentX operator role");
+    expect(rerun).not.toContain("you are using the Rovara operator role");
     expect(rerun).toContain("already done: Set up AWS permissions");
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation", "foundation"]);
@@ -1185,7 +1185,7 @@ describe("a plain --resume under the operator role", () => {
     const h = await harness();
     const operator = { ...h.deps.deploy, identity: { get: async () => ({ account: "123456789012", arn: OPERATOR }) } };
     expect(await h.run(["--resume"], { prompter: scriptedPrompter([]), deploy: operator })).toBe(2);
-    expect(h.printed()).toContain("there is no install of environment staging to resume in account 123456789012 (us-east-1); you are using the AgentX operator role, so if your platform team deployed the access stack from an export bundle, run agentx init --resume --from-bundle <the bundle directory>");
+    expect(h.printed()).toContain("there is no install of environment staging to resume in account 123456789012 (us-east-1); you are using the Rovara operator role, so if your platform team deployed the access stack from an export bundle, run rovara init --resume --from-bundle <the bundle directory>");
   });
 });
 
@@ -1196,7 +1196,7 @@ describe("the access step under the operator role (FR-019)", () => {
     // A first run as the operator: answers are saved, prerequisites pass, then access refuses.
     const code = await h.run([], { prompter: scriptedPrompter([...FIRST_RUN]), deploy: operator });
     expect(code).not.toBe(0);
-    expect(h.printed()).toContain("the access stack needs admin rights, and you are using the AgentX operator role; ask your platform team to deploy it (agentx init --export, then deploy-access.sh), or run agentx init with admin credentials");
+    expect(h.printed()).toContain("the access stack needs admin rights, and you are using the Rovara operator role; ask your platform team to deploy it (rovara init --export, then deploy-access.sh), or run rovara init with admin credentials");
     expect(h.deployer.requests).toEqual([]);
   });
 });

@@ -16,7 +16,7 @@ import type {
 /** FR-037: every link the page shows says it opens in a new tab and to come back. */
 export const NEW_TAB_NOTE = "Opens in a new tab. Come back to this tab when you are done.";
 /** FR-005: the tab title whenever the run waits on the operator. */
-export const ACTION_NEEDED_TITLE = "(Action needed) Install AgentX";
+export const ACTION_NEEDED_TITLE = "(Action needed) Install Rovara";
 
 const withNote = (link: WizardLink): WizardLink => ({ ...link, note: NEW_TAB_NOTE });
 
@@ -179,7 +179,7 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
       header,
       journey,
       waitingOnYou: waiting,
-      pageTitle: waiting ? ACTION_NEEDED_TITLE : `Install AgentX (step ${journey.stepNumber} of ${journey.stepCount})`,
+      pageTitle: waiting ? ACTION_NEEDED_TITLE : `Install Rovara (step ${journey.stepNumber} of ${journey.stepCount})`,
       ...(stage === "get-started" && steps.every((step) => step.status === "pending") ? { welcome: welcomeLines() } : {}),
       ...(question === undefined ? {} : { question }),
       ...(plan === undefined ? {} : { plan }),

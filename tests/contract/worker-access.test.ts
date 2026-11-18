@@ -13,21 +13,21 @@ const refusal = { status: "WORKSPACE_LIMIT_REACHED" as const, message: "No codin
 
 // One rule per in-house tool. Adding a tool without a rule fails the first test.
 const WORKER_RULE = {
-  agentx_submit_task: "prepares",
-  agentx_follow_up: "prepares",
-  agentx_create_pull_request: "needs-prepared",
-  agentx_task_status: "never",
-  agentx_task_result: "never",
-  agentx_manage_pull_request: "never",
+  rovara_submit_task: "prepares",
+  rovara_follow_up: "prepares",
+  rovara_create_pull_request: "needs-prepared",
+  rovara_task_status: "never",
+  rovara_task_result: "never",
+  rovara_manage_pull_request: "never",
 } satisfies Record<ToolName, "prepares" | "needs-prepared" | "never">;
 
 const PARAMETERS: Record<ToolName, Record<string, unknown>> = {
-  agentx_submit_task: { prompt: "list the files" },
-  agentx_follow_up: { prompt: "and the tests" },
-  agentx_create_pull_request: { repository: "demo", title: "Fix" },
-  agentx_task_status: { operationId: OPERATION },
-  agentx_task_result: { operationId: OPERATION },
-  agentx_manage_pull_request: { repository: "demo", pullRequestNumber: 7, action: "close" },
+  rovara_submit_task: { prompt: "list the files" },
+  rovara_follow_up: { prompt: "and the tests" },
+  rovara_create_pull_request: { repository: "demo", title: "Fix" },
+  rovara_task_status: { operationId: OPERATION },
+  rovara_task_result: { operationId: OPERATION },
+  rovara_manage_pull_request: { repository: "demo", pullRequestNumber: 7, action: "close" },
 };
 
 function fakeApi() {
@@ -73,7 +73,7 @@ describe("which in-house tools need the worker", () => {
 
   it("publishes as today once the thread has compute", async () => {
     const api = fakeApi();
-    await run(createOrchestrationTools(api, context, { worker: worker(true) }), "agentx_create_pull_request", PARAMETERS.agentx_create_pull_request);
+    await run(createOrchestrationTools(api, context, { worker: worker(true) }), "rovara_create_pull_request", PARAMETERS.rovara_create_pull_request);
     expect(api.createPullRequest).toHaveBeenCalledOnce();
   });
 
@@ -115,7 +115,7 @@ describe("which in-house tools need the worker", () => {
       model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, worker: access,
     });
     try {
-      const result = await runtime.session.getToolDefinition("agentx_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);
+      const result = await runtime.session.getToolDefinition("rovara_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);
       expect(access.ensureReady).toHaveBeenCalledOnce();
       expect(result.content).toEqual([{ type: "text", text: JSON.stringify(refusal) }]);
       expect(api.submitTask).not.toHaveBeenCalled();

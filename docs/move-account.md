@@ -6,7 +6,7 @@ This is a deliberate decision, tracked in [issue #67](https://github.com/PrepLab
 
 ## 1. Keep a copy of your project files
 
-`agentx destroy` removes the project files written for the old environment, so copy them first:
+`rovara destroy` removes the project files written for the old environment, so copy them first:
 
 ```sh
 cp -R ~/.agentx/projects ~/agentx-projects-<old env>
@@ -44,14 +44,14 @@ admin of the new environment, then register each file with the new foundation's 
 template and subnets:
 
 ```sh
-agentx --env <new env> login --admin
+rovara --env <new env> login --admin
 aws cloudformation describe-stacks --stack-name agentx-<new env>-foundation --region <region> \
   --query "Stacks[0].Outputs[?OutputKey=='Ec2WorkerLaunchTemplateId' || OutputKey=='Ec2WorkerSubnets']"
-agentx --env <new env> admin project register --file ~/agentx-projects-<old env>/<name>.yaml \
+rovara --env <new env> admin project register --file ~/agentx-projects-<old env>/<name>.yaml \
   --deployment-mode ec2-ebs --launch-template-id <Ec2WorkerLaunchTemplateId> --subnets <Ec2WorkerSubnets>
 ```
 
-Then bind each project's channel: `agentx --env <new env> channel add --project <name> --channel
+Then bind each project's channel: `rovara --env <new env> channel add --project <name> --channel
 <channel>`.
 
 ## 4. Add the connectors again
@@ -60,8 +60,8 @@ Connector credentials live in the old account's Secrets Manager and do not move.
 project, add them again:
 
 ```sh
-agentx --env <new env> connector add linear|jira|asana --project <name>
-agentx --env <new env> connector add mcp --project <name> --endpoint <url> --name <name>
+rovara --env <new env> connector add linear|jira|asana --project <name>
+rovara --env <new env> connector add mcp --project <name> --endpoint <url> --name <name>
 ```
 
 An `mcp` connector's credential is pinned to its server's host, so the new account registers it
@@ -70,12 +70,12 @@ again with the same pin.
 ## 5. What does not move
 
 - **Turn records**: the history of what each Slack turn did. To keep it, export it from the old
-  environment first with `agentx --env <old env> admin turns export --since 30d --output <file>` (records are
+  environment first with `rovara --env <old env> admin turns export --since 30d --output <file>` (records are
   kept 30 days).
 - **Workspaces**: open worker sessions and their volumes. Finish or close them first.
 - **Developer sign-in sessions**: everyone signs in again, to the new control plane URL
   (`npx @preplabsai/rovara-code login <new control plane URL>`).
-- **Settings you changed with `agentx config`**: set them again in the new environment
+- **Settings you changed with `rovara config`**: set them again in the new environment
   ([docs/day-two.md](day-two.md)).
 
 ## 6. Remove the old environment
@@ -83,7 +83,7 @@ again with the same pin.
 Once the new one answers in Slack, remove the old one with admin credentials for the old account:
 
 ```sh
-agentx --env <old env> destroy --region <old region>
+rovara --env <old env> destroy --region <old region>
 ```
 
 See [docs/teardown.md](teardown.md). Then delete the old GitHub App and Slack app if you replaced

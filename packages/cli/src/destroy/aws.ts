@@ -12,7 +12,7 @@ import { DeleteAliasCommand, DescribeKeyCommand, ListAliasesCommand, ListResourc
 import { DeleteLogGroupCommand, DescribeLogGroupsCommand, ListTagsForResourceCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { DeleteBucketCommand, DeleteObjectsCommand, GetBucketTaggingCommand, ListObjectVersionsCommand } from "@aws-sdk/client-s3";
 import { DeleteSecretCommand, DescribeSecretCommand, ListSecretsCommand, RestoreSecretCommand } from "@aws-sdk/client-secrets-manager";
-import { agentXError, environmentPullThroughPrefix } from "@agentx/contracts";
+import { agentXError, environmentPullThroughPrefix, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { RetainedResource } from "./inventory.js";
 import { isOwnedAlias, isOwnedSecret, isOwnedWorker } from "./names.js";
 
@@ -211,7 +211,7 @@ export function awsDestroyApi(
           for (let start = 0; start < objects.length; start += 1000) {
             const batch = objects.slice(start, start + 1000);
             const result = (await s3.send(new DeleteObjectsCommand({ Bucket: name, Delete: { Objects: batch, Quiet: true } }))) as { Errors?: Array<{ Key?: string; Code?: string }> };
-            if ((result.Errors ?? []).length > 0) throw agentXError("RUNTIME_UNAVAILABLE", `bucket ${name}: ${result.Errors!.length} objects could not be deleted (${result.Errors![0]?.Code ?? "no code"}); run agentx destroy again`);
+            if ((result.Errors ?? []).length > 0) throw agentXError("RUNTIME_UNAVAILABLE", `bucket ${name}: ${result.Errors!.length} objects could not be deleted (${result.Errors![0]?.Code ?? "no code"}); run ${CLI_COMMAND_NAME} destroy again`);
             deleted += batch.length;
             onProgress(deleted);
           }
@@ -238,7 +238,7 @@ export function awsDestroyApi(
               return;
             } catch (error) {
               if (!(error instanceof Error && error.name === "ResourceInUseException")) throw error;
-              if (attempt >= TABLE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", `table ${name} is still busy after ${(TABLE_ATTEMPTS * TABLE_RETRY_MS) / 60_000} minutes; run agentx destroy again to continue`);
+              if (attempt >= TABLE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", `table ${name} is still busy after ${(TABLE_ATTEMPTS * TABLE_RETRY_MS) / 60_000} minutes; run ${CLI_COMMAND_NAME} destroy again to continue`);
               await sleep(TABLE_RETRY_MS);
             }
           }
@@ -253,7 +253,7 @@ export function awsDestroyApi(
         const pool = ((await cognito.send(new DescribeUserPoolCommand({ UserPoolId: id }))) as { UserPool?: { DeletionProtection?: string; Domain?: string } }).UserPool;
         if (pool === undefined) return;
         if (pool.Domain !== undefined && pool.Domain !== domainPrefix) {
-          throw agentXError("CONFIG_INVALID", `user pool ${id} has the domain ${pool.Domain}, which is not ${domainPrefix}; delete that domain yourself, then run agentx destroy again`);
+          throw agentXError("CONFIG_INVALID", `user pool ${id} has the domain ${pool.Domain}, which is not ${domainPrefix}; delete that domain yourself, then run ${CLI_COMMAND_NAME} destroy again`);
         }
         // UpdateUserPool resets settings it is not given; the pool is deleted next, so that is fine.
         if (pool.DeletionProtection === "ACTIVE") await cognito.send(new UpdateUserPoolCommand({ UserPoolId: id, DeletionProtection: "INACTIVE" }));
@@ -308,7 +308,7 @@ export function awsDestroyApi(
               const gone = await unlessGone(async () => { await secrets.send(new DescribeSecretCommand({ SecretId: name })); return false; }, true);
               if (gone) return;
             }
-            throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} refused RestoreSecret and is still listed after ${SECRET_GONE_TIMEOUT_MS / 60_000} minutes; run agentx destroy again to continue`);
+            throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} refused RestoreSecret and is still listed after ${SECRET_GONE_TIMEOUT_MS / 60_000} minutes; run ${CLI_COMMAND_NAME} destroy again to continue`);
           }
         }
         await secrets.send(new DeleteSecretCommand({ SecretId: name, ForceDeleteWithoutRecovery: true }));

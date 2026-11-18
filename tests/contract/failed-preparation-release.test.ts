@@ -405,7 +405,7 @@ describe("a developer task whose setup failed (#213)", () => {
     const refused = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "more" });
     expect(refused.body.error).toEqual({
       code: "CONFIG_INVALID",
-      message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task",
+      message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with rovara_start_task, and close this one with rovara_close_task",
     });
   });
 });

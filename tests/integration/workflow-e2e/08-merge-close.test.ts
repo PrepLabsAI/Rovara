@@ -488,7 +488,7 @@ describe("Suite 8: merge and close", () => {
     async function rejectPlan(e2e: WorkflowE2E): Promise<void> {
       const workflow = e2e.workflow();
       const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
-      const answer = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: workflow.revision,
+      const answer = await e2e.mcp("rovara_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: workflow.revision,
         decision: "REJECT", reason: "Not needed after all.", artifact_digest: plan.sha256 });
       expect(answer.isError).toBe(false);
       await e2e.settle();

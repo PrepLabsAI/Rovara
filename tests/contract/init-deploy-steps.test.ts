@@ -1,4 +1,4 @@
-// agentx init's deploy steps: each drives deployEnvironment for its own parts under the lock the
+// rovara init's deploy steps: each drives deployEnvironment for its own parts under the lock the
 // step runner already holds, and first waits out any of its stacks an interrupted run left busy
 // (Review Focus 2). No test here reaches AWS, GitHub or Slack.
 import { rm } from "node:fs/promises";
@@ -45,7 +45,7 @@ describe("init deploy answers", () => {
     const deploy = initDeployAnswers(sampleAnswers(), emptyProgress("staging", T0), ["control-plane"], GITHUB.privateKeySecretArn);
     expect(deploy.github).toEqual({ account: "", appId: "", installationId: "", privateKeySecretArn: GITHUB.privateKeySecretArn });
     expect(() => initDeployAnswers(sampleAnswers(), emptyProgress("staging", T0), ["control-plane"]))
-      .toThrow("the control plane needs the GitHub App's secret; run agentx init again");
+      .toThrow("the control plane needs the GitHub App's secret; run rovara init again");
   });
 });
 
@@ -92,7 +92,7 @@ describe("init deploy steps", () => {
   });
 
   it("passes the Slack app-posted-messages choice to the control plane", async () => {
-    const context = initContext({ answers: sampleAnswers({ slack: { appName: "AgentX", appPostedMessages: "ignore" } }) });
+    const context = initContext({ answers: sampleAnswers({ slack: { appName: "Rovara", appPostedMessages: "ignore" } }) });
     homes.push(context.home);
     const progress = progressHandle({ ...emptyProgress("staging", T0), github: GITHUB });
     for (const id of ["access", "core", "control-plane"] as const) await deployStep({ id, title: id }).run(context, progress);
@@ -147,7 +147,7 @@ describe("waiting for stacks left busy by an interrupted run (Review Focus 2)", 
   it("gives up after 60 minutes with what to do", async () => {
     let clock = T0;
     await expect(waitForIdleStacks({ reader: { status: async () => "ROLLBACK_IN_PROGRESS" }, stackNames: ["agentx-staging-core"], sleep: async (ms) => { clock += ms; }, write: () => undefined, now: () => clock }))
-      .rejects.toThrow("stack agentx-staging-core is still ROLLBACK_IN_PROGRESS after 60 minutes; check it in the CloudFormation console, then run agentx init again");
+      .rejects.toThrow("stack agentx-staging-core is still ROLLBACK_IN_PROGRESS after 60 minutes; check it in the CloudFormation console, then run rovara init again");
     expect(clock - T0).toBe(60 * 60 * 1000);
   });
 

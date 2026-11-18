@@ -203,19 +203,19 @@ describe("writeExportBundle", () => {
     expect(readmeText).toContain(STACK_NAME);
     expect(readmeText).toContain(REGION);
     expect(readmeText).toContain(ACCOUNT);
-    // I6, updated by phase 15d2 Task 14: the operator's resume path is now agentx init --resume
+    // I6, updated by phase 15d2 Task 14: the operator's resume path is now rovara init --resume
     // --from-bundle (it deploys every later stack, never access), in the README and the script.
-    expect(readmeText).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
-    expect(readmeText).not.toContain("agentx deploy --mode install --parts");
-    expect(script).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
-    expect(script).not.toContain("agentx deploy --mode install --parts");
-    // deploy-access.sh never creates the callback signing key; agentx deploy does, on its first run.
+    expect(readmeText).toContain("rovara init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(readmeText).not.toContain("rovara deploy --mode install --parts");
+    expect(script).toContain("rovara init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(script).not.toContain("rovara deploy --mode install --parts");
+    // deploy-access.sh never creates the callback signing key; rovara deploy does, on its first run.
     expect(readmeText).toMatch(/does not create the callback signing key/);
     // I4: tearing down is documented. No retired runtime capacity provider or runtime survives it (#118).
     expect(readmeText).toContain("## Tearing down an environment");
     expect(readmeText).not.toMatch(/capacity provider|delete-agent-runtime/);
     expect(readmeText).toContain("--force-delete-without-recovery");
-    expect(readmeText).toContain("agentx destroy");
+    expect(readmeText).toContain("rovara destroy");
     expect(readmeText).toContain("The foundation's VPC flow-log group");
     // Every AWS CLI line in the teardown names the region, so it cannot hit the shell's default one.
     for (const line of readmeText.split("\n").filter((l) => /^\s*aws (s3api|s3|ec2) /.test(l))) {
@@ -243,7 +243,7 @@ describe("writeExportBundle", () => {
     expect(step4Body).toContain("Name=tag:Environment,Values=staging");
     expect(step4Body).toContain("Name=tag:DeploymentMode,Values=ec2-ebs");
     expect(step4Body).toContain("Name=tag:agentx:env,Values=staging");
-    expect(readmeText).toContain("agentx --env staging destroy --region us-east-1 does all of this");
+    expect(readmeText).toContain("rovara --env staging destroy --region us-east-1 does all of this");
     // Normalize line wrapping before matching this sentence, so a reflow of the README's prose
     // doesn't break the test.
     expect(step4Body.replace(/\s+/g, " ")).toContain("worker security group blocks the foundation stack's delete");
@@ -309,7 +309,7 @@ describe("writeExportBundle", () => {
 
   it("refuses a bundle with no answers file, or an answers file that is not valid", async () => {
     const empty = await mkdtemp(join(tmpdir(), "agentx-export-out-"));
-    await expect(readBundleAnswers(empty)).rejects.toThrow(`${empty} has no readable init-answers.json; pass the bundle agentx init --export wrote`);
+    await expect(readBundleAnswers(empty)).rejects.toThrow(`${empty} has no readable init-answers.json; pass the bundle rovara init --export wrote`);
     await writeFile(join(empty, "init-answers.json"), JSON.stringify({ schemaVersion: 1, env: "staging", engine: "cdk" }));
     await expect(readBundleAnswers(empty)).rejects.toThrow(`${empty}/init-answers.json is invalid`);
     await writeFile(join(empty, "init-answers.json"), JSON.stringify({
@@ -323,8 +323,8 @@ describe("writeExportBundle", () => {
     const dir = join(await mkdtemp(join(tmpdir(), "agentx-export-out-")), "bundle");
     await writeExportBundle({ dir, answers: cognitoAnswers(), release: fakeRelease() });
     const readme = await readFile(join(dir, "README.md"), "utf8");
-    expect(readme).toContain("agentx init --resume --env staging --region us-east-1 --from-bundle <this directory>");
-    expect(readme).not.toContain("agentx deploy --mode install --parts");
+    expect(readme).toContain("rovara init --resume --env staging --region us-east-1 --from-bundle <this directory>");
+    expect(readme).not.toContain("rovara deploy --mode install --parts");
   });
 
   it("writes parameter files whose unknown values are markers, and never a secret value", async () => {

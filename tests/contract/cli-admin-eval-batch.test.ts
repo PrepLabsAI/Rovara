@@ -1,4 +1,4 @@
-// Spec 052 Task 5: `agentx admin eval batch start|show|stop|results`, against the admin routes.
+// Spec 052 Task 5: `rovara admin eval batch start|show|stop|results`, against the admin routes.
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,7 +37,7 @@ async function tempFile(name: string, content: string) {
   return path;
 }
 
-describe("agentx admin eval batch start (spec 052 FR-001, FR-003)", () => {
+describe("rovara admin eval batch start (spec 052 FR-001, FR-003)", () => {
   it("parses and validates the YAML, then posts it with the team and channel", async () => {
     const filePath = await tempFile("batch.yaml", yamlFile);
     const answer = { created: true, batch: { batchId, status: "RUNNING" } };
@@ -94,7 +94,7 @@ describe("agentx admin eval batch start (spec 052 FR-001, FR-003)", () => {
   });
 });
 
-describe("agentx admin eval batch show and stop (spec 052 FR-009, Ruling 11)", () => {
+describe("rovara admin eval batch show and stop (spec 052 FR-009, Ruling 11)", () => {
   it("reads and stops a batch by ID", async () => {
     const fetchImplementation = fakeFetch(200, { ended: false, batch: { batchId } });
     await showEvalBatch({ ...base, batchId }, fetchImplementation as typeof fetch);
@@ -130,7 +130,7 @@ describe("a CLI batch's placeholder thread (spec 052)", () => {
   });
 });
 
-describe("agentx admin eval batch results (spec 052 FR-010)", () => {
+describe("rovara admin eval batch results (spec 052 FR-010)", () => {
   const summary = { batchId, models: [{ provider: "amazon-bedrock", modelId: "us.vendor.batch-v1", thinkingLevel: "low", runs: 4, failed: 1, cancelled: 0, retried: 0, resolved: 3, rate: 0.75, wilsonLow: 0.3, wilsonHigh: 0.95, totalCostUsd: 12.5, unpricedRuns: 0, costPerSolvedUsd: 4.1667 }] };
 
   it("fetches through the broker and writes the CSV where --csv says", async () => {

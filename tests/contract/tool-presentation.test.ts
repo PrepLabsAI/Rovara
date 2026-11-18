@@ -17,7 +17,7 @@ describe("what the orchestrator sees", () => {
   it("for a two-repository project with GitHub issues", () => {
     const presented = presentCatalog({
       connector: "github", label: "GitHub", scopeNoun: "repository",
-      approvals: [{ name: "list_issues" }, { name: "issue_write", description: "Create or update a GitHub issue. Not for pull requests (agentx_create_pull_request)." }],
+      approvals: [{ name: "list_issues" }, { name: "issue_write", description: "Create or update a GitHub issue. Not for pull requests (rovara_create_pull_request)." }],
       scopes: [{ alias: "api", tools: recorded("api") }, { alias: "web", tools: recorded("web") }],
     });
     const catalog: ConnectorCatalog = { connector: "github", tools: presented.tools, skipped: presented.skipped };

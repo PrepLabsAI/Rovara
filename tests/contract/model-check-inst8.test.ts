@@ -38,7 +38,7 @@ describe("INST-8 in init", () => {
 
   it("keeps today's text and says the quota could not be read when the lookup is denied", async () => {
     const { message } = await init(denied);
-    expect(message).toContain(`Bedrock throttled the check of ${SONNET}; wait a minute and run agentx init again`);
+    expect(message).toContain(`Bedrock throttled the check of ${SONNET}; wait a minute and run rovara init again`);
     expect(message).toContain("Rovara could not read the quota");
   });
 });
@@ -50,14 +50,14 @@ describe("INST-8 in doctor", () => {
   it("uses the same limit text, worded for doctor", async () => {
     const orchestrator = await found(quotas(0));
     expect(orchestrator.status).toBe("fail");
-    expect(orchestrator.detail).toContain("is 0 tokens per minute (quota L-SONNET46GEO). Request an increase in Service Quotas, or choose another model with agentx --env staging config set models.orchestrator <model id>");
+    expect(orchestrator.detail).toContain("is 0 tokens per minute (quota L-SONNET46GEO). Request an increase in Service Quotas, or choose another model with rovara --env staging config set models.orchestrator <model id>");
     expect(orchestrator.detail).not.toContain("wait a minute");
   });
 
   it("says 'if this repeats' above zero, and the old text with 'could not read the quota' when denied", async () => {
     expect((await found(quotas(5_000_000))).detail).toContain("quota L-SONNET46GEO: 5000000 tokens per minute");
     const unreadable = (await found(denied)).detail;
-    expect(unreadable).toContain("wait a minute and run agentx doctor again");
+    expect(unreadable).toContain("wait a minute and run rovara doctor again");
     expect(unreadable).toContain("could not read the quota");
   });
 });

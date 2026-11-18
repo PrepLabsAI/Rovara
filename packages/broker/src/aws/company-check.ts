@@ -3,10 +3,10 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type DocumentStore, type OrgRole } from "@agentx/contracts";
+import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type DocumentStore, type OrgRole, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 export interface CompanyMembershipReader { companyOf(personId: string): Promise<string | undefined>; membershipOf?(personId: string): Promise<{ companyId: string; role: OrgRole } | undefined> }
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 export const Membership = z.object({
   entityType: z.literal("COMPANY_MEMBERSHIP"), personId: z.string(), companyId: OrgIdSchema,
   role: OrgRoleSchema, joinedAt: z.iso.datetime(),

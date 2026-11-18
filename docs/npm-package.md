@@ -1,7 +1,7 @@
 # Rovara Code npm package
 
 The selected public package name is `@preplabsai/rovara-code` and its primary executable
-is `rovara`. The package also installs `agentx` as a compatibility alias pointing to
+is `rovara`. The package also installs `rovara` as a compatibility alias pointing to
 the same executable. Configuration continues to live under `~/.agentx`; existing
 AWS resource names, MCP server/tool identifiers and task/evidence IDs are unchanged.
 

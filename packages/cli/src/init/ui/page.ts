@@ -40,12 +40,12 @@ export function wizardHtml(token: string, options: { poll?: boolean } = {}): str
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
-<title>Install AgentX</title>
+<title>Install Rovara</title>
 <link rel="stylesheet" href="${stylesheet}">
 </head>
 <body>
 <header class="top">
-  <div><h1>Install AgentX</h1><p id="place">Connecting to the installer&hellip;</p></div>
+  <div><h1>Install Rovara</h1><p id="place">Connecting to the installer&hellip;</p></div>
   <p id="time-left" class="time-left"></p>
 </header>
 <div class="layout">
@@ -88,7 +88,7 @@ export { WIZARD_CSS } from "./design.js";
 
 /** The page's module. It is plain browser JavaScript held as text, not TypeScript: nothing here is
  * compiled, imported by Node, or type-checked with the rest of the CLI. */
-export const WIZARD_JS = `// AgentX install wizard. Served from 127.0.0.1 by the AgentX installer; loopback only.
+export const WIZARD_JS = `// Rovara install wizard. Served from 127.0.0.1 by the Rovara installer; loopback only.
 const token = new URL(import.meta.url).searchParams.get(${JSON.stringify(WIZARD_TOKEN_QUERY)}) ?? "";
 const TOKEN_HEADER = ${JSON.stringify(WIZARD_TOKEN_HEADER)};
 const CARD_PHASES = ${JSON.stringify(CARD_PHASES)};

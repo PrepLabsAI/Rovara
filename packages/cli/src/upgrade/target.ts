@@ -1,6 +1,6 @@
 // FR-042: which release an upgrade moves to, that it never moves back (question 3), and the
 // release's notes. Ruling F31 (amended by the controller): never a prerelease target, as init.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { RELEASE_REPOSITORY } from "../init/release-fetch.js";
 import { isPrereleaseVersion } from "../version.js";
 
@@ -44,12 +44,12 @@ export function compareVersions(a: string, b: string): number {
 
 export function upgradeDirection(env: string, current: string, target: string): "same" | "newer" {
   if (!RELEASE_VERSION_PATTERN.test(current)) {
-    throw agentXError("CONFIG_INVALID", `environment ${env}'s settings record version "${current}", not a release, so agentx upgrade cannot tell whether ${target} is older; agentx upgrade works only on environments agentx init installed`);
+    throw agentXError("CONFIG_INVALID", `environment ${env}'s settings record version "${current}", not a release, so ${CLI_COMMAND_NAME} upgrade cannot tell whether ${target} is older; ${CLI_COMMAND_NAME} upgrade works only on environments ${CLI_COMMAND_NAME} init installed`);
   }
   const order = compareVersions(current, target);
   if (order === 0) return "same";
   if (order < 0) return "newer";
-  throw agentXError("CONFIG_INVALID", `release ${target} is older than ${current}, which environment ${env} runs; agentx upgrade never moves an environment back, because a newer release may have written data an older one cannot read. Upgrade to ${current} or later`);
+  throw agentXError("CONFIG_INVALID", `release ${target} is older than ${current}, which environment ${env} runs; ${CLI_COMMAND_NAME} upgrade never moves an environment back, because a newer release may have written data an older one cannot read. Upgrade to ${current} or later`);
 }
 
 /** Ruling F31, amended: like init, upgrade moves only to published releases, from --release <dir> too.
@@ -57,7 +57,7 @@ export function upgradeDirection(env: string, current: string, target: string): 
  * write the settings. Call it right after the release loads, before anything deploys. */
 export function refusePrereleaseTarget(version: string): void {
   if (!isPrereleaseVersion(version)) return;
-  throw agentXError("CONFIG_INVALID", `release ${version} is a prerelease; agentx upgrade moves an environment only to published releases (x.y.z), because the environment settings record only x.y.z and a prerelease would fail after every stack deployed. Pass --release <dir> with a published release, or upgrade to a published version`);
+  throw agentXError("CONFIG_INVALID", `release ${version} is a prerelease; ${CLI_COMMAND_NAME} upgrade moves an environment only to published releases (x.y.z), because the environment settings record only x.y.z and a prerelease would fail after every stack deployed. Pass --release <dir> with a published release, or upgrade to a published version`);
 }
 
 export interface ReleaseNotes { text: string; url: string }

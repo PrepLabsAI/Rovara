@@ -66,9 +66,9 @@ describe("the start's refusals, in FR-018's order, before anything starts", () =
     for (const project of ["nope", "Not A Name!"]) {
       const response = await dev(MAYA, "POST", "/v1/dev/tasks", start({ project }));
       expect(response.body.error).toMatchObject({ code: "PROJECT_NOT_FOUND" });
-      // The broker names what is wrong; the MCP server adds "run agentx_list_projects" once, as its next step.
+      // The broker names what is wrong; the MCP server adds "run rovara_list_projects" once, as its next step.
       expect((response.body.error as { message: string }).message).toBe(project === "nope" ? "project `nope` doesn't exist in this AgentX" : "that is not a valid AgentX project name");
-      expect(NEXT_STEPS.PROJECT_NOT_FOUND).toContain("agentx_list_projects");
+      expect(NEXT_STEPS.PROJECT_NOT_FOUND).toContain("rovara_list_projects");
     }
     expect(workspaces(db)).toHaveLength(0);
     expect(refusals(db).map((item) => (item.error as { code: string }).code)).toEqual(["PROJECT_NOT_FOUND", "PROJECT_NOT_FOUND"]);
@@ -300,7 +300,7 @@ describe("the start's transaction and the workspace limit (FR-020, R6)", () => {
     });
     const response = await dev(MAYA, "POST", "/v1/dev/tasks", start());
     expect(response.body.error).toMatchObject({ code: "WORKSPACE_LIMIT" });
-    expect(String((response.body.error as { message: string }).message)).toContain("this AgentX has reached its limit of 1");
+    expect(String((response.body.error as { message: string }).message)).toContain("this Rovara has reached its limit of 1");
     expect(workspaces(db)).toHaveLength(0);
   });
 

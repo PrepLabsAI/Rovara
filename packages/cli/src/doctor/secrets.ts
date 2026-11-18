@@ -1,6 +1,6 @@
 // FR-050: that secrets exist and have the right shape. Values are read only to judge their shape;
 // no message here is built from a value.
-import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, keyedProviderSecretName, type KeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, keyedProviderSecretName, type KeyedModelProvider, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { providerKeyProblem } from "@agentx/model-runtime/config";
 import { providerSecretArn } from "../deploy/answer-schemas.js";
 import { githubAppSecretName, parseAppSecret } from "../init/github-app.js";
@@ -41,9 +41,9 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
     {
       name: `agentx/${env}/callback-signing-key`,
       shape: (value) => (value.length >= 32 ? undefined : "is shorter than the 32 characters the control plane needs"),
-      fix: `run agentx --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
+      fix: `run ${CLI_COMMAND_NAME} --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
       // Upgrade keeps any key that exists (callbackSigningKey), so a short one must go first.
-      shapeFix: `with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/${env}/callback-signing-key --force-delete-without-recovery --region ${settings.region}), then run agentx --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
+      shapeFix: `with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/${env}/callback-signing-key --force-delete-without-recovery --region ${settings.region}), then run ${CLI_COMMAND_NAME} --env ${env} upgrade: it makes a new key and redeploys the control plane with it`,
     },
     {
       name: slackSecretName(env),
@@ -52,7 +52,7 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
     },
     {
       name: githubAppSecretName(env),
-      shape: (value) => { try { parseAppSecret(value, githubAppSecretName(env)); return undefined; } catch { return "is not an AgentX GitHub App secret"; } },
+      shape: (value) => { try { parseAppSecret(value, githubAppSecretName(env)); return undefined; } catch { return "is not a Rovara GitHub App secret"; } },
       fix: `generate a new private key on the GitHub App's settings page, then ${put(githubAppSecretName(env), "github-app.json")} with {"appId":"...","slug":"...","account":"...","privateKey":"-----BEGIN RSA PRIVATE KEY-----..."}`,
     },
   ];
@@ -60,7 +60,7 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
     rules.push({
       name: answers.alert.secretName,
       shape: (value) => { try { checkAlertWebhook(value.trim()); return undefined; } catch { return "is not an https:// address"; } },
-      fix: `agentx --env ${env} config set alerts.address --value-file <file holding the PagerDuty or Opsgenie address>`,
+      fix: `${CLI_COMMAND_NAME} --env ${env} config set alerts.address --value-file <file holding the PagerDuty or Opsgenie address>`,
     });
   }
   const checks: DoctorCheck[] = [];

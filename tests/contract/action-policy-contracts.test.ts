@@ -81,7 +81,7 @@ describe("action policy contracts", () => {
     expect(issues(project({ rules: [
       { tool: "issue_write", connector: "github", whenArguments: ["state"], treatAs: "destructive" },
       { tool: "github__list_*", outcome: "allow" },
-      { tool: "agentx_create_pull_request", outcome: "ask", reason: "Pull requests need a person." },
+      { tool: "rovara_create_pull_request", outcome: "ask", reason: "Pull requests need a person." },
     ] }))).toEqual([]);
   });
 

@@ -56,19 +56,19 @@ export async function appRequest(
       signal: AbortSignal.timeout(30_000),
     });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach Rovara at ${session.entry.url}; check your connection and try again`);
   }
   const value: unknown = await response.json().catch(() => undefined);
-  if (response.status === 401) throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
+  if (response.status === 401) throw agentXError("AUTH_REQUIRED", `your Rovara sign-in for ${session.env} has ended; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
   if (!response.ok) {
     const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
     const message = typeof error?.message === "string" ? clean(error.message).trim() : "";
-    if (message === "") throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
+    if (message === "") throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered HTTP ${response.status}; try again`);
     const code = AgentXErrorCodeSchema.safeParse(error?.code);
     throw new ReportedFailure(code.success ? code.data : "REFUSED", message, response.status === 409 || !code.success ? 1 : exitCodeForError(code.data));
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
   }
   return { env: session.env, url: session.entry.url, status: response.status, body: value as Body };
 }

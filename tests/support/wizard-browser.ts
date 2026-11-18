@@ -1,4 +1,4 @@
-// A headless operator for `agentx init --ui`: the browser the wizard opens, played by fetch. It
+// A headless operator for `rovara init --ui`: the browser the wizard opens, played by fetch. It
 // reads the wizard's state, answers each question from a script in the order it is asked, and
 // stops when the run does. Nothing here reaches AWS, GitHub or Slack; it also plays GitHub for the
 // manifest listener, the way browserThatCreatesGitHubApp does.
@@ -10,7 +10,7 @@ import type { ScriptedAnswer } from "./init-fakes.js";
 const MAX_QUESTIONS = 80;
 
 export interface WizardOperator {
-  /** The `openBrowser` seam `agentx init` calls; a property, so it can be passed on unbound. */
+  /** The `openBrowser` seam `rovara init` calls; a property, so it can be passed on unbound. */
   open: (url: string) => Promise<boolean>;
   /** Every address the run asked a browser to open. */
   opened: string[];

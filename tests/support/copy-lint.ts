@@ -23,7 +23,7 @@ export const COPY_RULES: readonly CopyRule[] = [
   { id: "empty-leave-empty-for", pattern: /\bLeave empty for\s*(?:$|[.,;:)])/, allowedIn: [] },
   { id: "error-code", pattern: /\b[A-Z]{2,}_[A-Z_]{2,}\b/, allowedIn: ["details"] },
   { id: "finished-on-failed-run", pattern: /\bFinished\b/, allowedIn: [], onlyOnFailedRun: true },
-  { id: "day-two-without-env", pattern: /\bagentx\s+(?!--env\s)(?:doctor|destroy|connector|project|channel|alerts|config|upgrade|deploy|signin|env)\b/, allowedIn: [] },
+  { id: "day-two-without-env", pattern: /\b(?:agentx|rovara)\s+(?!--env\s)(?:doctor|destroy|connector|project|channel|alerts|config|upgrade|deploy|signin|env)\b/, allowedIn: [] },
   { id: "unpublished-package", pattern: /@preplabsai\/rovara-code\b(?!@\d)/, allowedIn: [] },
   {
     id: "terminal-instruction",
@@ -56,7 +56,7 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
   for (const step of state.steps) {
     entries.push(at(step.title, "step"), at(step.usualText, "step"));
     // review fix round 1: a waiting step's message is terminal-only text (FR-072; slack-app.ts,
-    // finish-steps.ts say "run agentx init --env ... again"); the page never renders it
+    // finish-steps.ts say "run rovara init --env ... again"); the page never renders it
     // (page.ts's renderRail reads only title/status/startedAt/usualSeconds/usualText/tookSeconds),
     // so it is linted as technical detail, not page copy.
     if (step.message !== undefined) entries.push(at(step.message, "step message", "details"));

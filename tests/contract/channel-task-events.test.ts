@@ -31,10 +31,10 @@ const published = {
 /** A turn that runs a worker task, then opens its pull request. */
 function codingTurn(input: TurnInput): Promise<string> {
   const recorder = input.recorder!;
-  recorder.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-  recorder.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: taskOperation, status: "SUCCEEDED", checks: report }) });
-  recorder.toolStarted({ toolCallId: "2", toolName: "agentx_create_pull_request", args: { repository: "web", title: "Fix the login bug" } });
-  recorder.toolEnded({ toolCallId: "2", toolName: "agentx_create_pull_request", isError: false, result: text({ operationId: publishOperation, status: "SUCCEEDED", result: published }) });
+  recorder.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+  recorder.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ operationId: taskOperation, status: "SUCCEEDED", checks: report }) });
+  recorder.toolStarted({ toolCallId: "2", toolName: "rovara_create_pull_request", args: { repository: "web", title: "Fix the login bug" } });
+  recorder.toolEnded({ toolCallId: "2", toolName: "rovara_create_pull_request", isError: false, result: text({ operationId: publishOperation, status: "SUCCEEDED", result: published }) });
   return Promise.resolve("Fixed, and the pull request is open.");
 }
 
@@ -83,8 +83,8 @@ describe("a coding turn in an adapter's conversation (#438)", () => {
 
   it("names a pull request change by its action", async () => {
     const { events, run } = harness(async (input) => {
-      input.recorder!.toolStarted({ toolCallId: "1", toolName: "agentx_close_pull_request", args: {} });
-      input.recorder!.toolEnded({ toolCallId: "1", toolName: "agentx_close_pull_request", isError: false, result: text({ operationId: publishOperation, status: "SUCCEEDED", result: { ...published, action: "close", state: "closed", checks: [] } }) });
+      input.recorder!.toolStarted({ toolCallId: "1", toolName: "rovara_manage_pull_request", args: {} });
+      input.recorder!.toolEnded({ toolCallId: "1", toolName: "rovara_manage_pull_request", isError: false, result: text({ operationId: publishOperation, status: "SUCCEEDED", result: { ...published, action: "close", state: "closed", checks: [] } }) });
       return "Closed.";
     });
     await run();
@@ -120,11 +120,11 @@ describe("the turn recorder's pull requests (#438)", () => {
     return recorder.pullRequests();
   };
   it("keeps only a succeeded result whose URL is the GitHub pull request it names", () => {
-    expect(recorded("agentx_create_pull_request", { operationId: publishOperation, status: "SUCCEEDED", result: published })).toHaveLength(1);
-    expect(recorded("agentx_create_pull_request", { operationId: publishOperation, status: "FAILED", result: published })).toEqual([]);
-    expect(recorded("agentx_create_pull_request", { status: "SUCCEEDED", result: { ...published, url: "https://evil.example.com/acme/web/pull/42" } })).toEqual([]);
-    expect(recorded("agentx_create_pull_request", { status: "SUCCEEDED", result: { ...published, number: 43 } })).toEqual([]);
-    expect(recorded("agentx_create_pull_request", { status: "SUCCEEDED", result: { ...published, commit: "not-a-sha" } })).toEqual([]);
-    expect(recorded("agentx_submit_task", { status: "SUCCEEDED", result: published })).toEqual([]);
+    expect(recorded("rovara_create_pull_request", { operationId: publishOperation, status: "SUCCEEDED", result: published })).toHaveLength(1);
+    expect(recorded("rovara_create_pull_request", { operationId: publishOperation, status: "FAILED", result: published })).toEqual([]);
+    expect(recorded("rovara_create_pull_request", { status: "SUCCEEDED", result: { ...published, url: "https://evil.example.com/acme/web/pull/42" } })).toEqual([]);
+    expect(recorded("rovara_create_pull_request", { status: "SUCCEEDED", result: { ...published, number: 43 } })).toEqual([]);
+    expect(recorded("rovara_create_pull_request", { status: "SUCCEEDED", result: { ...published, commit: "not-a-sha" } })).toEqual([]);
+    expect(recorded("rovara_submit_task", { status: "SUCCEEDED", result: published })).toEqual([]);
   });
 });

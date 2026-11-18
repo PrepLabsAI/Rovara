@@ -29,7 +29,7 @@ describe("the environment's confirmation methods (FR-041)", () => {
   });
 });
 
-describe("agentx config set mcp.confirmElicitation (E16, Q1)", () => {
+describe("rovara config set mcp.confirmElicitation (E16, Q1)", () => {
   it("is a control-plane stack parameter that upgrades keep", () => {
     const entry = configKey("mcp.confirmElicitation");
     expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "McpConfirmElicitation" });

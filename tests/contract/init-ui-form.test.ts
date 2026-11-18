@@ -11,7 +11,7 @@ import { scriptedPrompter, TEST_BOT_TOKEN } from "../support/init-fakes.js";
 const FIELDS: FormField[] = [
   { name: "clientId", question: "Slack app Client ID (Basic Information, App Credentials)", flag: "--slack-client-id", validate: (value) => (/^\d+\.\d+$/.test(value) ? undefined : "the Client ID is two numbers joined by a dot") },
   { name: "botToken", question: "Slack bot token", flag: "--slack-bot-token", secret: true, validate: fieldCheck(checkSlackBotToken) },
-  { name: "appName", question: "Slack app name", flag: "--slack-app-name", defaultValue: "AgentX acme (staging)" },
+  { name: "appName", question: "Slack app name", flag: "--slack-app-name", defaultValue: "Rovara acme (staging)" },
 ];
 
 const shown = (hub: WizardHub) => {
@@ -28,9 +28,9 @@ describe("forms", () => {
     expect(shown(hub).fields?.map((field) => [field.name, field.label, field.masked === true])).toEqual([
       ["clientId", "Client ID", false], ["botToken", "Bot User OAuth Token", true], ["appName", "Slack app name", false],
     ]);
-    expect(shown(hub).fields?.[2]?.hint).toBe("Leave empty to use AgentX acme (staging).");
+    expect(shown(hub).fields?.[2]?.hint).toBe("Leave empty to use Rovara acme (staging).");
     hub.answer(shown(hub).id, JSON.stringify({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "" }));
-    await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
+    await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "Rovara acme (staging)" });
   });
 
   it("a refused form keeps valid plain values and never echoes a secret", async () => {
@@ -61,7 +61,7 @@ describe("forms", () => {
     const answer = askForm(prompter, "Paste the Slack values", FIELDS);
     expect(shown(hub)).toMatchObject({ kind: "form", text: "Paste the Slack values" });
     hub.answer(shown(hub).id, JSON.stringify({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "" }));
-    await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
+    await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "Rovara acme (staging)" });
     expect(Object.hasOwn(answeringSlackInstall(scriptedPrompter([]), "installed"), "form")).toBe(false);
   });
 
@@ -73,7 +73,7 @@ describe("forms", () => {
 
   it("asks the same values one by one in the terminal", async () => {
     const prompter = scriptedPrompter(["1111.2222", TEST_BOT_TOKEN, ""]);
-    await expect(askForm(prompter, "Paste the Slack values", FIELDS)).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
+    await expect(askForm(prompter, "Paste the Slack values", FIELDS)).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "Rovara acme (staging)" });
     expect(prompter.asked).toEqual(["Slack app Client ID (Basic Information, App Credentials)", "Slack bot token", "Slack app name"]);
   });
 });
@@ -141,7 +141,7 @@ describe("spec 048 phase 2: richer forms", () => {
     const field = hub.state().question?.fields?.find((each) => each.name === "engine");
     expect(field?.choices).toEqual([
       { value: "templates", label: "Published templates (recommended)" },
-      { value: "cdk", label: "From AgentX's source code, for contributors" },
+      { value: "cdk", label: "From Rovara's source code, for contributors" },
     ]);
   });
 });

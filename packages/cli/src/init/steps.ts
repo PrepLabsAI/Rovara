@@ -2,7 +2,7 @@
 // as soon as it is known. A done step is skipped on every later run (FR-019: re-running a
 // completed step changes nothing); a failed step is not recorded, so the next run retries it; a
 // waiting step (a person must act first, FR-035) is recorded and stops the run.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { cliErrorFor } from "../deploy/commands.js";
 import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -40,7 +40,7 @@ export type InitRunResult =
 export function initStepFailure(title: string, error: unknown, where: { env: string; region: string }): unknown {
   const mapped = cliErrorFor(error);
   const message = mapped instanceof Error ? mapped.message.replace(/^[A-Z_]+: /, "") : String(mapped);
-  const text = `init stopped at "${title}": ${message}. Run agentx init --env ${where.env} --region ${where.region} again to continue from this step.`;
+  const text = `init stopped at "${title}": ${message}. Run ${CLI_COMMAND_NAME} init --env ${where.env} --region ${where.region} again to continue from this step.`;
   // Fix round 1 (Plan ruling 8): a stop the step's own run already chose keeps that status
   // through this wrap, so a catch further up (runInit's) still reads it as a stop, not a new
   // failure, whatever onStepFailure answered.

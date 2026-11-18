@@ -14,7 +14,7 @@
 // stay in the CLI process -- the browser is never given one.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { WORKSPACES_CSP, WORKSPACES_CSS, WORKSPACES_JS, workspacesHtml } from "./page.js";
 import { UI_TOKEN_HEADER, UI_TOKEN_QUERY, type UiData, type UiDataReply } from "./protocol.js";
 
@@ -119,7 +119,7 @@ export async function startWorkspacesUiServer(input: {
         // CLI's own fault and is not repeated back to the page.
         const message = error instanceof AgentXError
           ? error.message.slice(error.code.length + 2)
-          : "AgentX could not be read; check the terminal";
+          : "Rovara could not be read; check the terminal";
         return json(response, 200, { ok: false, error: message });
       }
     }
@@ -128,20 +128,20 @@ export async function startWorkspacesUiServer(input: {
 
   const server: Server = createServer((request, response) => {
     handle(request, response).catch(() => {
-      if (!response.headersSent) send(response, 500, "text/plain; charset=utf-8", "agentx could not answer that\n");
+      if (!response.headersSent) send(response, 500, "text/plain; charset=utf-8", `${CLI_COMMAND_NAME} could not answer that\n`);
       else response.end();
     });
   });
 
   await new Promise<void>((resolvePromise, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
-      reject(agentXError("CONFIG_INVALID", `could not open a local port on 127.0.0.1 to show your workspaces (${error.code ?? error.name}); check that no firewall or security tool blocks local ports, or run agentx workspaces --no-ui`));
+      reject(agentXError("CONFIG_INVALID", `could not open a local port on 127.0.0.1 to show your workspaces (${error.code ?? error.name}); check that no firewall or security tool blocks local ports, or run ${CLI_COMMAND_NAME} workspaces --no-ui`));
     };
     server.once("error", onError);
     server.listen(input.port ?? 0, "127.0.0.1", () => { server.removeListener("error", onError); resolvePromise(); });
   });
   const address = server.address();
-  if (address === null || typeof address === "string") throw agentXError("CONFIG_INVALID", "the workspaces page's listener did not bind a TCP port; run agentx workspaces --no-ui");
+  if (address === null || typeof address === "string") throw agentXError("CONFIG_INVALID", `the workspaces page's listener did not bind a TCP port; run ${CLI_COMMAND_NAME} workspaces --no-ui`);
   const { port } = address;
   expectedOrigin = `http://127.0.0.1:${port}`;
 

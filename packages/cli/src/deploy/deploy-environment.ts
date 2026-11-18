@@ -2,7 +2,7 @@
 // lock, the callback signing key and environment settings. Phase 15d's `agentx init`/`agentx
 // upgrade` build a StackDeployer (the templates or cdk engine), collect DeployAnswers, and call
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
 import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -158,7 +158,7 @@ export function upgradeKeptParameterNames(part: DeployPart): ReadonlySet<string>
  * Refused when the deployed stack has no such parameter: nothing to keep, so the answers must name one. */
 async function deployedGitHubAppId(read: DeployEnvironmentInput["deployedParameters"], stackName: string): Promise<string> {
   if (read === undefined) {
-    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is a Rovara bug, so report it");
   }
   const value = (await read(stackName))?.GitHubAppId;
   if (value === undefined) {
@@ -188,7 +188,7 @@ function requiredOutput(outputs: Partial<Record<DeployPart, StackOutputs>>, part
  */
 function assertDeployAllowed(existing: EnvironmentSettings | undefined, mode: "install" | "upgrade", engine: "templates" | "cdk", parts: DeployPart[] | undefined, env: string): void {
   if (existing !== undefined && existing.naming === "legacy") {
-    throw agentXError("CONFIG_INVALID", `environment ${env} uses the legacy stack names; upgrading it with agentx deploy is not supported yet`);
+    throw agentXError("CONFIG_INVALID", `environment ${env} uses the legacy stack names; upgrading it with ${CLI_COMMAND_NAME} deploy is not supported yet`);
   }
   if (existing !== undefined && existing.engine !== engine) {
     throw agentXError("CONFIG_INVALID", `environment ${env} was installed with the ${existing.engine} engine; switching engines is not supported`);
@@ -219,7 +219,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
   assertDeployAllowed(await readEnvironmentSettings(store, env), mode, engine, input.parts, env);
   if (answers.identity.mode === "oidc" && answers.identity.clientId === undefined) {
-    throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
+    throw agentXError("CONFIG_INVALID", `bringing your own OIDC provider requires clientId to write environment settings (needed for ${CLI_COMMAND_NAME} login)`);
   }
   // F6: refused before the lock and the deploy loop, so nothing deploys. An upgrade that could not
   // read the deployed parameters would reset every operator parameter to its template default.
@@ -228,7 +228,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
   const deploySet = new Set(input.parts ?? fullOrder);
   if (mode === "upgrade" && input.deployedParameters === undefined && [...deploySet].some((part) => OPERATOR_PARAMETERS[part].length > 0)) {
-    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is a Rovara bug, so report it");
   }
   // Only an upgrade may leave the GitHub App id out (it keeps the deployed one); an install must name it.
   if (mode === "install" && answers.github.appId === undefined) {
@@ -316,7 +316,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         // The F6 guard above already refused this before anything deployed. Never skip carrying the
         // parameters: skipping would reset them to the template defaults, the bug this code prevents.
         if (input.deployedParameters === undefined) {
-          throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+          throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is a Rovara bug, so report it");
         }
         const deployed = await input.deployedParameters(stackName);
         // The template is read only when there is something to keep: most upgrades read none.
@@ -425,7 +425,7 @@ function identitySettingsFor(identity: DeployAnswers["identity"], outputs: Parti
     };
   }
   if (identity.clientId === undefined) {
-    throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
+    throw agentXError("CONFIG_INVALID", `bringing your own OIDC provider requires clientId to write environment settings (needed for ${CLI_COMMAND_NAME} login)`);
   }
   return { mode: "oidc", issuer: identity.issuer, audience: identity.audience, clientId: identity.clientId };
 }

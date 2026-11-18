@@ -1,4 +1,4 @@
-// `agentx deploy` and `agentx init --export`: executeCli end to end, with every AWS-facing piece
+// `rovara deploy` and `rovara init --export`: executeCli end to end, with every AWS-facing piece
 // injected through CliDependencies.deploy (main.ts follows the same pattern env commands use). No
 // AWS is ever touched by any test here.
 import { createHash } from "node:crypto";
@@ -165,13 +165,13 @@ function unexpectedAwsCall(): never {
 }
 
 /**
- * `agentx deploy`'s dependency overrides, with `identity`, `store` and `secrets` always present and
+ * `rovara deploy`'s dependency overrides, with `identity`, `store` and `secrets` always present and
  * throwing "unexpected AWS call in test" by default: `runDeploy` falls back to constructing *real*
  * STS/SSM/SecretsManager clients for whichever of these a test omits, so a deploy test that forgets
  * one no longer silently risks reaching them (and, through them, real AWS) — it fails loudly instead,
  * the moment that fake is actually invoked. `overrides` replaces any of these three, and adds
  * whichever of `deployer`/`commandRunner`/`confirm`/`isInteractive`/`now` the test needs; every
- * `describe("agentx deploy", ...)` test builds its dependencies through this helper.
+ * `describe("rovara deploy", ...)` test builds its dependencies through this helper.
  */
 function safeDeployDeps(overrides: DeployCliDependencies = {}): DeployCliDependencies {
   return {
@@ -326,7 +326,7 @@ function cleanCdkRunner(scripted: Record<string, StackOutputs>, declared: Partia
   return runner;
 }
 
-describe("agentx init --export", () => {
+describe("rovara init --export", () => {
   it("writes a bundle and makes no AWS write call", async () => {
     const releaseDir = await fullReleaseDir();
     const exportDir = join(await tmp("agentx-deploy-cli-export-"), "bundle");
@@ -349,7 +349,7 @@ describe("agentx init --export", () => {
     const io = capture();
     const code = await executeCli(["--env", ENV, "init", "--region", REGION], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
+    expect(io.err.join("")).toContain("this rovara was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   });
 
   // Issue 152 replaces live check L7: --engine cdk --source needs no release (init-cli.test.ts).
@@ -432,7 +432,7 @@ describe("agentx init --export", () => {
       );
 
       expect(code).toBe(2);
-      expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: --identity oidc requires ${missing}\n`);
+      expect(io.err.join("")).toBe(`Rovara error [CONFIG_INVALID]: --identity oidc requires ${missing}\n`);
       await expect(stat(exportDir)).rejects.toThrow();
     });
   }
@@ -449,7 +449,7 @@ describe("agentx init --export", () => {
     );
 
     expect(code).toBe(2);
-    expect(io.err.join("")).toBe("AgentX error [CONFIG_INVALID]: --identity oidc requires --admin-values\n");
+    expect(io.err.join("")).toBe("Rovara error [CONFIG_INVALID]: --identity oidc requires --admin-values\n");
   });
 
   it("--identity oidc with every flag writes a bundle", async () => {
@@ -494,7 +494,7 @@ describe("agentx init --export", () => {
     );
 
     expect(code).toBe(3);
-    expect(io.err.join("")).toContain("AgentX error [AUTH_REQUIRED]");
+    expect(io.err.join("")).toContain("Rovara error [AUTH_REQUIRED]");
     await expect(stat(exportDir)).rejects.toThrow();
   });
 
@@ -510,7 +510,7 @@ describe("agentx init --export", () => {
     );
 
     expect(code).toBe(3);
-    expect(io.err.join("")).toBe("AgentX error [AUTH_REQUIRED]: AWS credentials missing or expired: Could not load credentials from any providers\n");
+    expect(io.err.join("")).toBe("Rovara error [AUTH_REQUIRED]: AWS credentials missing or expired: Could not load credentials from any providers\n");
     await expect(stat(exportDir)).rejects.toThrow();
   });
 
@@ -561,7 +561,7 @@ describe("agentx init --export", () => {
   });
 });
 
-describe("agentx deploy", () => {
+describe("rovara deploy", () => {
   it("refuses answers that do not match the schema, naming the field", async () => {
     const answersPath = await writeAnswers({ region: undefined });
     const io = capture();
@@ -569,7 +569,7 @@ describe("agentx deploy", () => {
     const code = await executeCli(["deploy", "--mode", "install", "--release", "/nonexistent-release", "--answers", answersPath, "--yes"], { ...io, deploy: safeDeployDeps() });
 
     expect(code).toBe(2);
-    expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
+    expect(io.err.join("")).toBe(`Rovara error [CONFIG_INVALID]: answers file ${answersPath} is invalid: region Invalid input: expected string, received undefined\n`);
   });
 
   it("install answers must name the GitHub App id; upgrade answers may leave it out, and neither accepts an empty one (switch-over gap 1)", async () => {
@@ -582,7 +582,7 @@ describe("agentx deploy", () => {
       const code = await executeCli(["deploy", "--mode", mode, "--release", "/nonexistent-release", "--answers", path, "--yes"], { ...io, deploy: safeDeployDeps() });
       return { code, err: io.err.join("") };
     };
-    expect(await run("install", missing)).toEqual({ code: 2, err: `AgentX error [CONFIG_INVALID]: answers file ${missing} is invalid: github.appId Invalid input: expected string, received undefined\n` });
+    expect(await run("install", missing)).toEqual({ code: 2, err: `Rovara error [CONFIG_INVALID]: answers file ${missing} is invalid: github.appId Invalid input: expected string, received undefined\n` });
     expect((await run("install", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
     expect((await run("upgrade", empty)).err).toContain(`answers file ${empty} is invalid: github.appId`);
     // Upgrade accepts the answers and goes on to the release (which does not exist here).
@@ -627,7 +627,7 @@ describe("agentx deploy", () => {
     );
 
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("agentx deploy needs --yes when stdin is not a terminal");
+    expect(io.err.join("")).toContain("rovara deploy needs --yes when stdin is not a terminal");
   });
 
   it("--engine cdk refuses a source checkout with uncommitted changes, before deploying anything", async () => {
@@ -903,7 +903,7 @@ describe("agentx deploy", () => {
     );
 
     expect(code).toBe(2);
-    expect(io.err.join("")).toBe(`AgentX error [CONFIG_INVALID]: release ${RELEASE_VERSION} does not cover region eu-west-1; it covers: us-east-1\n`);
+    expect(io.err.join("")).toBe(`Rovara error [CONFIG_INVALID]: release ${RELEASE_VERSION} does not cover region eu-west-1; it covers: us-east-1\n`);
   });
 
   const oidcIdentity = { mode: "oidc", issuer: "https://idp.example.com", audience: "api://agentx", adminClaim: "groups", adminValues: ["agentx-admins"], clientId: "cli-client" };
@@ -963,7 +963,7 @@ describe("agentx deploy", () => {
       );
 
       expect(code).toBe(3);
-      expect(io.err.join("")).toBe(`AgentX error [AUTH_REQUIRED]: AWS credentials missing or expired: ${error.message}\n`);
+      expect(io.err.join("")).toBe(`Rovara error [AUTH_REQUIRED]: AWS credentials missing or expired: ${error.message}\n`);
     });
   }
 
@@ -999,7 +999,7 @@ describe("agentx deploy", () => {
     );
 
     expect(code).toBe(4);
-    expect(io.err.join("")).toBe(`AgentX error [FORBIDDEN]: AWS denied the request: ${denied.message}\n`);
+    expect(io.err.join("")).toBe(`Rovara error [FORBIDDEN]: AWS denied the request: ${denied.message}\n`);
   });
 
   it("when settings were not written, prints the deployed and missing parts and the exact resume command", async () => {
@@ -1029,7 +1029,7 @@ describe("agentx deploy", () => {
         "Deployed parts: access, foundation",
         "Missing parts: identity, control-plane, runtime, slack",
         "Environment settings are written once every part is deployed.",
-        `Resume with: agentx deploy --mode install --parts identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes`,
+        `Resume with: rovara deploy --mode install --parts identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes`,
         "",
       ].join("\n"),
     );
@@ -1080,7 +1080,7 @@ describe("agentx deploy", () => {
 
     expect(code).toBe(0);
     expect(io.out.join("")).toContain(
-      `Resume with: agentx deploy --mode install --engine cdk --source /some/source --parts foundation,identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes\n`,
+      `Resume with: rovara deploy --mode install --engine cdk --source /some/source --parts foundation,identity,control-plane,runtime,slack --release ${releaseDir} --answers ${answersPath} --yes\n`,
     );
   });
 });
@@ -1100,7 +1100,7 @@ async function releaseDirDeclaringBudget(): Promise<string> {
   return dir;
 }
 
-describe("agentx deploy --mode upgrade keeps the deployed budget", () => {
+describe("rovara deploy --mode upgrade keeps the deployed budget", () => {
   it("reads the control-plane stack's parameters and sends its budget back", async () => {
     const store = new MemoryParameterStore();
     // Every part's outputs, including every foundation output the control plane takes.

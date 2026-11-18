@@ -1,6 +1,6 @@
 // Core switch-on blocker (2026-11-17): the core engine's model gateway and agent model are stack parameters of the named control plane (CoreModelGatewayHost, CoreAgentModel),
-// packed for the broker and the dispatcher (which read ROVARA_CORE_MODEL_GATEWAY_URL = https://<host> and ROVARA_CORE_AGENT_MODEL), set with `agentx config set
-// coreEngine.modelGatewayUrl` / `coreEngine.agentModel`, and kept across upgrades. Before this they could only be set by a template overlay, which every `agentx upgrade` dropped,
+// packed for the broker and the dispatcher (which read ROVARA_CORE_MODEL_GATEWAY_URL = https://<host> and ROVARA_CORE_AGENT_MODEL), set with `rovara config set
+// coreEngine.modelGatewayUrl` / `coreEngine.agentModel`, and kept across upgrades. Before this they could only be set by a template overlay, which every `rovara upgrade` dropped,
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
 import { describe, expect, it } from "vitest";
 import {
@@ -192,7 +192,7 @@ describe("the config keys", () => {
   });
 });
 
-describe("agentx config set", () => {
+describe("rovara config set", () => {
   const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: "", CoreAgentModel: "", ...parameters } });
   const changed = (cloudFormation: ReturnType<typeof fakeCloudFormation>) => {
     const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>>; UsePreviousTemplate?: boolean };
@@ -216,7 +216,7 @@ describe("agentx config set", () => {
     const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({}) });
     expect((await runConfigSet(run, ENV, { key: MODEL_KEY, value: MODEL, yes: true })).changed).toBe(true);
     expect(changed(cloudFormation).values).toEqual([{ ParameterKey: "CoreAgentModel", ParameterValue: MODEL }]);
-    expect(run.lines).toContain(`Note: ${URL_KEY} is not set yet; the core engine refuses work until both ${MODEL_KEY} and ${URL_KEY} are set. Next: agentx --env staging config set ${URL_KEY} <value>`);
+    expect(run.lines).toContain(`Note: ${URL_KEY} is not set yet; the core engine refuses work until both ${MODEL_KEY} and ${URL_KEY} are set. Next: rovara --env staging config set ${URL_KEY} <value>`);
   });
 
   it("clears with none, and says the other one is still set", async () => {
@@ -224,7 +224,7 @@ describe("agentx config set", () => {
     const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreModelGatewayHost: HOST, CoreAgentModel: MODEL }) });
     expect((await runConfigSet(run, ENV, { key: URL_KEY, value: "none", yes: true })).changed).toBe(true);
     expect(changed(cloudFormation).values).toEqual([{ ParameterKey: "CoreModelGatewayHost", ParameterValue: "" }]);
-    expect(run.lines).toContain(`Note: ${MODEL_KEY} is still set; with ${URL_KEY} empty the core engine refuses work. To turn the gateway off fully, also run agentx --env staging config set ${MODEL_KEY} none`);
+    expect(run.lines).toContain(`Note: ${MODEL_KEY} is still set; with ${URL_KEY} empty the core engine refuses work. To turn the gateway off fully, also run rovara --env staging config set ${MODEL_KEY} none`);
   });
 
   it("refuses http, a URL with credentials, an unknown Claude model and a malformed id before any AWS call", async () => {
@@ -331,7 +331,7 @@ describe("agentx config set", () => {
     it("refuses without an admin sign-in, or when the sign-in is refused", async () => {
       const gateway = withGateway(offering(GATEWAY_OFFERED_MODELS));
       const signedOut = await run(GLM, gateway, { adminSession: async () => undefined });
-      await expect(signedOut.result).rejects.toThrow(`run agentx --env staging login --admin, then try again; nothing changed`);
+      await expect(signedOut.result).rejects.toThrow(`run rovara --env staging login --admin, then try again; nothing changed`);
       expect(gateway.asked).toEqual([]);
       for (const status of [401, 403]) {
         const refused = await run(GLM, withGateway(() => new Response("", { status })));
@@ -377,6 +377,6 @@ describe("agentx config set", () => {
   it("asks for an upgrade first when the stack has no such parameter", async () => {
     const cloudFormation = fakeCloudFormation({ parameters: { CoreEngine: "off" } });
     await expect(updateStackParameters({ cloudFormation, stackName: "agentx-staging-control-plane", roleArn: "arn:aws:iam::123456789012:role/x", changes: { CoreModelGatewayHost: HOST }, label: "config", confirm: async () => true, write: () => undefined }))
-      .rejects.toThrow("stack agentx-staging-control-plane has no CoreModelGatewayHost parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
+      .rejects.toThrow("stack agentx-staging-control-plane has no CoreModelGatewayHost parameter; it runs an older Rovara release, so upgrade it with rovara upgrade, then run this again");
   });
 });

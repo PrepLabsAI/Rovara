@@ -1,7 +1,7 @@
 # Maintainers' production release
 
 This page describes the maintainers' own deployment and its release pipeline. To move an
-installed environment to a newer release, use `agentx --env <name> upgrade`; see
+installed environment to a newer release, use `rovara --env <name> upgrade`; see
 [Running Rovara](day-two.md#upgrade).
 
 Registering a project and binding its channel are covered in [Administration client and projects](administration.md#2-register-a-project-and-bind-its-slack-channel). Workspaces are created by
@@ -94,10 +94,10 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
 
 - In the Slack app's **Interactivity & Shortcuts** settings, turn Interactivity on and set the
   Request URL to the `AgentXControlPlane` output `SlackInteractivityUrl`. Without it a button press
-  reaches no one, and members must confirm by replying `@AgentX yes`.
+  reaches no one, and members must confirm by replying `@Rovara yes`.
 - On Slack Enterprise Grid, the team ID in a button press may differ from the one in the thread's
   mention events. A press would then find no pending confirmation and answer that it is no longer
-  pending. This has not been checked on a Grid workspace; there, a typed `@AgentX yes` still works.
+  pending. This has not been checked on a Grid workspace; there, a typed `@Rovara yes` still works.
 - A confirming `yes` claims its confirmation only after the thread's conversation bookkeeping (the
   workspace check, the conversation record and any settings notice), just before the turn runs, so
   a request that stops early leaves the question pending. Two answers racing each other can both do
@@ -105,12 +105,12 @@ Spec 014 phase 14c part 2 turns the action gate on. Operator notes:
   already used.
 - The part 1 rollback floor above still applies.
 - Rolling the control plane back below this release does not break the turn record export, but
-  `agentx admin turns export` then skips every record that has a call `gate` or one of the new
+  `rovara admin turns export` then skips every record that has a call `gate` or one of the new
   dispositions: the older control plane's record schema refuses them, counts them as `skipped` and
   logs `turn_record.invalid`. The records stay in the table and export again after rolling forward,
   within their 30 days.
 - Rolling the Slack service back below this release while confirmations are pending turns a
-  button press (the control plane still queues it as "yes" or "cancel") or a typed `@AgentX yes`
+  button press (the control plane still queues it as "yes" or "cancel") or a typed `@Rovara yes`
   into an ordinary, ungated turn. The model may then re-issue the call it was holding back, and it
   runs without asking. Roll back only when no confirmation is pending, or tell members not to
   answer pending ones.
@@ -134,7 +134,7 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
   logged the same way without a code and is not followed by a text copy, since Slack may already
   have posted the reply; the request is retried like any failed post.
 - Who can open it: any member who can see the reply, from the thread's own workspace. A member of
-  another organization in a Slack Connect channel is told "AgentX couldn't find the details for
+  another organization in a Slack Connect channel is told "Rovara couldn't find the details for
   this reply.", and nothing is read. So is a press whose payload carries no workspace team ID. On
   Enterprise Grid, a member of a sibling workspace in the same grid may open it when the press
   carries the same grid ID for the workspace and the member; the record's own team must still
@@ -146,12 +146,12 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
   shows at most 2,000 characters of each call's arguments, and less when a turn made many calls.
   Record text is escaped, so it cannot form a link, mention or alert in the view. The request and
   response text, the workspace and the worker operations are never read.
-- Turn records are kept 30 days. After that the view says "AgentX keeps turn details for 30 days.
+- Turn records are kept 30 days. After that the view says "Rovara keeps turn details for 30 days.
   The details for this reply, from <date>, are no longer kept." It says so from the button alone,
   without a read, and also for a record DynamoDB has not deleted yet.
 - A press within 60 seconds of the reply, before the record is saved, says the details are still
   being saved. A record that was never saved points to `turn_record.write_failed`. A record that
-  fails its schema (`interaction.details_invalid`) points to `agentx admin turns export`. A read
+  fails its schema (`interaction.details_invalid`) points to `rovara admin turns export`. A read
   that fails or takes more than 1 second (`interaction.details_read_failed`) says to press
   Details again. If the view cannot open (`interaction.details_open_failed`), the member gets
   "I couldn't open the details in time. Press Details again." privately.

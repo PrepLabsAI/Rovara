@@ -98,11 +98,11 @@ export async function listSignInClients(session: { controlPlaneUrl: string; acce
   try {
     response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/sign-in-clients`, { headers: { authorization: `Bearer ${session.accessToken}` } });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach AgentX to list sign-in clients; try again");
+    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach Rovara to list sign-in clients; try again");
   }
   const body = await adminResponseBody(response);
   const clients = SignInClientViewSchema.array().safeParse((body as { clients?: unknown } | null)?.clients);
-  if (!clients.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with sign-in clients this version of the CLI cannot read; upgrade the CLI");
+  if (!clients.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered with sign-in clients this version of the CLI cannot read; upgrade the CLI");
   return clients.data;
 }
 

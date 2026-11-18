@@ -1,6 +1,6 @@
 // The install page in the cloud: the setup table both sides share (setup-store.ts), the job's relay
 // (relay.ts), the page's handler (setup-handler.ts), and a whole install run through them with
-// `agentx init --setup-table`. Nothing here reaches AWS, GitHub or Slack.
+// `rovara init --setup-table`. Nothing here reaches AWS, GitHub or Slack.
 import { describe, expect, it } from "vitest";
 import { DeleteItemCommand, GetItemCommand, PutItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { wizardHtml } from "../../packages/cli/src/init/ui/page.js";
@@ -219,7 +219,7 @@ describe("the GitHub App from the setup page", () => {
     expect((await handle(github({ code: "c0de", state: "b".repeat(32) }))).status).toBe(400);
     expect((await handle(github({ state: FORM.state }))).status).toBe(400);
     const sent = await handle(github({ code: "c0de", state: FORM.state }));
-    expect(sent).toMatchObject({ status: 200, body: expect.stringContaining("GitHub sent AgentX the new app") as unknown });
+    expect(sent).toMatchObject({ status: 200, body: expect.stringContaining("GitHub sent Rovara the new app") as unknown });
     expect(await store.takeGitHubCode(FORM.state)).toBe("c0de");
     expect((await handle(github({ code: "again", state: FORM.state }))).status).toBe(400);
   });
@@ -238,7 +238,7 @@ describe("the GitHub App from the setup page", () => {
   });
 });
 
-describe("agentx init --setup-table", () => {
+describe("rovara init --setup-table", () => {
   it("runs a whole install with every question answered on the setup page, through the table", async () => {
     const h = await harness();
     const store = memorySetupStore();
@@ -282,7 +282,7 @@ describe("agentx init --setup-table", () => {
     expect(operator.states.at(-1)).toMatchObject({ installerClosed: true });
     expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(true);
     // Nothing is served from the job's own machine.
-    expect(h.err.join("")).toContain(`The AgentX installer is on its setup page: ${SETUP_ORIGIN}`);
+    expect(h.err.join("")).toContain(`The Rovara installer is on its setup page: ${SETUP_ORIGIN}`);
     expect(h.err.join("")).not.toContain("127.0.0.1");
   });
 

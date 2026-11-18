@@ -601,7 +601,7 @@ review, item. A caller reads an adapter's `capabilities` and never branches on i
   interface, not to `github-app.ts`: this tree's `GitHubAppCredentialProvider` is the older client and lacks 15 of the 24 methods (status,
   feedback, merge, working branches, code owners, standing, path kinds, credential expiry). The plug-in module refuses a client that lacks
   any method when the process starts, naming the missing methods. Cloud's client, a client built on `gh` or a personal token for the local
-  runtime, and the test fixture can all sit under the adapters. The adapter holds the cheap input rules itself (working branches `agentx/<uuid>`
+  runtime, and the test fixture can all sit under the adapters. The adapter holds the cheap input rules itself (working branches `rovara/<uuid>`, and the older `agentx/<uuid>`
   only, an organization scope and pages 1 to 1000 for the branch listing); the rest (tenant binding on every call, least-privilege tokens per
   repository, no redirects) are rules the client must keep, written on `GitHubCodeHostProvider`.
 - **Cloud's GitHub client is in this tree** (`code-host/github/client.ts`, a copy of Cloud v0.5.11's `github-app.ts`; `app-client.ts` hands it over as the provider and its
@@ -683,15 +683,15 @@ The MCP tools an AI tool calls use chat-neutral names, so a second chat adapter 
 
 | Neutral name | Replaces | Where |
 | --- | --- | --- |
-| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `agentx_start`, `agentx_start_task`, `agentx_start_workflow`. `channel` stays the string that names which bound channel to use; a name alone does not ask for a share (a project that requires sharing shares anyway, as before). The two spellings must agree when both are given. |
-| `channel_user` | `slack_user` | `agentx_whoami`, and each entry of `channel_turns` in a task answer (both names are sent) |
-| `plugins`: one row `{ point, name, status, detail? }` per plug-in set up on the install (a chat or code-host adapter with no probe has no row) | `slack`, `github` | `agentx_admin_health` and `GET /v1/admin/health` (both old fields are still sent, with status unknown when not set up; an older server's answer is turned into rows) |
-| `sign_in_provider` and `sign_in_kind` (`chat` or `company`) | `sign_in_method` | `agentx_whoami` |
-| `source` (`chat` or `ai_tool`) | `origin` (`slack` means `chat`) | `agentx_admin_failed_tasks`, `agentx_admin_list_workspaces` and the turn records of `agentx_admin_turns` (output, both sent); `agentx_admin_turns` input (`origin` is read as before, the two must agree) |
-| `channel_team_id`, `channel_user_id`, `channel_user_name` | `slack_team_id`, `slack_user_id`, `slack_name` | `owner` in `agentx_admin_list_workspaces` (both sent) |
+| `share` (boolean: `true` posts the task in the project's chat channel, `false` keeps it private) | `share_to_channel` | `rovara_start`, `rovara_start_task`, `rovara_start_workflow`. `channel` stays the string that names which bound channel to use; a name alone does not ask for a share (a project that requires sharing shares anyway, as before). The two spellings must agree when both are given. |
+| `channel_user` | `slack_user` | `rovara_whoami`, and each entry of `channel_turns` in a task answer (both names are sent) |
+| `plugins`: one row `{ point, name, status, detail? }` per plug-in set up on the install (a chat or code-host adapter with no probe has no row) | `slack`, `github` | `rovara_admin_health` and `GET /v1/admin/health` (both old fields are still sent, with status unknown when not set up; an older server's answer is turned into rows) |
+| `sign_in_provider` and `sign_in_kind` (`chat` or `company`) | `sign_in_method` | `rovara_whoami` |
+| `source` (`chat` or `ai_tool`) | `origin` (`slack` means `chat`) | `rovara_admin_failed_tasks`, `rovara_admin_list_workspaces` and the turn records of `rovara_admin_turns` (output, both sent); `rovara_admin_turns` input (`origin` is read as before, the two must agree) |
+| `channel_team_id`, `channel_user_id`, `channel_user_name` | `slack_team_id`, `slack_user_id`, `slack_name` | `owner` in `rovara_admin_list_workspaces` (both sent) |
 
 Wording only: the tools' descriptions and the fallback name of a task person with no name now say "chat" where they said Slack (`Chat user`, and the requester text `chat member <id>`).
-**Not renamed (internal REST bodies and values, a later lane with I2):** `slackUserId` on the developer principal, task people and turn authors, `shareToChannel` on the start request, `origin: "slack"` in the control plane's records, the `slack_unavailable` notice code, `AdminRequester.kind "slack"`, and the group keys of `agentx_admin_usage` when grouped by origin.
+**Not renamed (internal REST bodies and values, a later lane with I2):** `slackUserId` on the developer principal, task people and turn authors, `shareToChannel` on the start request, `origin: "slack"` in the control plane's records, the `slack_unavailable` notice code, `AdminRequester.kind "slack"`, and the group keys of `rovara_admin_usage` when grouped by origin.
 
 ## Build systems (lane P6, item B1)
 

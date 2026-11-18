@@ -90,7 +90,7 @@ describe("waits (US2, R21)", () => {
   });
 
   it("answers with the last view and the failure, not a timeout, when a check fails", async () => {
-    const failure = new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX");
+    const failure = new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach Rovara");
     const getTask = vi.fn<ControlPlaneClient["getTask"]>().mockResolvedValueOnce(view("RUNNING")).mockRejectedValueOnce(failure);
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 30, events: 10, signal: new AbortController().signal, ...clock() });
     expect(result).toEqual({ task: view("RUNNING"), timedOut: false, failure });

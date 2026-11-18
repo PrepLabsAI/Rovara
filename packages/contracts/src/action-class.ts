@@ -1,5 +1,5 @@
 import { itemPathHolders, itemPathValues } from "./item-paths.js";
-import { toolPatternMatches, type ActionPolicy, type ActionPolicyRule } from "./action-policy-node.js";
+import { inHouseToolPattern, toolPatternMatches, type ActionPolicy, type ActionPolicyRule } from "./action-policy-node.js";
 import type { AgentConnectorType } from "./agent-recipe-node.js";
 import type { ToolHints } from "./connectors-node.js";
 import { redactText } from "./redaction.js";
@@ -119,7 +119,7 @@ function isLifecycleKey(key: string): boolean {
 /** How deep, counting the arguments object as depth 1, a tool that offers item paths is searched for lifecycle keys. */
 const LIFECYCLE_SEARCH_DEPTH = 4;
 
-const IN_HOUSE_READS: ReadonlySet<string> = new Set(["agentx_follow_up", "agentx_task_status", "agentx_task_result"]);
+const IN_HOUSE_READS: ReadonlySet<string> = new Set(["rovara_follow_up", "rovara_task_status", "rovara_task_result"]);
 const DESTRUCTIVE_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set(["close", "replace", "revert"]);
 
 /**
@@ -261,22 +261,22 @@ export function itemReference(facts: ToolFacts | undefined, args: Record<string,
  * - It is a change when any of its item argument paths names a present item (a name, `a.b` or
  *   `a[].b`, R19), and a create when none does. When the connector declares no item arguments, it
  *   is a change.
- * - In-house tools are classified here in code: agentx_submit_task is a change only while the
+ * - In-house tools are classified here in code: rovara_submit_task is a change only while the
  *   thread has no prepared compute (D5); the other task tools read; publishing is a change; closing,
  *   replacing or reverting a pull request is destructive. Any other unknown tool is a change unless
  *   its name says it destroys. Without a worker (the gate passes a prepared one when the host says
- *   the thread's compute is prepared), agentx_submit_task and agentx_follow_up fail closed as a change.
+ *   the thread's compute is prepared), rovara_submit_task and rovara_follow_up fail closed as a change.
  * - Arguments that are not a plain object make any call but a read-approved tool a change, so the
  *   classifier decides (fail closed).
  */
 export function baseClass(name: string, facts: ToolFacts | undefined, args: Record<string, unknown>, worker?: { prepared(): boolean }): ActionClass {
   if (facts === undefined) {
-    if (name === "agentx_submit_task") return worker !== undefined && worker.prepared() ? "read" : "change";
-    if (name === "agentx_follow_up") return worker === undefined ? "change" : "read";
+    if (name === "rovara_submit_task") return worker !== undefined && worker.prepared() ? "read" : "change";
+    if (name === "rovara_follow_up") return worker === undefined ? "change" : "read";
     if (IN_HOUSE_READS.has(name)) return "read";
     if (!isPlainObject(args)) return "change";
-    if (name === "agentx_create_pull_request") return "change";
-    if (name === "agentx_manage_pull_request") return DESTRUCTIVE_PULL_REQUEST_ACTIONS.has(String(args.action)) ? "destructive" : "change";
+    if (name === "rovara_create_pull_request") return "change";
+    if (name === "rovara_manage_pull_request") return DESTRUCTIVE_PULL_REQUEST_ACTIONS.has(String(args.action)) ? "destructive" : "change";
     return destructiveSignal(name, args) === undefined ? "change" : "destructive";
   }
   if (facts.access === "read" && facts.hints?.readOnlyHint !== false && facts.hints?.destructiveHint !== true) return "read";
@@ -304,7 +304,7 @@ function namesExactTool(rule: ActionPolicyRule): boolean {
 function ruleMatches(rule: ActionPolicyRule, name: string, facts: ToolFacts | undefined, args: Record<string, unknown>): boolean {
   if (rule.connector !== undefined) {
     if (facts?.connector !== rule.connector || !toolPatternMatches(rule.tool, facts.upstreamName)) return false;
-  } else if (!toolPatternMatches(rule.tool, name)) {
+  } else if (!toolPatternMatches(inHouseToolPattern(rule.tool), name)) {
     return false;
   }
   // whenArguments matches the call's own top-level argument names only, never nested or inherited keys.
@@ -413,10 +413,10 @@ function inHouseAction(tool: string, args: Record<string, unknown>): string | un
   const repository = typeof args.repository === "string" ? ` in ${shortened(args.repository, VALUE_SHOWN)}` : "";
   const title = quoted(args.title, VALUE_SHOWN);
   switch (tool) {
-    case "agentx_submit_task": return `Start a coding task${prompt === undefined ? "" : `: ${prompt}`}`;
-    case "agentx_follow_up": return `Continue the coding task${prompt === undefined ? "" : `: ${prompt}`}`;
-    case "agentx_create_pull_request": return `Open a pull request${repository}${title === undefined ? "" : `: ${title}`}`;
-    case "agentx_manage_pull_request": {
+    case "rovara_submit_task": return `Start a coding task${prompt === undefined ? "" : `: ${prompt}`}`;
+    case "rovara_follow_up": return `Continue the coding task${prompt === undefined ? "" : `: ${prompt}`}`;
+    case "rovara_create_pull_request": return `Open a pull request${repository}${title === undefined ? "" : `: ${title}`}`;
+    case "rovara_manage_pull_request": {
       const action = typeof args.action === "string" ? args.action : "";
       const number = typeof args.pullRequestNumber === "number" ? ` #${args.pullRequestNumber}` : "";
       const verb = PULL_REQUEST_VERBS[action] ?? `${words(action) || "Change"}`;
@@ -424,8 +424,8 @@ function inHouseAction(tool: string, args: Record<string, unknown>): string | un
       const titled = (action === "edit" || action === "replace" || action === "revert") && title !== undefined ? `: ${title}` : "";
       return `${verb.charAt(0).toUpperCase()}${verb.slice(1)} pull request${number}${repository}${tail}${titled}`;
     }
-    case "agentx_task_status": return "Check the status of an earlier coding task";
-    case "agentx_task_result": return "Get the result of an earlier coding task";
+    case "rovara_task_status": return "Check the status of an earlier coding task";
+    case "rovara_task_result": return "Get the result of an earlier coding task";
     default: return undefined;
   }
 }
@@ -455,7 +455,7 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
   const where = typeof target === "string" ? ` in ${target}` : "";
   const split = tool.indexOf("__");
   // An in-house tool not described above is never named, even in words.
-  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("agentx_") ? "Run an AgentX action" : `Run ${words(tool)}`;
+  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("rovara_") ? "Run a Rovara action" : `Run ${words(tool)}`;
   return slackSafe(`${action}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 

@@ -19,7 +19,7 @@ async function wizard() {
   open.push(server);
   return { server, origin: `http://127.0.0.1:${server.port}` };
 }
-const page = (redirectUrl: string, nonce?: string) => manifestFormPage({ actionUrl: `https://github.com/settings/apps/new?state=${STATE}`, manifest: githubAppManifest({ appName: "AgentX", redirectUrl, webhookUrl: "https://agentx.example.test/v1/github/webhooks" }), ...(nonce === undefined ? {} : { nonce }) });
+const page = (redirectUrl: string, nonce?: string) => manifestFormPage({ actionUrl: `https://github.com/settings/apps/new?state=${STATE}`, manifest: githubAppManifest({ appName: "Rovara", redirectUrl, webhookUrl: "https://agentx.example.test/v1/github/webhooks" }), ...(nonce === undefined ? {} : { nonce }) });
 const fromGitHub = { "sec-fetch-site": "cross-site", referer: "https://github.com/" };
 const settled = <T>(promise: Promise<T>) => Promise.race([promise.then(() => "resolved", () => "rejected"), new Promise((resolve) => setTimeout(() => resolve("pending"), 50))]);
 
@@ -54,7 +54,7 @@ describe("the GitHub App flow on the wizard's own address", () => {
     expect(answer.headers.get("referrer-policy")).toBe("no-referrer");
     expect(answer.headers.get("access-control-allow-origin")).toBeNull();
     // It claims only what is true yet: GitHub sent the code; the conversion happens after.
-    expect(await answer.text()).toContain("GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.");
+    expect(await answer.text()).toContain("GitHub sent Rovara the new app. You can close this tab and go back to the Install Rovara tab.");
     await expect(mount.code).resolves.toBe("0123456789abcdef0123");
     // Review Focus 2: a second callback (a second GitHub tab) is refused like any other request:
     // with GitHub's cross-site headers that is the ordinary cross-site refusal, checked before the token.
@@ -68,7 +68,7 @@ describe("the GitHub App flow on the wizard's own address", () => {
     const mount = server.mountManifest({ state: STATE, page, timeoutMs: 60_000 });
     const wrong = await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=ffffffffffffffffffffffffffffffff`, { headers: fromGitHub });
     expect(wrong.status).toBe(400);
-    expect(await wrong.text()).toContain("This page is from a different agentx init run.");
+    expect(await wrong.text()).toContain("This page is from a different rovara init run.");
     expect(await settled(mount.code)).toBe("pending");
     expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}?state=${STATE}`, { headers: fromGitHub })).status).toBe(400);
     expect(await settled(mount.code)).toBe("pending");
@@ -93,7 +93,7 @@ describe("the GitHub App flow on the wizard's own address", () => {
   it("Review Focus 1: a callback after the wait ended is refused like any other request", async () => {
     const { server, origin } = await wizard();
     const mount = server.mountManifest({ state: STATE, page, timeoutMs: 20 });
-    await expect(mount.code).rejects.toThrow("no GitHub App was created within 0 minutes; run agentx init again");
+    await expect(mount.code).rejects.toThrow("no GitHub App was created within 0 minutes; run rovara init again");
     const late = await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`, { headers: fromGitHub });
     expect(late.status).toBe(403);
     expect(await late.text()).toBe("cross-site request\n");

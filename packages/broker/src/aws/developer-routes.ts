@@ -1,6 +1,6 @@
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
-import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
+import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, type CompanyMembershipReader } from "./company-check.js";
@@ -652,11 +652,11 @@ export function developerKeysThroughLambda(invoke: (payload: Uint8Array) => Prom
   };
 }
 
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 export function developerClaims(claims: Record<string, unknown> | undefined, config: DeveloperApiConfiguration): { developerId: string; sessionId: string; amr: DeveloperSignInMethod } {
   if (claims === undefined || claims.iss !== config.issuer || claims.aud !== DEVELOPER_TOKEN_AUDIENCE || claims.env !== config.env) {
-    throw agentXError("AUTH_REQUIRED", "this route needs an AgentX developer sign-in; run agentx login <url>");
+    throw agentXError("AUTH_REQUIRED", `this route needs a Rovara developer sign-in; run ${CLI_COMMAND_NAME} login <url>`);
   }
   if (typeof claims.sub !== "string" || !/^[a-f0-9]{64}$/.test(claims.sub) || typeof claims.sid !== "string" || claims.sid === "") {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
@@ -664,7 +664,7 @@ export function developerClaims(claims: Record<string, unknown> | undefined, con
   const amr = claims.amr;
   if (amr !== "slack" && amr !== "oidc" && amr !== "github") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (config.methods[amr] !== true) {
-    throw agentXError("AUTH_REQUIRED", `${methodName(amr)} sign-in is turned off in this environment; sign in another way with agentx login <url>`);
+    throw agentXError("AUTH_REQUIRED", `${methodName(amr)} sign-in is turned off in this environment; sign in another way with ${CLI_COMMAND_NAME} login <url>`);
   }
   return { developerId: claims.sub, sessionId: claims.sid, amr };
 }
@@ -743,18 +743,18 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
   if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   const companyDeveloper = await companyOidcSession(deps, session);
   if (checkInstallEnabled && deps.companies !== undefined && token.amr === "oidc" && companyDeveloper === undefined && !deps.developer.methods.oidc) {
-    throw agentXError("AUTH_REQUIRED", "Company sign-in is turned off in this environment; sign in another way with agentx login <url>");
+    throw agentXError("AUTH_REQUIRED", `Company sign-in is turned off in this environment; sign in another way with ${CLI_COMMAND_NAME} login <url>`);
   }
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
   if (companyDeveloper === undefined && startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
-    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : token.amr === "github" ? "GitHub" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
+    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : token.amr === "github" ? "GitHub" : "company sign-in"} was turned off; sign in again with ${CLI_COMMAND_NAME} login <url>`);
   }
   const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
     // E9: D16's per-request check ends the session at once; the token endpoint revokes it at its next refresh.
-    throw agentXError("AUTH_REQUIRED", "an AgentX admin ended your sign-in; run agentx login <url> again");
+    throw agentXError("AUTH_REQUIRED", `a Rovara admin ended your sign-in; run ${CLI_COMMAND_NAME} login <url> again`);
   }
   return {
     ...token,

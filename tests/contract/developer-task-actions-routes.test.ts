@@ -56,8 +56,8 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     await post("continue", { requestId: randomUUID(), instructions: "one" });
     const busy = await post("continue", { requestId: randomUUID(), instructions: "two" });
     expect(busy.body.error).toMatchObject({ code: "TASK_BUSY" });
-    expect(String((busy.body.error as { message: string }).message)).toContain("agentx_wait_for_task");
-    expect(String((busy.body.error as { message: string }).message)).toContain("agentx_cancel_task");
+    expect(String((busy.body.error as { message: string }).message)).toContain("rovara_wait_for_task");
+    expect(String((busy.body.error as { message: string }).message)).toContain("rovara_cancel_task");
   });
 
   it("gives two concurrent continues one RUNNING and one TASK_BUSY, and one new task operation", async () => {
@@ -80,7 +80,7 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
     await harness.finish(workspaceId, String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "FAILED", { error: "npm ci exited 1" });
     const refused = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "retry" });
-    expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
+    expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with rovara_start_task, and close this one with rovara_close_task" });
   });
 
   it("refuses a task whose setup failed for want of a worker too (R17), not as TASK_BUSY", async () => {
@@ -91,7 +91,7 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     await harness.finish(workspaceId, String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "FAILED", { error: "RUNTIME_UNAVAILABLE: no capacity" });
     for (const [route, body] of [["continue", { requestId: randomUUID(), instructions: "retry" }], ["pull-requests", { requestId: randomUUID(), title: "x" }]] as const) {
       const refused = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/${route}`, body);
-      expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
+      expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with rovara_start_task, and close this one with rovara_close_task" });
     }
   });
 
@@ -114,7 +114,7 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     const { db, post, taskId, turns } = await finished();
     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
     const before = turns().length;
-    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
     expect(turns()).toHaveLength(before);
     expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
   });
@@ -122,15 +122,15 @@ describe("continue (US1 scenario 5, FR-019)", () => {
   it("refuses to cancel a task whose workspace is closed, with no audit record (final review M2)", async () => {
     const { db, post, task, turns } = await finished();
     Object.assign(db.get(`WORKSPACE#${task.workspaceId}`, "META")!, { status: "CLOSED", closedAt: new Date().toISOString() });
-    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
     expect(turns().filter((item) => item.action === "cancel")).toHaveLength(0);
   });
 
   it("refuses a closed task", async () => {
     const { db, post, taskId } = await finished();
     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
-    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
+    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
   });
 
   it("refuses every legacy mutation on a terminal workflow before closedAt, with no effects", async () => {
@@ -141,9 +141,9 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     const beforeTurns = turns().length;
     const beforeOperations = db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId).length;
 
-    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
-    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
+    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
     expect(turns()).toHaveLength(beforeTurns);
     expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId)).toHaveLength(beforeOperations);
   });
@@ -272,7 +272,7 @@ describe("cancel", () => {
     // The running operation's fence moved on, so the cancel's transaction fails its condition.
     (db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${active()}`) as { fence: number }).fence += 1;
     const response = await post("cancel", { requestId: randomUUID() });
-    expect(response.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "the task changed while cancelling; try agentx_cancel_task again" });
+    expect(response.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "the task changed while cancelling; try rovara_cancel_task again" });
   });
 
   it("refuses a requestId already used for another action of the task", async () => {
@@ -358,7 +358,7 @@ describe("pull requests (US1 scenario 4, FR-023)", () => {
     const requestId = randomUUID();
     await post("pull-requests", { requestId, title: "x" });
     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).closedAt = new Date().toISOString();
-    expect((await post("pull-requests", { requestId, title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("pull-requests", { requestId, title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with rovara_start_task" });
   });
 
   it("answers TASK_BUSY while the task runs", async () => {

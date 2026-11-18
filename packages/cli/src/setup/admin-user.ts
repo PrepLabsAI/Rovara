@@ -1,6 +1,6 @@
 // FR-018 step 7 for a Cognito identity: the admin user, created once. Cognito emails a temporary
 // password; the first sign-in asks for a new one. Re-running never sends a second email.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { ADMIN_GROUP } from "./admin-session.js";
 import type { CognitoAdmin } from "./services.js";
 
@@ -27,8 +27,8 @@ export async function ensureCognitoAdmin(input: {
     return { created: false, temporaryPassword: true };
   }
   if ((await cognito.groups(poolId, email)).includes(ADMIN_GROUP)) return { created: false, temporaryPassword: false };
-  if (status === "CONFIRMED" && !(await input.confirm(`The user ${email} already exists and has signed in before. Make it an AgentX administrator (group ${ADMIN_GROUP})?`))) {
-    throw agentXError("CONFIG_INVALID", `you chose not to make ${email} an AgentX administrator; run agentx init again and give the email address of the admin you want (--admin-email)`);
+  if (status === "CONFIRMED" && !(await input.confirm(`The user ${email} already exists and has signed in before. Make it a Rovara administrator (group ${ADMIN_GROUP})?`))) {
+    throw agentXError("CONFIG_INVALID", `you chose not to make ${email} a Rovara administrator; run ${CLI_COMMAND_NAME} init again and give the email address of the admin you want (--admin-email)`);
   }
   input.write(`The user ${email} already exists (status ${status}); adding it to ${ADMIN_GROUP}.`);
   await cognito.addToGroup(poolId, email, ADMIN_GROUP);

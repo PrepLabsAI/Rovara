@@ -21,7 +21,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
+import { agentXError, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackTeamIdSchema, SlackUserIdSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -48,7 +48,7 @@ export const SLACK_WORKSPACE_TAKEN = "This Slack workspace is already connected 
 export const SLACK_COMPANY_HAS_WORKSPACE = "This company is already connected to a different Slack workspace. A company owner can disconnect it first.";
 export const SLACK_ENTERPRISE_REFUSED = "Rovara can be added to one Slack workspace, not to a whole Enterprise Grid organization. Add it to a single workspace.";
 export const SLACK_NOT_CONNECTED = "This company has no Slack workspace connected.";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 /** How long a state lives. */
 export const SLACK_INSTALL_TTL_SECONDS = 600;

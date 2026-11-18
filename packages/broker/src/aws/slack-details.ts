@@ -7,7 +7,7 @@ import {
   parseDetailsButtonValue,
   slackThreadSubject,
   turnDetailsFromItem,
-  turnDetailsKey,
+  turnDetailsKey, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { detailsMessageView, turnDetailsView, type SlackModalView } from "./slack-details-view.js";
 import type { SlackIngressLog } from "./slack-ingress.js";
@@ -28,7 +28,7 @@ export const DETAILS_OPEN_FLOOR_MS = 500;
 export const DETAILS_NOT_FOUND = "AgentX couldn't find the details for this reply.";
 export const DETAILS_SAVING = "The details for this reply are still being saved. Close this and press Details again in a moment.";
 export const DETAILS_NOT_SAVED = "AgentX has no saved details for this reply. Saving them may have failed; an administrator can look for turn_record.write_failed in the Slack service logs.";
-export const DETAILS_UNREADABLE = "The saved details for this reply could not be read. An administrator can export the turn with `agentx admin turns export`.";
+export const DETAILS_UNREADABLE = `The saved details for this reply could not be read. An administrator can export the turn with \`${CLI_COMMAND_NAME} admin turns export\`.`;
 export const DETAILS_UNAVAILABLE = "AgentX couldn't load the details right now. Close this and press Details again.";
 export const DETAILS_OPEN_FAILED = "I couldn't open the details in time. Press Details again.";
 

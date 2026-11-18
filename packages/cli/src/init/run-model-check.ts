@@ -4,6 +4,7 @@ import type { ModelsAnswers } from "../deploy/answer-schemas.js";
 import { checkModel, type ModelCheckResult } from "@agentx/model-runtime/model-check";
 import type { ModelProvider } from "@agentx/contracts";
 import type { PrerequisiteChecks } from "./prerequisites.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** Where each keyed provider's key and routing are configured for the environment (the settings' `models`). */
 export interface ModelCheckConfig {
@@ -21,10 +22,10 @@ export async function runModelCheck(input: {
   const { provider, modelId, checks, config } = input;
   const run = async (): Promise<void> => {
     if (provider === "openrouter") {
-      if (checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
+      if (checks.openRouter === undefined) throw new Error(`this ${CLI_COMMAND_NAME} cannot check OpenRouter models`);
       await checks.openRouter(modelId, config.openRouter ?? {});
     } else if (provider === "anthropic" || provider === "openai") {
-      if (checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
+      if (checks.directProvider === undefined) throw new Error(`this ${CLI_COMMAND_NAME} cannot check ${provider} models`);
       await checks.directProvider(provider, modelId, config[provider] ?? {});
     } else {
       await checks.converse(modelId);

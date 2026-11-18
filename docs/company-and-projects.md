@@ -7,12 +7,12 @@ These steps work once your Rovara administrator sets `COMPANY_SIGNIN=enabled`. U
 
 ## Sign in with GitHub
 
-If your Rovara administrator enables GitHub sign-in with `agentx signin enable github`, choose GitHub on the company sign-in page. GitHub sign-in also requires `COMPANY_SIGNIN=enabled`. To join a company, use a company invite or have an owner or admin pre-approve your verified GitHub email. Signing in with GitHub does not connect a GitHub organization or select repositories; see the GitHub connection steps below.
+If your Rovara administrator enables GitHub sign-in with `rovara signin enable github`, choose GitHub on the company sign-in page. GitHub sign-in also requires `COMPANY_SIGNIN=enabled`. To join a company, use a company invite or have an owner or admin pre-approve your verified GitHub email. Signing in with GitHub does not connect a GitHub organization or select repositories; see the GitHub connection steps below.
 <!-- Source: packages/cli/src/signin/commands.ts; packages/broker/src/developer/providers.ts; packages/broker/src/aws/developer-routes.ts; PrepLabsAI/Rovara#831; PrepLabsAI/Rovara#834; PrepLabsAI/Rovara#846. -->
 
 ## Create or join a company
 
-A Rovara administrator can create a single-use company invite code with `agentx admin company-invite create`. Sign in, then use the code with `POST /v1/dev/company` to create a company. After the company is created, sign in again to enter it.
+A Rovara administrator can create a single-use company invite code with `rovara admin company-invite create`. Sign in, then use the code with `POST /v1/dev/company` to create a company. After the company is created, sign in again to enter it.
 <!-- Source: packages/cli/src/main.ts; packages/broker/src/developer/company-invites.ts; packages/broker/src/aws/developer-routes.ts; PrepLabsAI/Rovara#823. -->
 
 A live company owner or admin can pre-approve a teammate as a member. The invite link works once. The owner or admin chooses how long it lasts, from 1 to 720 hours. A teammate uses the link to sign in and join; invites cannot directly grant the admin role during the pilot.

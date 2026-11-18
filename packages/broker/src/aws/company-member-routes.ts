@@ -17,7 +17,7 @@
 //   - Reads are bounded in total; past a bound the whole answer is refused, never a partial one.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { OrgIdSchema, agentXError, type OrgRole } from "@agentx/contracts";
+import { OrgIdSchema, agentXError, type OrgRole, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { profileDisplayName } from "../developer/github-profile.js";
@@ -37,7 +37,7 @@ export const REMOVAL_BODY = "a removal takes no body";
 export const LIST_QUERY = "the list takes an optional cursor this list gave and a limit from 1 to 100";
 export const TOO_MUCH_WORK = "This person has too much work to show in one preview. Hand some of it over first.";
 export const MEMBERS_UNAVAILABLE = "the company's members could not be read or changed just now; try again";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 const REQUEST_INVALID = "the request is not valid";
 
 /** Total bounds for one preview: rows read per index, open tasks looked at, and the members one page names. */

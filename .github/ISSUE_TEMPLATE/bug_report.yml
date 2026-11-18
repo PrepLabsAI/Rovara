@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in AgentX does not work as the docs say it should.
+description: Something in Rovara does not work as the docs say it should.
 labels: ["bug"]
 body:
   - type: markdown
@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: The output of `agentx --version`, or the commit you built from.
+      description: The output of `rovara --version`, or the commit you built from.
     validations:
       required: true
   - type: dropdown
@@ -21,7 +21,7 @@ body:
       options:
         - Installing (init, deploy, upgrade, destroy)
         - Slack thread
-        - AI tool (agentx mcp)
+        - AI tool (rovara mcp)
         - Pull request or CodeBuild gates
         - Connectors (GitHub, Linear, Jira, Asana)
         - CLI command
@@ -33,7 +33,7 @@ body:
     id: what-happened
     attributes:
       label: What happened
-      description: What you did, and what AgentX did.
+      description: What you did, and what Rovara did.
     validations:
       required: true
   - type: textarea
@@ -54,8 +54,8 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: agentx doctor output
-      description: For an installed environment, the output of `agentx --env <name> doctor`, with secrets removed.
+      label: rovara doctor output
+      description: For an installed environment, the output of `rovara --env <name> doctor`, with secrets removed.
       render: text
   - type: textarea
     id: logs

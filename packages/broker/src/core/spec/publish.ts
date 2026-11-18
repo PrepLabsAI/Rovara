@@ -110,7 +110,7 @@ export async function publishSpec(
   input: { files: readonly SpecFile[]; folder: string; baseCommit: string; baseBranch: string; branch: string; title: string; body: string; forbiddenFolders: readonly string[] },
 ): Promise<{ commit: string; number: number; url: string }> {
   assertSpecPaths(input.files, input.folder, input.forbiddenFolders);
-  if (!/^[a-f0-9]{40}$/u.test(input.baseCommit) || !/^agentx\/[0-9a-f-]{36}$/u.test(input.branch)) throw new SpecPublishError("paths", false);
+  if (!/^[a-f0-9]{40}$/u.test(input.baseCommit) || !/^(?:rovara|agentx)\/[0-9a-f-]{36}$/u.test(input.branch)) throw new SpecPublishError("paths", false);
   let head: string | undefined;
   try {
     // The commit the spec is built on must still be on the default branch: if the branch was rewritten, the pull request would carry the old history back.

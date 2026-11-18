@@ -1,4 +1,4 @@
-// Spec 025 User Story 5 and SC-004, end to end: agentx mcp's server, the broker in process, an admin
+// Spec 025 User Story 5 and SC-004, end to end: rovara mcp's server, the broker in process, an admin
 // sign-in and a developer sign-in. Each read tool's result is compared with the expected result
 // committed here (US5's "committed snapshot"; never regenerated, never vitest -u).
 import { randomUUID } from "node:crypto";
@@ -11,7 +11,7 @@ import { ADMIN_TOKEN, NON_ADMIN_TOKEN, REFRESH_TOKEN, adminSignedInClient } from
 import { call } from "../support/slack-broker.js";
 
 const PLANTED = [`ghp_${"Q".repeat(36)}`, `xoxb-${"2".repeat(12)}-planted`, `agxr_${"z".repeat(43)}`];
-const ADMIN_TOOLS = ["agentx_admin_health", "agentx_admin_failed_tasks", "agentx_admin_turns", "agentx_admin_usage", "agentx_admin_list_projects", "agentx_admin_list_channels", "agentx_admin_list_credentials", "agentx_admin_list_workspaces"];
+const ADMIN_TOOLS = ["rovara_admin_health", "rovara_admin_failed_tasks", "rovara_admin_turns", "rovara_admin_usage", "rovara_admin_list_projects", "rovara_admin_list_channels", "rovara_admin_list_credentials", "rovara_admin_list_workspaces"];
 /** Times and IDs change each run; everything else is compared as committed. */
 const normalized = (value: unknown): unknown => JSON.parse(JSON.stringify(value)
   .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "<time>")
@@ -35,11 +35,11 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
   it("lists the admin read tools for an admin, answers each with no confirmation, and matches the committed results", async () => {
     const { harness, taskId } = await failedTask();
     const mcp = await adminSignedInClient(harness);
-    await expect.poll(async () => (await mcp.names()).filter((name) => name.startsWith("agentx_admin_"))).toEqual(ADMIN_TOOLS);
+    await expect.poll(async () => (await mcp.names()).filter((name) => name.startsWith("rovara_admin_"))).toEqual(ADMIN_TOOLS);
     // FR-038: admin reads change nothing. Every command the eight tool calls send is a read.
     const sentBefore = harness.db.commandNames().length;
 
-    const failed = await mcp.tool("agentx_admin_failed_tasks");
+    const failed = await mcp.tool("rovara_admin_failed_tasks");
     expect(normalized(failed.value)).toEqual({
       failures: [{
         time: "<time>", project: "payments", source: "ai_tool", origin: "ai_tool", requester: "`Maya Chen` (developer)", workspace_id: "<uuid>", operation_id: "<uuid>",
@@ -49,15 +49,15 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     });
     expect((failed.value.failures as Array<{ turn_record: { task_id: string } }>)[0]?.turn_record.task_id).toBe(taskId);
 
-    const turns = await mcp.tool("agentx_admin_turns", { since: new Date(Date.now() - 3_600_000).toISOString(), task_id: taskId });
+    const turns = await mcp.tool("rovara_admin_turns", { since: new Date(Date.now() - 3_600_000).toISOString(), task_id: taskId });
     expect((turns.value.turns as Array<{ action: string; phase: string }>).map((turn) => `${turn.action}:${turn.phase}`)).toContain("start:accepted");
 
-    expect(normalized((await mcp.tool("agentx_admin_list_projects")).value)).toEqual({ projects: [{
+    expect(normalized((await mcp.tool("rovara_admin_list_projects")).value)).toEqual({ projects: [{
       name: "payments", latest_revision: 1, registered_at: "<time>", repositories: [{ name: "demo", url: "https://github.com/example/demo.git" }], runtime_mode: "ec2-ebs", connectors: [],
       developer_tasks: { enabled: true, share: "optional", share_mode: { default: "view", allow_continue: true }, channel_members_may_use: true },
     }] });
-    expect(normalized((await mcp.tool("agentx_admin_list_channels")).value)).toEqual({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", private: false, project: "payments", updated_at: "<time>" }], notices: [] });
-    const workspaceAnswer = (await mcp.tool("agentx_admin_list_workspaces")).value;
+    expect(normalized((await mcp.tool("rovara_admin_list_channels")).value)).toEqual({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", private: false, project: "payments", updated_at: "<time>" }], notices: [] });
+    const workspaceAnswer = (await mcp.tool("rovara_admin_list_workspaces")).value;
     const workspaceRows = workspaceAnswer.workspaces as Array<{ owner: Record<string, unknown> }>;
     expect(workspaceRows.map((row) => row.owner.developer_id)).toStrictEqual([MAYA.developerId]);
     // #214's additive identity is checked above; the committed legacy result stays unchanged.
@@ -67,9 +67,9 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
       // #213: a workspace whose setup failed no longer counts toward the limits.
       limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 0 }, truncated: false,
     });
-    expect((await mcp.tool("agentx_admin_usage", { group_by: "origin" })).value).toMatchObject({ group_by: "origin", truncated: false });
-    expect((await mcp.tool("agentx_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.1" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
-    expect((await mcp.tool("agentx_admin_list_credentials")).value).toMatchObject({ references: expect.any(Array) as unknown });
+    expect((await mcp.tool("rovara_admin_usage", { group_by: "origin" })).value).toMatchObject({ group_by: "origin", truncated: false });
+    expect((await mcp.tool("rovara_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.1" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
+    expect((await mcp.tool("rovara_admin_list_credentials")).value).toMatchObject({ references: expect.any(Array) as unknown });
     const sentByTools = harness.db.commandNames().slice(sentBefore);
     expect(sentByTools.length).toBeGreaterThan(0);
     expect([...new Set(sentByTools)].sort()).toEqual(["GetCommand", "QueryCommand"]);
@@ -79,24 +79,24 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     const { harness } = await failedTask();
     const mcp = await adminSignedInClient(harness);
     // Codex lists once and does not re-list on list_changed: no poll here.
-    expect((await mcp.names()).filter((name) => name.startsWith("agentx_admin_") && ADMIN_TOOLS.includes(name))).toEqual(ADMIN_TOOLS);
+    expect((await mcp.names()).filter((name) => name.startsWith("rovara_admin_") && ADMIN_TOOLS.includes(name))).toEqual(ADMIN_TOOLS);
   });
 
   it("offers no admin tool to a developer without an admin sign-in, and refuses a direct call with ADMIN_REQUIRED", async () => {
     const { harness } = await failedTask();
     const mcp = await adminSignedInClient(harness, { adminToken: null });
-    expect((await mcp.names()).filter((name) => name.startsWith("agentx_admin_"))).toEqual([]);
-    for (const name of ADMIN_TOOLS) expect((await mcp.tool(name, name === "agentx_admin_turns" ? { since: new Date().toISOString() } : name === "agentx_admin_usage" ? { group_by: "day" } : {})).error, name).toMatchObject({ code: "ADMIN_REQUIRED" });
+    expect((await mcp.names()).filter((name) => name.startsWith("rovara_admin_"))).toEqual([]);
+    for (const name of ADMIN_TOOLS) expect((await mcp.tool(name, name === "rovara_admin_turns" ? { since: new Date().toISOString() } : name === "rovara_admin_usage" ? { group_by: "day" } : {})).error, name).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 
   it("answers ADMIN_REQUIRED for a sign-in without the admin claim, and for a developer token sent as one", async () => {
     const { harness } = await failedTask();
     const notAdmin = await adminSignedInClient(harness, { adminToken: NON_ADMIN_TOKEN });
-    await expect.poll(async () => (await notAdmin.names()).includes("agentx_admin_health")).toBe(true);
-    expect((await notAdmin.tool("agentx_admin_health")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
+    await expect.poll(async () => (await notAdmin.names()).includes("rovara_admin_health")).toBe(true);
+    expect((await notAdmin.tool("rovara_admin_health")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
     const confused = await adminSignedInClient(harness, { adminToken: (await bearerFor(MAYA)).slice("Bearer ".length) });
-    await expect.poll(async () => (await confused.names()).includes("agentx_admin_health")).toBe(true);
-    expect((await confused.tool("agentx_admin_list_projects")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
+    await expect.poll(async () => (await confused.names()).includes("rovara_admin_health")).toBe(true);
+    expect((await confused.tool("rovara_admin_list_projects")).error).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 
   it("carries no planted secret in any admin result or log line (SC-004)", async () => {
@@ -146,23 +146,23 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     expect(registered.status).toBe(201);
 
     const mcp = await adminSignedInClient(harness);
-    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_turns")).toBe(true);
+    await expect.poll(async () => (await mcp.names()).includes("rovara_admin_turns")).toBe(true);
     const answers: Record<string, Awaited<ReturnType<typeof mcp.tool>>> = {};
-    for (const name of ADMIN_TOOLS) answers[name] = await mcp.tool(name, name === "agentx_admin_turns" ? { since: new Date(Date.now() - 3_600_000).toISOString() } : name === "agentx_admin_usage" ? { group_by: "requester" } : {});
+    for (const name of ADMIN_TOOLS) answers[name] = await mcp.tool(name, name === "rovara_admin_turns" ? { since: new Date(Date.now() - 3_600_000).toISOString() } : name === "rovara_admin_usage" ? { group_by: "requester" } : {});
     // Not vacuous: every tool answered, and each planted source came back (redacted).
     for (const name of ADMIN_TOOLS) expect(answers[name]?.isError, name).toBe(false);
-    const turnsAnswer = JSON.stringify(answers.agentx_admin_turns?.value);
+    const turnsAnswer = JSON.stringify(answers.rovara_admin_turns?.value);
     expect(turnsAnswer).toContain("EvPLANT00001");
     expect(turnsAnswer).toContain("[REDACTED]");
     const shown = (name: string) => JSON.stringify(answers[name]?.value);
-    expect(shown("agentx_admin_list_channels")).toContain("`deploys-[REDACTED]`");
-    expect(shown("agentx_admin_list_credentials")).toContain("agentx/connectors/[REDACTED]");
-    expect(shown("agentx_admin_list_projects")).toContain("https://github.com/example/[REDACTED].git");
-    expect(shown("agentx_admin_failed_tasks")).toContain("`Maya [REDACTED]` (developer)");
-    expect(shown("agentx_admin_failed_tasks")).toContain("RUNTIME_UNAVAILABLE: no capacity (token [REDACTED] [REDACTED])");
-    expect(shown("agentx_admin_health")).toContain("RUNTIME_UNAVAILABLE: no capacity (token [REDACTED] [REDACTED])");
-    expect(shown("agentx_admin_usage")).toContain("developer:Maya [REDACTED]");
-    expect(shown("agentx_admin_list_workspaces")).toContain("`Maya [REDACTED]`");
+    expect(shown("rovara_admin_list_channels")).toContain("`deploys-[REDACTED]`");
+    expect(shown("rovara_admin_list_credentials")).toContain("agentx/connectors/[REDACTED]");
+    expect(shown("rovara_admin_list_projects")).toContain("https://github.com/example/[REDACTED].git");
+    expect(shown("rovara_admin_failed_tasks")).toContain("`Maya [REDACTED]` (developer)");
+    expect(shown("rovara_admin_failed_tasks")).toContain("RUNTIME_UNAVAILABLE: no capacity (token [REDACTED] [REDACTED])");
+    expect(shown("rovara_admin_health")).toContain("RUNTIME_UNAVAILABLE: no capacity (token [REDACTED] [REDACTED])");
+    expect(shown("rovara_admin_usage")).toContain("developer:Maya [REDACTED]");
+    expect(shown("rovara_admin_list_workspaces")).toContain("`Maya [REDACTED]`");
     for (const secret of [...PLANTED, ADMIN_TOKEN, mcp.developerToken, REFRESH_TOKEN]) {
       expect(mcp.answers.join("\n")).not.toContain(secret);
       expect(mcp.stderr.join("")).not.toContain(secret);

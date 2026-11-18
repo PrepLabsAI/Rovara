@@ -149,5 +149,5 @@ export function notCounted(estimate: CostEstimate): string[] {
 export function budgetWhy(estimate: CostEstimate): string {
   const missing = notCounted(estimate);
   const left = missing.length === 0 ? "" : `, not counting ${missing.join(" and ")}, whose price is not on file`;
-  return `AgentX's estimate is about ${money(estimate.totalUsd)} a month${left}. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.`;
+  return `Rovara's estimate is about ${money(estimate.totalUsd)} a month${left}. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.`;
 }

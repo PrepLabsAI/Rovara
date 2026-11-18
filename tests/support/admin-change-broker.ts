@@ -77,7 +77,7 @@ export async function createAdminChangeBroker(options: {
       ...(options.connectorTypes === undefined ? {} : { connectorTypes: options.connectorTypes }),
       // A test's own `me` replaces the production default whole, so it names the lookup too.
       adminReads: { me: { issuer, fetch, slackUserByEmail } },
-      // A credential registry, so agentx_admin_register_credential can plan; its secret reads as nothing useful.
+      // A credential registry, so rovara_admin_register_credential can plan; its secret reads as nothing useful.
       connectorCredentials: { secrets: { read: async () => "{}" }, githubApp: { ref: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:github-app" } },
       adminChanges: { confirm: { elicitation: options.elicitation ?? true, slack: options.slack ?? true }, now: clock.now, metric: (outcome: string) => metrics.push(outcome) },
     },

@@ -1,4 +1,4 @@
-// Shared fakes for `agentx init` tests. Nothing here reaches AWS, GitHub or Slack.
+// Shared fakes for `rovara init` tests. Nothing here reaches AWS, GitHub or Slack.
 import { createHmac, generateKeyPairSync, randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,7 @@ import { fakeCloudFormation, SIGN_IN_PARAMETERS } from "./fake-cloudformation.js
 import { MemoryParameterStore } from "./memory-parameter-store.js";
 import { setupServices } from "./setup-fakes.js";
 
-/** A complete, valid set of `agentx init` answers, for tests that round-trip or size-check them
+/** A complete, valid set of `rovara init` answers, for tests that round-trip or size-check them
  * rather than exercising the prompts that collect them. */
 export function sampleAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers {
   return {
@@ -36,8 +36,8 @@ export function sampleAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers
     identity: { mode: "cognito" },
     models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     alert: { kind: "email", address: "ops@example.com" },
-    github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
-    slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
+    github: { account: "acme", accountType: "organization", appName: "Rovara acme (staging)" },
+    slack: { appName: "Rovara acme (staging)", appPostedMessages: "accept" },
     createdAt: "2026-09-27T00:00:00.000Z",
     ...overrides,
   };
@@ -134,11 +134,11 @@ export const TEST_CLI_INVOCATION: CliInvocation = { published: false, cliPath: "
 /**
  * Owner decision 2026-10-02 (#218, #235 follow-up): a published install, run as the bare, directly-
  * invoked `agentx` command (not through npx), for tests of a live message that shows the command
- * the way the person actually ran AgentX.
+ * the way the person actually ran Rovara.
  */
 export const INSTALLED_CLI_INVOCATION: CliInvocation = {
   published: true, version: "1.4.0", cliPath: "/opt/node_modules/@preplabsai/rovara-code/bin/agentx.mjs", invokedViaNpx: false,
-  packageName: "@preplabsai/rovara-code", commandName: "agentx",
+  packageName: "@preplabsai/rovara-code", commandName: "rovara",
 };
 
 /** The same install, but this run of it was through npx. */
@@ -168,7 +168,7 @@ export function memoryInitSecrets(initial: Record<string, string> = {}, options:
   };
 }
 
-/** A parameter store where `holder` already holds env's lock for `agentx init`, as the step runner
+/** A parameter store where `holder` already holds env's lock for `rovara init`, as the step runner
  * leaves it while steps run. Seeded directly, so no store call is recorded for it. */
 export function storeWithInitLock(env = "staging", holder = HOLDER): MemoryParameterStore {
   const store = new MemoryParameterStore();

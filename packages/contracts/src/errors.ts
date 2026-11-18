@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CLI_COMMAND_NAME } from "./cli-distribution.js";
 
 export const AgentXErrorCodeSchema = z.enum([
   "CONFIG_INVALID",
@@ -198,7 +199,7 @@ export function agentXError(code: AgentXErrorCode, message: string): AgentXError
 export const GITHUB_DISCONNECTED_MESSAGE = "GitHub disconnected. Reconnect it in Company settings, Connections.";
 
 /** What a refusal to reach a repository through the org's GitHub connection says (GITHUB_NOT_CONNECTED, Plan 2). */
-export const githubNotConnectedMessage = (fullName: string) => `Rovara can't reach ${fullName} through your organization's GitHub connection. Connect it with: agentx github connect`;
+export const githubNotConnectedMessage = (fullName: string) => `Rovara can't reach ${fullName} through your organization's GitHub connection. Connect it with: ${CLI_COMMAND_NAME} github connect`;
 
 // ---- chains (Plan 4): the exact texts of the chain error codes. Chain, step and agent names are the caller's own, never another org's.
 

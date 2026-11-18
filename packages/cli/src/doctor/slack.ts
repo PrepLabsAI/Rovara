@@ -1,7 +1,7 @@
 // FR-050: the Slack token, the request URLs, and the bot's membership of the bound channel. Slack's
 // own "Verified" mark cannot be read without an app configuration token (15d1 decision), so the URLs
 // get the same signed self-probe agentx init sends.
-import { AgentXError, environmentStackName } from "@agentx/contracts";
+import { AgentXError, environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { probeSlackUrls, readSlackBotToken, replaceSlackBotTokenStep, slackSecretName, SlackSignatureRefusedError } from "../init/slack-app.js";
 import { SlackRateLimitedError } from "../setup/channel-add.js";
 import { plainMessage } from "../output.js";
@@ -16,12 +16,12 @@ const safeCode = (code: string | undefined) => (code !== undefined && /^[a-z0-9_
  * missing scope and for a workspace too large to search, RUNTIME_UNAVAILABLE for Slack's other
  * refusals and HTTP errors, and a non-AgentX error when Slack cannot be reached at all. */
 function channelLookupFix(error: unknown, reinstall: string, project: { name: string; channelId?: string | undefined; teamId?: string | undefined } | undefined): string {
-  const network = "check this computer's network access to slack.com, then run agentx doctor again";
-  if (error instanceof SlackRateLimitedError) return "Slack is rate limiting the bot; run agentx doctor again in a minute";
+  const network = `check this computer's network access to slack.com, then run ${CLI_COMMAND_NAME} doctor again`;
+  if (error instanceof SlackRateLimitedError) return `Slack is rate limiting the bot; run ${CLI_COMMAND_NAME} doctor again in a minute`;
   if (!(error instanceof AgentXError)) return network;
   const message = plainMessage(error);
   if (message.includes("refused: missing_scope")) return `${reinstall} (its manifest grants channels:read, groups:read and channels:join)`;
-  if (error.code === "CONFIG_INVALID") return `bind it by ID: agentx admin slack bind --team ${project?.teamId ?? "<team-id>"} --channel ${project?.channelId ?? "<channel-id>"} --project ${project?.name ?? "<name>"}`;
+  if (error.code === "CONFIG_INVALID") return `bind it by ID: ${CLI_COMMAND_NAME} admin slack bind --team ${project?.teamId ?? "<team-id>"} --channel ${project?.channelId ?? "<channel-id>"} --project ${project?.name ?? "<name>"}`;
   if (message.includes(" refused: ")) return `Slack refused the bot's request (its error code is above); ${reinstall}`;
   return network;
 }
@@ -47,13 +47,13 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
   try {
     auth = await services.slackApi.authTest(token);
   } catch {
-    return [check("slack", "bot token", "fail", "could not reach Slack to check the bot token", "check this computer's network access to slack.com, then run agentx doctor again")];
+    return [check("slack", "bot token", "fail", "could not reach Slack to check the bot token", `check this computer's network access to slack.com, then run ${CLI_COMMAND_NAME} doctor again`)];
   }
   if (!auth.ok) return [check("slack", "bot token", "fail", `Slack refused the bot token (${safeCode(auth.error)})`, reinstall)];
   if (auth.bot_id === undefined) return [check("slack", "bot token", "fail", "the stored token is not a bot token", reinstall)];
   const recordedTeam = progress?.slack?.teamId;
   if (recordedTeam !== undefined && auth.team_id !== recordedTeam) {
-    return [check("slack", "bot token", "fail", `the bot token is for workspace ${auth.team_id ?? "unknown"}, but agentx init set up ${recordedTeam}`, `store the bot token of the Slack app installed in ${recordedTeam} in ${slackSecretName(env)}`)];
+    return [check("slack", "bot token", "fail", `the bot token is for workspace ${auth.team_id ?? "unknown"}, but ${CLI_COMMAND_NAME} init set up ${recordedTeam}`, `store the bot token of the Slack app installed in ${recordedTeam} in ${slackSecretName(env)}`)];
   }
   const checks = [check("slack", "bot token", "ok", `bot ${auth.user ?? auth.user_id ?? "user"} in ${auth.team ?? auth.team_id ?? "the workspace"}`)];
 
@@ -69,16 +69,16 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
     } catch (error) {
       if (error instanceof SlackSignatureRefusedError) {
         // init's words assume a secret it just stored; doctor's secret is not new.
-        checks.push(check("slack", "request URLs", "fail", `${error.url} refuses requests signed with the signing secret stored in ${slackSecretName(env)}`, `check that ${slackSecretName(env)} holds the Slack app's Signing Secret (not the Client Secret) and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx doctor again`));
+        checks.push(check("slack", "request URLs", "fail", `${error.url} refuses requests signed with the signing secret stored in ${slackSecretName(env)}`, `check that ${slackSecretName(env)} holds the Slack app's Signing Secret (not the Client Secret) and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run ${CLI_COMMAND_NAME} doctor again`));
       } else {
-        checks.push(check("slack", "request URLs", "fail", plainMessage(error).replace("then run agentx init again", "then run agentx doctor again"), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
+        checks.push(check("slack", "request URLs", "fail", plainMessage(error).replace(`then run ${CLI_COMMAND_NAME} init again`, `then run ${CLI_COMMAND_NAME} doctor again`), `check that the Slack app's Request URLs are ${outputs.SlackEventsUrl} and ${outputs.SlackInteractivityUrl}, and the control plane's SlackIngress logs`));
       }
     }
   }
 
   const channel = progress?.project?.channelName;
   if (channel === undefined) {
-    checks.push(check("slack", "bound channels", "skip", "agentx init recorded no bound channel; channels bound later are not listed until the control plane can report them"));
+    checks.push(check("slack", "bound channels", "skip", `${CLI_COMMAND_NAME} init recorded no bound channel; channels bound later are not listed until the control plane can report them`));
     return checks;
   }
   const bot = auth.user ?? "the bot";
@@ -89,7 +89,7 @@ export async function slackChecks(context: DoctorContext): Promise<DoctorCheck[]
     checks.push(check("slack", `#${channel}`, "fail", plainMessage(error), channelLookupFix(error, reinstall, progress?.project)));
     return checks;
   }
-  if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with agentx --env ${env} channel add --project ${progress?.project?.name ?? "<project>"}`));
+  if (found === undefined) checks.push(check("slack", `#${channel}`, "fail", "the channel no longer exists, or it is private and the bot is not in it", `in #${channel}, type /invite @${bot}, or bind another channel with ${CLI_COMMAND_NAME} --env ${env} channel add --project ${progress?.project?.name ?? "<project>"}`));
   else if (!found.isMember) checks.push(check("slack", `#${channel}`, "fail", "the bot is not a member", `in #${channel}, type /invite @${bot}`));
   else checks.push(check("slack", `#${channel}`, "ok", "the bot is a member"));
   return checks;

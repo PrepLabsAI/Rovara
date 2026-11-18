@@ -1,4 +1,4 @@
-import { McpConnectorSchema, type CredentialType, type McpConnectorConfig } from "@agentx/contracts";
+import { McpConnectorSchema, type CredentialType, type McpConnectorConfig, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { connectMcp, genericScopes, mcpConnector, type ConnectorDefinition, type CredentialProvider, type GenericScope, type PresentationApproval, type ToolApproval } from "@agentx/gateway";
 import type { z } from "zod";
 import { connectorLedgerKeys } from "./connector-ledger.js";
@@ -85,7 +85,7 @@ export function presetConnectorType<Config extends PresetConfig, Scope>(preset: 
         if (type === "static-secret" || record === undefined) return undefined;
         // OAuth: the token endpoint is the type's own, or for a generic connector the credential's.
         if (described.tokenEndpoint === undefined && record.tokenUrl === undefined) {
-          return `credential ${ref} has no token URL; sign in with agentx admin credential authorize --ref ${ref} --endpoint ${described.endpoint.href}, or register it with --token-url`;
+          return `credential ${ref} has no token URL; sign in with ${CLI_COMMAND_NAME} admin credential authorize --ref ${ref} --endpoint ${described.endpoint.href}, or register it with --token-url`;
         }
         return tokenUrlProblem(ref, record.tokenUrl, described.tokenEndpoint);
       };

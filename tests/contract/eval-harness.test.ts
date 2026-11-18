@@ -32,7 +32,7 @@ function expected(evalCase: EvalCase) {
 function liveReport(overrides: Partial<EvalReport> = {}): EvalReport {
   return {
     provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6", presentation: "new", repeat: 3, generatedAt: "2026-09-25T00:00:00.000Z",
-    cases: [{ id: "files-not-pr", passed: true, runs: [{ tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null }] }],
+    cases: [{ id: "files-not-pr", passed: true, runs: [{ tool: "rovara_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null }] }],
     summary: { cases: 1, passed: 1, errors: 0, toolAccuracy: 1, refusalCases: 0, refusalAccuracy: 1 },
     ...overrides,
   };
@@ -92,7 +92,7 @@ describe("evaluation cases", () => {
     expect(project.connectors[0]?.approvals.map((approval) => approval.name)).toEqual(["list_issues", "issue_read", "issue_write", "add_issue_comment"]);
     const presented = newPresentation(project, new Map([["github", await loadCatalog("github")]]));
     expect(presented.toolNames).toEqual([
-      "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request",
+      "rovara_submit_task", "rovara_create_pull_request", "rovara_follow_up", "rovara_manage_pull_request",
       "github__list_issues", "github__issue_read", "github__issue_write", "github__add_issue_comment",
     ]);
     expect(presented.catalogs[0]?.tools[2]?.description).toMatch(/^Create or update a GitHub issue\. Not for pull requests/);
@@ -122,7 +122,7 @@ describe("evaluation cases", () => {
     const presented = newPresentation(project, new Map());
     expect(presented.connectors).toEqual([{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: false }]);
     expect(presented.catalogs).toEqual([]);
-    expect(presented.toolNames).toEqual(["agentx_submit_task", "agentx_create_pull_request", "agentx_task_status", "agentx_task_result", "agentx_follow_up", "agentx_manage_pull_request"]);
+    expect(presented.toolNames).toEqual(["rovara_submit_task", "rovara_create_pull_request", "rovara_task_status", "rovara_task_result", "rovara_follow_up", "rovara_manage_pull_request"]);
   });
 });
 
@@ -138,12 +138,12 @@ describe("evaluation harness, offline", () => {
   it("fails a case on a wrong tool, wrong arguments or a missing refusal, and counts regressions", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const cases = (await loadCases()).filter((entry) => ["files-not-pr", "jira-not-connected", "append-pr"].includes(entry.id));
-    const wrong = oracle(faux, (evalCase) => evalCase.id === "files-not-pr" ? { tool: "agentx_create_pull_request", args: { repository: "payments-api", title: "x" } }
-      : evalCase.id === "append-pr" ? { tool: "agentx_manage_pull_request", args: { repository: "payments-api", pullRequestNumber: 12, action: "sync" } }
+    const wrong = oracle(faux, (evalCase) => evalCase.id === "files-not-pr" ? { tool: "rovara_create_pull_request", args: { repository: "payments-api", title: "x" } }
+      : evalCase.id === "append-pr" ? { tool: "rovara_manage_pull_request", args: { repository: "payments-api", pullRequestNumber: 12, action: "sync" } }
         : { text: "Jira is a tool I lack." });
     const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 2, beforeRun: wrong });
     expect(report.cases.map((result) => [result.id, result.passed])).toEqual([["files-not-pr", false], ["jira-not-connected", false], ["append-pr", false]]);
-    expect(report.cases[2]?.runs[0]).toMatchObject({ tool: "agentx_manage_pull_request", toolOk: true, argsOk: false });
+    expect(report.cases[2]?.runs[0]).toMatchObject({ tool: "rovara_manage_pull_request", toolOk: true, argsOk: false });
     expect(report.cases[0]?.runs).toHaveLength(2);
     const baseline: EvalReport = { ...report, cases: report.cases.map((result) => ({ ...result, passed: true })) };
     expect(compareWithBaseline(report, baseline)).toEqual({ regressions: ["files-not-pr", "jira-not-connected", "append-pr"], failed: true });
@@ -290,7 +290,7 @@ describe("evaluation harness, offline", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const directory = await temporaryDirectory();
     try {
-      await writeFile(join(directory, "broken.jsonl"), `${JSON.stringify({ id: "broken-fixture", project: "fixtures/missing-project.yaml", prompt: "list files", expect: { tool: "agentx_submit_task" } })}\n`);
+      await writeFile(join(directory, "broken.jsonl"), `${JSON.stringify({ id: "broken-fixture", project: "fixtures/missing-project.yaml", prompt: "list files", expect: { tool: "rovara_submit_task" } })}\n`);
       const broken = await runEvaluation(await loadCases(directory), { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: oracle(faux, expected) });
       expect(broken.cases[0]?.runs[0]?.timedOut).toBeUndefined();
       expect(broken.summary).toMatchObject({ errors: 1 });
@@ -317,12 +317,12 @@ describe("evaluation harness, offline", () => {
     expect(legacy.systemPrompt).not.toContain("What this channel can do:");
     const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "legacy", repeat: 1,
       beforeRun: oracle(faux, () => ({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } })) });
-    expect(report.cases[0]).toMatchObject({ passed: true, runs: [{ tool: "agentx_manage_pull_request", argsOk: true }] });
+    expect(report.cases[0]).toMatchObject({ passed: true, runs: [{ tool: "rovara_manage_pull_request", argsOk: true }] });
     const issueTool = legacy.legacyName("github__list_issues", { target: "payments-web" });
     expect(issueTool).toMatch(/^github_list_issues_[a-f0-9]{12}$/);
     expect(legacy.canonical(issueTool, { state: "OPEN" })).toEqual({ tool: "github__list_issues", args: { state: "OPEN", target: "payments-web" } });
     expect(legacy.legacyCall("github__list_issues", { target: "payments-web", state: "OPEN" })).toEqual({ tool: issueTool, args: { state: "OPEN" } });
-    expect(legacy.legacyCall("agentx_manage_pull_request", { repository: "payments-api", pullRequestNumber: 12, action: "append" }))
+    expect(legacy.legacyCall("rovara_manage_pull_request", { repository: "payments-api", pullRequestNumber: 12, action: "append" }))
       .toEqual({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } });
   }, 60_000);
 
@@ -364,7 +364,7 @@ describe("evaluation harness, offline", () => {
     const files = cases.find((entry) => entry.id === "files-not-pr")!;
     expect(caseHash(files)).toMatch(/^[a-f0-9]{64}$/);
     expect(caseHash({ ...files, note: "a note changes nothing", source: "channel" })).toBe(caseHash(files));
-    expect(caseHash({ ...files, expect: { tool: "agentx_submit_task", argsSubset: {} } })).not.toBe(caseHash(files));
+    expect(caseHash({ ...files, expect: { tool: "rovara_submit_task", argsSubset: {} } })).not.toBe(caseHash(files));
     expect(caseHash({ ...files, prompt: `${files.prompt}.` })).not.toBe(caseHash(files));
     expect(fresh.cases.map((result) => result.caseHash)).toEqual(cases.map(caseHash));
     expect(legacy.cases.map((result) => [result.id, result.caseHash])).toEqual([["files-not-pr", caseHash(files)]]);
@@ -379,9 +379,9 @@ describe("evaluation harness, offline", () => {
     const retired = oracle(faux, () => ({ tool: "agentx_append_pull_request", args: { repository: "payments-api", pullRequestNumber: 12 } }));
     const report = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1, beforeRun: retired });
     expect(report.cases[0]).toMatchObject({ passed: false, runs: [{ tool: "agentx_append_pull_request", offered: false, toolOk: false }] });
-    const legacyWithNewName = oracle(faux, () => ({ tool: "agentx_manage_pull_request", args: { repository: "payments-api", pullRequestNumber: 12, action: "append" } }));
+    const legacyWithNewName = oracle(faux, () => ({ tool: "rovara_manage_pull_request", args: { repository: "payments-api", pullRequestNumber: 12, action: "append" } }));
     const legacy = await runEvaluation(cases, { model: FAUX_MODEL, modelRuntime, presentation: "legacy", repeat: 1, beforeRun: legacyWithNewName });
-    expect(legacy.cases[0]).toMatchObject({ passed: false, runs: [{ tool: "agentx_manage_pull_request", offered: false, toolOk: false }] });
+    expect(legacy.cases[0]).toMatchObject({ passed: false, runs: [{ tool: "rovara_manage_pull_request", offered: false, toolOk: false }] });
   }, 60_000);
 
   it("keeps results and baselines per model and presentation", () => {
@@ -391,14 +391,14 @@ describe("evaluation harness, offline", () => {
 });
 
 function scored(id: string, run: Partial<EvalReport["cases"][number]["runs"][number]>): EvalReport["cases"][number] {
-  const full = { tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, ...run };
+  const full = { tool: "rovara_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null, ...run };
   return { id, caseHash: `${id}-definition`, passed: full.toolOk && full.argsOk && full.phraseOk !== false, runs: [full, full, full] };
 }
 
 function sc004Reports(): { fresh: EvalReport; legacy: EvalReport } {
   const refusal = { tool: null, phraseOk: true, refusalOk: true };
-  const freshCases = [scored("files", {}), scored("issues", { toolOk: false, tool: "agentx_submit_task" }), scored("refuse", refusal), scored("linear", { tool: "linear__list_issues" })];
-  const legacyCases = [scored("files", { toolOk: false, tool: "agentx_create_pull_request" }), scored("issues", { toolOk: false }), scored("refuse", refusal)];
+  const freshCases = [scored("files", {}), scored("issues", { toolOk: false, tool: "rovara_submit_task" }), scored("refuse", refusal), scored("linear", { tool: "linear__list_issues" })];
+  const legacyCases = [scored("files", { toolOk: false, tool: "rovara_create_pull_request" }), scored("issues", { toolOk: false }), scored("refuse", refusal)];
   return {
     fresh: liveReport({ cases: freshCases, summary: { cases: 4, passed: 3, errors: 0, toolAccuracy: 0.75, refusalCases: 1, refusalAccuracy: 1 } }),
     legacy: liveReport({ presentation: "legacy", cases: legacyCases, notApplicable: [{ id: "linear", reason: "needs connector linear (type linear), which the legacy presentation cannot offer" }],
@@ -564,7 +564,7 @@ describe("evaluation command, live safety", () => {
       const recovering = new Set<string>();
       for (const entry of all) if ((await loadProject(entry.project)).recoverableOperations.length > 0) recovering.add(entry.id);
       expect(recovering.size).toBeGreaterThan(0);
-      const inexpressible = all.filter((entry) => recovering.has(entry.id) || [entry.expect.tool].flat().some((tool) => tool !== null && !/^(agentx_|github__)/.test(tool))).map((entry) => entry.id);
+      const inexpressible = all.filter((entry) => recovering.has(entry.id) || [entry.expect.tool].flat().some((tool) => tool !== null && !/^(rovara_|github__)/.test(tool))).map((entry) => entry.id);
       expect(inexpressible.length).toBeGreaterThan(0);
       expect(legacy.report.notApplicable?.map((entry) => entry.id)).toEqual(inexpressible);
       expect(legacy.report.summary.cases + inexpressible.length).toBe(all.length);

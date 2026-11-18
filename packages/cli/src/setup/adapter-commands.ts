@@ -88,7 +88,7 @@ const describe = (adapter: ChannelAdapterRecord) =>
   `${adapter.channel}  ${adapter.callbackUrl}  projects: ${adapter.projects.join(", ")}  step-up: ${adapter.stepUp.length === 0 ? "none" : adapter.stepUp.join(", ")}`;
 
 export function registerAdapterCommands(program: Command, context: SetupCommandContext): void {
-  const adapter = program.command("adapter").description("channel adapters (WhatsApp and others) that reach AgentX through the channel API");
+  const adapter = program.command("adapter").description("channel adapters (WhatsApp and others) that reach Rovara through the channel API");
   const withRegion = (command: Command) => command.option("--region <region>", "AWS region of the environment; defaults to your AWS configuration");
 
   withRegion(adapter.command("add <channel>")

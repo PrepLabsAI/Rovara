@@ -44,10 +44,10 @@ const OTHER_MODEL = { value: "other", label: "Another Bedrock model id" };
 
 const ENGINE_CHOICES = [
   { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
-  { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
+  { value: "cdk", label: "cdk: deploy from Rovara's CDK code at the release tag" },
 ];
 const IDENTITY_CHOICES = [
-  { value: "cognito", label: "Create a Cognito user pool for AgentX (recommended)" },
+  { value: "cognito", label: "Create a Cognito user pool for Rovara (recommended)" },
   { value: "oidc", label: "Use your own OIDC provider" },
 ];
 const SIGNIN_CHOICES = [
@@ -115,16 +115,16 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   // with --identity oidc and --no-alerts or --alert-webhook-* asks no email, as before phase 2).
   const noEmailNeeded = flags.identity === "oidc" && (flags.alerts === false || flags.alertWebhook !== undefined) ? true : undefined;
   unless(input.adminEmail ?? flags.alertEmail ?? noEmailNeeded, {
-    name: SETTINGS_FIELD.email, question: "Your email, for your AgentX admin user and alerts", flag: "--admin-email", validate: emailProblem,
-    help: { why: "AgentX uses it for your admin sign-in and, by default, for alerts." },
+    name: SETTINGS_FIELD.email, question: "Your email, for your Rovara admin user and alerts", flag: "--admin-email", validate: emailProblem,
+    help: { why: "Rovara uses it for your admin sign-in and, by default, for alerts." },
   });
-  unless(flags.githubAccount, { name: SETTINGS_FIELD.githubAccount, question: "GitHub organization or user that will own the AgentX GitHub App", flag: "--github-account", validate: loginProblem });
+  unless(flags.githubAccount, { name: SETTINGS_FIELD.githubAccount, question: "GitHub organization or user that will own the Rovara GitHub App", flag: "--github-account", validate: loginProblem });
   unless(fixed, { name: SETTINGS_FIELD.installName, question: "Install name", flag: "--env", defaultValue: input.env, validate: installNameProblem });
   unless(flags.githubAppName, { name: SETTINGS_FIELD.appName, question: "App name for GitHub and Slack (unique on GitHub)", flag: "--github-app-name", defaultValue: "", validate: appNameProblem });
 
   unless(fixed ?? flags.engine, advanced({ name: SETTINGS_FIELD.engine, question: "Deploy engine", flag: "--engine", defaultValue: "templates", choices: ENGINE_CHOICES }));
   unless(fixed ?? flags.identity, advanced({ name: SETTINGS_FIELD.identity, group: SIGN_IN_GROUP, question: "Sign-in", flag: "--identity", defaultValue: "cognito", choices: IDENTITY_CHOICES }));
-  unless(input.signinMethods, advanced({ name: SETTINGS_FIELD.signin, group: SIGN_IN_GROUP, question: "How will developers sign in to AgentX from their AI tools?", flag: "--signin", defaultValue: "slack", choices: SIGNIN_CHOICES }));
+  unless(input.signinMethods, advanced({ name: SETTINGS_FIELD.signin, group: SIGN_IN_GROUP, question: "How will developers sign in to Rovara from their AI tools?", flag: "--signin", defaultValue: "slack", choices: SIGNIN_CHOICES }));
   const providerPinned = [flags.modelProvider, flags.orchestratorProvider, flags.classifierProvider, flags.workerProvider, flags.orchestratorModel, flags.classifierModel, flags.workerModel]
     .some((value) => value !== undefined) ? true : undefined;
   unless(fixed ?? providerPinned, advanced({ name: SETTINGS_FIELD.modelProvider, question: "Model provider", flag: "--model-provider", defaultValue: "amazon-bedrock", choices: PROVIDER_CHOICES }));
@@ -134,8 +134,8 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
     unless(fixed ?? flags.classifierModel ?? flags.classifierProvider, advanced({ name: SETTINGS_FIELD.classifierModel, question: "Action-gate classifier model", flag: "--classifier-model", defaultValue: DEFAULT.classifier, choices: [...CLASSIFIER_MODEL_CHOICES, OTHER_MODEL] }));
     unless(fixed ?? flags.workerModel ?? flags.workerProvider, advanced({ name: SETTINGS_FIELD.workerModel, question: "Worker model", flag: "--worker-model", defaultValue: DEFAULT.worker, choices: [...WORKER_MODEL_CHOICES, OTHER_MODEL] }));
   }
-  unless(fixed ?? flags.permissionBoundary, advanced({ name: SETTINGS_FIELD.permissionBoundary, question: "Permission boundary policy ARN (Enter for AgentX's default boundary)", flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN") }));
-  unless(fixed ?? flags.operatorPrincipal, advanced({ name: SETTINGS_FIELD.operatorPrincipal, question: "IAM principal allowed to assume the AgentX operator role (Enter for this account)", flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN") }));
+  unless(fixed ?? flags.permissionBoundary, advanced({ name: SETTINGS_FIELD.permissionBoundary, question: "Permission boundary policy ARN (Enter for Rovara's default boundary)", flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN") }));
+  unless(fixed ?? flags.operatorPrincipal, advanced({ name: SETTINGS_FIELD.operatorPrincipal, question: "IAM principal allowed to assume the Rovara operator role (Enter for this account)", flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN") }));
   // FR-023: empty is the estimate plus 20%; the amount for the recommended models is said in the
   // terminal's question (the terminal shows no hint) and in the page's hint.
   const suggested = suggestedBudgetUsd(estimateMonthlyCost(DEFAULT));
@@ -145,7 +145,7 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   }));
   unless(flags.budgetScope, advanced({ name: SETTINGS_FIELD.budgetScope, question: "Which costs should the budget count?", flag: "--budget-scope", defaultValue: "account", choices: BUDGET_SCOPE_CHOICES }));
   unless(flags.slackAppPostedMessages, advanced({ name: SETTINGS_FIELD.appPostedMessages, question: "Answer mentions people post through other apps with their own Slack token?", flag: "--slack-app-posted-messages", defaultValue: "accept", choices: POSTED_CHOICES }));
-  unless(alertAnswered, advanced({ name: SETTINGS_FIELD.alertKind, question: "Where should AgentX send alerts?", flag: ALERT_FLAG, defaultValue: "email", choices: ALERT_CHOICES }));
+  unless(alertAnswered, advanced({ name: SETTINGS_FIELD.alertKind, question: "Where should Rovara send alerts?", flag: ALERT_FLAG, defaultValue: "email", choices: ALERT_CHOICES }));
   unless(alertAnswered, advanced({ name: SETTINGS_FIELD.alertEmail, question: "Alert email address", flag: ALERT_FLAG, defaultValue: "", validate: orEmpty(emailProblem), help: { hint: "Optional. Leave empty to use your email." } }));
   return fields;
 }
@@ -154,7 +154,7 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
 export function recommendedSummary(input: { estimateUsd: number; suggestedBudgetUsd: number }): string[] {
   return [
     `Models: ${modelName(DEFAULT.orchestrator)} on Amazon Bedrock for the main and coding models, ${modelName(DEFAULT.classifier)} for the safety check.`,
-    "Sign-in: AgentX's own sign-in for you, Sign in with Slack for developers.",
+    "Sign-in: Rovara's own sign-in for you, Sign in with Slack for developers.",
     `Budget alert: $${input.suggestedBudgetUsd} a month for the whole account (the estimate is about ${money(input.estimateUsd)}).`,
     "Alerts go to: your email.",
   ];

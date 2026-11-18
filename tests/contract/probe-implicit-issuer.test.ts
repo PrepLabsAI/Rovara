@@ -55,7 +55,7 @@ it("PROBE inverted: implicit refresh obeys install since despite a looser stray 
   const signed = await h.exchange(h.code); expect(signed.status).toBe(200);
   h.deps.config.oidc!.since = h.now() / 1000 + 10;
   expect(await h.refresh(signed.body.refresh_token as string)).toEqual({ status: 400, body: {
-    error: "invalid_grant", error_description: "your sign-in ended when Okta was turned off; sign in again with agentx login",
+    error: "invalid_grant", error_description: "your sign-in ended when Okta was turned off; sign in again with rovara login",
   } });
 });
 

@@ -2,7 +2,7 @@
 // browser sign-in (PKCE on 127.0.0.1:8765). Either way the admin route must accept it, so a later
 // step never fails on a bare 403. Your own OIDC provider's token must also carry the admin claim
 // (FR-021); the control plane is what verifies it, this only explains a refusal.
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { ADMIN_LISTENER_MESSAGES, tokenStoreKey } from "../auth.js";
 import { listCredentials } from "../admin/credential.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
@@ -30,7 +30,7 @@ export function tokenClaimValues(accessToken: string, claim: string): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
-const NOT_ADMIN = "you signed in as someone who is not an AgentX administrator; sign out of the AgentX sign-in page in your browser, then run agentx init again and sign in as the admin user";
+const NOT_ADMIN = `you signed in as someone who is not a Rovara administrator; sign out of the Rovara sign-in page in your browser, then run ${CLI_COMMAND_NAME} init again and sign in as the admin user`;
 /** The first Cognito sign-in waits for the temporary-password email and a new password. */
 const SIGN_IN_TIMEOUT_MS = 600_000;
 
@@ -48,7 +48,7 @@ export async function openAdminSession(input: {
   const signIn = async (): Promise<string> => {
     input.write(openBrowser === undefined
       ? "Open this address in your browser and sign in as the admin user:"
-      : "A browser opens the AgentX sign-in page. Sign in as the admin user; if no browser opens, open the address below.");
+      : "A browser opens the Rovara sign-in page. Sign in as the admin user; if no browser opens, open the address below.");
     try {
       // Always pass openBrowser, so loginWithPkce never falls back to the system browser: with
       // --no-browser the address is printed and nothing is opened (F12).
@@ -62,7 +62,7 @@ export async function openAdminSession(input: {
     } catch (error) {
       // Not AUTH_REQUIRED, which init follows with advice to refresh the AWS session.
       if (error instanceof AgentXError && error.code === "AUTH_REQUIRED" && error.message === `AUTH_REQUIRED: ${ADMIN_LISTENER_MESSAGES.timedOut}`) {
-        throw agentXError("OPERATION_INTERRUPTED", `the AgentX sign-in did not finish within ${SIGN_IN_TIMEOUT_MS / 60_000} minutes; run agentx init again and finish signing in as the admin user in the browser`);
+        throw agentXError("OPERATION_INTERRUPTED", `the Rovara sign-in did not finish within ${SIGN_IN_TIMEOUT_MS / 60_000} minutes; run ${CLI_COMMAND_NAME} init again and finish signing in as the admin user in the browser`);
       }
       throw error;
     }
@@ -74,7 +74,7 @@ export async function openAdminSession(input: {
     if (adminClaim !== undefined) {
       const values = tokenClaimValues(accessToken, adminClaim.claim);
       if (!values.some((value) => adminClaim.values.includes(value))) {
-        return agentXError("FORBIDDEN", `your sign-in token's "${adminClaim.claim}" claim has none of ${adminClaim.values.join(", ")} (it has ${values.join(", ") || "no values"}); add yourself to one of them in your identity provider, then run agentx init again`);
+        return agentXError("FORBIDDEN", `your sign-in token's "${adminClaim.claim}" claim has none of ${adminClaim.values.join(", ")} (it has ${values.join(", ") || "no values"}); add yourself to one of them in your identity provider, then run ${CLI_COMMAND_NAME} init again`);
       }
     }
     try {

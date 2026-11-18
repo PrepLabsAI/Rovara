@@ -1,6 +1,6 @@
 // A live check against the real Asana MCP server (https://mcp.asana.com/v2/mcp) and token
 // endpoint, skipped unless AGENTX_LIVE_ASANA_CLIENT_ID is set. The bot user signs in once in a
-// browser through the real `agentx admin credential authorize` code (secrets held in memory, the
+// browser through the real `rovara admin credential authorize` code (secrets held in memory, the
 // control plane served in process). Then the broker from this branch registers the project,
 // searches, creates a task, reads it, comments on it, refuses a task outside the project, refreshes
 // headlessly from a second broker, and reports a revoked refresh token as not connected.
@@ -140,7 +140,7 @@ describe.skipIf(!CLIENT_ID)("asana connector, live check against the real projec
     // Step 4: create a task in the project. name and notes are the only keys set, both allowlisted
     // in ASANA_CREATE_TASK_ITEM_KEYS (packages/gateway/src/asana.ts); the project itself comes from
     // the connector's binder (default_project), never a project_id passed here.
-    const created = await run(first.handler, "create_tasks", { tasks: [{ name: `AgentX live check ${new Date().toISOString()}`, notes: "Created by the AgentX phase 7 live check." }] });
+    const created = await run(first.handler, "create_tasks", { tasks: [{ name: `Rovara live check ${new Date().toISOString()}`, notes: "Created by the Rovara phase 7 live check." }] });
     expect(created.status).toBe("SUCCEEDED");
     const taskGid = /"gid"\s*:\s*"(\d+)"/.exec(created.text)?.[1];
     expect(taskGid).toBeDefined();
@@ -185,7 +185,7 @@ describe.skipIf(!CLIENT_ID)("asana connector, live check against the real projec
     const revoked = await call(second.handler, { method: "POST", path: "/v1/admin/projects", user: admin, body: registrationBody(2, "asana-revoked", PROJECT) });
     const revokedPreflight = revoked.body.preflight as { connectors: Array<{ status: string; problem?: string }> };
     expect(revokedPreflight.connectors[0]).toMatchObject({ status: "not_connected" });
-    expect(revokedPreflight.connectors[0]!.problem).toContain("agentx admin credential authorize --ref asana-revoked");
+    expect(revokedPreflight.connectors[0]!.problem).toContain("rovara admin credential authorize --ref asana-revoked");
     evidence(`step 9 revoked sign-in ${revokedPreflight.connectors[0]!.status}`);
 
     for (const line of printed) {

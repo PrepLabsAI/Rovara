@@ -132,7 +132,7 @@ export type StartIdentityLinkAppResponse = z.infer<typeof StartIdentityLinkAppRe
 /**
  * F6: a non-strict copy of `DeveloperTaskPolicySchema` (`project.ts`), used only to parse a
  * project's task policy inside this response. A strict schema embedded here would make an old MCP
- * server fail the whole `projects()` response (`whoami`, `agentx_list_projects`) as soon as a
+ * server fail the whole `projects()` response (`whoami`, `rovara_list_projects`) as soon as a
  * newer control plane added one field to the policy, at any nesting level (including inside
  * `shareMode`). The field list stays defined once, in Task 1's schema.
  */

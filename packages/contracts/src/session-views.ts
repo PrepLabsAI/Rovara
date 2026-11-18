@@ -112,11 +112,11 @@ export const SessionResponseReaderSchema = forwardReader(SessionResponseSchema);
  * ended without closing the task and only a NEW request id starts it again (the old id keeps answering with the old, ended check).
  */
 export const CLOSE_MESSAGES = {
-  checking: "AgentX is checking the task's workspace for unpublished work before closing it; check back with agentx_get_task",
-  computePending: "the workspace has no unpublished work, but its compute is not removed yet; try agentx_close_task again shortly",
-  discardPending: "AgentX recorded your request to discard unpublished work, but could not finish releasing the workspace; try agentx_close_task again shortly",
-  checkFailed: "the check for unpublished work did not finish; try agentx_close_task again with a new request_id",
-  stillOpen: "the task is still open; try agentx_close_task again with a new request_id",
+  checking: "Rovara is checking the task's workspace for unpublished work before closing it; check back with rovara_get_task",
+  computePending: "the workspace has no unpublished work, but its compute is not removed yet; try rovara_close_task again shortly",
+  discardPending: "Rovara recorded your request to discard unpublished work, but could not finish releasing the workspace; try rovara_close_task again shortly",
+  checkFailed: "the check for unpublished work did not finish; try rovara_close_task again with a new request_id",
+  stillOpen: "the task is still open; try rovara_close_task again with a new request_id",
 } as const;
 
 /**

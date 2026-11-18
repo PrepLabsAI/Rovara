@@ -3,7 +3,7 @@
 // environment, and safe to re-run: the inventory of retained resources is saved in SSM before any
 // stack is deleted, and the settings and lock are deleted last.
 import { access, rm } from "node:fs/promises";
-import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart } from "@agentx/contracts";
+import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { tokenStoreKey } from "../auth.js";
 import { forgetDeveloperSignIn } from "../developer/config.js";
 import { plainMessage } from "../output.js";
@@ -58,20 +58,20 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   try {
     settings = await readEnvironmentSettings(store, env);
   } catch (error) {
-    throw agentXError("CONFIG_INVALID", `${settingsParameterName(env)} cannot be read (${error instanceof Error ? error.message : String(error)}), so agentx destroy cannot tell whether ${env} is the older production deployment; nothing was removed. Fix that parameter, or delete it if you are sure ${env} is not that deployment, then run agentx destroy again`);
+    throw agentXError("CONFIG_INVALID", `${settingsParameterName(env)} cannot be read (${error instanceof Error ? error.message : String(error)}), so ${CLI_COMMAND_NAME} destroy cannot tell whether ${env} is the older production deployment; nothing was removed. Fix that parameter, or delete it if you are sure ${env} is not that deployment, then run ${CLI_COMMAND_NAME} destroy again`);
   }
-  const legacyRefusal = "agentx destroy never removes the legacy deployment (fixed stack names); tear it down by hand if you mean to";
+  const legacyRefusal = `${CLI_COMMAND_NAME} destroy never removes the legacy deployment (fixed stack names); tear it down by hand if you mean to`;
   if (settings?.naming === "legacy") throw agentXError("CONFIG_INVALID", legacyRefusal);
   // Every client is built for deps.region; an environment installed elsewhere is not in them.
   if (settings !== undefined && settings.region !== deps.region) {
-    throw agentXError("CONFIG_INVALID", `environment ${env} is installed in ${settings.region}, not ${deps.region}; run agentx --env ${env} destroy --region ${settings.region}`);
+    throw agentXError("CONFIG_INVALID", `environment ${env} is installed in ${settings.region}, not ${deps.region}; run ${CLI_COMMAND_NAME} --env ${env} destroy --region ${settings.region}`);
   }
   // SSM is regional: in the wrong region the settings simply read as absent. This computer's cache
   // records the environment's endpoints, which name its region.
   if (settings === undefined) {
     const cachedRegion = await cachedEnvironmentRegion(deps.home, env);
     if (cachedRegion !== undefined && cachedRegion !== deps.region) {
-      throw agentXError("CONFIG_INVALID", `this computer's record of environment ${env} (${environmentCachePath(deps.home, env)}) says it is in ${cachedRegion}, not ${deps.region}; run agentx --env ${env} destroy --region ${cachedRegion}`);
+      throw agentXError("CONFIG_INVALID", `this computer's record of environment ${env} (${environmentCachePath(deps.home, env)}) says it is in ${cachedRegion}, not ${deps.region}; run ${CLI_COMMAND_NAME} --env ${env} destroy --region ${cachedRegion}`);
     }
   }
   if (env === "production") {
@@ -81,14 +81,14 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   }
   const caller = await deps.identity.get();
   if (isOperatorRole(caller.arn, env)) {
-    throw agentXError("CONFIG_INVALID", "agentx destroy needs admin credentials. It deletes the access stack and its IAM roles, which the operator role cannot do by design, and any other role without the rights to delete all of it fails partway; run agentx destroy again with admin credentials to continue");
+    throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} destroy needs admin credentials. It deletes the access stack and its IAM roles, which the operator role cannot do by design, and any other role without the rights to delete all of it fails partway; run ${CLI_COMMAND_NAME} destroy again with admin credentials to continue`);
   }
   if (settings !== undefined && settings.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `environment ${env} is installed in account ${settings.account}, but your AWS credentials are for ${caller.account}; use credentials for ${settings.account}`);
   }
   // An unreadable record is safe to go on without; the line names it, never what it holds.
   const unreadable = (name: string, effect: string) => () => {
-    deps.write(`Could not read ${name}, so agentx destroy goes on without ${effect}.`);
+    deps.write(`Could not read ${name}, so ${CLI_COMMAND_NAME} destroy goes on without ${effect}.`);
     return undefined;
   };
   const answers = await readInstallAnswers(store, env).catch(unreadable(installAnswersParameterName(env), "the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment"));
@@ -108,7 +108,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
       for (const [part, stack] of stacks) {
         if (stack.roleArn === undefined) continue;
         const name = environmentStackName(env, part);
-        throw agentXError("CONFIG_INVALID", `stack ${name} was deployed through the role ${stack.roleArn}, which the access stack held and which is gone, so CloudFormation cannot delete it. Delete it with a role that can (aws cloudformation delete-stack --stack-name ${name} --role-arn <an admin role ARN> --region ${deps.region}), then run agentx destroy again`);
+        throw agentXError("CONFIG_INVALID", `stack ${name} was deployed through the role ${stack.roleArn}, which the access stack held and which is gone, so CloudFormation cannot delete it. Delete it with a role that can (aws cloudformation delete-stack --stack-name ${name} --role-arn <an admin role ARN> --region ${deps.region}), then run ${CLI_COMMAND_NAME} destroy again`);
       }
     }
     const found: RetainedResource[] = [];
@@ -182,7 +182,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
     // REVIEW_IN_PROGRESS is a change set an interrupted init never ran: nothing is running, so it is
     // deleted at once, as init's busyStatus treats it (init/deploy-steps.ts).
     while (stack !== undefined && stack.status.endsWith("_IN_PROGRESS") && stack.status !== "DELETE_IN_PROGRESS" && stack.status !== "REVIEW_IN_PROGRESS") {
-      if (deps.now() - idleSince >= IDLE_TIMEOUT_MS) throw agentXError("RUNTIME_UNAVAILABLE", `stack ${name} is still ${stack.status} after 60 minutes; wait for it to finish, then run agentx destroy again`);
+      if (deps.now() - idleSince >= IDLE_TIMEOUT_MS) throw agentXError("RUNTIME_UNAVAILABLE", `stack ${name} is still ${stack.status} after 60 minutes; wait for it to finish, then run ${CLI_COMMAND_NAME} destroy again`);
       deps.write(`Waiting for ${name}: it is ${stack.status}`);
       await deps.sleep(15_000);
       stack = await api.stack(name);
@@ -244,7 +244,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
         case "AWS::Cognito::UserPool": await api.deleteUserPool(resource.physicalId, `agentx-${env}-${caller.account}`); break;
         case "AWS::KMS::Key": await api.scheduleKeyDeletion(resource.physicalId); break;
         case "AWS::SecretsManager::Secret": await api.deleteSecret(resource.physicalId); deletedSecrets.push(resource.physicalId); break;
-        default: result.leftInPlace.push(`${label(resource)} (agentx destroy does not delete this type; delete it by hand)`); continue;
+        default: result.leftInPlace.push(`${label(resource)} (${CLI_COMMAND_NAME} destroy does not delete this type; delete it by hand)`); continue;
       }
       result.retainedDeleted.push(label(resource));
     }
@@ -291,7 +291,7 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   result.manualSteps = [
     ...vendorSteps(inventory),
     ...(options.keepData && result.kept.length + keptSecrets.length > 0 ? [`Kept, as --keep-data asked: ${[...result.kept, ...keptSecrets.map((name) => `secret ${name}`)].join(", ")}. A new install named ${env} cannot reuse the secret names until you delete them.`] : []),
-    ...(options.keepData ? ["Run agentx destroy again, without --keep-data, to remove what was kept."] : []),
+    ...(options.keepData ? [`Run ${CLI_COMMAND_NAME} destroy again, without --keep-data, to remove what was kept.`] : []),
     // Ruling F32: the image pull-through cache made these repositories, outside every stack.
     ...(repositories?.length === 0 ? [] : [`Delete the ECR repositories under ${repositoryPrefix} that the image pull-through cache created${repositories === undefined ? "" : ` (${repositories.join(", ")})`}: in the ECR console for ${deps.region}, Private registry, Repositories, filter by ${repositoryPrefix} and delete each one (or aws ecr delete-repository --force --region ${deps.region} --repository-name <name>).`]),
     ...(result.retainedDeleted.some((entry) => entry.startsWith("AWS::KMS::Key")) ? ["The KMS keys are scheduled for deletion in 7 days; until then, aws kms cancel-key-deletion brings one back."] : []),

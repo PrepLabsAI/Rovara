@@ -12,9 +12,9 @@ const MODEL_CODES = ["model-limit-reached", "model-key-rejected", "model-not-fou
 describe("22. the sentence of each model code, from the approved wording", () => {
   it("gives exactly the approved text for each code with the provider and the model named", () => {
     const say = (code: (typeof MODEL_CODES)[number]) => E2E_OWNER_SENTENCES.agentCode(code, CTX);
-    expect(say("model-limit-reached")).toBe(`Amazon Bedrock refused the AI navigation call to ${M}: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks`);
+    expect(say("model-limit-reached")).toBe(`Amazon Bedrock refused the AI navigation call to ${M}: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (rovara project model-check test --model <id>), then retry the checks`);
     expect(say("model-key-rejected")).toBe(`Amazon Bedrock did not accept Rovara's access for ${M} (the API key, or on Amazon Bedrock the worker role's model access). Fix the access, then retry the checks`);
-    expect(say("model-not-found")).toBe(`Amazon Bedrock says ${M} does not exist or is not available to this account. Choose another model, run its driving test (agentx project model-check test --model <id>), and approve setup again`);
+    expect(say("model-not-found")).toBe(`Amazon Bedrock says ${M} does not exist or is not available to this account. Choose another model, run its driving test (rovara project model-check test --model <id>), and approve setup again`);
     expect(say("model-unreachable")).toBe(`Rovara could not reach Amazon Bedrock to call ${M}. Check the network path from the runner, then retry the checks`);
     expect(say("model-request-rejected")).toBe(`Amazon Bedrock rejected the AI navigation request to ${M}, so this check could not run. Tell Rovara support (code model-request-rejected)`);
     expect(say("model-provider-outage")).toBe(`Amazon Bedrock had a problem answering for ${M}. Retry the checks later`);

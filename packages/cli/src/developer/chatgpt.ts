@@ -86,7 +86,7 @@ export async function chatGptConnect(deps: DeveloperSessionDeps, env: string | u
   const { authorizeUrl } = started.body;
   const state = new URL(authorizeUrl).searchParams.get("state");
   if (state === null || !authorizeUrl.startsWith("https://auth.openai.com/")) {
-    throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest chatgpt connect`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest chatgpt connect`);
   }
   const listener = await listenForChatGptCallback(state, options.port ?? Number(new URL(CHATGPT_CALLBACK_URL).port));
   if (listener === undefined && !options.interactive) {
@@ -156,12 +156,12 @@ export async function chatGptDisconnect(deps: DeveloperSessionDeps, env: string 
 export function chatGptConnectionText(result: { env: string; connection: ChatGptConnectionView }, verb: "connected" | "status"): string {
   const { connection } = result;
   if (!connection.connected) {
-    return `ChatGPT is not connected to AgentX environment ${result.env}. Connect it with npx ${CLI_PACKAGE_NAME} chatgpt connect.\n`;
+    return `ChatGPT is not connected to Rovara environment ${result.env}. Connect it with npx ${CLI_PACKAGE_NAME} chatgpt connect.\n`;
   }
   const account = connection.email === undefined ? "" : ` (${sanitizeServerText(connection.email)})`;
   const lines = [verb === "connected"
-    ? `Connected your ChatGPT plan${account} to AgentX environment ${result.env}.`
-    : `Your ChatGPT plan${account} is connected to AgentX environment ${result.env}${connection.connectedAt === undefined ? "" : ` since ${sanitizeServerText(connection.connectedAt)}`}.`];
+    ? `Connected your ChatGPT plan${account} to Rovara environment ${result.env}.`
+    : `Your ChatGPT plan${account} is connected to Rovara environment ${result.env}${connection.connectedAt === undefined ? "" : ` since ${sanitizeServerText(connection.connectedAt)}`}.`];
   if (connection.status === "revoked") {
     lines.push(`The connection no longer works (it was revoked at OpenAI, or expired); connect again with npx ${CLI_PACKAGE_NAME} chatgpt connect.`);
   } else if (connection.status === "limit-reached") {
@@ -174,5 +174,5 @@ export function chatGptConnectionText(result: { env: string; connection: ChatGpt
 }
 
 export function chatGptDisconnectText(result: { env: string }): string {
-  return `Disconnected ChatGPT from AgentX environment ${result.env}. You can also remove Rovara from your ChatGPT account's connected apps.\n`;
+  return `Disconnected ChatGPT from Rovara environment ${result.env}. You can also remove Rovara from your ChatGPT account's connected apps.\n`;
 }

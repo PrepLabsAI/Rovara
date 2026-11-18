@@ -8,7 +8,7 @@ import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { passingChecks } from "../support/init-fakes.js";
 import { seeded, services, stacks } from "../support/config-services.js";
 
-// M1.4 Task 4.10A, test 11: agentx config set models.e2eAgent, the customer's choice of AI navigation model.
+// M1.4 Task 4.10A, test 11: rovara config set models.e2eAgent, the customer's choice of AI navigation model.
 
 const ENV = "staging";
 const HAIKU_45_GLOBAL = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -44,7 +44,7 @@ describe("the models.e2eAgent config key", () => {
   });
 });
 
-describe("agentx config set models.e2eAgent", () => {
+describe("rovara config set models.e2eAgent", () => {
   it("changes only E2eAgentModelId, default to the chosen id, and makes no model call", async () => {
     const store = await seeded();
     const cloudFormation = fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6", E2eAgentModelId: "default", WorkerImageUri: "x@sha256:aa" } });
@@ -71,7 +71,7 @@ describe("agentx config set models.e2eAgent", () => {
       const cloudFormation = fakeCloudFormation();
       const probe = spies();
       await expect(runConfigSet(services({ store: await seeded(), cloudFormation, stacks: runtimeStack({}), checks: probe.checks }), ENV, { key: "models.e2eAgent", value, yes: true }), value)
-        .rejects.toThrow(`models.e2eAgent must be default or a model Rovara can use with Amazon Bedrock in us-east-1; agentx --env staging config set models.e2eAgent default puts the recommendation back; nothing changed`);
+        .rejects.toThrow(`models.e2eAgent must be default or a model Rovara can use with Amazon Bedrock in us-east-1; rovara --env staging config set models.e2eAgent default puts the recommendation back; nothing changed`);
       expect(cloudFormation.calls, value).toEqual([]);
       expect(probe.converse).not.toHaveBeenCalled();
     }
@@ -83,7 +83,7 @@ describe("agentx config set models.e2eAgent", () => {
     await writeEnvironmentSettings(store, { ...settings, models: { ...settings.models, providers: { orchestrator: "anthropic", classifier: "anthropic", worker: "anthropic" } } });
     const refused = fakeCloudFormation();
     await expect(runConfigSet(services({ store, cloudFormation: refused, stacks: runtimeStack({}) }), ENV, { key: "models.e2eAgent", value: HAIKU_45_US, yes: true }))
-      .rejects.toThrow("models.e2eAgent must be default or a model Rovara can use with Anthropic in us-east-1; agentx --env staging config set models.e2eAgent default puts the recommendation back; nothing changed");
+      .rejects.toThrow("models.e2eAgent must be default or a model Rovara can use with Anthropic in us-east-1; rovara --env staging config set models.e2eAgent default puts the recommendation back; nothing changed");
     expect(refused.calls).toEqual([]);
     const accepted = fakeCloudFormation({ parameters: { E2eAgentModelId: "default" } });
     expect((await runConfigSet(services({ store, cloudFormation: accepted, stacks: runtimeStack({}) }), ENV, { key: "models.e2eAgent", value: "claude-haiku-4-5", yes: true })).changed).toBe(true);

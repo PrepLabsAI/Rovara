@@ -1,7 +1,7 @@
 // agentx doctor's browser and API runtime checks (evaluation fix RUN-3): the qualified runtime lives seven days and only an operator renewing it keeps browser and API checks
 // running, so doctor warns ahead of time, naming when it expires and the exact command that renews it. Only the control plane knows the registrations, so they are read through this
 // computer's admin sign-in; without one the check is skipped, with how to sign in.
-import { CLI_PACKAGE_NAME, E2ERuntimeStatusSchema, e2eRuntimeExpiryNotice, e2eRuntimeRenewCommand, E2E_RUNTIME_GENERIC_RENEW_COMMAND, type E2ERuntimeStatus } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, E2ERuntimeStatusSchema, e2eRuntimeExpiryNotice, e2eRuntimeRenewCommand, E2E_RUNTIME_GENERIC_RENEW_COMMAND, type E2ERuntimeStatus, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
 export type RuntimeStatusRead = { kind: "status"; status: E2ERuntimeStatus; awsProfile?: string | undefined } | { kind: "signed-out" } | { kind: "not-set-up" };
@@ -26,7 +26,7 @@ export async function runtimeChecks(context: DoctorContext): Promise<DoctorCheck
   if (read === undefined) return [check("runtime", name, "skip", "not checked by this agentx")];
   const result = await read();
   const cli = `npx ${CLI_PACKAGE_NAME} --env ${context.env}`;
-  if (result.kind === "signed-out") return [check("runtime", name, "skip", `not checked: this computer has no working admin sign-in for ${context.env}`, `run ${cli} login --admin, then run agentx doctor again`)];
+  if (result.kind === "signed-out") return [check("runtime", name, "skip", `not checked: this computer has no working admin sign-in for ${context.env}`, `run ${cli} login --admin, then run ${CLI_COMMAND_NAME} doctor again`)];
   if (result.kind === "not-set-up") return [check("runtime", name, "skip", "not set up in this deployment")];
   if (result.status.rows.length === 0) return [check("runtime", name, "skip", "no browser and API runtime has been qualified here, so browser and API checks are off")];
   const renew = result.awsProfile === undefined || result.awsProfile === "" ? E2E_RUNTIME_GENERIC_RENEW_COMMAND.replace("<env>", context.env)

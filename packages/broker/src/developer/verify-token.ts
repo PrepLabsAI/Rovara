@@ -2,7 +2,7 @@
 // fetches the issuer's discovery document when it is created, and the issuer is served by the same
 // API, so a fresh install could never create it. Every refusal is the same AUTH_REQUIRED, and the
 // token is never logged or repeated.
-import { agentXError, DEVELOPER_STEP_UP_METHODS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperStepUpMethod } from "@agentx/contracts";
+import { agentXError, DEVELOPER_STEP_UP_METHODS, DEVELOPER_TOKEN_AUDIENCE, type DeveloperStepUpMethod, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { decodeProtectedHeader, importJWK, jwtVerify, type CryptoKey, type JWTPayload, type KeyObject } from "jose";
 
 type VerifyKey = CryptoKey | KeyObject | Uint8Array;
@@ -23,7 +23,7 @@ const FAILURE_PAUSE_MS = 10_000;
 const COMPACT_JWT = /^Bearer ([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*)$/;
 const STRING_CLAIMS = ["sub", "sid", "amr", "env"] as const;
 
-const refused = () => agentXError("AUTH_REQUIRED", "this route needs an AgentX developer sign-in; run agentx login <url>");
+const refused = () => agentXError("AUTH_REQUIRED", `this route needs a Rovara developer sign-in; run ${CLI_COMMAND_NAME} login <url>`);
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "AgentX could not check your sign-in just now; try again in a moment");
 
 async function importKeys(jwks: unknown[]): Promise<Map<string, VerifyKey>> {

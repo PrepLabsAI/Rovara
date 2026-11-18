@@ -94,7 +94,7 @@ async function mcpGetTask(task: DeveloperTaskView, taskId: string) {
   await server.connect(serverTransport);
   const client = new McpClient({ name: "p0-native-journey", version: "1.0.0" });
   await client.connect(clientTransport);
-  try { return await client.callTool({ name: "agentx_get_task", arguments: { task_id: taskId } }); }
+  try { return await client.callTool({ name: "rovara_get_task", arguments: { task_id: taskId } }); }
   finally { await client.close(); await server.close(); }
 }
 const gitBlob = (cwd: string, revision: string, path: string): Buffer | undefined => {
@@ -125,7 +125,7 @@ describe("P0 normal project onboarding journey", () => {
     expect(evidenceRootStat.uid).toBe(process.getuid?.());
     expect(evidenceRootStat.mode & 0o077).toBe(0);
     expect(await realpath(evidenceRootPath)).toBe(evidenceRootPath);
-    expect(basename(dirname(evidenceRootPath))).toBe("AgentX-e2e-p0-20261012-evidence");
+    expect(basename(dirname(evidenceRootPath))).toBe("Rovara-e2e-p0-20261012-evidence");
     expect(dirname(dirname(evidenceRootPath)), "the evidence collection must be a sibling of this source checkout").toBe(dirname(resolve(process.cwd())));
     expect(await readdir(evidenceRootPath), "evidence root must be fresh and empty before the journey begins").toEqual([]);
     const root = resolve(evidenceRoot!, "native-journey", `5a-normal-discovery-${randomUUID()}`);
@@ -2119,7 +2119,7 @@ describe("P0 normal project onboarding journey", () => {
       { publicKey: workerKeys.publicKey, workspaceId: featureWorkspaceId, generation: 1 });
     const authorizationFor = (claims: WorkerInvokeTokenClaims): string => {
       const payload = workerInvokeTokenPayload(claims);
-      return `AgentX-Invoke ${workerInvokeToken(payload, cryptoSign("sha256", Buffer.from(payload, "ascii"), workerKeys.privateKey))}`;
+      return `Rovara-Invoke ${workerInvokeToken(payload, cryptoSign("sha256", Buffer.from(payload, "ascii"), workerKeys.privateKey))}`;
     };
     const workspaceClaims: WorkerInvokeTokenClaims = { workspaceId: featureWorkspaceId, generation: 1,
       operationId: implementInvocation.operationId, fence: implementInvocation.fence, expiresAt: Math.floor(Date.now() / 1_000) + 60,
@@ -2498,7 +2498,7 @@ describe("P0 normal project onboarding journey", () => {
     expect(JSON.stringify(browserNoticePost)).toContain("Captured portable source/mock observations: UNKNOWN");
     expect(JSON.stringify(browserNoticePost)).toContain("Current readiness is UNKNOWN; it was not rechecked in this notification.");
     expect(browserNoticePost?.text).toContain("required E2E evidence is incomplete or unavailable");
-    expect(browserNoticePost?.text).not.toContain("Something went wrong on AgentX's side");
+    expect(browserNoticePost?.text).not.toContain("Something went wrong on Rovara's side");
     expect(JSON.stringify(browserNoticePost)).not.toContain("agentx_workflow_send_back");
     const browserViewerRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${browserTaskId}`,
       headers: { authorization: "Bearer synthetic-ungranted-session" } });

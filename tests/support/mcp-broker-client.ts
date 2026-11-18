@@ -1,4 +1,4 @@
-// The MCP SDK's client driving `agentx mcp`'s server against the developer task broker in process
+// The MCP SDK's client driving `rovara mcp`'s server against the developer task broker in process
 // (spec 025 Testing section). Moved from mcp-developer-flow.test.ts for Task 16's shared-task flow.
 import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
@@ -106,7 +106,7 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
 }
 
 /**
- * Spec 025 phase 25d: `agentx mcp` with a developer sign-in and, unless `adminToken` is null, an admin
+ * Spec 025 phase 25d: `rovara mcp` with a developer sign-in and, unless `adminToken` is null, an admin
  * sign-in. Phase 25e: a client that declares form elicitation (unless `elicitation` is false) and
  * answers each pop-up yes or no, the MCP server's clock (a sleep advances it, then runs `onSleep`),
  * and the configuration's options.

@@ -6,8 +6,8 @@ This page says how to propose a change and get it merged.
 ## Before you start
 
 - **Found a security problem?** Do not open an issue. Follow [SECURITY.md](SECURITY.md).
-- **Found a bug?** Open an issue with the bug form. Include `agentx --version` and, for an
-  installed environment, the output of `agentx --env <name> doctor`, with secrets removed.
+- **Found a bug?** Open an issue with the bug form. Include `rovara --version` and, for an
+  installed environment, the output of `rovara --env <name> doctor`, with secrets removed.
 - **Want to add or change a feature?** Open an issue first and describe the problem. Larger changes
   start as a specification under `specs/`, so we can agree the behaviour before anyone writes code.
 

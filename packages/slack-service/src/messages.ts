@@ -64,7 +64,7 @@ export function limitMessage(result: { limit: WorkspaceLimit; maximum: number; s
   const tasks = result.openTaskCount ?? 0;
   if (result.starterThreads.length === 0 && tasks > 0) {
     const which = tasks === 1 ? "One of them is a task" : `${tasks} of them are tasks`;
-    return `${head} ${which} started from an AI tool; close one there with agentx_close_task to free a workspace.`;
+    return `${head} ${which} started from an AI tool; close one there with rovara_close_task to free a workspace.`;
   }
   // An adapter conversation's limit lists no Slack threads; it says how to free a workspace instead.
   if (format.kind !== "slack" && result.starterThreads.length === 0) {
@@ -74,6 +74,6 @@ export function limitMessage(result: { limit: WorkspaceLimit; maximum: number; s
   return [
     `${head} Continue in one of your existing threads instead:`,
     ...links,
-    ...(tasks > 0 ? [`You also have ${tasks} task${tasks === 1 ? "" : "s"} started from an AI tool; closing one there with agentx_close_task frees a workspace.`] : []),
+    ...(tasks > 0 ? [`You also have ${tasks} task${tasks === 1 ? "" : "s"} started from an AI tool; closing one there with rovara_close_task frees a workspace.`] : []),
   ].join("\n");
 }

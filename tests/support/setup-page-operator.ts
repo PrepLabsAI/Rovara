@@ -1,7 +1,7 @@
 // A headless operator for the install page in the cloud: what a person's browser does on the setup
 // page, played against the page's handler with no HTTP in between. It polls GET /state as the page
 // does, answers each new question from a script in the order it is asked, and stops when the
-// state says the installer has closed. The job on the other side runs `agentx init --setup-table`
+// state says the installer has closed. The job on the other side runs `rovara init --setup-table`
 // with the same store.
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 import type { SetupRequest, SetupResponse, SetupStateReply } from "../../packages/cli/src/init/ui/setup-handler.js";

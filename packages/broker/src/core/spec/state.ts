@@ -32,7 +32,7 @@ export const SpecPullRequestSchema = z.object({
   number: z.number().int().positive(),
   url: z.string().url().max(500),
   repositoryUrl: z.string().url().max(500),
-  headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/iu),
+  headBranch: z.string().regex(/^(?:rovara|agentx)\/[0-9a-f-]{36}$/iu),
   /** The spec commit the review reads: the head Rovara pushed, or the head a person's edit was kept at. */
   commit: Commit,
 }).strict();
@@ -200,10 +200,10 @@ export function writeNotStarted(state: SpecState, now: string): SpecState {
   return touch(state, now, { status: "failed", failure: { code: "write_failed", at: now }, attempt: state.attempt + 1, transient: undefined, retryAfter: undefined });
 }
 
-/** The spec pull request's branch for this attempt: `agentx/<uuid>`, the same every time for the same task and attempt, so a publication that was cut short is found again and not repeated. */
+/** The spec pull request's branch for this attempt: `rovara/<uuid>`, the same every time for the same task and attempt, so a publication that was cut short is found again and not repeated. */
 export function specBranchName(taskId: string, attempt: number): string {
   const hex = createHash("sha256").update(`agentx-spec-branch:${taskId}:${String(attempt)}`).digest("hex");
-  return `agentx/${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  return `rovara/${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** The owner presses Retry after a failure: a failure in the publish retries the publish (the files are kept); any other starts the write again. Bounded by SPEC_ATTEMPTS_MAX. */

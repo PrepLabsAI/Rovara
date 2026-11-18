@@ -28,7 +28,7 @@ import {
   type SwebenchRun,
   type SwebenchRunResult,
   type SwebenchSettings,
-  type SwebenchStartResult,
+  type SwebenchStartResult, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 
 /** What a run needs from the deployment; undefined when the eval stack or runner image is not installed. */
@@ -203,7 +203,7 @@ export async function startSwebenchRun(
   }
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
   if (channel === undefined) {
-    return { outcome: "REFUSED", reason: "NOT_ENABLED", message: "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`." };
+    return { outcome: "REFUSED", reason: "NOT_ENABLED", message: `Eval runs are not enabled in this channel. An administrator can enable them with \`${CLI_COMMAND_NAME} admin eval enable\`.` };
   }
   const runnerImage = options.runnerImage ?? deployment.runnerImage;
   const runnerFeatures = runnerImage === deployment.runnerImage ? deployment.runnerFeatures : options.runnerFeatures ?? [];

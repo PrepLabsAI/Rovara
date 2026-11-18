@@ -47,12 +47,12 @@ async function signedIn(options: { revoke?: () => Promise<Response>; name?: stri
   return { home, tokenStore, out, err, run, fetchImplementation };
 }
 
-describe("agentx whoami and logout (FR-011)", () => {
+describe("rovara whoami and logout (FR-011)", () => {
   it("whoami shows the name, method, Slack link and projects with how each is allowed (US4 scenario 1)", async () => {
     const h = await signedIn();
     expect(await h.run(["whoami"])).toBe(0);
     expect(h.out.join("")).toBe([
-      `Signed in to AgentX environment staging (${URL_}) as Maya Chen, with Slack (U0MAYA001).`,
+      `Signed in to Rovara environment staging (${URL_}) as Maya Chen, with Slack (U0MAYA001).`,
       "Projects you can use:",
       "  payments-api  (you are in its Slack channel C0PAY0001)",
       "  solo  (an admin granted you access)",
@@ -69,21 +69,21 @@ describe("agentx whoami and logout (FR-011)", () => {
   it("whoami without a sign-in says how to sign in", async () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "whoami"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>");
+    expect(h.err.join("")).toContain("this computer is not signed in to Rovara environment other; run npx @preplabsai/rovara-code login <your Rovara URL>");
   });
 
-  it("whoami gives the server's reason when AgentX refuses the sign-in, made safe, with the login hint", async () => {
+  it("whoami gives the server's reason when Rovara refuses the sign-in, made safe, with the login hint", async () => {
     const refused = (message: unknown) => () => Response.json({ error: { code: "AUTH_REQUIRED", message } }, { status: 401 });
-    const h = await signedIn({ projects: refused("your sign-in ended when Slack was turned off\u001b[2J; sign in again with agentx login <url>") });
+    const h = await signedIn({ projects: refused("your sign-in ended when Slack was turned off\u001b[2J; sign in again with rovara login <url>") });
     expect(await h.run(["whoami"])).toBe(3);
-    expect(h.err.join("")).toContain(`your AgentX sign-in for staging has ended (your sign-in ended when Slack was turned off[2J); run npx @preplabsai/rovara-code login ${URL_}`);
+    expect(h.err.join("")).toContain(`your Rovara sign-in for staging has ended (your sign-in ended when Slack was turned off[2J); run npx @preplabsai/rovara-code login ${URL_}`);
     // No reason, or one that is not text: the generic line, still with the hint.
     const bare = await signedIn({ projects: () => new Response("", { status: 401 }) });
     expect(await bare.run(["whoami"])).toBe(3);
-    expect(bare.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
+    expect(bare.err.join("")).toContain(`your Rovara sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
     const odd = await signedIn({ projects: refused(7) });
     expect(await odd.run(["whoami"])).toBe(3);
-    expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
+    expect(odd.err.join("")).toContain(`your Rovara sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
   });
 
   it("logout revokes the session at the server and removes the tokens and the environment", async () => {
@@ -94,7 +94,7 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(Object.fromEntries(formOf(revoke?.[1]))).toEqual({ token: REFRESH, client_id: "agentx-cli" });
     expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
     expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
-    expect(h.out.join("")).toBe("Signed out of AgentX environment staging.\n");
+    expect(h.out.join("")).toBe("Signed out of Rovara environment staging.\n");
     expect(h.out.join("") + h.err.join("")).not.toContain(REFRESH);
   });
 
@@ -112,21 +112,21 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(await h.run(["logout"])).toBe(0);
     expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
     expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
-    expect(h.out.join("")).toContain("Signed out of AgentX environment staging on this computer");
+    expect(h.out.join("")).toContain("Signed out of Rovara environment staging on this computer");
     expect(h.out.join("")).toContain("the server session may stay until it expires");
   });
 
   it("logout says the server did not confirm when revoke answers an error, with its reason (fix 5)", async () => {
-    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({ error: "temporarily_unavailable", error_description: "AgentX could not finish this just now\u001b[2J" }, { status: 503 })) });
+    const h = await signedIn({ revoke: () => Promise.resolve(Response.json({ error: "temporarily_unavailable", error_description: "Rovara could not finish this just now\u001b[2J" }, { status: 503 })) });
     expect(await h.run(["logout"])).toBe(0);
     expect(await h.tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
-    expect(h.out.join("")).toBe("Signed out of AgentX environment staging on this computer. AgentX did not confirm it ended the sign-in there (AgentX could not finish this just now[2J), so the server session may stay until it expires.\n");
+    expect(h.out.join("")).toBe("Signed out of Rovara environment staging on this computer. Rovara did not confirm it ended the sign-in there (Rovara could not finish this just now[2J), so the server session may stay until it expires.\n");
   });
 
   it("logout without a developer sign-in names the admin logout too", async () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "logout"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>; for the admin login, run agentx logout --admin");
+    expect(h.err.join("")).toContain("this computer is not signed in to Rovara environment other; run npx @preplabsai/rovara-code login <your Rovara URL>; for the admin login, run rovara logout --admin");
   });
 
   it("logout --json reports whether the server revoked the session", async () => {
@@ -150,6 +150,6 @@ describe("agentx whoami and logout (FR-011)", () => {
   it("login refuses a URL together with --admin", async () => {
     const h = await signedIn();
     expect(await h.run(["login", URL_, "--admin"])).toBe(2);
-    expect(h.err.join("")).toContain("use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+    expect(h.err.join("")).toContain("use either rovara login <url> (developer sign-in) or rovara login --admin, not both");
   });
 });

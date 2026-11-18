@@ -82,8 +82,8 @@ describe("capabilities manifest", () => {
     });
     expect(manifest).toBe([
       "What this channel can do:",
-      "- Repository code and files (demo, docs): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo, docs): agentx_create_pull_request, agentx_manage_pull_request",
+      "- Repository code and files (demo, docs): rovara_submit_task, rovara_follow_up",
+      "- Pull requests (demo, docs): rovara_create_pull_request, rovara_manage_pull_request",
       "- GitHub issues (demo, docs): github__* tools",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
@@ -109,8 +109,8 @@ describe("capabilities manifest", () => {
     });
     expect(manifest).toBe([
       "What this channel can do:",
-      "- Repository code and files (demo): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo): agentx_create_pull_request, agentx_manage_pull_request",
+      "- Repository code and files (demo): rovara_submit_task, rovara_follow_up",
+      "- Pull requests (demo): rovara_create_pull_request, rovara_manage_pull_request",
       "Temporarily unavailable: GitHub issues. Tell the user it is temporarily unavailable and continue with the rest.",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
@@ -126,8 +126,8 @@ describe("capabilities manifest", () => {
     });
     expect(manifest).toBe([
       "What this channel can do:",
-      "- Repository code and files (demo): agentx_submit_task, agentx_follow_up",
-      "- Pull requests (demo): agentx_create_pull_request, agentx_manage_pull_request",
+      "- Repository code and files (demo): rovara_submit_task, rovara_follow_up",
+      "- Pull requests (demo): rovara_create_pull_request, rovara_manage_pull_request",
       "Unavailable because of a setup problem: GitHub issues. Tell the user an administrator needs to check this connector, and continue with the rest.",
       "Not connected for this channel: Linear, Jira, Asana. If asked about something that is not connected, say it is not connected for this channel and do not attempt a workaround.",
       "Closing this thread's workspace is a command, not a tool: the user writes \"close this workspace\".",
@@ -137,6 +137,6 @@ describe("capabilities manifest", () => {
 
   it("points the model at an unfinished operation", () => {
     const manifest = capabilitiesManifest({ repositories: ["demo"], connectors: [], catalogs: [], recoverableOperations: ["55555555-5555-4555-8555-555555555555"] });
-    expect(manifest).toContain("An earlier operation in this thread has not finished: 55555555-5555-4555-8555-555555555555. Check it with agentx_task_status or agentx_task_result before starting new work.");
+    expect(manifest).toContain("An earlier operation in this thread has not finished: 55555555-5555-4555-8555-555555555555. Check it with rovara_task_status or rovara_task_result before starting new work.");
   });
 });

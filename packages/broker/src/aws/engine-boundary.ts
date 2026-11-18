@@ -16,7 +16,7 @@ import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointe
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, OrgIdSchema, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
@@ -215,7 +215,7 @@ export function coreTaskEntryFrom(
 }
 
 /** The developer routes' own sign-in refusal (developer-routes.ts SIGN_IN_AGAIN). */
-const CORE_SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const CORE_SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 const CORE_ANSWER_UNREADABLE = "The core engine's answer could not be read.";
 
 /** The core's answer as the developer task routes return it: the value for a 200, else the AgentXError it names (a code outside the closed list, or a body that is not one, is a fixed error). */

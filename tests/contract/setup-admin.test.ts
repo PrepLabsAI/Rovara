@@ -69,7 +69,7 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
     const lines: string[] = [];
     const asked: string[] = [];
     await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: async (question) => { asked.push(question); return true; } });
-    expect(asked).toEqual([`The user ${ADMIN_EMAIL} already exists and has signed in before. Make it an AgentX administrator (group agentx-admin)?`]);
+    expect(asked).toEqual([`The user ${ADMIN_EMAIL} already exists and has signed in before. Make it a Rovara administrator (group agentx-admin)?`]);
     expect(lines).toEqual([`The user ${ADMIN_EMAIL} already exists (status CONFIRMED); adding it to agentx-admin.`]);
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
   });
@@ -77,7 +77,7 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
   it("stops, promoting no one, when you decline (fix round 1)", async () => {
     const cognito = fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" });
     await expect(ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: () => undefined, confirm: async () => false }))
-      .rejects.toThrow(`you chose not to make ${ADMIN_EMAIL} an AgentX administrator; run agentx init again and give the email address of the admin you want (--admin-email)`);
+      .rejects.toThrow(`you chose not to make ${ADMIN_EMAIL} a Rovara administrator; run rovara init again and give the email address of the admin you want (--admin-email)`);
     expect(cognito.grouped).toEqual([]);
   });
 
@@ -192,7 +192,7 @@ describe("the admin session", () => {
     });
     expect(opened).toEqual([SIGN_IN_URL]);
     expect(lines).toContain(SIGN_IN_URL);
-    expect(lines.join("\n")).toContain("A browser opens the AgentX sign-in page. Sign in as the admin user");
+    expect(lines.join("\n")).toContain("A browser opens the Rovara sign-in page. Sign in as the admin user");
     expect(lines.join("\n")).not.toContain(token);
   });
 
@@ -203,7 +203,7 @@ describe("the admin session", () => {
     await expect(openAdminSession({
       settings: cognitoSettings, now, write: () => undefined,
       services: { tokenStore: memoryTokenStore(), fetch: plane.fetch, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) },
-    })).rejects.toThrow("you signed in as someone who is not an AgentX administrator; sign out of the AgentX sign-in page in your browser, then run agentx init again and sign in as the admin user");
+    })).rejects.toThrow("you signed in as someone who is not a Rovara administrator; sign out of the Rovara sign-in page in your browser, then run rovara init again and sign in as the admin user");
   });
 
   it("decides a refusal by the error code, not by words in the message (F11)", async () => {
@@ -214,7 +214,7 @@ describe("the admin session", () => {
       services: { tokenStore: memoryTokenStore(), fetch: wordy, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) },
     });
     await expect(failure).rejects.toThrow("CONFIG_INVALID: administrator settings are FORBIDDEN here");
-    await expect(failure).rejects.not.toThrow("not an AgentX administrator");
+    await expect(failure).rejects.not.toThrow("not a Rovara administrator");
   });
 
   it("forgets a token the admin route refused, and a rerun signs in fresh (fix round 1)", async () => {
@@ -226,7 +226,7 @@ describe("the admin session", () => {
     let answer = refused;
     const login = fakeLogin(() => ({ accessToken: answer, expiresAt: T0 + 3_600_000 }));
     const open = () => openAdminSession({ settings: cognitoSettings, now, write: () => undefined, services: { tokenStore, fetch: plane.fetch, login } });
-    await expect(open()).rejects.toThrow("not an AgentX administrator");
+    await expect(open()).rejects.toThrow("not a Rovara administrator");
     expect(tokenStore.values.size).toBe(0);
     answer = admin;
     expect((await open()).accessToken).toBe(admin);
@@ -264,7 +264,7 @@ describe("the admin session", () => {
     const tokenStore = memoryTokenStore({ [key]: { accessToken: stale, expiresAt: T0 + 3_600_000 } });
     const login = fakeLogin({ accessToken: fresh, expiresAt: T0 + 3_600_000 });
     await expect(openAdminSession({ settings: cognitoSettings, now, write: () => undefined, services: { tokenStore, fetch: plane.fetch, login } }))
-      .rejects.toThrow("not an AgentX administrator");
+      .rejects.toThrow("not a Rovara administrator");
     expect(login.calls).toHaveLength(1);
     expect(tokenStore.values.size).toBe(0);
   });
@@ -288,9 +288,9 @@ describe("the admin session", () => {
       settings: cognitoSettings, now, write: () => undefined,
       services: { tokenStore: memoryTokenStore(), fetch: fakeControlPlane().fetch, login: async () => { throw agentXError("AUTH_REQUIRED", "OIDC login timed out"); } },
     });
-    const message = "the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser";
+    const message = "the Rovara sign-in did not finish within 10 minutes; run rovara init again and finish signing in as the admin user in the browser";
     await expect(failure).rejects.toThrow(message);
-    const shown = initStepFailure("Sign in to AgentX", await failure.catch((error: unknown) => error), { env: "staging", region: "us-east-1" }) as Error;
+    const shown = initStepFailure("Sign in to Rovara", await failure.catch((error: unknown) => error), { env: "staging", region: "us-east-1" }) as Error;
     expect(shown.message).toContain(message);
     expect(shown.message).not.toContain("Refresh your AWS session");
   });
@@ -300,7 +300,7 @@ describe("the admin session", () => {
     await expect(openAdminSession({
       settings: oidcSettings, now, write: () => undefined, adminClaim: { claim: "groups", values: ["agentx-admins"] },
       services: { tokenStore: memoryTokenStore(), fetch: fakeControlPlane().fetch, login: async () => ({ accessToken: token, expiresAt: T0 + 3_600_000 }) },
-    })).rejects.toThrow('your sign-in token\'s "groups" claim has none of agentx-admins (it has engineering); add yourself to one of them in your identity provider, then run agentx init again');
+    })).rejects.toThrow('your sign-in token\'s "groups" claim has none of agentx-admins (it has engineering); add yourself to one of them in your identity provider, then run rovara init again');
   });
 
   it("reads claim values from a string or a list, and from no claim at all", () => {
@@ -323,7 +323,7 @@ describe("the admin-user init step", () => {
     expect(await adminUserStep().run(context, progress)).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
     expect(cognito.created).toEqual([ADMIN_EMAIL]);
     expect(progress.value().admin).toEqual({ username: ADMIN_EMAIL, mode: "cognito" });
-    expect(context.lines.join("\n")).toContain("A browser opens the AgentX sign-in page. Sign in as");
+    expect(context.lines.join("\n")).toContain("A browser opens the Rovara sign-in page. Sign in as");
   });
 
   it("does not ask again on a rerun that already recorded the admin", async () => {
@@ -415,6 +415,6 @@ describe("the admin-user init step", () => {
 
   it("refuses to run before the environment has settings, saying what to do", async () => {
     context = initContext({ prompter: scriptedPrompter([]) });
-    await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run agentx --env staging init again");
+    await expect(adminUserStep().run(context, progressHandle())).rejects.toThrow("environment staging has no settings yet; the Slack service step must finish first, so run rovara --env staging init again");
   });
 });

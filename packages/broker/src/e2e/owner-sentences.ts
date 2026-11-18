@@ -1,5 +1,5 @@
 import type { DockerApplicationUnavailableReason, E2EAgentUnknownCode } from "@agentx/verifier";
-import { E2E_APPLICATION_SEND_BACK_CODES, KEYED_MODEL_PROVIDERS, isKeyedModelProvider, type E2E_DISPLAY_ASSERTION_KINDS } from "@agentx/contracts";
+import { E2E_APPLICATION_SEND_BACK_CODES, KEYED_MODEL_PROVIDERS, isKeyedModelProvider, type E2E_DISPLAY_ASSERTION_KINDS, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /**
  * M1.4 Tasks 4.4b and 4.4c: every sentence the owner reads about AI navigation, in one place. Change the wording here and nowhere else. The display, the Slack summary and the task page
@@ -48,7 +48,7 @@ export function modelSentenceContext(definition: Readonly<{ provider: string; mo
 }
 
 /** The command that runs a model's driving test (Task 4.10C), as the owner-approved sentences name it. */
-const DRIVING_TEST_COMMAND = "agentx project model-check test --model <id>";
+const DRIVING_TEST_COMMAND = `${CLI_COMMAND_NAME} project model-check test --model <id>`;
 
 /** How a sentence names the provider (at the start of a sentence, and inside one) and the model, with a plain fallback when no definition is known. */
 type Who = Readonly<{ start: string; mid: string; model: string; named: boolean }>;

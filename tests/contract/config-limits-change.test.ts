@@ -1,5 +1,5 @@
 // tests/contract/config-limits-change.test.ts
-// Spec 025 FR-053, E17, E19: agentx config set limits.* plans the change, shows it, asks, and applies
+// Spec 025 FR-053, E17, E19: rovara config set limits.* plans the change, shows it, asks, and applies
 // it through the admin change path with the cli method; the broker's next creation uses it.
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -26,10 +26,10 @@ function brokerFetch(harness: Awaited<ReturnType<typeof createAdminChangeBroker>
   };
 }
 
-const LEGACY_REFUSAL = "limits.workspacesPerMember changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. To change it there, update the AgentXControlPlane stack parameter SlackMemberWorkspaceLimit";
+const LEGACY_REFUSAL = "limits.workspacesPerMember changes through Rovara's admin change path, which only environments installed with rovara init have, not the legacy deployment; nothing changed. To change it there, update the AgentXControlPlane stack parameter SlackMemberWorkspaceLimit";
 const SESSION = { controlPlaneUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "admin-token-for-tests" };
 
-describe("agentx config set limits.* (FR-053, owner requirement)", () => {
+describe("rovara config set limits.* (FR-053, owner requirement)", () => {
   it("shows who is over the new limit, asks, and the next creation uses it", async () => {
     const harness = await createAdminChangeBroker();
     for (const ts of ["1695500000.000401", "1695500000.000402", "1695500000.000403"]) await ensureWorkspace(harness.handler, `${SLACK_TEAM}/${SLACK_CHANNEL}/${ts}`, "U0PRIYA001");
@@ -111,7 +111,7 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     expect(fetched).toBe(false);
   });
 
-  it("refuses the same way for production before agentx env adopt, when it has no settings record at all", async () => {
+  it("refuses the same way for production before rovara env adopt, when it has no settings record at all", async () => {
     let fetched = false;
     const services = await configServicesFor({ store: new MemoryParameterStore(), adminSession: async () => SESSION, fetch: (async () => { fetched = true; return Response.json({}); }) as unknown as typeof fetch });
     await expect(runConfigSet(services, "production", { key: "limits.workspacesPerMember", value: "5", yes: true })).rejects.toThrow(LEGACY_REFUSAL);
@@ -128,7 +128,7 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     expect(harness.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT")).toEqual([]);
   });
 
-  describe("through agentx config set", () => {
+  describe("through rovara config set", () => {
     const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
     const TOKEN = "access-secret-7f3a";
     /** A terminal's stdin when `tty`, with `answer` typed into it; otherwise a pipe with nothing in it. */
@@ -205,7 +205,7 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
     it("without the admin sign-in, says to sign in and plans nothing", async () => {
       const session = await cli({ signedIn: false, prompter: false });
       expect(await session.run(["limits.workspacesPerMember", "2", "--yes"])).not.toBe(0);
-      expect(session.stderr()).toContain("limits.workspacesPerMember changes through AgentX's admin change path, which needs this computer's admin sign-in; run agentx --env staging login --admin, then try again");
+      expect(session.stderr()).toContain("limits.workspacesPerMember changes through Rovara's admin change path, which needs this computer's admin sign-in; run rovara --env staging login --admin, then try again");
       expect(session.fetched()).toBe(0);
     });
   });

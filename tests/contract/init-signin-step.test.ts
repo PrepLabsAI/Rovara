@@ -1,4 +1,4 @@
-// The developer-signin init step (spec 025 FR-044): the last agentx init step (R9 corrected by
+// The developer-signin init step (spec 025 FR-044): the last rovara init step (R9 corrected by
 // F15). Nothing here reaches AWS, Slack or an identity provider.
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
@@ -112,7 +112,7 @@ describe("the developer-signin init step (FR-044)", () => {
       const message = error instanceof Error ? error.message : "";
       expect(message).toContain("agentx/staging/developer-oidc did not exist before, so it stays, unused until company sign-in is on");
       expect(message).toContain("agentx/staging/slack: Rate exceeded");
-      expect(message).toContain("run agentx init again");
+      expect(message).toContain("run rovara init again");
       expect(order).toEqual(["oidc create", "slack restore"]);
     });
   });

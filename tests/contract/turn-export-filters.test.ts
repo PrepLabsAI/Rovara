@@ -125,7 +125,7 @@ describe("the admin turn filters (A8)", () => {
     const turns = new TurnRecordExport({ source: { page: async () => ({ items: [] }) }, projectOf: async () => undefined, now: () => now });
     const cases: [Record<string, string>, string][] = [
       [{ until: "2026-09-28T00:00:00Z" }, "until must not be before since; send an until at or after since"],
-      [{ project: "<b>" }, "project must be an AgentX project name such as payments; list them with agentx_admin_list_projects"],
+      [{ project: "<b>" }, "project must be a Rovara project name such as payments; list them with rovara_admin_list_projects"],
       [{ task: "nope" }, "task must be a task ID such as 33333333-3333-4333-8333-333333333333"],
     ];
     for (const [query, message] of cases) {

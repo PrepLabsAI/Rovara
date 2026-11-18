@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
+    "rovara": "./dist/bin.js",
     "agentx": "./dist/bin.js"
   },
   "dependencies": {

@@ -4,7 +4,7 @@ import {
   ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_ISSUER, SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEAM, fakeOidc, fakeSlack, routeFetch, rsaKeyPair,
 } from "../support/developer-fakes.js";
 
-const REFUSED = { ok: false, reason: "the identity token could not be verified; run agentx login again" };
+const REFUSED = { ok: false, reason: "the identity token could not be verified; run rovara login again" };
 const seconds = () => Math.floor(Date.now() / 1000);
 const publicKeyAsSecret = (key: { export(options: { format: "pem"; type: "spki" }): string | Buffer }) => new TextEncoder().encode(String(key.export({ format: "pem", type: "spki" })));
 
@@ -223,7 +223,7 @@ describe("company sign-in (FR-004)", () => {
     });
 
     it("refuses a nonce that does not match", async () => {
-      expect(await withToken((fake) => fake.issue({ ...good, nonce: "someone-elses" }))).toEqual({ ok: false, reason: "the identity token's nonce does not match this sign-in; run agentx login again" });
+      expect(await withToken((fake) => fake.issue({ ...good, nonce: "someone-elses" }))).toEqual({ ok: false, reason: "the identity token's nonce does not match this sign-in; run rovara login again" });
     });
 
     it("refuses a token signed by a key that is not the provider's", async () => {

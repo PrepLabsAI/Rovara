@@ -133,7 +133,7 @@ function parseStoredTokens(serialized: string): StoredTokens {
     !Number.isFinite(value.expiresAt) ||
     (value.refreshToken !== undefined && typeof value.refreshToken !== "string")
   ) {
-    throw agentXError("AUTH_REQUIRED", "credential store contains an invalid AgentX token");
+    throw agentXError("AUTH_REQUIRED", "credential store contains an invalid Rovara token");
   }
   return {
     accessToken: value.accessToken,

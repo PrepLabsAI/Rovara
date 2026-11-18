@@ -10,7 +10,7 @@ import { developerTokenVerifier } from "../../packages/broker/src/developer/veri
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
 const A = COMPANY_A.orgId, B = COMPANY_B.orgId;
-const SIGN_IN_AGAIN = "AUTH_REQUIRED: your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = "AUTH_REQUIRED: your Rovara sign-in has ended; run rovara login <url> again";
 const ACCESS_REFUSED = "AUTH_REQUIRED: this access check needs a signed-in person's token for this service, or a confidential service's own credentials";
 const paths = ["cli", "browser", "client"] as const;
 type Path = typeof paths[number];
@@ -99,7 +99,7 @@ it.each(paths.flatMap((path) => damages.map((damage) => ({ path, damage }))))("$
   }
   const answer = await h.run();
   // Existing admin-ending wording remains on the CLI/browser path.
-  expect(answer).toEqual(damage === "developer-ended" && path !== "client" ? { status: 401, message: "AUTH_REQUIRED: an AgentX admin ended your sign-in; run agentx login <url> again" } : h.refused);
+  expect(answer).toEqual(damage === "developer-ended" && path !== "client" ? { status: 401, message: "AUTH_REQUIRED: a Rovara admin ended your sign-in; run rovara login <url> again" } : h.refused);
   expect(JSON.stringify(answer)).not.toContain("private-canary");
 });
 
@@ -186,8 +186,8 @@ it.each([false, true].flatMap((enabled) => paths.flatMap((path) => ["oidc", "sla
   };
   const expected = policy === "on" || (policy === "off" && path === "browser") ? { status: 200 }
     : { status: 401, message: path === "client" ? ACCESS_REFUSED : policy === "off"
-      ? `AUTH_REQUIRED: ${amr === "slack" ? "Slack" : "Company"} sign-in is turned off in this environment; sign in another way with agentx login <url>`
-      : `AUTH_REQUIRED: your sign-in ended when ${amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with agentx login <url>` };
+      ? `AUTH_REQUIRED: ${amr === "slack" ? "Slack" : "Company"} sign-in is turned off in this environment; sign in another way with rovara login <url>`
+      : `AUTH_REQUIRED: your sign-in ended when ${amr === "slack" ? "Slack" : "company sign-in"} was turned off; sign in again with rovara login <url>` };
   expect(JSON.stringify(await answer())).toBe(JSON.stringify(expected));
 });
 

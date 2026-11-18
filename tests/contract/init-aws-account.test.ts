@@ -122,9 +122,9 @@ describe("the account the install lands in", () => {
     expect(page.cards).toEqual([{
       id: "aws", title: "AWS account", status: "ok",
       lines: [
-        "AgentX installs into AWS account 123456789012 in us-east-1.",
+        "Rovara installs into AWS account 123456789012 in us-east-1.",
         `You are signed in as ${signedInAs(HOLDER)}, with the AWS profile dev.`,
-        "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.",
+        "Tip: a separate AWS account just for Rovara keeps its costs and permissions apart from your other work.",
       ],
       details: [HOLDER],
     }]);
@@ -188,7 +188,7 @@ describe("the account the install lands in", () => {
     for (const card of page.cards) for (const line of card.lines) expect(line).not.toContain("\n");
   });
 
-  it("offers only check again for a profile AgentX cannot sign in to, and rethrows anything that is not a sign-in problem", async () => {
+  it("offers only check again for a profile Rovara cannot sign in to, and rethrows anything that is not a sign-in problem", async () => {
     const page = surface();
     let calls = 0;
     const caller = await resolveCaller({
@@ -212,8 +212,8 @@ describe("the account the install lands in", () => {
     expect(page.cards[0]).toMatchObject({
       id: "aws", status: "waiting",
       lines: [
-        "AgentX installs into AWS account 123456789012 in us-east-1.",
-        "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.",
+        "Rovara installs into AWS account 123456789012 in us-east-1.",
+        "You are signed in as the AWS root user. Rovara works, but AWS advises an admin user instead.",
         "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
       ],
       link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
@@ -236,7 +236,7 @@ describe("the account the install lands in", () => {
   });
 
   it("FR-017: the account tip is plain words with no double negative", () => {
-    expect(DEDICATED_ACCOUNT_NOTE).toBe("Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.");
+    expect(DEDICATED_ACCOUNT_NOTE).toBe("Tip: a separate AWS account just for Rovara keeps its costs and permissions apart from your other work.");
     expect(DEDICATED_ACCOUNT_NOTE).not.toMatch(/\bnot\b|\bno\b|\bnever\b/);
   });
 
@@ -255,7 +255,7 @@ describe("the account the install lands in", () => {
     });
     expect(caller.account).toBe("123456789012");
     expect(cards.at(-1)?.lines).toEqual([
-      "AgentX installs into AWS account 123456789012 (acme-prod).",
+      "Rovara installs into AWS account 123456789012 (acme-prod).",
       `You are signed in as ${signedInAs(arn)}.`,
       DEDICATED_ACCOUNT_NOTE,
     ]);

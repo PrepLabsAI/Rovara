@@ -15,7 +15,7 @@ import type { SetupServices } from "../services.js";
 import { addConnectorRevision, connectorRerun, connectorSecretName, errorName, refuseLegacyGitHubMcp, scopeAlias, type ConnectorAddInput } from "./revision.js";
 
 export const ASANA_GUIDE = [
-  "Asana: AgentX acts as a bot user that signs in once. An Asana token reaches everything that user sees.",
+  "Asana: Rovara acts as a bot user that signs in once. An Asana token reaches everything that user sees.",
   "  1. Invite a dedicated bot address (outside your email domain, so it joins as a guest) to the one project, with Editor access.",
   "  2. app.asana.com/0/my-apps: Create new app, type Asana MCP (not External MCP, not an API app).",
   "  3. In the app's settings, add the redirect URL http://localhost:8765/callback exactly.",

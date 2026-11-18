@@ -1,6 +1,6 @@
 // FR-050: that stacks exist and are healthy, that they run the release the settings name, the engine
 // they were deployed with, and their last drift result.
-import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { environmentStackName, type ReleaseManifest, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { check, type DoctorCheck, type DoctorContext, type DoctorStack } from "./checks.js";
 
@@ -29,8 +29,8 @@ const deployedWithCdk = (stack: DoctorStack) => Object.hasOwn(stack.parameters, 
 const UPGRADE_NEEDS: ReadonlySet<DeployPart> = new Set(["control-plane", "access"]);
 
 function missingStackFix(env: string, region: string, part: DeployPart): string {
-  if (!UPGRADE_NEEDS.has(part)) return `agentx --env ${env} upgrade deploys it again`;
-  return `agentx upgrade cannot deploy it again. If the install never finished, run agentx init --env ${env} --region ${region} --resume; otherwise remove the environment with agentx --env ${env} destroy --region ${region}, then install it again with agentx init`;
+  if (!UPGRADE_NEEDS.has(part)) return `${CLI_COMMAND_NAME} --env ${env} upgrade deploys it again`;
+  return `${CLI_COMMAND_NAME} upgrade cannot deploy it again. If the install never finished, run ${CLI_COMMAND_NAME} init --env ${env} --region ${region} --resume; otherwise remove the environment with ${CLI_COMMAND_NAME} --env ${env} destroy --region ${region}, then install it again with ${CLI_COMMAND_NAME} init`;
 }
 
 function stackHealth(env: string, region: string, part: DeployPart, name: string, stack: DoctorStack | undefined): DoctorCheck {
@@ -38,10 +38,10 @@ function stackHealth(env: string, region: string, part: DeployPart, name: string
   const status = stack.status;
   const events = `aws cloudformation describe-stack-events --stack-name ${name} --region ${region}`;
   if (HEALTHY.has(status)) return check("stacks", name, "ok", status);
-  if (status === "UPDATE_ROLLBACK_COMPLETE") return check("stacks", name, "warn", `${status}: its last update was rolled back, so it runs the previous version`, `read its events (${events}), fix the cause, then run agentx --env ${env} upgrade`);
-  if (status.endsWith("_IN_PROGRESS")) return check("stacks", name, "warn", `${status}: CloudFormation is still working on it`, "run agentx doctor again when it finishes");
+  if (status === "UPDATE_ROLLBACK_COMPLETE") return check("stacks", name, "warn", `${status}: its last update was rolled back, so it runs the previous version`, `read its events (${events}), fix the cause, then run ${CLI_COMMAND_NAME} --env ${env} upgrade`);
+  if (status.endsWith("_IN_PROGRESS")) return check("stacks", name, "warn", `${status}: CloudFormation is still working on it`, `run ${CLI_COMMAND_NAME} doctor again when it finishes`);
   if (status === "ROLLBACK_COMPLETE") {
-    return check("stacks", name, "fail", `${status}: its first create failed`, `delete it (aws cloudformation delete-stack --stack-name ${name} --region ${region}) and run agentx init --env ${env} --region ${region} again, or remove the whole environment with agentx --env ${env} destroy --region ${region}`);
+    return check("stacks", name, "fail", `${status}: its first create failed`, `delete it (aws cloudformation delete-stack --stack-name ${name} --region ${region}) and run ${CLI_COMMAND_NAME} init --env ${env} --region ${region} again, or remove the whole environment with ${CLI_COMMAND_NAME} --env ${env} destroy --region ${region}`);
   }
   return check("stacks", name, "fail", status, `see its events (${events})`);
 }
@@ -64,7 +64,7 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   });
   checks.push(wrongEngine.length === 0
     ? check("stacks", "engine", "ok", `every stack was deployed with the ${settings.engine} engine`)
-    : check("stacks", "engine", "fail", `the settings say ${settings.engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${settings.engine} engine: agentx --env ${env} upgrade uses the engine in the settings`));
+    : check("stacks", "engine", "fail", `the settings say ${settings.engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${settings.engine} engine: ${CLI_COMMAND_NAME} --env ${env} upgrade uses the engine in the settings`));
 
   const existing = [...described.values()].filter((entry): entry is { name: string; stack: DoctorStack } => entry.stack !== undefined);
   const drifted = existing.filter(({ stack }) => stack.drift === "DRIFTED").map(({ name }) => name);
@@ -74,7 +74,7 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   // Only stacks that were never checked are named as such: a partly checked environment never reads as fully checked.
   const notChecked = unchecked.length === 0 ? "" : inSync.length === 0 && drifted.length === 0 ? `drift has not been checked; ${detect}` : `drift has not been checked for ${unchecked.join(", ")}; ${detect}`;
   if (drifted.length > 0) {
-    checks.push(check("stacks", "drift", "warn", `${drifted.join(", ")} changed outside CloudFormation (at the last drift check)${notChecked === "" ? "" : `; ${notChecked}`}`, `see what changed, with admin credentials: ${drifted.map((name) => `aws cloudformation describe-stack-resource-drifts --stack-name ${name} --region ${settings.region}`).join("; ")}; then undo it by hand or run agentx --env ${env} upgrade`));
+    checks.push(check("stacks", "drift", "warn", `${drifted.join(", ")} changed outside CloudFormation (at the last drift check)${notChecked === "" ? "" : `; ${notChecked}`}`, `see what changed, with admin credentials: ${drifted.map((name) => `aws cloudformation describe-stack-resource-drifts --stack-name ${name} --region ${settings.region}`).join("; ")}; then undo it by hand or run ${CLI_COMMAND_NAME} --env ${env} upgrade`));
   } else if (inSync.length === 0) {
     checks.push(check("stacks", "drift", "ok", notChecked === "" ? "no stack to check" : notChecked));
   } else {
@@ -84,7 +84,7 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   const title = `release ${settings.version}`;
   const manifest = await services.releaseManifest(settings.version);
   if (manifest === undefined) {
-    checks.push(check("stacks", title, "warn", `could not read release ${settings.version}'s release.json, so the stacks' versions were not compared`, "check this computer's network access to github.com, then run agentx doctor again"));
+    checks.push(check("stacks", title, "warn", `could not read release ${settings.version}'s release.json, so the stacks' versions were not compared`, `check this computer's network access to github.com, then run ${CLI_COMMAND_NAME} doctor again`));
     return checks;
   }
   const code: string[] = [];
@@ -105,8 +105,8 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   // A cdk environment upgrades from a checkout of the release's tag, and only with admin credentials
   // (ruling F20), so its fix names both.
   const upgrade = settings.engine === "cdk"
-    ? `with admin credentials, agentx --env ${env} upgrade --to ${settings.version} --source <a clean checkout of tag v${settings.version}>`
-    : `agentx --env ${env} upgrade --to ${settings.version}`;
+    ? `with admin credentials, ${CLI_COMMAND_NAME} --env ${env} upgrade --to ${settings.version} --source <a clean checkout of tag v${settings.version}>`
+    : `${CLI_COMMAND_NAME} --env ${env} upgrade --to ${settings.version}`;
   if (code.length > 0) checks.push(check("stacks", title, "fail", `${code.join(", ")} ${code.length === 1 ? "does" : "do"} not match release ${settings.version}'s code packages`, upgrade));
   else if (images.length > 0) checks.push(check("stacks", title, "warn", `${images.join(", ")} ${images.length === 1 ? "is not" : "are not"} release ${settings.version}'s image (the testing-only image flags set this${cdkMismatch ? ", or the stack runs another release" : ""})`, `${upgrade}, without --worker-image or --slack-image`));
   else checks.push(check("stacks", title, "ok", cdkStacks === 0 ? `every stack runs release ${settings.version}'s code and images` : `every stack runs release ${settings.version}'s images; cdk: code packages are not compared (they live in the bootstrap bucket)`));

@@ -3,7 +3,7 @@
 // SSM value; the workspace limits are the control plane's setting (spec 025 FR-053). list and get
 // never print the alert address, which can be a webhook secret: only whether it is set.
 import { randomUUID } from "node:crypto";
-import { AgentXError, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, agentXError, environmentStackName, type AdminChangeInput, type ConfigChangeOutcomeRequest } from "@agentx/contracts";
+import { AgentXError, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, agentXError, environmentStackName, type AdminChangeInput, type ConfigChangeOutcomeRequest, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { recordConfigChange, recordConfigOutcome, runCliChange } from "../admin/changes.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
 import { withEnvironmentLock } from "../environments/lock.js";
@@ -59,7 +59,7 @@ const LEGACY_ENV = "production";
 async function installed(services: ConfigServices, env: string): Promise<EnvironmentSettings> {
   const settings = await readEnvironmentSettings(services.store, env);
   if (settings === undefined) throw notInstalled(env);
-  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx config works on environments installed with agentx init; ${env} uses the legacy stack names`);
+  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} config works on environments installed with ${CLI_COMMAND_NAME} init; ${env} uses the legacy stack names`);
   return settings;
 }
 
@@ -90,7 +90,7 @@ async function currentValue(services: ConfigServices, env: string, settings: Env
   if (target.kind === "stack-parameter" && target.also !== undefined) {
     // One value on several stacks: when they differ, say so (a set finishes the stacks that are behind).
     const others = await Promise.all(target.also.map(async (each) => (await services.stacks.describe(environmentStackName(env, each.part)))?.parameters[each.parameter] ?? entry.defaultValue ?? "unknown"));
-    if (others.some((other) => other !== value)) return `${[value, ...others].map((each, index) => `${each} (${[target, ...target.also!][index]!.part})`).join(", ")}; agentx config set ${entry.key} makes them the same`;
+    if (others.some((other) => other !== value)) return `${[value, ...others].map((each, index) => `${each} (${[target, ...target.also!][index]!.part})`).join(", ")}; ${CLI_COMMAND_NAME} config set ${entry.key} makes them the same`;
   }
   if (target.kind === "stack-parameter") return entry.shown === undefined ? value : entry.shown(value);
   return `${value} (install-time default; the control plane may hold a newer setting)`;
@@ -125,7 +125,7 @@ function checkE2eAgentChoice(env: string, settings: EnvironmentSettings, value: 
   const provider: ModelProvider = settings.models.providers?.worker ?? "amazon-bedrock";
   if (eligibleE2EAgentModel(provider, value, settings.region) !== null) return;
   const label = isKeyedModelProvider(provider) ? KEYED_MODEL_PROVIDERS[provider].label : "Amazon Bedrock";
-  throw agentXError("CONFIG_INVALID", `models.e2eAgent must be default or a model Rovara can use with ${label} in ${settings.region}; agentx --env ${env} config set models.e2eAgent default puts the recommendation back; nothing changed`);
+  throw agentXError("CONFIG_INVALID", `models.e2eAgent must be default or a model Rovara can use with ${label} in ${settings.region}; ${CLI_COMMAND_NAME} --env ${env} config set models.e2eAgent default puts the recommendation back; nothing changed`);
 }
 
 /**
@@ -138,8 +138,8 @@ async function notePairedCoreSetting(services: ConfigServices, env: string, entr
   const pairedValue = await stackParameterValue(services, env, paired.target, paired.defaultValue);
   if ((value === "") === (pairedValue === "")) return;
   services.write(value === ""
-    ? `Note: ${paired.key} is still set; with ${entry.key} empty the core engine refuses work. To turn the gateway off fully, also run agentx --env ${env} config set ${paired.key} none`
-    : `Note: ${paired.key} is not set yet; the core engine refuses work until both ${entry.key} and ${paired.key} are set. Next: agentx --env ${env} config set ${paired.key} <value>`);
+    ? `Note: ${paired.key} is still set; with ${entry.key} empty the core engine refuses work. To turn the gateway off fully, also run ${CLI_COMMAND_NAME} --env ${env} config set ${paired.key} none`
+    : `Note: ${paired.key} is not set yet; the core engine refuses work until both ${entry.key} and ${paired.key} are set. Next: ${CLI_COMMAND_NAME} --env ${env} config set ${paired.key} <value>`);
 }
 
 /** FR-049: a model key passes the same one-token test call init makes, with the environment's provider. */
@@ -150,8 +150,8 @@ async function checkModel(services: ConfigServices, env: string, settings: Envir
   if (outcome.ok) return;
   // Live check L3: init's wording names its --<role>-model flag, which config set does not take.
   const wording = {
-    changeModel: `agentx --env ${env} config set models.${role} <another model id>`,
-    rerun: `run agentx --env ${env} config set models.${role} again`,
+    changeModel: `${CLI_COMMAND_NAME} --env ${env} config set models.${role} <another model id>`,
+    rerun: `run ${CLI_COMMAND_NAME} --env ${env} config set models.${role} again`,
     region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
   };
   throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording })}; nothing changed`);
@@ -162,8 +162,8 @@ async function checkFallbackModel(services: ConfigServices, env: string, setting
   const outcome = await runModelCheck({ provider: "amazon-bedrock", modelId, region: settings.region, checks: services.checks(settings.region), config: settings.models, sleep: services.sleep });
   if (outcome.ok) return;
   const wording = {
-    changeModel: `agentx --env ${env} config set ${key} <another model id>`,
-    rerun: `run agentx --env ${env} config set ${key} again`,
+    changeModel: `${CLI_COMMAND_NAME} --env ${env} config set ${key} <another model id>`,
+    rerun: `run ${CLI_COMMAND_NAME} --env ${env} config set ${key} again`,
     region: "check this computer's network access to AWS (an environment cannot move regions), then try again",
   };
   throw agentXError("CONFIG_INVALID", `${modelCheckProblem({ modelId, role: "worker", region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording })}; nothing changed`);
@@ -228,8 +228,8 @@ async function recordingSession(services: ConfigServices, env: string, entry: Co
   const session = await services.adminSession?.(env);
   if (session === undefined) {
     services.write(yes
-      ? `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}; it goes ahead now. To record config changes, run agentx --env ${env} login --admin before config set.`
-      : `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}. To record it, answer no, run agentx --env ${env} login --admin, then run this again.`);
+      ? `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}; it goes ahead now. To record config changes, run ${CLI_COMMAND_NAME} --env ${env} login --admin before config set.`
+      : `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}. To record it, answer no, run ${CLI_COMMAND_NAME} --env ${env} login --admin, then run this again.`);
     return undefined;
   }
   checkSignInLeft(services, env, entry, session, needMs);
@@ -239,7 +239,7 @@ async function recordingSession(services: ConfigServices, env: string, entry: Co
 /** Refuses a sign-in that would end before the change could finish and its outcome be recorded (a reminder to sign in again; the operator role alone can always skip recording). */
 function checkSignInLeft(services: ConfigServices, env: string, entry: ConfigKey, session: AdminSession, needMs: number): void {
   if (session.expiresAt === undefined || session.expiresAt - services.now() >= needMs) return;
-  throw agentXError("AUTH_REQUIRED", `this computer's admin sign-in for ${env} ends in ${Math.max(0, Math.floor((session.expiresAt - services.now()) / 60_000))} minutes, too soon to record how this ${entry.key} change ends; run agentx --env ${env} login --admin again, then try again; nothing changed`);
+  throw agentXError("AUTH_REQUIRED", `this computer's admin sign-in for ${env} ends in ${Math.max(0, Math.floor((session.expiresAt - services.now()) / 60_000))} minutes, too soon to record how this ${entry.key} change ends; run ${CLI_COMMAND_NAME} --env ${env} login --admin again, then try again; nothing changed`);
 }
 
 /**
@@ -267,12 +267,12 @@ async function startRecording(services: ConfigServices, env: string, session: Ad
   } catch (error) {
     const reason = error instanceof AgentXError ? withoutCode(error) : "an unexpected error";
     if (error instanceof AgentXError && error.code === "NOT_FOUND") {
-      throw agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed: this environment's control plane cannot record config changes yet; upgrade it with agentx --env ${env} upgrade, then try again; nothing changed`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed: this environment's control plane cannot record config changes yet; upgrade it with ${CLI_COMMAND_NAME} --env ${env} upgrade, then try again; nothing changed`);
     }
     if (error instanceof AgentXError && (error.code === "AUTH_REQUIRED" || error.code === "FORBIDDEN")) {
-      throw agentXError(error.code, `${entry.key} was not changed: AgentX would not record the change with this computer's admin sign-in (${reason}); run agentx --env ${env} login --admin, then try again; nothing changed`);
+      throw agentXError(error.code, `${entry.key} was not changed: Rovara would not record the change with this computer's admin sign-in (${reason}); run ${CLI_COMMAND_NAME} --env ${env} login --admin, then try again; nothing changed`);
     }
-    throw agentXError(error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE", `${entry.key} was not changed: AgentX could not record the change in the admin change history (${reason}); nothing changed, try again`);
+    throw agentXError(error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE", `${entry.key} was not changed: Rovara could not record the change in the admin change history (${reason}); nothing changed, try again`);
   }
 }
 
@@ -295,8 +295,8 @@ async function finishRecording(services: ConfigServices, entry: ConfigKey, recor
     await recordConfigOutcome({ ...recording.session, changeId: recording.changeId, traceId: recording.traceId, outcome }, services.fetch ?? fetch);
   } catch {
     services.write(outcome.outcome === "applied"
-      ? `Warning: ${entry.key} changed, but AgentX could not record that it applied, so agentx admin changes shows change ${recording.changeId} as applying.`
-      : `Warning: AgentX could not record that the ${entry.key} change failed, so agentx admin changes shows change ${recording.changeId} as applying.`);
+      ? `Warning: ${entry.key} changed, but Rovara could not record that it applied, so ${CLI_COMMAND_NAME} admin changes shows change ${recording.changeId} as applying.`
+      : `Warning: Rovara could not record that the ${entry.key} change failed, so ${CLI_COMMAND_NAME} admin changes shows change ${recording.changeId} as applying.`);
   }
 }
 
@@ -304,18 +304,18 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   const entry = configKey(input.key);
   const { target } = entry;
   if (target.kind === "control-plane-setting") {
-    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: ${CLI_COMMAND_NAME} config set ${entry.key} <value>`);
     return setThroughChange(services, env, entry, { kind: "set_workspace_limits", [target.field]: Number(entry.parse(input.value)) },
       `To change it there, update the AgentXControlPlane stack parameter ${target.installDefault.parameter}`, input);
   }
   if (target.kind === "chatgpt-setting") {
-    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: ${CLI_COMMAND_NAME} config set ${entry.key} <value>`);
     const value = entry.parse(input.value);
     return setThroughChange(services, env, entry, target.field === "enabled" ? { kind: "set_chatgpt", enabled: value === "true" } : { kind: "set_chatgpt", preferredModel: value },
-      "Sign in with ChatGPT needs an environment installed with agentx init", input);
+      `Sign in with ChatGPT needs an environment installed with ${CLI_COMMAND_NAME} init`, input);
   }
   if (target.kind === "settings") return setAlertAddress(services, env, input);
-  if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+  if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: ${CLI_COMMAND_NAME} config set ${entry.key} <value>`);
   const value = entry.parse(input.value);
   const settings = await installed(services, env);
   const role = entry.model;
@@ -344,7 +344,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
   if (role !== undefined) await checkModel(services, env, settings, role, value);
   if (entry.fallbackModel === true && value !== MODEL_FALLBACK_NONE) await checkFallbackModel(services, env, settings, entry.key, value);
   const roleArn = settings.access?.cloudFormationRoleArn;
-  if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run agentx env use --env ${env}, or agentx init --resume`);
+  if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run ${CLI_COMMAND_NAME} env use --env ${env}, or ${CLI_COMMAND_NAME} init --resume`);
   const holder = (await services.identity.get()).arn;
   return withEnvironmentLock({ store: services.store, env, holder, command: `config set ${entry.key}`, now: services.now }, async () => {
     // Issue #205: recorded after the yes, before the first change set runs; a failed record runs nothing.
@@ -386,8 +386,8 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
         // Only a stack that ended (rolled back, or gone) is a failure for certain. A deadline, a
         // throttled poll or a lost answer may still be applying: the record is left applying.
         if (error instanceof AgentXError && error.code === "CONFIG_INVALID") await finishRecording(services, entry, recording, failureOf(entry, error));
-        else if (recording !== undefined) services.write(`Warning: the ${entry.key} change may still be applying, so agentx admin changes shows change ${recording.changeId} as applying; check ${stackName} in the CloudFormation console.`);
-        if (done.length > 0) services.write(`Warning: ${entry.key} is now ${value} on ${done.join(" and ")}, but not on ${stackName}; run the same agentx config set again to finish it.`);
+        else if (recording !== undefined) services.write(`Warning: the ${entry.key} change may still be applying, so ${CLI_COMMAND_NAME} admin changes shows change ${recording.changeId} as applying; check ${stackName} in the CloudFormation console.`);
+        if (done.length > 0) services.write(`Warning: ${entry.key} is now ${value} on ${done.join(" and ")}, but not on ${stackName}; run the same ${CLI_COMMAND_NAME} config set again to finish it.`);
         throw error;
       }
       done.push(stackName);
@@ -402,7 +402,7 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
       } catch (error) {
         const failed = error instanceof RecordModelError ? error : new RecordModelError("the settings", error);
         throw Object.assign(
-          agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} now uses ${value}, but ${failed.what} were not updated; run the same agentx config set again to record it`),
+          agentXError("RUNTIME_UNAVAILABLE", `stack ${stackName} now uses ${value}, but ${failed.what} were not updated; run the same ${CLI_COMMAND_NAME} config set again to record it`),
           { cause: failed.cause },
         );
       }
@@ -423,11 +423,11 @@ async function setThroughChange(
   // D14: the legacy deployment has no admin change routes: adopted (settings naming legacy), or not
   // yet adopted (production with no settings record).
   if (settings === undefined ? env === LEGACY_ENV : settings.naming !== "environment") {
-    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. ${legacyHint}`);
+    throw agentXError("CONFIG_INVALID", `${entry.key} changes through Rovara's admin change path, which only environments installed with ${CLI_COMMAND_NAME} init have, not the legacy deployment; nothing changed. ${legacyHint}`);
   }
   if (settings === undefined) throw notInstalled(env);
   const session = await services.adminSession?.(env);
-  if (session === undefined) throw agentXError("AUTH_REQUIRED", `${entry.key} changes through AgentX's admin change path, which needs this computer's admin sign-in; run agentx --env ${env} login --admin, then try again`);
+  if (session === undefined) throw agentXError("AUTH_REQUIRED", `${entry.key} changes through Rovara's admin change path, which needs this computer's admin sign-in; run ${CLI_COMMAND_NAME} --env ${env} login --admin, then try again`);
   // SC-005: checked before anything is planned.
   if (!input.yes && services.canAsk === false) {
     throw agentXError("CONFIRMATION_UNAVAILABLE", `${entry.key} needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed`);
@@ -506,7 +506,7 @@ async function changeAlertAddress(
   services: ConfigServices, env: string, settings: EnvironmentSettings,
   target: { kind: "email"; address: string } | { kind: "webhook"; endpoint: string; display: string }, shown: string, secretName: string,
 ): Promise<{ changed: boolean }> {
-  const topicArn = await alertsTopicArn({ stackOutputs: async (name) => (await services.stacks.describe(name))?.outputs, stackName: settings.stacks["control-plane"], next: "upgrade the environment with agentx upgrade" });
+  const topicArn = await alertsTopicArn({ stackOutputs: async (name) => (await services.stacks.describe(name))?.outputs, stackName: settings.stacks["control-plane"], next: `upgrade the environment with ${CLI_COMMAND_NAME} upgrade` });
   const before = await services.alerts.subscriptions(topicArn);
   const state = await ensureSubscribed({ api: services.alerts, topicArn, target, write: services.write, sleep: services.sleep, now: services.now });
   // Only once the new address is subscribed: until then the secret keeps the old one.
@@ -525,8 +525,8 @@ async function changeAlertAddress(
     services.write(`${oldShown} is still subscribed. To stop sending it alarms, an admin runs: aws sns unsubscribe --subscription-arn ${old.arn} --region ${settings.region}`);
   }
   services.write(state === "pending"
-    ? `Alerts will go to ${shown} once the subscription is confirmed; then run agentx --env ${env} alerts test.`
-    : `Alerts now go to ${shown}. Send a test alarm with agentx --env ${env} alerts test.`);
+    ? `Alerts will go to ${shown} once the subscription is confirmed; then run ${CLI_COMMAND_NAME} --env ${env} alerts test.`
+    : `Alerts now go to ${shown}. Send a test alarm with ${CLI_COMMAND_NAME} --env ${env} alerts test.`);
   return { changed: true };
 }
 

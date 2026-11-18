@@ -23,7 +23,7 @@ import {
   operatorRoleStatements,
   serviceRoleStatements,
   type PolicyScope,
-  type PolicyStatementJson,
+  type PolicyStatementJson, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import type { InitAnswers } from "../init/install-state.js";
 import { ACCOUNT_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
@@ -94,7 +94,7 @@ export async function readBundleAnswers(dir: string): Promise<BundleAnswers> {
   try {
     json = JSON.parse(await readFile(join(dir, BUNDLE_ANSWERS_FILE), "utf8"));
   } catch {
-    throw agentXError("CONFIG_INVALID", `${dir} has no readable ${BUNDLE_ANSWERS_FILE}; pass the bundle agentx init --export wrote`);
+    throw agentXError("CONFIG_INVALID", `${dir} has no readable ${BUNDLE_ANSWERS_FILE}; pass the bundle ${CLI_COMMAND_NAME} init --export wrote`);
   }
   const parsed = BundleAnswersSchema.safeParse(json);
   if (!parsed.success) throw invalidBundleAnswers(`${dir}/${BUNDLE_ANSWERS_FILE}`, parsed.error.issues);
@@ -365,7 +365,7 @@ function accessDeployerStatements(scope: { env: string; partition: string; regio
 /** The command the AgentX operator runs once the access stack exists: it deploys every later part,
  * never access itself (the operator role is denied change sets on the access stack). */
 function operatorResumeCommand(env: string, region: string): string {
-  return `agentx init --resume --env ${env} --region ${region} --from-bundle <this directory>`;
+  return `${CLI_COMMAND_NAME} init --resume --env ${env} --region ${region} --from-bundle <this directory>`;
 }
 
 /** One wording for a failed or refused change set on a new stack, shared by the script and README. */
@@ -378,13 +378,13 @@ function deployAccessScript(scope: { env: string; region: string; version: strin
   return `#!/usr/bin/env bash
 set -euo pipefail
 
-# Deploys the access stack for the "${scope.env}" AgentX environment in ${region}: the one stack a
+# Deploys the access stack for the "${scope.env}" Rovara environment in ${region}: the one stack a
 # platform team deploys directly, with their own AWS credentials (policies/access-deployer.json
-# names exactly what that principal needs). Every later stack is deployed by the AgentX operator
+# names exactly what that principal needs). Every later stack is deployed by the Rovara operator
 # through the CloudFormationServiceRole this stack creates, by running (see README.md):
 #   ${operatorResumeCommand(scope.env, region)}
 # The access stack takes no secret parameters, so this script never reads or prints one. It does
-# not create the callback signing key either: agentx deploy creates it on its first run.
+# not create the callback signing key either: ${CLI_COMMAND_NAME} deploy creates it on its first run.
 #
 # Pass --yes to execute the change set without the interactive prompt. If a step fails, see
 # README.md's "If it fails" section; this script prints the reason and the exact recovery command.
@@ -518,18 +518,18 @@ function readme(input: { env: string; region: string; account: string; order: De
   const controlPlaneDeleteIndex = deleteOrder.indexOf(environmentStackName(env, "control-plane"));
   const deleteOrderThroughControlPlane = deleteOrder.slice(0, controlPlaneDeleteIndex + 1);
   const deleteOrderAfterControlPlane = deleteOrder.slice(controlPlaneDeleteIndex + 1);
-  return `# AgentX access stack: platform-team deploy bundle
+  return `# Rovara access stack: platform-team deploy bundle
 
-This bundle deploys the **access stack** (\`${stackName}\`) for the \`${env}\` AgentX environment in
+This bundle deploys the **access stack** (\`${stackName}\`) for the \`${env}\` Rovara environment in
 \`${region}\` (AWS account \`${account}\`). The access stack is the only stack a platform team ever
 deploys directly, with their own AWS credentials: it creates the artifact bucket, the ECR
 pull-through cache rule, and the two IAM roles every later stack needs.
 
 ## What it creates
 
-- \`agentx-${env}-cloudformation\`: the role CloudFormation assumes to deploy every later AgentX
+- \`agentx-${env}-cloudformation\`: the role CloudFormation assumes to deploy every later Rovara
   stack for this environment.
-- \`agentx-${env}-operator\`: the role an AgentX operator assumes to run \`agentx\` against this
+- \`agentx-${env}-operator\`: the role a Rovara operator assumes to run \`agentx\` against this
   environment.
 - \`agentx-${env}-boundary\` (only when no permissions boundary ARN is given): the default
   permission boundary applied to both roles above and every role the later stacks create.
@@ -568,7 +568,7 @@ executes unattended. It runs, in order:
 
 The access stack takes no secret parameters; the script never reads or prints one.
 \`deploy-access.sh\` does not create the callback signing key (\`agentx/${env}/callback-signing-key\`)
-either. That is deliberate: \`agentx deploy\` creates it on its first run, in Secrets Manager only.
+either. That is deliberate: \`${CLI_COMMAND_NAME} deploy\` creates it on its first run, in Secrets Manager only.
 
 ## If it fails
 
@@ -595,7 +595,7 @@ Either way, nothing from a failed attempt is reused; the next run always creates
 
 ## After this stack exists
 
-The AgentX operator then runs, with the operator role, from a machine with a browser:
+The Rovara operator then runs, with the operator role, from a machine with a browser:
 
 \`\`\`
 ${operatorResumeCommand(env, region)}
@@ -603,7 +603,7 @@ ${operatorResumeCommand(env, region)}
 
 It deploys every other stack (${laterParts.join(", ")}) through the \`agentx-${env}-cloudformation\`
 role, creates the GitHub and Slack apps, the admin user, the first project and channel, and the
-alerts, and ends when AgentX answers in Slack.
+alerts, and ends when Rovara answers in Slack.
 
 It reads the answers this export already knew from \`init-answers.json\` (no secret is in it) and
 asks only the rest. It never deploys the access stack: the operator role is denied change sets on
@@ -612,8 +612,8 @@ lasts at least as long as the deploy (plan for about an hour).
 
 ## Tearing down an environment
 
-agentx --env ${env} destroy --region ${region} does all of this, in this order, with admin
-credentials; it asks you to type the environment's name first. If agentx destroy stops partway, run
+${CLI_COMMAND_NAME} --env ${env} destroy --region ${region} does all of this, in this order, with admin
+credentials; it asks you to type the environment's name first. If ${CLI_COMMAND_NAME} destroy stops partway, run
 it again: it continues where it stopped. The steps below are the same work by hand.
 
 1. **Record what the stacks retain.** Stack deletion keeps some resources on purpose. Before you
@@ -687,8 +687,8 @@ it again: it continues where it stopped. The steps below are the same work by ha
      aws kms schedule-key-deletion --key-id <key id> --pending-window-in-days 7 --region ${region}
      aws kms delete-alias --alias-name alias/agentx/${env}/workspaces --region ${region}
      \`\`\`
-   - **Every secret under \`agentx/${env}/\`**: \`callback-signing-key\` (created by \`agentx deploy\`,
-     outside any stack), \`callback-key\` and \`slack\` (kept by the control-plane stack), and those \`agentx init\` stored (\`github-app\`, \`alert-endpoint\`,
+   - **Every secret under \`agentx/${env}/\`**: \`callback-signing-key\` (created by \`${CLI_COMMAND_NAME} deploy\`,
+     outside any stack), \`callback-key\` and \`slack\` (kept by the control-plane stack), and those \`${CLI_COMMAND_NAME} init\` stored (\`github-app\`, \`alert-endpoint\`,
      \`openrouter\`, \`anthropic\`, \`openai\`, \`developer-oidc\`, \`connectors/...\`). List them, then delete each one without a
      recovery window, so the names can be reused by a new install:
      \`\`\`
@@ -718,7 +718,7 @@ whose deletion protection keeps it; its name is not unique, so it never blocks a
   region and partition.
 - \`policies/access-deployer.json\`: the policy for whoever runs \`deploy-access.sh\`.
 - \`init-answers.json\`: the answers this export knew, for the operator's
-  \`agentx init --resume --from-bundle\`. It holds no secret.
+  \`${CLI_COMMAND_NAME} init --resume --from-bundle\`. It holds no secret.
 `;
 }
 

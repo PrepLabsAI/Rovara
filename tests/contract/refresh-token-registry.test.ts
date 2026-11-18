@@ -43,7 +43,7 @@ describe("oauth-refresh-token in the credential registry", () => {
     const secrets = memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }) });
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     await register(handler, { ref: "asana-bot", type: "oauth-refresh-token", secretName: SECRET });
-    await expect(registry!.provider("asana-bot").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential asana-bot has no token URL; sign in again with agentx admin credential authorize --ref asana-bot --endpoint <mcp url>, or register it with --token-url"));
+    await expect(registry!.provider("asana-bot").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential asana-bot has no token URL; sign in again with rovara admin credential authorize --ref asana-bot --endpoint <mcp url>, or register it with --token-url"));
 
     const readOnly = { read: vi.fn(async (name: string) => secrets.values[name]) };
     const second = await createAdminBroker({ connectorCredentials: { secrets: readOnly, githubApp } });

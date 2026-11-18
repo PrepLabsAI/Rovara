@@ -195,7 +195,7 @@ describe("qualificationBinding", () => {
       { availabilityZone: "us-east-1c", subnetId: "subnet-0cccccccccccccccc" },
     ]);
     const digest = (binding: unknown) => createHash("sha256").update(canonicalJson(Ec2RuntimeBindingSchema.parse(binding))).digest("hex");
-    // What `agentx project add` registers for the same outputs ...
+    // What `rovara project add` registers for the same outputs ...
     expect(digest(projectBinding)).toBe(digest(ec2Binding(foundationOutputs, "stack")));
     // ... and the literal binding the registered runtime row must equal.
     expect(digest(projectBinding)).toBe(digest({

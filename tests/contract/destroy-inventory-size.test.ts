@@ -1,7 +1,7 @@
 // The destroy inventory must fit SSM's 4096-byte standard tier (final review M6). It is measured here
 // against the retained resources of a real synth of the installer's stacks, for a 20-character
 // environment name, with every optional field filled and each physical ID as long as AWS makes it,
-// so a new retained resource that would break agentx destroy fails this test first.
+// so a new retained resource that would break rovara destroy fails this test first.
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";

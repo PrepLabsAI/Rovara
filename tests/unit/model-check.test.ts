@@ -24,7 +24,7 @@ describe("the single-call model check (test 42, INST-8)", () => {
     expect(run).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledExactlyOnceWith(2000);
     expect(result).toMatchObject({ ok: false, class: "limit-or-rate-limited", signal: "ThrottlingException", quota: { scope: "geographic", code: "L-SONNET46GEO", tokensPerMinute: 0 } });
-    const sentence = bedrockThrottleSentence({ modelId: SONNET, quota: (result as { quota: ModelCheckQuota }).quota, rerun: "run agentx init again", changeModel: "--worker-model" });
+    const sentence = bedrockThrottleSentence({ modelId: SONNET, quota: (result as { quota: ModelCheckQuota }).quota, rerun: "run rovara init again", changeModel: "--worker-model" });
     expect(sentence).toBe("Amazon Bedrock's limit for us.anthropic.claude-sonnet-4-6 in this account is 0 tokens per minute (quota L-SONNET46GEO). Request an increase in Service Quotas, or choose another model with --worker-model");
     expect(sentence).not.toMatch(/wait a minute/);
   });
@@ -33,7 +33,7 @@ describe("the single-call model check (test 42, INST-8)", () => {
     const result = await checkModel(base, { run: async () => { throw throttled(); }, sleep: async () => undefined, quotas: quotaClient(5_000_000), now: () => NOW });
     const quota = (result as { quota: ModelCheckQuota }).quota;
     expect(quota).toEqual({ scope: "geographic", code: "L-SONNET46GEO", tokensPerMinute: 5_000_000 });
-    expect(bedrockThrottleSentence({ modelId: SONNET, quota, rerun: "run agentx init again", changeModel: "--worker-model" }))
+    expect(bedrockThrottleSentence({ modelId: SONNET, quota, rerun: "run rovara init again", changeModel: "--worker-model" }))
       .toBe("Amazon Bedrock throttled the check of us.anthropic.claude-sonnet-4-6; if this repeats, check Service Quotas → Amazon Bedrock (quota L-SONNET46GEO: 5000000 tokens per minute)");
   });
 
@@ -41,8 +41,8 @@ describe("the single-call model check (test 42, INST-8)", () => {
     const result = await checkModel(base, { run: async () => { throw throttled(); }, sleep: async () => undefined, quotas: deniedQuotas, now: () => NOW });
     const quota = (result as { quota: ModelCheckQuota }).quota;
     expect(quota.tokensPerMinute).toBeNull();
-    const sentence = bedrockThrottleSentence({ modelId: SONNET, quota, rerun: "run agentx init again", changeModel: "--worker-model" });
-    expect(sentence).toContain("Bedrock throttled the check of us.anthropic.claude-sonnet-4-6; wait a minute and run agentx init again");
+    const sentence = bedrockThrottleSentence({ modelId: SONNET, quota, rerun: "run rovara init again", changeModel: "--worker-model" });
+    expect(sentence).toContain("Bedrock throttled the check of us.anthropic.claude-sonnet-4-6; wait a minute and run rovara init again");
     expect(sentence).toContain("Rovara could not read the quota");
   });
 
@@ -54,7 +54,7 @@ describe("the single-call model check (test 42, INST-8)", () => {
     const without = await checkModel(base, { run: async () => { throw throttled(); }, sleep: async () => undefined, now: () => NOW });
     expect(without).toMatchObject({ ok: false, class: "limit-or-rate-limited" });
     expect((without as { quota?: unknown }).quota).toBeUndefined();
-    expect(bedrockThrottleSentence({ modelId: SONNET, quota: undefined, rerun: "run agentx init again", changeModel: "--worker-model" })).toBe(`Bedrock throttled the check of ${SONNET}; wait a minute and run agentx init again`);
+    expect(bedrockThrottleSentence({ modelId: SONNET, quota: undefined, rerun: "run rovara init again", changeModel: "--worker-model" })).toBe(`Bedrock throttled the check of ${SONNET}; wait a minute and run rovara init again`);
   });
 
   it("reads the quota that applies to the route's scope: a global profile reads the global quota, and a bare id reads none", async () => {

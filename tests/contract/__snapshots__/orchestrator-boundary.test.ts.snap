@@ -3,8 +3,8 @@
 exports[`pi orchestration boundary > characterizes the in-house agentx_* tools byte-for-byte with no connector catalogs (regression guard) 1`] = `
 [
   {
-    "description": "Run repository inspection, editing, build, or test work on the remote AgentX worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
-    "name": "agentx_submit_task",
+    "description": "Run repository inspection, editing, build, or test work on the remote Rovara worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
+    "name": "rovara_submit_task",
     "parameters": {
       "properties": {
         "prompt": {
@@ -20,8 +20,8 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
     },
   },
   {
-    "description": "Explicitly validate and publish one changed registered repository as a pull request. AgentX opens it as a draft when a check fails, and the result says draft. AgentX itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, and the result says so when there is nothing to publish. Do not run agentx_submit_task or agentx_follow_up first to inspect, commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says nothing, use a short title naming the repository. Call this only when the user clearly asks to create or raise a pull request.",
-    "name": "agentx_create_pull_request",
+    "description": "Explicitly validate and publish one changed registered repository as a pull request. Rovara opens it as a draft when a check fails, and the result says draft. Rovara itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, and the result says so when there is nothing to publish. Do not run rovara_submit_task or rovara_follow_up first to inspect, commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says nothing, use a short title naming the repository. Call this only when the user clearly asks to create or raise a pull request.",
+    "name": "rovara_create_pull_request",
     "parameters": {
       "properties": {
         "body": {
@@ -47,8 +47,8 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
     },
   },
   {
-    "description": "Recovery only: read durable status for a previously interrupted AgentX operation.",
-    "name": "agentx_task_status",
+    "description": "Recovery only: read durable status for a previously interrupted Rovara operation.",
+    "name": "rovara_task_status",
     "parameters": {
       "properties": {
         "operationId": {
@@ -64,7 +64,7 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
   },
   {
     "description": "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
-    "name": "agentx_task_result",
+    "name": "rovara_task_result",
     "parameters": {
       "properties": {
         "operationId": {
@@ -80,7 +80,7 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
   },
   {
     "description": "Run a follow-up on the same remote workspace and conversation. This waits for completion and returns the worker's final response; do not poll or resubmit it.",
-    "name": "agentx_follow_up",
+    "name": "rovara_follow_up",
     "parameters": {
       "properties": {
         "prompt": {
@@ -96,8 +96,8 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
     },
   },
   {
-    "description": "Change an existing AgentX-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; sync by merging the latest base branch into it; close it; reopen a closed, unmerged one; replace it with clean history (the new pull request is created before the original is closed); revert a merged one with a reviewable revert pull request. History is never rebased or force-pushed. Title and body apply only to edit, replace and revert. Call only for the action the user explicitly asked for.",
-    "name": "agentx_manage_pull_request",
+    "description": "Change an existing Rovara-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; sync by merging the latest base branch into it; close it; reopen a closed, unmerged one; replace it with clean history (the new pull request is created before the original is closed); revert a merged one with a reviewable revert pull request. History is never rebased or force-pushed. Title and body apply only to edit, replace and revert. Call only for the action the user explicitly asked for.",
+    "name": "rovara_manage_pull_request",
     "parameters": {
       "properties": {
         "action": {
@@ -145,9 +145,9 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
 exports[`pi orchestration boundary > keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard) 1`] = `
 [
   {
-    "description": "Run repository inspection, editing, build, or test work on the remote AgentX worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
+    "description": "Run repository inspection, editing, build, or test work on the remote Rovara worker. This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
     "label": "Delegate coding task",
-    "name": "agentx_submit_task",
+    "name": "rovara_submit_task",
     "parameters": {
       "properties": {
         "prompt": {
@@ -163,9 +163,9 @@ exports[`pi orchestration boundary > keeps the five tools outside the pull-reque
     },
   },
   {
-    "description": "Explicitly validate and publish one changed registered repository as a pull request. AgentX opens it as a draft when a check fails, and the result says draft. AgentX itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, and the result says so when there is nothing to publish. Do not run agentx_submit_task or agentx_follow_up first to inspect, commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says nothing, use a short title naming the repository. Call this only when the user clearly asks to create or raise a pull request.",
+    "description": "Explicitly validate and publish one changed registered repository as a pull request. Rovara opens it as a draft when a check fails, and the result says draft. Rovara itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, and the result says so when there is nothing to publish. Do not run rovara_submit_task or rovara_follow_up first to inspect, commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says nothing, use a short title naming the repository. Call this only when the user clearly asks to create or raise a pull request.",
     "label": "Create pull request",
-    "name": "agentx_create_pull_request",
+    "name": "rovara_create_pull_request",
     "parameters": {
       "properties": {
         "body": {
@@ -191,9 +191,9 @@ exports[`pi orchestration boundary > keeps the five tools outside the pull-reque
     },
   },
   {
-    "description": "Recovery only: read durable status for a previously interrupted AgentX operation.",
+    "description": "Recovery only: read durable status for a previously interrupted Rovara operation.",
     "label": "Remote task status",
-    "name": "agentx_task_status",
+    "name": "rovara_task_status",
     "parameters": {
       "properties": {
         "operationId": {
@@ -210,7 +210,7 @@ exports[`pi orchestration boundary > keeps the five tools outside the pull-reque
   {
     "description": "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
     "label": "Remote task result",
-    "name": "agentx_task_result",
+    "name": "rovara_task_result",
     "parameters": {
       "properties": {
         "operationId": {
@@ -227,7 +227,7 @@ exports[`pi orchestration boundary > keeps the five tools outside the pull-reque
   {
     "description": "Run a follow-up on the same remote workspace and conversation. This waits for completion and returns the worker's final response; do not poll or resubmit it.",
     "label": "Remote follow-up",
-    "name": "agentx_follow_up",
+    "name": "rovara_follow_up",
     "parameters": {
       "properties": {
         "prompt": {

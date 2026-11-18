@@ -3,8 +3,8 @@
 Spec 043. A member of an enabled channel scores the Rovara coding agent on one SWE-bench task:
 
 ```
-@agentx eval swebench verified django__django-11099
-@agentx eval swebench lite astropy__astropy-12907 model Fast
+@rovara eval swebench verified django__django-11099
+@rovara eval swebench lite astropy__astropy-12907 model Fast
 ```
 
 Rovara replies that the run started, and later posts whether the task was resolved, the hidden tests'
@@ -23,7 +23,7 @@ frontier model families failed). Their IDs look like `instance_NodeBB__NodeBB-<c
 `instance_id` column of `ScaleAI/SWE-bench_Pro` on Hugging Face lists them.
 
 ```
-@agentx eval swebench pro-hard instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e model Claude Sonnet 4.6
+@rovara eval swebench pro-hard instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e model Claude Sonnet 4.6
 ```
 
 A Pro run differs from a SWE-bench run in four ways: the agent works from the task's `instruction.md` (PR
@@ -39,7 +39,7 @@ bugs). IDs look like `njs.cve-2022-32414` or `libxml2.ossfuzz-417247563`; the `i
 `SEC-bench/SEC-bench` (split `eval`) lists them.
 
 ```
-@agentx eval secbench patch njs.cve-2022-32414 model Claude Sonnet 4.6
+@rovara eval secbench patch njs.cve-2022-32414 model Claude Sonnet 4.6
 ```
 
 The agent gets SEC-bench's own patch prompt (bug description and sanitizer report) in the task's
@@ -126,8 +126,8 @@ Every step writes to the AWS account; an administrator runs them.
    treats that answer as final, so the graded result is lost and the run ends FAILED. The same holds after
    a control-plane rollback: roll the runner image back first. (Spec 053's thinking level alone was safe in
    that direction, since the runner reports it only when the run config carried it.)
-4. **Enable a channel**: `agentx admin eval enable --team <T…> --channel <C…> [--max-cost-usd 10]`.
-   The channel must already be bound to a project. `agentx admin eval show` and `disable` read and
+4. **Enable a channel**: `rovara admin eval enable --team <T…> --channel <C…> [--max-cost-usd 10]`.
+   The channel must already be bound to a project. `rovara admin eval show` and `disable` read and
    remove the setting.
 
 ## Costs and limits
@@ -210,11 +210,11 @@ costCapUsd: 60                     # 1 to 1,000
 ```
 
 ```bash
-agentx admin eval batch start --file batch.yaml --team <T…> --channel <C…>
-agentx admin eval batch show <batch-id>
-agentx admin eval batch stop <batch-id>
-agentx admin eval batch results <batch-id>                 # the per-model table
-agentx admin eval batch results <batch-id> --csv out.csv   # the per-run CSV
+rovara admin eval batch start --file batch.yaml --team <T…> --channel <C…>
+rovara admin eval batch show <batch-id>
+rovara admin eval batch stop <batch-id>
+rovara admin eval batch results <batch-id>                 # the per-model table
+rovara admin eval batch results <batch-id> --csv out.csv   # the per-run CSV
 ```
 
 The channel must be bound to a project and enabled for evals; every model must be approved for that
@@ -233,8 +233,8 @@ starts another one. A batch is refused, with the reason, when:
 ### From Slack
 
 ```
-@agentx eval batch secbench patch njs.cve-2022-32414 gpac.cve-2023-5586 models GLM 5.3, MiniMax M3 repeats 2 cap $20
-@agentx eval batch swebench verified django__django-11099 models Claude Sonnet 4.6, Fast
+@rovara eval batch secbench patch njs.cve-2022-32414 gpac.cve-2023-5586 models GLM 5.3, MiniMax M3 repeats 2 cap $20
+@rovara eval batch swebench verified django__django-11099 models Claude Sonnet 4.6, Fast
 ```
 
 At most 20 runs. Models are named as for `eval swebench … model <name>`, separated by commas. The
@@ -254,7 +254,7 @@ ceiling × 1.1), rounded up to cents and at most $1,000. `stop` in the batch's t
 - **Progress.** The thread is updated as runs finish ("12/72 done, 7 resolved, $41.20 spent") and gets
   a per-model summary at the end. A timer every 2 minutes tops up free slots and records ends the
   broker missed, so a lost callback never stalls a batch.
-- **Stop.** `stop` in the thread, or `agentx admin eval batch stop`, cancels queued runs and stops runs
+- **Stop.** `stop` in the thread, or `rovara admin eval batch stop`, cancels queued runs and stops runs
   in flight. Single runs started in the thread are stopped too.
 
 ### Results
@@ -266,7 +266,7 @@ ceiling × 1.1), rounded up to cents and at most $1,000. `stop` in the batch's t
 | `results.csv` | One row per run: instance, model, provider pin, thinking level, repeat, attempt, outcome, resolved, the SEC-bench verdict or test counts, stop reason, agent seconds, tool calls, tokens by kind, cost and charge, image digest, and (spec 051) `checkStatus`, `agentClaim` and `disagrees` |
 | `summary.json` | Per model: graded runs, resolved, resolve rate with a 95% Wilson interval, failed, total cost and cost per solved task, and `disagreementRate` (spec 051) |
 
-`agentx admin eval batch results` reads them through the control plane. Until the batch ends it
+`rovara admin eval batch results` reads them through the control plane. Until the batch ends it
 says the batch is running; if the tick wrote the files and could not confirm them (a lost row, or
 charges that do not sum to the spend) it says the results are incomplete, and the
 `EvalBatchTickErrors` alarm fires. A run with no reported cost is charged its ceiling and marked

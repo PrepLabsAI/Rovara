@@ -65,7 +65,7 @@ describe("registering and removing, as admin changes (FR-001)", () => {
     expect(planned.status).toBe(201);
     const view = planned.body.change as { effect: string; details: Record<string, unknown> };
     expect(view.effect).toContain("Register sign-in client scheduler (Scheduler)");
-    expect(view.effect).toContain("tokens addressed to scheduler, which AgentX's own API never accepts");
+    expect(view.effect).toContain("tokens addressed to scheduler, which Rovara's own API never accepts");
     expect(view.effect).toContain("It is confidential");
     expect(JSON.stringify(view)).not.toContain(secretHash);
     expect(rows()).toEqual([]);
@@ -147,7 +147,7 @@ describe("updating a client, keeping its secret", () => {
   });
 });
 
-describe("agentx admin sign-in-client (FR-001)", () => {
+describe("rovara admin sign-in-client (FR-001)", () => {
   const CHANGE = "55555555-5555-4555-8555-555555555555";
   const view = (status: string) => ({ changeId: CHANGE, kind: "register_sign_in_client", status, effect: "Register sign-in client scheduler (Scheduler).", methodsOffered: ["cli"], createdAt: "2026-11-12T09:00:00.000Z", expiresAt: "2026-11-12T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
   const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
@@ -211,7 +211,7 @@ describe("agentx admin sign-in-client (FR-001)", () => {
     expect(declined.err()).not.toContain("Client secret");
   });
 
-  it("refuses a bad client before calling AgentX", async () => {
+  it("refuses a bad client before calling Rovara", async () => {
     const session = await cli("applied");
     expect(await session.run(["add", "agentx-cli", "--audience", "scheduler", "--loopback"])).toBe(2);
     expect(await session.run(["add", "scheduler", "--audience", "scheduler", "--loopback", "--secret-file", "x"])).toBe(2);

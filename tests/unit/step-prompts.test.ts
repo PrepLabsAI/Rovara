@@ -1,5 +1,5 @@
 // Lane L14: the words each step is given must tell a real model the format its reader requires. For every prompt: a realistic model answer shaped as the prompt says is accepted by the real reader, and
-// the prompt text carries the format (so a change to a reader fails here, not on a laptop). The coding and review prompts need no block of their own: the worker adds the "AgentX result" rule to the
+// the prompt text carries the format (so a change to a reader fails here, not on a laptop). The coding and review prompts need no block of their own: the worker adds the "Rovara result" rule to the
 // coder's system prompt, and builds the reviewers' prompts itself.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";

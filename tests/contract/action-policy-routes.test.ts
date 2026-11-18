@@ -9,7 +9,7 @@ const pratik = "U0123456789";
 const admin = { subject: "admin-subject", admin: true };
 const policy = { rules: [
   { tool: "issue_write", connector: "github", whenArguments: ["state"], treatAs: "destructive" },
-  { tool: "agentx_create_pull_request", outcome: "ask", reason: "Pull requests need a person." },
+  { tool: "rovara_create_pull_request", outcome: "ask", reason: "Pull requests need a person." },
 ] };
 
 beforeAll(async () => { await loadSlackBroker(); });

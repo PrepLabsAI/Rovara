@@ -35,7 +35,7 @@ function tools(order: string[], onOperationAccepted: (operationId: string) => Pr
 }
 
 describe("onOperationAccepted", () => {
-  for (const name of ["agentx_submit_task", "agentx_follow_up"] as const) {
+  for (const name of ["rovara_submit_task", "rovara_follow_up"] as const) {
     it(`${name} reports its accepted operation once, and before it waits on it`, async () => {
       const order: string[] = [];
       const accepted = vi.fn(async (operationId: string) => {
@@ -50,8 +50,8 @@ describe("onOperationAccepted", () => {
   it("is not called by the recovery tools, which start no new work", async () => {
     const accepted = vi.fn(async () => undefined);
     const { named } = tools([], accepted);
-    await named("agentx_task_status")({ operationId: OPERATION });
-    await named("agentx_task_result")({ operationId: OPERATION });
+    await named("rovara_task_status")({ operationId: OPERATION });
+    await named("rovara_task_result")({ operationId: OPERATION });
     expect(accepted).not.toHaveBeenCalled();
   });
 
@@ -59,33 +59,33 @@ describe("onOperationAccepted", () => {
     const accepted = vi.fn(async () => undefined);
     const { api, named } = tools([], accepted);
     api.submitTask.mockResolvedValueOnce({});
-    await expect(named("agentx_submit_task")({ prompt: "fix it" })).rejects.toThrow("omitted the operation");
+    await expect(named("rovara_submit_task")({ prompt: "fix it" })).rejects.toThrow("omitted the operation");
     expect(accepted).not.toHaveBeenCalled();
   });
 });
 
 describe("onOperationAttached (#173)", () => {
-  it("agentx_task_result reports the operation it re-attaches to once, before it waits, and never as accepted", async () => {
+  it("rovara_task_result reports the operation it re-attaches to once, before it waits, and never as accepted", async () => {
     const order: string[] = [];
     const accepted = vi.fn(async () => undefined);
     const attached = vi.fn(async (operationId: string) => { order.push(`attached ${operationId}`); });
     const api = fakeApi(order);
     const tool = createOrchestrationTools(api, context, { requestId: () => "44444444-4444-4444-8444-444444444444", recovery: true, onOperationAccepted: accepted, onOperationAttached: attached })
-      .find((entry) => entry.name === "agentx_task_result")!;
+      .find((entry) => entry.name === "rovara_task_result")!;
     await tool.execute("call-1", { operationId: OPERATION }, undefined, undefined, {} as never);
     expect(attached).toHaveBeenCalledExactlyOnceWith(OPERATION);
     expect(order).toEqual([`attached ${OPERATION}`, "wait"]);
     expect(accepted).not.toHaveBeenCalled();
   });
 
-  it("is not called by agentx_task_status, which waits on nothing", async () => {
+  it("is not called by rovara_task_status, which waits on nothing", async () => {
     const attached = vi.fn(async () => undefined);
-    const tool = createOrchestrationTools(fakeApi([]), context, { recovery: true, onOperationAttached: attached }).find((entry) => entry.name === "agentx_task_status")!;
+    const tool = createOrchestrationTools(fakeApi([]), context, { recovery: true, onOperationAttached: attached }).find((entry) => entry.name === "rovara_task_status")!;
     await tool.execute("call-1", { operationId: OPERATION }, undefined, undefined, {} as never);
     expect(attached).not.toHaveBeenCalled();
   });
 
-  it("is handed from the hosted Slack runtime to agentx_task_result", async () => {
+  it("is handed from the hosted Slack runtime to rovara_task_result", async () => {
     const attached = vi.fn(async () => undefined);
     const runtime = await createHostedSlackRuntime({
       message: {
@@ -101,7 +101,7 @@ describe("onOperationAttached (#173)", () => {
       onOperationAttached: attached,
     }, { stateDirectory: await createFixtureDirectory("agentx-attached-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
     try {
-      await runtime.session.getToolDefinition("agentx_task_result")!.execute("result-1", { operationId: OPERATION }, undefined, undefined, {} as never);
+      await runtime.session.getToolDefinition("rovara_task_result")!.execute("result-1", { operationId: OPERATION }, undefined, undefined, {} as never);
     } finally {
       await runtime.dispose();
     }
@@ -110,7 +110,7 @@ describe("onOperationAttached (#173)", () => {
 });
 
 describe("the hosted Slack runtime", () => {
-  it("hands the turn's onOperationAccepted to agentx_submit_task", async () => {
+  it("hands the turn's onOperationAccepted to rovara_submit_task", async () => {
     const accepted = vi.fn(async () => undefined);
     const runtime = await createHostedSlackRuntime({
       message: {
@@ -125,7 +125,7 @@ describe("the hosted Slack runtime", () => {
       onOperationAccepted: accepted,
     }, { stateDirectory: await createFixtureDirectory("agentx-accepted-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
     try {
-      await runtime.session.getToolDefinition("agentx_submit_task")!.execute("submit-1", { prompt: "fix it" }, undefined, undefined, {} as never);
+      await runtime.session.getToolDefinition("rovara_submit_task")!.execute("submit-1", { prompt: "fix it" }, undefined, undefined, {} as never);
     } finally {
       await runtime.dispose();
     }
@@ -195,12 +195,12 @@ describe("running a hosted turn that may be handed off", () => {
 });
 
 describe("a task tool whose turn was handed off", () => {
-  for (const name of ["agentx_submit_task", "agentx_follow_up"] as const) {
+  for (const name of ["rovara_submit_task", "rovara_follow_up"] as const) {
     it(`${name} starts no worker task once the turn's signal has fired`, async () => {
       const accepted = vi.fn(async () => undefined);
       const api = fakeApi([]);
       const tool = createOrchestrationTools(api, context, { requestId: () => "44444444-4444-4444-8444-444444444444", onOperationAccepted: accepted }).find((entry) => entry.name === name)!;
-      await expect(tool.execute("call-1", { prompt: "fix it" }, AbortSignal.abort(), undefined, {} as never)).rejects.toThrow("AgentX is restarting");
+      await expect(tool.execute("call-1", { prompt: "fix it" }, AbortSignal.abort(), undefined, {} as never)).rejects.toThrow("Rovara is restarting");
       expect(api.submitTask).not.toHaveBeenCalled();
       expect(api.followUp).not.toHaveBeenCalled();
       expect(accepted).not.toHaveBeenCalled();

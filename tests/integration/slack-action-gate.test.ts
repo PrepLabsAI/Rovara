@@ -463,7 +463,7 @@ describe("the hosted Slack runtime", () => {
   async function codingTurn(extra: Partial<TurnInput>) {
     const { modelRuntime, faux } = await fauxModelRuntime();
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("agentx_submit_task", { prompt: "now run the tests" }), fauxToolCall("agentx_follow_up", { prompt: "and fix any failure" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("rovara_submit_task", { prompt: "now run the tests" }), fauxToolCall("rovara_follow_up", { prompt: "and fix any failure" })], { stopReason: "toolUse" }),
       fauxAssistantMessage("Started."),
     ]);
     const api = { discoverConnectorTools: vi.fn(), callConnectorTool: vi.fn(), submitTask: vi.fn(async () => { throw new Error("no worker in this test"); }), taskStatus: vi.fn(), taskResult: vi.fn(),
@@ -516,8 +516,8 @@ describe("the hosted Slack runtime", () => {
     const { decisions, classifier, api } = await codingTurn({ computePrepared: true });
     expect(classifier).not.toHaveBeenCalled();
     expect(decisions).toMatchObject([
-      { tool: "agentx_submit_task", outcome: "allow", actionClass: "read" },
-      { tool: "agentx_follow_up", outcome: "allow", actionClass: "read" },
+      { tool: "rovara_submit_task", outcome: "allow", actionClass: "read" },
+      { tool: "rovara_follow_up", outcome: "allow", actionClass: "read" },
     ]);
     expect(api.submitTask).toHaveBeenCalledOnce();
     expect(api.followUp).toHaveBeenCalledOnce();
@@ -527,8 +527,8 @@ describe("the hosted Slack runtime", () => {
     const { decisions, classifier, api } = await codingTurn({ worker: { prepared: () => false, ensureReady: async () => undefined } });
     expect(classifier).toHaveBeenCalledOnce();
     expect(decisions).toMatchObject([
-      { tool: "agentx_submit_task", outcome: "ask", actionClass: "change", source: "classifier" },
-      { tool: "agentx_follow_up", outcome: "allow", actionClass: "read" },
+      { tool: "rovara_submit_task", outcome: "ask", actionClass: "change", source: "classifier" },
+      { tool: "rovara_follow_up", outcome: "allow", actionClass: "read" },
     ]);
     expect(api.submitTask).not.toHaveBeenCalled();
   });
@@ -537,8 +537,8 @@ describe("the hosted Slack runtime", () => {
     const { decisions, classifier } = await codingTurn({});
     expect(classifier).toHaveBeenCalledTimes(2);
     expect(decisions).toMatchObject([
-      { tool: "agentx_submit_task", outcome: "ask", actionClass: "change" },
-      { tool: "agentx_follow_up", outcome: "ask", actionClass: "change" },
+      { tool: "rovara_submit_task", outcome: "ask", actionClass: "change" },
+      { tool: "rovara_follow_up", outcome: "ask", actionClass: "change" },
     ]);
   });
 

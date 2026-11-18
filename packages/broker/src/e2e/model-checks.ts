@@ -226,7 +226,7 @@ export async function untestedRouteSentence(deps: Pick<ModelCheckDependencies, "
   try {
     const last = await readModelTest(deps, untested.routeId, untested.modelId);
     // The class sentence ends with "(agentx project model-check test --model <id>)" in places: the proposal gives the real command itself, so the placeholder one is left out here.
-    if (last?.outcome === "failed") why = failureClassSentence(last.failureClass ?? "unknown", untested).replace(/ \(agentx project model-check test --model <id>\)/u, "").replace(/[.\s]+$/u, "");
+    if (last?.outcome === "failed") why = failureClassSentence(last.failureClass ?? "unknown", untested).replace(/ \((?:agentx|rovara) project model-check test --model <id>\)/u, "").replace(/[.\s]+$/u, "");
   } catch { /* the sentence then says "not run" */ }
   return `AI navigation steps will not run: the driving test with ${LABELS[untested.provider]} \`${untested.modelId}\` has not passed (${why})`;
 }

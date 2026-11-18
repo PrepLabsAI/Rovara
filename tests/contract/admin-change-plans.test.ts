@@ -91,7 +91,7 @@ describe("binding and unbinding (E7, E12)", () => {
     const { deps, identity, db } = await harness();
     const plan = await planChange(deps, identity, { kind: "unbind_channel", channel: SLACK_CHANNEL });
     expect(plan.effect).toBe(`Unbind channel #payments-dev (${SLACK_CHANNEL}) from project payments. New messages there will get no reply; existing thread workspaces are kept.`);
-    await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "C0NOTBOUND1" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: channel #ledger-dev (C0NOTBOUND1) is not bound to any project; list the bindings with agentx admin slack bindings" });
+    await expect(planChange(deps, identity, { kind: "unbind_channel", channel: "C0NOTBOUND1" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: channel #ledger-dev (C0NOTBOUND1) is not bound to any project; list the bindings with rovara admin slack bindings" });
     expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeDefined();
     await plan.apply(identity);
     expect(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
@@ -175,7 +175,7 @@ describe("a project revision (E7, E11)", () => {
 
   it("refuses a first revision, an existing revision, a retired field and an invalid definition", async () => {
     const { deps, identity } = await harness();
-    await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "ledger", revision: 1 } })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: project ledger has no revision yet; register its first revision with agentx admin project register" });
+    await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "ledger", revision: 1 } })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: project ledger has no revision yet; register its first revision with rovara admin project register" });
     await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 1, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: "x" } })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: revision 1 is not newer than the latest, 1; use 2" });
     await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, schemaVersion: 1, repositories: [repository], setup: [], readiness: [], orchestratorInstructions: "x" } })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: "CONFIG_INVALID: project definition must not contain schemaVersion; remove them and register again" });
     await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2 } })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringMatching(/^CONFIG_INVALID: the project definition is invalid: repositories: .+; fix it and plan again$/) as unknown });

@@ -1,8 +1,8 @@
 # Install and run Rovara: overview
 
-A one-page tour of `agentx init`, the day-2 commands and developer sign-in. [Installing Rovara](install.md) and [Running Rovara](day-two.md) have the full detail.
+A one-page tour of `rovara init`, the day-2 commands and developer sign-in. [Installing Rovara](install.md) and [Running Rovara](day-two.md) have the full detail.
 
-`agentx init` installs a complete Rovara environment in your own AWS account, step by step: its
+`rovara init` installs a complete Rovara environment in your own AWS account, step by step: its
 stacks, its own GitHub App and Slack app, developer sign-in, your first project and its Slack
 channel, and, if you want them now, the Linear, Jira and Asana connectors (any other MCP server is
 added afterwards with `connector add mcp`). It prints everything it
@@ -10,7 +10,7 @@ will create and an estimated monthly cost before it creates anything, and runnin
 where it stopped.
 
 The usual way to start it is the Launch in AWS button in [Installing Rovara](install.md#install-with-the-launch-in-aws-button-recommended):
-it runs `agentx init` in your own AWS account and asks everything on a setup page, so nothing is
+it runs `rovara init` in your own AWS account and asks everything on a setup page, so nothing is
 installed on your computer. From a terminal, the whole install is one command:
 `npx @preplabsai/rovara-code init --env <name>`.
 
@@ -64,36 +64,36 @@ stops, for automated tests; running `init` again finishes.
 
 Secrets never go on the command line: each comes from a hidden prompt, a file you point to, or an
 environment variable, and `init` stores it in AWS Secrets Manager, never in its own settings. A
-platform team that must review IAM first can use `agentx --env <name> init --export <dir> --region
+platform team that must review IAM first can use `rovara --env <name> init --export <dir> --region
 <region> --release <dir>` for a bundle they deploy themselves (`--env` must be given explicitly);
-the operator then continues with `agentx --env <name> init --resume --region <region> --from-bundle
+the operator then continues with `rovara --env <name> init --resume --region <region> --from-bundle
 <dir>`.
 
 After the install, day-2 work runs with the operator role that `init` created:
 
-- `agentx --env <name> project add` and `agentx --env <name> channel add` add another project and
+- `rovara --env <name> project add` and `rovara --env <name> channel add` add another project and
   channel (the worker image has Python 3 and uv for Python projects).
-- `agentx --env <name> connector add linear|jira|asana` adds a connector later, and
-  `agentx --env <name> connector add mcp` connects any other remote MCP server, such as Sentry or
+- `rovara --env <name> connector add linear|jira|asana` adds a connector later, and
+  `rovara --env <name> connector add mcp` connects any other remote MCP server, such as Sentry or
   PagerDuty ([docs/connectors/custom-mcp.md](connectors/custom-mcp.md)), and
-  `agentx --env <name> alerts test` sends another test alarm.
-- `agentx --env <name> doctor` checks every part of the environment and says how to fix what is
+  `rovara --env <name> alerts test` sends another test alarm.
+- `rovara --env <name> doctor` checks every part of the environment and says how to fix what is
   wrong.
-- `agentx --env <name> config list`, `config get <key>` and `config set <key> <value>` read and
+- `rovara --env <name> config list`, `config get <key>` and `config set <key> <value>` read and
   change the models, the per-thread request limit, Slack settings, alerts and the budget. They show
   the workspace limits too, but cannot change them until spec 025 phase 25e (see [Working in a
   thread](slack.md#working-in-a-thread)).
-- `agentx --env <name> upgrade` moves to a newer release, showing every change and asking first;
+- `rovara --env <name> upgrade` moves to a newer release, showing every change and asking first;
   `upgrade --export <dir>` writes the upgrade for a platform team's pipeline instead.
-- `agentx --env <name> destroy` removes the environment. It needs admin credentials and an explicit
+- `rovara --env <name> destroy` removes the environment. It needs admin credentials and an explicit
   `--env`, and asks you to type the environment's name; `--keep-data` keeps the tables, buckets,
   secrets, Cognito user pool and KMS keys.
 
-Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
-AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
+Developers then sign in from their own machines with `rovara login <control plane URL>`, with no
+AWS credentials; `rovara whoami` shows which projects they can use, and `rovara workspaces` opens a
 page on `127.0.0.1` showing those projects and the workspaces in them (`--no-ui` prints the same
 list in the terminal). To hand tasks to Rovara from Claude Code, Codex or Cursor, a developer runs
-`agentx mcp install --client claude-code|codex|cursor` once.
+`rovara mcp install --client claude-code|codex|cursor` once.
 
 The guides:
 
@@ -101,10 +101,10 @@ The guides:
   and the cost estimate. [Other ways to install](install-advanced.md) covers the CDK, a platform
   team and a source checkout.
 - [Running Rovara](day-two.md): the operator role, `doctor`, `upgrade`, `config`, projects,
-  channels, connectors and developer sign-in settings (`agentx signin`).
+  channels, connectors and developer sign-in settings (`rovara signin`).
 - [Removing an environment](teardown.md) and
   [moving Rovara to another AWS account](move-account.md).
 - [Use Rovara from Claude Code, Codex or Cursor](mcp-install.md): the developer's guide to
-  `agentx mcp`, including sharing a task to Slack.
+  `rovara mcp`, including sharing a task to Slack.
 - [Releases](releases.md): what a release contains, how one is cut, the owner setup still
   open, and the release test.

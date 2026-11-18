@@ -127,7 +127,7 @@ describe("asana connector, end to end against a fake Asana", () => {
   it("refuses registration until an oauth-refresh-token credential is registered, then registers with a connected preflight", async () => {
     const { fake, handler } = await setupFake();
     const refused = await call(handler, { method: "POST", path: "/v1/admin/projects", user: admin, body: projectRegistrationBody() });
-    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "connector asana: credential asana-bot is not registered; run agentx admin credential authorize first" } });
+    expect(refused.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "connector asana: credential asana-bot is not registered; run rovara admin credential authorize first" } });
 
     expect((await registerCredential(handler, "static-secret", "agentx/connectors/asana-key")).status).toBe(201);
     const wrongType = await call(handler, { method: "POST", path: "/v1/admin/projects", user: admin, body: projectRegistrationBody() });
@@ -225,7 +225,7 @@ describe("asana connector, end to end against a fake Asana", () => {
     const result = await run("add_comment", { task_id: "1210000000000101", text: "x" });
     expect(result.body.result).toMatchObject({
       status: "FAILED", reason: "not_connected",
-      text: "Asana is not connected for this project: credential asana-bot: the token endpoint refused the refresh token with HTTP 400 (invalid_grant); the bot user must sign in again with agentx admin credential authorize --ref asana-bot. An administrator must fix its credential.",
+      text: "Asana is not connected for this project: credential asana-bot: the token endpoint refused the refresh token with HTTP 400 (invalid_grant); the bot user must sign in again with rovara admin credential authorize --ref asana-bot. An administrator must fix its credential.",
     });
     expect(writes(fake)).toEqual([]);
   });

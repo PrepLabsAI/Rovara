@@ -107,7 +107,7 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
   it("puts the regression first and labels the model's text as the agent's account", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "All good.", checks: report({}) }, "1");
+      taskCall(input, "rovara_submit_task", { operationId, status: "SUCCEEDED", response: "All good.", checks: report({}) }, "1");
       return "All good.";
     };
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
@@ -123,7 +123,7 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
   it("says the pull request opened as a draft in a turn that only publishes", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_create_pull_request", prResult(true), "1");
+      taskCall(input, "rovara_create_pull_request", prResult(true), "1");
       return "Opened https://github.com/example/demo/pull/7.";
     };
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
@@ -133,7 +133,7 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
   it.each([[false], [undefined]])("adds no line when the pull request is not a draft (draft: %s)", async (draft) => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_create_pull_request", prResult(draft), "1");
+      taskCall(input, "rovara_create_pull_request", prResult(draft), "1");
       return "Opened it.";
     };
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
@@ -143,8 +143,8 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
   it("leads with the task's verdict and then the draft line when a turn runs a task and publishes", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Fixed.", checks: report({ status: "verified", checks: [] }) }, "1");
-      taskCall(input, "agentx_create_pull_request", prResult(true), "2");
+      taskCall(input, "rovara_submit_task", { operationId, status: "SUCCEEDED", response: "Fixed.", checks: report({ status: "verified", checks: [] }) }, "1");
+      taskCall(input, "rovara_create_pull_request", prResult(true), "2");
       return "Fixed and opened.";
     };
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
@@ -154,7 +154,7 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
   it("leaves a turn with no check report exactly as before", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Done." }, "1");
+      taskCall(input, "rovara_submit_task", { operationId, status: "SUCCEEDED", response: "Done." }, "1");
       return "Done.";
     };
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });

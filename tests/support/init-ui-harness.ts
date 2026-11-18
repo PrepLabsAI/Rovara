@@ -1,4 +1,4 @@
-// SC-003: the shared harness for `agentx init --ui`: a full install driven entirely from the page.
+// SC-003: the shared harness for `rovara init --ui`: a full install driven entirely from the page.
 // Moved out of init-ui-cli.test.ts (Task 17) so the whole-journey copy-lint tests can reuse it
 // without duplicating the server and fake setup. The wizard server and the GitHub manifest listener
 // are both real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing

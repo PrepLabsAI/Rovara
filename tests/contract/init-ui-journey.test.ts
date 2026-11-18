@@ -22,9 +22,9 @@ describe("the journey", () => {
 
   it("gives every step a phase, a plain title and a usual time", () => {
     expect(INSTALL_STEP_ORDER.map((id) => STEP_PLAN[id].title)).toEqual([
-      "Check your account and choices", "Set up AWS permissions", "Build the network and sign-in", "Start the AgentX service",
-      "Start the Slack connection", "Create the GitHub app", "Create the Slack app", "Check that Slack reaches AgentX", "Turn on developer sign-in",
-      "Sign in to AgentX", "Set up your first project", "Connect your issue trackers", "Turn on alerts", "Get a first reply in Slack",
+      "Check your account and choices", "Set up AWS permissions", "Build the network and sign-in", "Start the Rovara service",
+      "Start the Slack connection", "Create the GitHub app", "Create the Slack app", "Check that Slack reaches Rovara", "Turn on developer sign-in",
+      "Sign in to Rovara", "Set up your first project", "Connect your issue trackers", "Turn on alerts", "Get a first reply in Slack",
     ]);
     for (const id of INSTALL_STEP_ORDER) expect(STEP_PLAN[id].usualSeconds).toBeGreaterThan(0);
   });
@@ -131,7 +131,7 @@ describe("the journey", () => {
 
   it("welcomes the user with the phases, the total, the time needed, and what to keep open", () => {
     expect(welcomeLines()).toEqual([
-      "AgentX installs into your AWS account and connects to GitHub and Slack, in five parts:",
+      "Rovara installs into your AWS account and connects to GitHub and Slack, in five parts:",
       "Get started: about 2 minutes.",
       "Your choices: about 6 minutes.",
       "Build in AWS: about 21 minutes.",
@@ -144,12 +144,12 @@ describe("the journey", () => {
   });
 
   it("writes one terminal line per step, and one each for a wait, the end and a stop", () => {
-    expect(terminalStepLine("control-plane")).toBe("[3/5] Build in AWS: Start the AgentX service (about 13 minutes)");
+    expect(terminalStepLine("control-plane")).toBe("[3/5] Build in AWS: Start the Rovara service (about 13 minutes)");
     expect(terminalStepLine("slack-app")).toBe("[4/5] Connect GitHub and Slack: Create the Slack app. Waiting for you in the browser.");
     expect(stageLine("your-choices")).toBe("[2/5] Your choices: waiting for you in the browser");
-    expect(READY_LINE).toBe("[5/5] Finish: done. AgentX is ready. The browser has the next steps.");
-    expect(stoppedLine({ phase: "build", problem: "Start the AgentX service did not finish.", logPath: "/home/a/.agentx/logs/init-staging.log" }))
-      .toBe("[3/5] Stopped: Start the AgentX service did not finish. Details in the browser and in /home/a/.agentx/logs/init-staging.log.");
+    expect(READY_LINE).toBe("[5/5] Finish: done. Rovara is ready. The browser has the next steps.");
+    expect(stoppedLine({ phase: "build", problem: "Start the Rovara service did not finish.", logPath: "/home/a/.agentx/logs/init-staging.log" }))
+      .toBe("[3/5] Stopped: Start the Rovara service did not finish. Details in the browser and in /home/a/.agentx/logs/init-staging.log.");
   });
 });
 

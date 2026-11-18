@@ -110,7 +110,7 @@ async function turnIn(s: Scenario, n: number, text: string, work: { coding: bool
         const listed = await runtime.session.getToolDefinition("github__list_issues")!.execute(`list-${message.eventId}`, {}, undefined, undefined, {} as never);
         s.toolResults.push(textOf(listed));
         if (!work.coding) return CONNECTOR_ANSWER;
-        const submitted = await runtime.session.getToolDefinition("agentx_submit_task")!
+        const submitted = await runtime.session.getToolDefinition("rovara_submit_task")!
           .execute(`submit-${message.eventId}`, { prompt: "List the files in the repository." }, undefined, undefined, {} as never);
         s.toolResults.push(textOf(submitted));
         return CODING_ANSWER;

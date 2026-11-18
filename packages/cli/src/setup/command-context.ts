@@ -1,7 +1,7 @@
 // What every setup day-2 command needs: the environment's settings from SSM (FR-004), an admin
 // session (the same check init uses), the secrets store, prompts, and the injected services.
 // main.ts builds the real one; tests pass their own through CliDependencies.setup.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { Command } from "commander";
 import { openSystemBrowser } from "../auth.js";
@@ -70,7 +70,7 @@ export function realSetupContext(input: {
     const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string; region?: string; acceptUncheckedModel?: string }>();
     const settings = await readEnvironmentSettings(input.parameterStore(globals.region), globals.env);
     if (settings === undefined) {
-      throw agentXError("CONFIG_INVALID", `environment ${globals.env} has no settings in ${globals.region ?? "your AWS configuration's region"}; pass --region, or run agentx env list`);
+      throw agentXError("CONFIG_INVALID", `environment ${globals.env} has no settings in ${globals.region ?? "your AWS configuration's region"}; pass --region, or run ${CLI_COMMAND_NAME} env list`);
     }
     return {
       env: globals.env, settings,

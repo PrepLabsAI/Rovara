@@ -120,7 +120,7 @@ describe("Suite 12: install, upgrade and doctor", () => {
     const { e2e, pullRequest } = await waiting({ webhookSecret: null });
     const early = e2e.github.comment(pullRequest.number, "octocat", "Looks good.");
     expect((await e2e.webhook({ kind: "issue_comment", number: pullRequest.number, comment: early })).status).toBe(503);
-    // The admin runs agentx upgrade: the App secret now holds GitHub's webhook secret; the running broker still holds its old copy.
+    // The admin runs rovara upgrade: the App secret now holds GitHub's webhook secret; the running broker still holds its old copy.
     e2e.rotateWebhookSecret(NEW_SECRET);
     e2e.github.merge(pullRequest.number);
     expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
@@ -135,7 +135,7 @@ describe("Suite 12: install, upgrade and doctor", () => {
     expect(project).toBeDefined();
     const kind = `${String(project!.pk).split("#")[0]}#${String(project!.sk).split("#")[0]}`;
     const reorderedBefore = e2e.db.readOrders.get(kind)?.reordered ?? 0;
-    // The same definition and binding, sent again as an admin's second `agentx project add` would send them.
+    // The same definition and binding, sent again as an admin's second `rovara project add` would send them.
     const again = await call(e2e.handler, { method: "POST", path: "/v1/admin/projects", user: ADMIN,
       body: { definition: project!.definition, runtimeBinding: project!.runtimeBinding } });
     expect(again.body).toMatchObject({ duplicate: true });

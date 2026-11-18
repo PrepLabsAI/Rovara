@@ -377,7 +377,7 @@ async function validateCandidate(
   sink: CodeBuildSink | undefined,
 ) {
   if (gates.length === 0) return [];
-  const validationBranch = `agentx/${invocation.operationId}`;
+  const validationBranch = `rovara/${invocation.operationId}`;
   await push(repositoryPath, url, validationBranch, credential);
   return runCodeBuildGates({
     repository,

@@ -2,7 +2,7 @@
 // person to invite the bot (a bot cannot join a private channel), so the CLI waits for that.
 // Everything here needs only the manifest's channels:read, groups:read and channels:join
 // (SLACK_BOT_SCOPES in init/slack-app.ts). The bot token goes only in the authorization header.
-import { AgentXError, agentXError, errorStatus } from "@agentx/contracts";
+import { AgentXError, agentXError, errorStatus, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { bindSlackChannel } from "../admin/slack.js";
 import type { Prompter } from "../init/prompts.js";
 import type { AdminSession, SetupServices } from "./services.js";
@@ -61,7 +61,7 @@ export function slackChannelApi(fetchImplementation: typeof fetch): SlackChannel
         cursor = (body.response_metadata as { next_cursor?: string } | undefined)?.next_cursor ?? "";
         if (cursor === "") return undefined;
       }
-      throw agentXError("CONFIG_INVALID", `the workspace has more than ${MAX_LIST_PAGES * LIST_PAGE_SIZE} channels to search; bind the channel by id with agentx admin slack bind --team <team-id> --channel <channel-id> --project <name>`);
+      throw agentXError("CONFIG_INVALID", `the workspace has more than ${MAX_LIST_PAGES * LIST_PAGE_SIZE} channels to search; bind the channel by id with ${CLI_COMMAND_NAME} admin slack bind --team <team-id> --channel <channel-id> --project <name>`);
     },
     async join(token, channelId) {
       await call("conversations.join", token, { channel: channelId });
@@ -96,7 +96,7 @@ export async function addChannel(input: {
       // A rate limit only delays the search; the overall deadline still holds.
       if (!(error instanceof SlackRateLimitedError)) throw error;
       wait = error.retryAfterMs;
-      input.write(`Slack is limiting how often AgentX may list channels; trying again in ${Math.ceil(wait / 1000)} seconds.`);
+      input.write(`Slack is limiting how often Rovara may list channels; trying again in ${Math.ceil(wait / 1000)} seconds.`);
     }
     if (channel !== undefined) break;
     if (!askedForInvite && wait === FIND_POLL_MS) {

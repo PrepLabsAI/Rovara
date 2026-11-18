@@ -22,7 +22,7 @@ describe("doctor: stacks (FR-050)", () => {
 
   it("fails a missing stack and says upgrade deploys it again", async () => {
     const found = (await stackChecks(withStack("agentx-staging-slack", undefined))).find((entry) => entry.name === "agentx-staging-slack")!;
-    expect(found).toMatchObject({ status: "fail", detail: "does not exist", fix: "agentx --env staging upgrade deploys it again" });
+    expect(found).toMatchObject({ status: "fail", detail: "does not exist", fix: "rovara --env staging upgrade deploys it again" });
   });
 
   it("never sends a missing control-plane or access stack to upgrade, which refuses both: resume the install, or destroy and install again", async () => {
@@ -30,16 +30,16 @@ describe("doctor: stacks (FR-050)", () => {
       const found = (await stackChecks(withStack(name, undefined))).find((entry) => entry.name === name)!;
       expect(found).toMatchObject({
         status: "fail", detail: "does not exist",
-        fix: "agentx upgrade cannot deploy it again. If the install never finished, run agentx init --env staging --region us-east-1 --resume; otherwise remove the environment with agentx --env staging destroy --region us-east-1, then install it again with agentx init",
+        fix: "rovara upgrade cannot deploy it again. If the install never finished, run rovara init --env staging --region us-east-1 --resume; otherwise remove the environment with rovara --env staging destroy --region us-east-1, then install it again with rovara init",
       });
     }
   });
 
-  it("fails a stack whose first create failed, offering the delete command and agentx destroy", async () => {
+  it("fails a stack whose first create failed, offering the delete command and rovara destroy", async () => {
     const found = (await stackChecks(withStack("agentx-staging-identity", { status: "ROLLBACK_COMPLETE" }))).find((entry) => entry.name === "agentx-staging-identity")!;
     expect(found.status).toBe("fail");
     expect(found.fix).toContain("aws cloudformation delete-stack --stack-name agentx-staging-identity --region us-east-1");
-    expect(found.fix).toContain("agentx --env staging destroy --region us-east-1");
+    expect(found.fix).toContain("rovara --env staging destroy --region us-east-1");
   });
 
   it("warns about a rolled-back update and a stack that is still busy", async () => {
@@ -78,7 +78,7 @@ describe("doctor: stacks (FR-050)", () => {
     const stacks = healthyStacks();
     stacks["agentx-staging-control-plane"] = { ...stacks["agentx-staging-control-plane"]!, parameters: { ...stacks["agentx-staging-control-plane"]!.parameters, AssetHash: "f".repeat(64) } };
     const release = (await stackChecks(doctorContext({ services: doctorServices({ stackMap: stacks }) }))).find((entry) => entry.name === "release 1.2.3")!;
-    expect(release).toMatchObject({ status: "fail", fix: "agentx --env staging upgrade --to 1.2.3" });
+    expect(release).toMatchObject({ status: "fail", fix: "rovara --env staging upgrade --to 1.2.3" });
     expect(releaseMismatch("runtime", { WorkerImageUri: `x@sha256:${"9".repeat(64)}` }, MANIFEST)).toEqual({ code: [], images: ["WorkerImageUri"] });
   });
 
@@ -121,7 +121,7 @@ describe("doctor: stacks (FR-050)", () => {
       stacks["agentx-staging-runtime"]!.parameters.WorkerImageUri = `x@sha256:${"9".repeat(64)}`;
     });
     const release = (await stackChecks(context)).find((entry) => entry.name === "release 1.2.3")!;
-    expect(release.fix).toBe("with admin credentials, agentx --env staging upgrade --to 1.2.3 --source <a clean checkout of tag v1.2.3>, without --worker-image or --slack-image");
+    expect(release.fix).toBe("with admin credentials, rovara --env staging upgrade --to 1.2.3 --source <a clean checkout of tag v1.2.3>, without --worker-image or --slack-image");
   });
 
   it("warns, and does not fail, when the release manifest cannot be read", async () => {
@@ -133,14 +133,14 @@ describe("doctor: stacks (FR-050)", () => {
 describe("doctor: reporting (FR-051)", () => {
   it("counts results and prints each problem with its fix", () => {
     const report = doctorReport(SETTINGS, [
-      { group: "stacks", name: "agentx-staging-slack", status: "fail", detail: "does not exist", fix: "agentx --env staging upgrade deploys it again" },
+      { group: "stacks", name: "agentx-staging-slack", status: "fail", detail: "does not exist", fix: "rovara --env staging upgrade deploys it again" },
       { group: "alerts", name: "subscription", status: "warn", detail: "not confirmed yet" },
       { group: "models", name: "orchestrator", status: "ok", detail: "answers" },
       { group: "slack", name: "bound channel", status: "skip", detail: "no channel recorded" },
     ]);
     expect(report).toMatchObject({ env: "staging", failed: 1, warned: 1, passed: 1 });
     const text = reportText(report);
-    expect(text).toContain("FAIL  stacks      agentx-staging-slack: does not exist\n      fix: agentx --env staging upgrade deploys it again");
+    expect(text).toContain("FAIL  stacks      agentx-staging-slack: does not exist\n      fix: rovara --env staging upgrade deploys it again");
     expect(text).toContain("warn  alerts      subscription: not confirmed yet");
     expect(text).toContain("skip  slack       bound channel: no channel recorded");
     expect(text.trimEnd().split("\n").at(-1)).toBe("1 failed, 1 warning, 1 passed, 1 skipped");
@@ -148,6 +148,6 @@ describe("doctor: reporting (FR-051)", () => {
 
   it("turns a check group that throws into one failed check, without the error's code prefix", async () => {
     const checks = await guarded("github", async () => { throw new Error("GitHub app lookup failed with HTTP 502"); });
-    expect(checks).toEqual([{ group: "github", name: "github checks", status: "fail", detail: "could not run the github checks: GitHub app lookup failed with HTTP 502", fix: "check this computer's network access to github.com, then run agentx doctor again" }]);
+    expect(checks).toEqual([{ group: "github", name: "github checks", status: "fail", detail: "could not run the github checks: GitHub app lookup failed with HTTP 502", fix: "check this computer's network access to github.com, then run rovara doctor again" }]);
   });
 });

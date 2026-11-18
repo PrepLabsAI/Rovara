@@ -9,6 +9,7 @@
 // Every same-origin asset this page links to must carry the session token in its URL: the server
 // refuses any request without it (tests/contract/local-page-assets.test.ts).
 import { UI_TOKEN_HEADER, UI_TOKEN_QUERY } from "./protocol.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 export const WORKSPACES_CSP = [
   "default-src 'none'",
@@ -33,7 +34,7 @@ export function workspacesHtml(token: string): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
-<title>AgentX workspaces</title>
+<title>Rovara workspaces</title>
 <link rel="stylesheet" href="${stylesheet}">
 </head>
 <body>
@@ -98,7 +99,7 @@ export const REFRESH_MS = 15_000;
 
 /** The page's module. Plain browser JavaScript held as text, not TypeScript: nothing here is
  * compiled, imported by Node, or type-checked with the rest of the CLI. */
-export const WORKSPACES_JS = `// AgentX workspaces. Served from 127.0.0.1 by \`agentx workspaces\`; loopback only.
+export const WORKSPACES_JS = `// Rovara workspaces. Served from 127.0.0.1 by \`${CLI_COMMAND_NAME} workspaces\`; loopback only.
 const token = new URL(import.meta.url).searchParams.get(${JSON.stringify(UI_TOKEN_QUERY)}) ?? "";
 const TOKEN_HEADER = ${JSON.stringify(UI_TOKEN_HEADER)};
 const REFRESH_MS = ${REFRESH_MS};
@@ -206,7 +207,7 @@ function load() {
       }
     })
     .catch((error) => {
-      byId("error").textContent = "could not reach agentx on this computer: " + error;
+      byId("error").textContent = "could not reach ${CLI_COMMAND_NAME} on this computer: " + error;
       show("error", true);
     })
     .finally(() => { button.disabled = false; });

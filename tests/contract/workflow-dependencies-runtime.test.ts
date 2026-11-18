@@ -159,14 +159,14 @@ describe("native runtime journeys for ordered work", () => {
     const context: { current?: WorkflowE2E } = {};
     const e2e = await createWorkflowE2E({ workflowDependenciesEnvironment: { AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: "false" }, model: workflowModel(context) });
     context.current = e2e;
-    const started = await e2e.mcp("agentx_start_workflow", { project: "payments", instructions: "Add a shared greeting service", workflow_path: "quick" });
+    const started = await e2e.mcp("rovara_start_workflow", { project: "payments", instructions: "Add a shared greeting service", workflow_path: "quick" });
     expect(started.isError).not.toBe(true);
     await e2e.settle();
     const page = await e2e.taskPage("", SLACK_MAYA);
     expect(page.status).toBe(200);
     expect(page.body).toContain("Work breakdown");
     const before = e2e.workflow();
-    const refused = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: "d805b284-f307-4dc2-9ac4-716c68125914",
+    const refused = await e2e.mcp("rovara_decide_workflow", { task_id: e2e.taskId(), request_id: "d805b284-f307-4dc2-9ac4-716c68125914",
       expected_revision: before.revision, decision: "APPROVE", reason: "Owner review", artifact_digest: before.artifacts.at(-1)!.sha256,
       work_breakdown_digest: taskGraphDigest(graphFor(e2e.taskId())) });
     expect(refused.isError).toBe(true);
@@ -183,13 +183,13 @@ describe("native runtime journeys for ordered work", () => {
       readiness: [{ cwd: "repo/demo", executable: "node", args: ["integration.mjs"], timeoutSeconds: 30 }], realProjectCommands: true,
       model: workflowModel(context) });
     context.current = e2e;
-    const started = await e2e.mcp("agentx_start_workflow", { project: "payments", instructions: "Add a shared greeting service", workflow_path: "full" });
+    const started = await e2e.mcp("rovara_start_workflow", { project: "payments", instructions: "Add a shared greeting service", workflow_path: "full" });
     expect(started.isError).not.toBe(true);
     for (let index = 0; index < 3; index += 1) {
       await e2e.settle();
       const before = e2e.workflow();
       expect(before).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
-      const decision = await e2e.mcp("agentx_decide_workflow", {
+      const decision = await e2e.mcp("rovara_decide_workflow", {
         task_id: e2e.taskId(), request_id: `a0b10000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
         expected_revision: before.revision, decision: "APPROVE", reason: "Owner reviewed the exact plan.",
         artifact_digest: before.artifacts.at(-1)!.sha256,

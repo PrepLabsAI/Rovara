@@ -16,7 +16,7 @@ const ANTHROPIC_KEY = "sk-ant-api03-0123456789abcdefKEYSECRET";
 const OPENAI_KEY = "sk-proj-0123456789abcdefKEYSECRET";
 const everyFlag: InitFlags = {
   engine: "templates", identity: "cognito", permissionBoundary: "", operatorPrincipal: "", alertEmail: "ops@example.com", budget: "0",
-  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging", slackAppName: "AgentX", slackAppPostedMessages: "accept",
+  githubAccount: "acme", githubAccountType: "organization", githubAppName: "Rovara acme staging", slackAppName: "Rovara", slackAppPostedMessages: "accept",
 };
 const bedrockModels: InitFlags = { orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6" };
 /** Spec 048: the settings form answered as a run with these flags would answer it in the terminal. */

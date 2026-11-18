@@ -127,7 +127,7 @@ describe("destroy: a generated bucket name, shortened (review I2)", () => {
     expect(isOwnedRetained("prod", shortenedSibling, { "agentx:env": "prod" })).toBe(true);
   });
 
-  it("never takes a bare agentx as the stack-name part of a shortened name (re-review R3)", () => {
+  it("never takes a bare rovara as the stack-name part of a shortened name (re-review R3)", () => {
     const bare: RetainedResource = { part: "control-plane", logicalId: "SlackThreadSessions6FD21617", type: "AWS::S3::Bucket", physicalId: `agentx-slackthreadsessions6fd21617-${"b2".repeat(14)}` };
     expect(bare.physicalId).toHaveLength(63);
     expect(isOwnedRetained("live15ea", bare, { "agentx:env": "live15ea" })).toBe(false);
@@ -186,7 +186,7 @@ describe("destroy: the inventory of what the stacks retain", () => {
 });
 
 describe("destroy: confirmation (question 1)", () => {
-  it("asks for the environment's name, and also the account id for production or an environment AgentX has no record of", () => {
+  it("asks for the environment's name, and also the account id for production or an environment Rovara has no record of", () => {
     expect(confirmationPrompts({ env: "staging", account: "123456789012", recorded: true }).map((prompt) => prompt.expected)).toEqual(["staging"]);
     expect(confirmationPrompts({ env: "production", account: "123456789012", recorded: true }).map((prompt) => prompt.expected)).toEqual(["production", "123456789012"]);
     expect(confirmationPrompts({ env: "staging", account: "123456789012", recorded: false }).map((prompt) => prompt.expected)).toEqual(["staging", "123456789012"]);
@@ -201,7 +201,7 @@ describe("destroy: what is shown before, and printed after", () => {
       instances: 1, volumes: 2, secrets: 5, parameters: 9, localFiles: ["/home/a/.agentx/environments/staging.yaml"], keepData: false,
       resources: [{ part: "control-plane", logicalId: "State", type: "AWS::DynamoDB::Table", physicalId: "t" }, { part: "foundation", logicalId: "Key", type: "AWS::KMS::Key", physicalId: "k" }],
     });
-    expect(lines[0]).toBe("This deletes AgentX environment staging in account 123456789012, region us-east-1:");
+    expect(lines[0]).toBe("This deletes Rovara environment staging in account 123456789012, region us-east-1:");
     expect(lines).toContain("  stacks, in this order: agentx-staging-slack (UPDATE_COMPLETE), agentx-staging-control-plane (UPDATE_COMPLETE)");
     expect(lines).toContain("  EC2 workers: 1 instance and 2 workspace volumes; deleting the volumes deletes every worker session's workspace");
     expect(lines).toContain("  what the stacks keep, deleted after them: 1 table and 1 KMS key (deleted after 7 days)");
@@ -242,7 +242,7 @@ describe("destroy: what is shown before, and printed after", () => {
     expect(vendorSteps({ schemaVersion: 1, env: "staging", resources: [], github: { account: "acme", accountType: "organization", slug: "agentx-acme" }, slackAppId: "A0APP", connectors: ["linear"] })).toEqual([
       "Delete the GitHub App agentx-acme: open https://github.com/organizations/acme/settings/apps/agentx-acme/advanced and choose Delete GitHub App.",
       "Delete the Slack app: open https://api.slack.com/apps/A0APP/general and choose Delete App at the bottom of the page.",
-      "Revoke the Linear API key AgentX used: Linear, Settings, Security and access, API keys.",
+      "Revoke the Linear API key Rovara used: Linear, Settings, Security and access, API keys.",
     ]);
     expect(vendorSteps({ schemaVersion: 1, env: "staging", resources: [], github: { account: "alice", accountType: "user", slug: "agentx-alice" } })[0]).toBe("Delete the GitHub App agentx-alice: open https://github.com/settings/apps/agentx-alice/advanced and choose Delete GitHub App.");
     expect(vendorSteps({ schemaVersion: 1, env: "staging", resources: [] })).toEqual([

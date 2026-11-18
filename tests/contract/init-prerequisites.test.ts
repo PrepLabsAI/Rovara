@@ -190,7 +190,7 @@ describe("init prerequisites", () => {
     await expect(run(sampleAnswers({ models: { orchestrator: "a", classifier: "a", worker: "a" } }), flaky)).resolves.toBeDefined();
     expect(calls).toBe(2);
     const throttled = passingChecks({ converse: async () => { throw awsError("ThrottlingException", "Too many requests"); } });
-    await expect(run(sampleAnswers({ models: { orchestrator: "a", classifier: "a", worker: "a" } }), throttled)).rejects.toThrow("Bedrock throttled the check of a; wait a minute and run agentx init again");
+    await expect(run(sampleAnswers({ models: { orchestrator: "a", classifier: "a", worker: "a" } }), throttled)).rejects.toThrow("Bedrock throttled the check of a; wait a minute and run rovara init again");
   });
 
   it("reports every problem at once", async () => {
@@ -315,7 +315,7 @@ describe("fix round 1", () => {
   });
 
   // Item 2: the one-token Bedrock call must be bounded so a hung network call fails clearly
-  // instead of hanging `agentx init` forever, and the SDK's own retry loop must be off (the
+  // instead of hanging `rovara init` forever, and the SDK's own retry loop must be off (the
   // outer checkPrerequisites retry already attempts the call at most twice).
   it("item 2: pins the Bedrock client to a single SDK attempt and its own request/connection timeouts", () => {
     expect(CONVERSE_CLIENT_MAX_ATTEMPTS).toBe(1);
@@ -566,7 +566,7 @@ describe("spec 048 FR-065: the release's images", () => {
     const [page] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, audience: "page" });
     expect(page).toEqual({
       label: "The coding image", ok: false,
-      detail: "This release's coding image is not on Amazon ECR Public, so AWS cannot pull it. Use a published AgentX release, or start the install again with an image address AWS can reach.",
+      detail: "This release's coding image is not on Amazon ECR Public, so AWS cannot pull it. Use a published Rovara release, or start the install again with an image address AWS can reach.",
       technical: PRIVATE,
     });
     const [terminal] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, audience: "terminal" });
@@ -582,7 +582,7 @@ describe("spec 048 FR-065: the release's images", () => {
 
   it("refuses a release with no image at all, in page words", () => {
     const [missing] = releaseImageChecks({ version: "1.2.3", images: { slack: SLACK }, audience: "page" });
-    expect(missing).toEqual({ label: "The coding image", ok: false, detail: "This release has no coding image. Use a published AgentX release." });
+    expect(missing).toEqual({ label: "The coding image", ok: false, detail: "This release has no coding image. Use a published Rovara release." });
   });
 
   it("SC-009: checkPrerequisites reports a private image with every other problem, before anything is created", async () => {

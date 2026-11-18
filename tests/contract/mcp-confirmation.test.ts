@@ -122,7 +122,7 @@ describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
   it("tries a failed Slack check again at the next poll, logging only the event, change and code", async () => {
     const log = vi.fn();
     const getChange = vi.fn()
-      .mockRejectedValueOnce(new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX planted-words"))
+      .mockRejectedValueOnce(new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach Rovara planted-words"))
       .mockResolvedValueOnce(view({ status: "applied", methodUsed: "slack" }));
     const { run: r } = run({ startSlackConfirmation: async () => view(), getChange }, { change: view({ methodsOffered: ["slack"] }), log });
     expect(await confirmChange(r)).toMatchObject({ outcome: "applied" });
@@ -268,7 +268,7 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
       expect(failure).toMatchObject({ code: expected, message });
     }
     const membership = await httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "administrator project membership is required" } }) }).proposeChange(request, "trace-7").catch((error: unknown) => error);
-    expect(membership).toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "ask an AgentX admin who administers that project to make this change" });
+    expect(membership).toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "ask a Rovara admin who administers that project to make this change" });
     // 25d's mappings still hold.
     await expect(httpAdminClient({ session, fetch: answering(401, {}) }).getChange(CHANGE, "t")).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: ADMIN_SIGN_IN_STEP });
     await expect(httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "administrator claim is required" } }) }).getChange(CHANGE, "t")).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: ADMIN_SIGN_IN_STEP });
@@ -279,7 +279,7 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     const lost = await httpAdminClient({ session, fetch: thrown }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
     expect(lost).toBeInstanceOf(ToolError);
     expect(lost).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: APPLY_UNKNOWN_STEP });
-    expect(APPLY_UNKNOWN_STEP).toBe("it may or may not have applied; check it with agentx_admin_changes before asking again");
+    expect(APPLY_UNKNOWN_STEP).toBe("it may or may not have applied; check it with rovara_admin_changes before asking again");
     expect(thrown).toHaveBeenCalledTimes(1);
     for (const status of [502, 504]) {
       const gateway = await httpAdminClient({ session, fetch: answering(status, { message: "Endpoint request timed out" }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
@@ -300,7 +300,7 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
       await expect(httpAdminClient({ session, fetch, sleep: async () => undefined }).proposeChange(request, "t")).rejects.toBeInstanceOf(ToolError);
       expect(fetch).toHaveBeenCalledTimes(1);
     }
-    // A 5xx without AgentX's own refusal is still tried again: the request ID makes it the same request.
+    // A 5xx without Rovara's own refusal is still tried again: the request ID makes it the same request.
     const gateway = vi.fn().mockResolvedValueOnce(reply(502, { message: "Bad Gateway" })).mockResolvedValue(reply(200, { change: view() }));
     await httpAdminClient({ session, fetch: gateway as never, sleep: async () => undefined }).proposeChange(request, "t");
     expect(gateway).toHaveBeenCalledTimes(2);
@@ -317,12 +317,12 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     expect(failed).toMatchObject({
       code: "CONTROL_PLANE_UNAVAILABLE",
       message: `change ${CHANGE} failed: the change could not be applied; check the state, then ask again`,
-      nextStep: "the change failed and is no longer pending; check it with agentx_admin_changes, fix what the message names, then ask for the change again",
+      nextStep: "the change failed and is no longer pending; check it with rovara_admin_changes, fix what the message names, then ask for the change again",
     });
     expect((failed as ToolError).nextStep).not.toBe(CHANGE_PENDING_STEP);
   });
 
-  it("says an apply AgentX met an unexpected error on may or may not have applied (25e re-review)", async () => {
+  it("says an apply Rovara met an unexpected error on may or may not have applied (25e re-review)", async () => {
     const message = "AgentX met an unexpected error on this change request, so it may or may not have taken effect; check the change records before asking again";
     const unknown = await httpAdminClient({ session, fetch: answering(503, { error: { code: "RUNTIME_UNAVAILABLE", message } }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
     expect(unknown).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", message, nextStep: APPLY_UNKNOWN_STEP });

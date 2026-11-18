@@ -534,7 +534,7 @@ describe("Suite 9: resilience", () => {
     await e2e.settle();
     expect(fixPushes(e2e)).toEqual([]);
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
-    expect(said(e2e).at(-1)).toBe(`I couldn't push the fix because this AgentX worker is out of date. Ask an admin to run agentx upgrade. ${STILL_WATCHING}`);
+    expect(said(e2e).at(-1)).toBe(`I couldn't push the fix because this Rovara worker is out of date. Ask an admin to run rovara upgrade. ${STILL_WATCHING}`);
     e2e.worker.features(undefined);
     await merged(e2e, pullRequest.number);
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
@@ -946,7 +946,7 @@ describe("Suite 9: resilience", () => {
       expect(production.posts).toHaveLength(0);
       expect(e2e.db.get(outboxPk, outboxSk)).toMatchObject({ status: "WAITING_FOR_TASK_ACCESS", operationId });
 
-      const retry = await e2e.mcp("agentx_retry_workflow", { task_id: e2e.taskId(), request_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      const retry = await e2e.mcp("rovara_retry_workflow", { task_id: e2e.taskId(), request_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
         instructions: "Resume the same approved implementation after proof service recovery." });
       expect(retry.isError, JSON.stringify(retry)).not.toBe(true);
       expect(directoryProofCalls.length).toBeGreaterThan(0);

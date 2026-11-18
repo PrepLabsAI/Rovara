@@ -177,7 +177,7 @@ describe.runIf(dockerReady)("M1.3 native journeys", () => {
     const snapshot: E2ESourceSnapshot = { candidate: createCandidateManifest([{ repositoryId: "example/demo", commitSha: baseCommit, treeSha: baseTree }]), commitSha: baseCommit, treeSha: baseTree,
       treeComplete: true, treePaths: treeFiles, sources };
 
-    // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `agentx admin` makes them).
+    // The broker, with the project registered and its setup approved on the qualified web profile (one admin proposal, approval and registration, as `rovara admin` makes them).
     const harness = await createSingleAnswerPlanBroker({ brokerExtra: { projectSetupSource: { capture: async () => snapshot }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const runtimeBinding = projectRow().runtimeBinding as typeof projectBinding;

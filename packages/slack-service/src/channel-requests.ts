@@ -11,7 +11,7 @@ import {
   type ChannelEvent,
   type ChannelQueueItem,
   type ConversationRef,
-  type PendingConfirmation,
+  type PendingConfirmation, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { confirmationApprovalKind, confirmationDigest, type ConfirmationAnswer } from "./confirmations.js";
 import { checkReportEvents, doneFields, pullRequestEvents } from "./channel-task-events.js";
@@ -31,7 +31,7 @@ export const SLACK_ONLY_COMMAND_TEXT = "SWE-bench runs and eval batches can only
  * FR-041: an adapter conversation may be a group, and ChatGPT's sign-in needs a private reply and a pasted address, so
  * the commands are answered with where to run them. Nothing about the person's connection is said here.
  */
-export const CHATGPT_ELSEWHERE_TEXT = "Your ChatGPT connection is private, so I don't manage it here. Use the Rovara CLI: `agentx chatgpt connect`, `agentx chatgpt status` or `agentx chatgpt disconnect`.";
+export const CHATGPT_ELSEWHERE_TEXT = `Your ChatGPT connection is private, so I don't manage it here. Use the Rovara CLI: \`${CLI_COMMAND_NAME} chatgpt connect\`, \`${CLI_COMMAND_NAME} chatgpt status\` or \`${CLI_COMMAND_NAME} chatgpt disconnect\`.`;
 
 /** A queued item, or undefined for one this consumer cannot read (it is discarded). */
 export function readChannelQueueItem(value: unknown): ChannelQueueItem | undefined {

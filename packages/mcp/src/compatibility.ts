@@ -21,7 +21,7 @@ export interface Compatibility {
 
 /** Spec 025 A1: the admin read tools arrived in admin API 1.0. */
 export const REQUIRED_ADMIN_MINOR = 0;
-/** Spec 025 Q11, C17: the admin change routes and agentx_admin_changes arrived in admin API 1.1. */
+/** Spec 025 Q11, C17: the admin change routes and rovara_admin_changes arrived in admin API 1.1. */
 export const REQUIRED_CHANGE_ADMIN_MINOR = 1;
 
 export function adminApiFits(version: string | undefined, requiredMinor: number = REQUIRED_ADMIN_MINOR): "fits" | "missing" | "too_old" | "incompatible" {
@@ -47,7 +47,7 @@ export function compatibilityChecker(client: ControlPlaneClient, options: { now?
   return async () => {
     if (cached !== undefined && now() - cached.at < cacheMs) return cached.value;
     const configuration = await client.configuration();
-    const where = `AgentX at ${plainText(configuration.baseUrl, "its URL")}`;
+    const where = `Rovara at ${plainText(configuration.baseUrl, "its URL")}`;
     const served = plainText(configuration.apiVersion, "an unknown version").slice(0, 20);
     const { compatible, upgradeNotice } = apiVersionCompatible(configuration.apiVersion, DEVELOPER_API_VERSION);
     const server = version(configuration.apiVersion);
@@ -58,14 +58,14 @@ export function compatibilityChecker(client: ControlPlaneClient, options: { now?
       throw new ToolError("UPGRADE_REQUIRED", `${where} answers API ${served}, which is older than this CLI's ${DEVELOPER_API_VERSION} and lacks the task routes it needs`, UPGRADE_AGENTX_STEP);
     }
     if (!compatible) {
-      throw new ToolError("UPGRADE_REQUIRED", `this CLI speaks AgentX API ${DEVELOPER_API_VERSION}, but ${where} answers ${served}`, NEXT_STEPS.UPGRADE_REQUIRED);
+      throw new ToolError("UPGRADE_REQUIRED", `this CLI speaks Rovara API ${DEVELOPER_API_VERSION}, but ${where} answers ${served}`, NEXT_STEPS.UPGRADE_REQUIRED);
     }
     const value: Compatibility = {
       env: configuration.env,
       apiVersion: configuration.apiVersion,
       ...(configuration.adminApiVersion === undefined ? {} : { adminApiVersion: configuration.adminApiVersion }),
       ...(configuration.confirm === undefined ? {} : { confirm: configuration.confirm }),
-      ...(upgradeNotice ? { notice: `a newer AgentX CLI is available for API ${configuration.apiVersion}; ${NEXT_STEPS.UPGRADE_REQUIRED}` } : {}),
+      ...(upgradeNotice ? { notice: `a newer Rovara CLI is available for API ${configuration.apiVersion}; ${NEXT_STEPS.UPGRADE_REQUIRED}` } : {}),
     };
     cached = { at: now(), value };
     return value;

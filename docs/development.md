@@ -52,12 +52,12 @@ For Bedrock/OpenRouter configuration, Slack model selection, and the live verifi
 - [Contracts](../specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](../specs/001-agentx-foundation/quickstart.md).
 - [Installer specification](../specs/015-installer/spec.md) and
-  [phase plans](../specs/015-installer/plans/README.md): `agentx init`, `upgrade`, `config`, `doctor`
+  [phase plans](../specs/015-installer/plans/README.md): `rovara init`, `upgrade`, `config`, `doctor`
   and `destroy` (phases 15a to 15e built).
 - [MCP server specification](../specs/025-mcp-server/spec.md) and
   [phase plans](../specs/025-mcp-server/plans/README.md): developer sign-in, tasks from AI tools and
   sharing (phases 25a to 25c built; 25d and 25e not yet).
-- [Local install page specification](../specs/040-install-ui/spec.md): `agentx init --ui` (phase 1
+- [Local install page specification](../specs/040-install-ui/spec.md): `rovara init --ui` (phase 1
   built; phases 2 to 4 not yet).
 - [Project configuration](project-configuration.md): every field of a project file.
 - [Constitution](../.specify/memory/constitution.md): project principles, version 4.0.0.

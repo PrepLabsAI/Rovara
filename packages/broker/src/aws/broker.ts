@@ -263,7 +263,7 @@ import {
   WorkerInvocationSchema,
   workflowPublicationContext,
   workflowPublicationContextDigest,
-  cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION,
+  cutEvidenceReason, EVAL_PLAN_DELIVERY_ACTION, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2EScenarioRowsHtml, renderE2EScenarioSlackBlocks, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
@@ -2167,7 +2167,7 @@ const TAKEOVER_REASON_MAX = 500;
 /** Missing membership wiring cannot turn on the legacy path when bindings are enabled. */
 async function githubCallerCompany(dependencies: AwsBrokerDependencies, personId: string, budget: ReturnType<typeof boundedCompanyReads>) {
   if (dependencies.githubBindings === undefined) return undefined;
-  if (personId === "") throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  if (personId === "") throw agentXError("AUTH_REQUIRED", `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`);
   return budget.read(() => resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, personId));
 }
 
@@ -2292,7 +2292,7 @@ async function registerProject(
     const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
     if (authority?.role === "administrator") return "administrator";
     if (takeover !== undefined) return "takeover";
-    throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (agentx admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
+    throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (${CLI_COMMAND_NAME} admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
   };
   const key = projectKey(definition.name, definition.revision);
   const readCatalogSnapshot = () => readProjectCatalogSnapshot(dependencies, definition.name);
@@ -5399,7 +5399,7 @@ async function acceptPullRequest(
   const now = new Date().toISOString();
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
-  const headBranch = `agentx/${operationId}`;
+  const headBranch = `rovara/${operationId}`;
   const operation = operationRecord({
     id: operationId,
     workspaceId,
@@ -5662,7 +5662,7 @@ async function acceptPullRequestLifecycle(
       ? `Clean replacement for #${record.number}.`
       : `Reverts merged pull request #${record.number}.`);
     const body = (await attributedBody(dependencies, identity, baseBody)) ?? baseBody;
-    const headBranch = `agentx/${operationId}`;
+    const headBranch = `rovara/${operationId}`;
     const operation = operationRecord({
       id: operationId, workspaceId, kind: "publish", requestId: request.requestId,
       payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
@@ -11158,7 +11158,7 @@ export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerD
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
   const checked = dependencies.companies !== undefined || dependencies.githubBindings !== undefined;
-  if (checked && identity.developer === undefined) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  if (checked && identity.developer === undefined) throw agentXError("AUTH_REQUIRED", `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`);
   const companyId = checked ? await resolveCompany(dependencies.companies ?? { companyOf: async () => undefined }, identity.developer!.developerId) : undefined;
   const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
   const stored = await getItem<Record<string, unknown>>(dependencies, key);
@@ -14861,7 +14861,7 @@ async function adoptLegacyPullRequest(
   repositoryUrl: string,
   remote: Awaited<ReturnType<GitHubAppCredentialProvider["getPullRequest"]>>,
 ): Promise<PullRequestRecord> {
-  const match = /^agentx\/([0-9a-f-]{36})$/iu.exec(remote.headBranch);
+  const match = /^(?:rovara|agentx)\/([0-9a-f-]{36})$/iu.exec(remote.headBranch);
   if (!match?.[1]) throw agentXError("NOT_FOUND", "pull request is not owned by this AgentX workspace");
   const operation = await requireOperation(dependencies, workspaceId, match[1]);
   if (

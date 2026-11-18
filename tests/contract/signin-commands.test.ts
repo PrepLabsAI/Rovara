@@ -46,7 +46,7 @@ describe("the sign-in change line", () => {
   });
 });
 
-describe("agentx signin enable slack (FR-045)", () => {
+describe("rovara signin enable slack (FR-045)", () => {
   it("stores the client credentials in the Slack secret, records the team ID, shows the change, updates the stack and writes the settings", async () => {
     const h = await services(["1111111111.2222222222222", SLACK_CLIENT_SECRET, true]);
     expect(await runSigninEnable(h.s, "staging", "slack", {}, {}, false)).toEqual({ changed: true });
@@ -123,7 +123,7 @@ describe("agentx signin enable slack (FR-045)", () => {
     const message = error instanceof Error ? error.message : "";
     expect(message).toContain("the update of agentx-staging-control-plane is still running");
     expect(message).toContain("the new client credentials are kept in agentx/staging/slack");
-    expect(message).toContain("check the stack's status in the CloudFormation console, then run agentx signin enable slack again");
+    expect(message).toContain("check the stack's status in the CloudFormation console, then run rovara signin enable slack again");
     expect(message).not.toContain("put back");
     expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject({ clientId: "1111111111.2222222222222", clientSecret: SLACK_CLIENT_SECRET });
   });
@@ -151,7 +151,7 @@ describe("agentx signin enable slack (FR-045)", () => {
     it("keeps the new credentials on UPDATE_ROLLBACK_FAILED, naming the status", async () => {
       const h = await services(PROMPTS, {}, SIGN_IN_PARAMETERS, { finalStatus: "UPDATE_ROLLBACK_FAILED", slackSecret: OLD });
       const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
-      expect(message).toContain("agentx-staging-control-plane is UPDATE_ROLLBACK_FAILED, so the new client credentials are kept in agentx/staging/slack; check the stack in the CloudFormation console, then run agentx signin enable slack again");
+      expect(message).toContain("agentx-staging-control-plane is UPDATE_ROLLBACK_FAILED, so the new client credentials are kept in agentx/staging/slack; check the stack in the CloudFormation console, then run rovara signin enable slack again");
       expect(message).not.toContain("sign-in did not change");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
     });
@@ -161,7 +161,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       let readsAfterExecute = 0;
       intercept(h, (name, executed) => (name === "DescribeStacksCommand" && executed && ++readsAfterExecute > 1 ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
       const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
-      expect(message).toContain("the state of agentx-staging-control-plane could not be confirmed (Rate exceeded); the new client credentials are kept in agentx/staging/slack; check the stack's status in the CloudFormation console, then run agentx signin enable slack again");
+      expect(message).toContain("the state of agentx-staging-control-plane could not be confirmed (Rate exceeded); the new client credentials are kept in agentx/staging/slack; check the stack's status in the CloudFormation console, then run rovara signin enable slack again");
       expect(message).not.toContain("sign-in did not change");
       expect(message).not.toContain("still running");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
@@ -172,7 +172,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       // The change set executes (and the fake applies it), then polling it fails.
       intercept(h, (name, executed) => (name === "DescribeChangeSetCommand" && executed ? Object.assign(new Error("Rate exceeded"), { name: "ThrottlingException" }) : undefined));
       const message = await failure(runSigninEnable(h.s, "staging", "slack", REPLACE, {}, false));
-      expect(message).toContain("Rate exceeded; agentx-staging-control-plane did take the change, so the new client credentials are kept in agentx/staging/slack; run agentx signin enable slack again to record the settings");
+      expect(message).toContain("Rate exceeded; agentx-staging-control-plane did take the change, so the new client credentials are kept in agentx/staging/slack; run rovara signin enable slack again to record the settings");
       expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("enabled");
       expect(JSON.parse(h.secrets.values.get("agentx/staging/slack")!)).toMatchObject(NEW);
       expect(await readSignInSettings(h.store, "staging")).toBeUndefined();
@@ -197,7 +197,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       await put(name, value, options);
     };
     await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false))
-      .rejects.toThrow("the client credentials in agentx/staging/slack were replaced (agentx-staging-control-plane already matched), but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run agentx signin enable slack again to record them");
+      .rejects.toThrow("the client credentials in agentx/staging/slack were replaced (agentx-staging-control-plane already matched), but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run rovara signin enable slack again to record them");
   });
 
   it("says so, and never that sign-in did not change, when the previous credentials cannot be put back", async () => {
@@ -212,7 +212,7 @@ describe("agentx signin enable slack (FR-045)", () => {
     const error = await runSigninEnable(h.s, "staging", "slack", {}, {}, false).then(() => undefined, (caught: unknown) => caught);
     const message = error instanceof Error ? error.message : "";
     expect(message).toContain("putting the previous client credentials back in agentx/staging/slack failed too (Rate exceeded)");
-    expect(message).toContain("run agentx signin enable slack again");
+    expect(message).toContain("run rovara signin enable slack again");
     expect(message).not.toContain("sign-in did not change");
   });
 
@@ -224,7 +224,7 @@ describe("agentx signin enable slack (FR-045)", () => {
       await put(name, value, options);
     };
     await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, false))
-      .rejects.toThrow("agentx-staging-control-plane was updated, but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run agentx signin enable slack again to record them");
+      .rejects.toThrow("agentx-staging-control-plane was updated, but recording the sign-in settings at /agentx/staging/signin failed (Rate exceeded); run rovara signin enable slack again to record them");
     expect(h.cloudFormation.parameters.DeveloperSignInSlack).toBe("enabled");
   });
 
@@ -302,11 +302,11 @@ describe("agentx signin enable slack (FR-045)", () => {
   it("refuses an environment that uses the legacy stack names", async () => {
     const h = await services([]);
     await writeEnvironmentSettings(h.store, { ...installed, env: "staging", naming: "legacy" });
-    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, true)).rejects.toThrow(/installed with agentx init/);
+    await expect(runSigninEnable(h.s, "staging", "slack", {}, {}, true)).rejects.toThrow(/installed with rovara init/);
   });
 });
 
-describe("agentx signin enable oidc (FR-004, FR-010, FR-045)", () => {
+describe("rovara signin enable oidc (FR-004, FR-010, FR-045)", () => {
   it("checks the issuer's discovery document, stores the client secret, and keeps Slack as it was", async () => {
     const h = await services([true]);
     await writeSignInSettings(h.store, slackOn);
@@ -394,7 +394,7 @@ describe("each method's enabled-since cutoff (FR-045)", () => {
   });
 });
 
-describe("agentx signin disable and show", () => {
+describe("rovara signin disable and show", () => {
   it("disables a method, which revokes its sessions through the control plane (FR-045, R13)", async () => {
     const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
     await writeSignInSettings(h.store, { ...slackOn, oidc: { issuer: "https://acme.okta.com", clientId: "0oa1", displayName: "Okta", clientSecretName: "agentx/staging/developer-oidc" } });
@@ -408,7 +408,7 @@ describe("agentx signin disable and show", () => {
   it("refuses to disable the last method (FR-010)", async () => {
     const h = await services([]);
     await writeSignInSettings(h.store, slackOn);
-    await expect(runSigninDisable(h.s, "staging", "slack", true)).rejects.toThrow("Slack sign-in is the only method enabled; enable company sign-in first (agentx signin enable oidc), because at least one method must stay on");
+    await expect(runSigninDisable(h.s, "staging", "slack", true)).rejects.toThrow("Slack sign-in is the only method enabled; enable company sign-in first (rovara signin enable oidc), because at least one method must stay on");
   });
 
   it("shows the settings and what the control plane offers, never a secret", async () => {
@@ -428,8 +428,8 @@ describe("agentx signin disable and show", () => {
   });
 });
 
-describe("the agentx signin command (F14)", () => {
-  it("takes the same flag names as agentx init, and reads the company secret from --signin-oidc-client-secret-env", async () => {
+describe("the rovara signin command (F14)", () => {
+  it("takes the same flag names as rovara init, and reads the company secret from --signin-oidc-client-secret-env", async () => {
     const h = await services([]);
     await writeSignInSettings(h.store, slackOn);
     await writeSlackTeamId(h.store, "staging", "T0TEAM");

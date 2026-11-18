@@ -1,4 +1,4 @@
-// The step runner for `agentx init`: runs steps under the environment lock, records each outcome
+// The step runner for `rovara init`: runs steps under the environment lock, records each outcome
 // in SSM as soon as it is known, skips a done step on every later run (FR-019), never records a
 // failed step (so the next run retries it), and records but stops on a waiting step (FR-035).
 import { describe, expect, it, vi, type Mock } from "vitest";
@@ -47,7 +47,7 @@ describe("init step runner", () => {
   it("resumes at the first incomplete step and never re-runs a completed one", async () => {
     const store = new MemoryParameterStore();
     const first = [step("prerequisites"), step("access"), step("core", async () => { throw new Error("network lost"); })];
-    await expect(run(store, first)).rejects.toThrow('init stopped at "step core": network lost. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    await expect(run(store, first)).rejects.toThrow('init stopped at "step core": network lost. Run rovara init --env staging --region us-east-1 again to continue from this step.');
     const second = [step("prerequisites"), step("access"), step("core")];
     const result = await run(store, second);
     expect(result).toEqual({ status: "complete", ran: ["core"], skipped: ["prerequisites", "access"] });
@@ -148,11 +148,11 @@ describe("init step runner", () => {
     const other = new MemoryParameterStore();
     other.values.set(LOCK, JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "init", acquiredAt: new Date(T0 - 5 * 60_000).toISOString() }));
     const notAsked = vi.fn(async () => true);
-    await expect(run(other, [step("access")], { confirmTakeover: notAsked })).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "init" since ${new Date(T0 - 5 * 60_000).toISOString()}; wait for it to finish, then run the same agentx command again`);
+    await expect(run(other, [step("access")], { confirmTakeover: notAsked })).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "init" since ${new Date(T0 - 5 * 60_000).toISOString()}; wait for it to finish, then run the same rovara command again`);
     expect(notAsked).not.toHaveBeenCalled();
   });
 
-  // F14: agentx init saves its answers here, so two first runs cannot overwrite each other's.
+  // F14: rovara init saves its answers here, so two first runs cannot overwrite each other's.
   it("runs beforeSteps under the lock, before any step, and runs no step when it fails", async () => {
     const store = new MemoryParameterStore();
     const order: string[] = [];
@@ -189,7 +189,7 @@ describe("init step runner", () => {
   it("spec 048 FR-060: stop throws the same error the run always threw", async () => {
     const failing: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw new Error("Rate exceeded"); } };
     await expect(runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [failing], context: null, onStepFailure: async () => "stop" }))
-      .rejects.toThrow('init stopped at "Set up AWS permissions": Rate exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+      .rejects.toThrow('init stopped at "Set up AWS permissions": Rate exceeded. Run rovara init --env staging --region us-east-1 again to continue from this step.');
   });
 
   // Fix round 1 (Plan ruling 8): a stop the step's own run chose (declining a "check again"

@@ -8,7 +8,7 @@ function fakeFetch(status = 200, body: unknown = { channel: { maxCostUsd: 10 } }
   return vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } }));
 }
 
-describe("agentx admin eval (spec 043 FR-002)", () => {
+describe("rovara admin eval (spec 043 FR-002)", () => {
   it("enables a channel with an optional cost ceiling, shows it and disables it", async () => {
     const fetchImplementation = fakeFetch();
     await enableEvalChannel({ ...base, maxCostUsd: 25 }, fetchImplementation as typeof fetch);

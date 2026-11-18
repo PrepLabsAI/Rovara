@@ -17,7 +17,7 @@
 //   - Only this company's connection (and so its token) is ever used for this company's projects: the company is the caller's, never named by the request.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, AgentXError, AgentXNameSchema, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, AgentXError, AgentXNameSchema, OrgIdSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -40,7 +40,7 @@ export const TEAM_ADMIN_ONLY = "Only a company owner or admin, or the project's 
 export const PROJECT_NOT_FOUND = "project not found";
 export const TEAM_NOT_FOUND = "That Linear team was not found in the company's Linear workspace.";
 export const TEAMS_UNAVAILABLE = "Linear's teams could not be read just now; try again.";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 export interface LinearConnectWiring {
   connections: Pick<LinearConnections, "mintState" | "spendState" | "connection" | "bindAndStore" | "accessToken" | "teamPick" | "setTeam" | "clearTeam" | "disconnect">;

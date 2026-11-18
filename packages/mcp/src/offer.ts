@@ -9,7 +9,7 @@ import { ToolError, UPGRADE_AGENTX_STEP } from "./errors.js";
 
 /**
  * `admin` is undefined when the admin read tools are offered, else why they are not. Spec 025
- * FR-028, FR-041: `audit` (agentx_admin_changes) and `changes` (the change tools) are offered only
+ * FR-028, FR-041: `audit` (rovara_admin_changes) and `changes` (the change tools) are offered only
  * when named and undefined, so an offer that names only `admin` (25d's) offers neither.
  */
 export interface AdminOffer { admin: ToolError | undefined; audit?: ToolError | undefined; changes?: ToolError | undefined }
@@ -34,9 +34,9 @@ export const FIRST_LIST_WAIT_MS = 5_000;
 export const OFFER_READ_TIMEOUT_MS = 15_000;
 
 /** Why the admin tools are hidden before any check has answered, or when none can be made. */
-export const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
-/** Why agentx_admin_changes and the change tools are hidden when the offer does not name their group. */
-const NO_CHANGE_TOOLS = new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin change tools yet", UPGRADE_AGENTX_STEP);
+export const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for Rovara", ADMIN_SIGN_IN_STEP);
+/** Why rovara_admin_changes and the change tools are hidden when the offer does not name their group. */
+const NO_CHANGE_TOOLS = new ToolError("UPGRADE_REQUIRED", "this Rovara has no admin change tools yet", UPGRADE_AGENTX_STEP);
 
 /** A group is offered only when named and undefined; while the admin group is refused, all are, for its reason. */
 function refusalOf(offer: AdminOffer, group: AdminToolGroup): ToolError | undefined {

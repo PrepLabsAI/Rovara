@@ -1,6 +1,6 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { EnvironmentNameSchema, agentXError } from "@agentx/contracts";
+import { EnvironmentNameSchema, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import YAML from "yaml";
 import { z } from "zod";
 
@@ -35,7 +35,7 @@ export async function loadDeploymentSettings(options: {
     throw agentXError(
       "CONFIG_INVALID",
       isNodeError(error) && error.code === "ENOENT"
-        ? `AgentX deployment settings are not configured at ${options.path}`
+        ? `Rovara deployment settings are not configured at ${options.path}`
         : "deployment settings cannot be resolved",
     );
   });
@@ -51,7 +51,7 @@ export async function loadDeploymentSettings(options: {
   if (options.expectedEnv !== undefined && settings.env !== undefined && settings.env !== options.expectedEnv) {
     throw agentXError(
       "CONFIG_INVALID",
-      `deployment file ${canonicalPath} is for environment ${settings.env}, not ${options.expectedEnv}; run agentx --env ${options.expectedEnv} env use`,
+      `deployment file ${canonicalPath} is for environment ${settings.env}, not ${options.expectedEnv}; run ${CLI_COMMAND_NAME} --env ${options.expectedEnv} env use`,
     );
   }
   if (!options.allowLoopback) assertHttps(settings);

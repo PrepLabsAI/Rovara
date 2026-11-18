@@ -28,7 +28,7 @@ describe("environment lock", () => {
     store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));
     const work = vi.fn(async () => 1);
     await expect(withEnvironmentLock({ ...base, store, now: () => t0 }, work))
-      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(`locked by bob running "upgrade" since ${new Date(t0 - 60_000).toISOString()}; wait for it to finish, then run the same agentx command again`) as unknown });
+      .rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(`locked by bob running "upgrade" since ${new Date(t0 - 60_000).toISOString()}; wait for it to finish, then run the same rovara command again`) as unknown });
     expect(work).not.toHaveBeenCalled();
     expect(store.values.has("/agentx/staging/lock")).toBe(true);
   });
@@ -37,7 +37,7 @@ describe("environment lock", () => {
     const store = new MemoryParameterStore();
     store.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "upgrade", acquiredAt: new Date(t0 - 60_000).toISOString() }));
     await expect(withEnvironmentLock({ ...base, command: "destroy", store, now: () => t0, takeOverOwn: true, confirmTakeover: async () => true }, async () => 1))
-      .rejects.toThrow(`; wait for it to finish, then run the same agentx command again. If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name /agentx/staging/lock --region <region>)`);
+      .rejects.toThrow(`; wait for it to finish, then run the same rovara command again. If it is no longer running, rovara init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name /agentx/staging/lock --region <region>)`);
   });
 
   it("does not offer takeover of a fresh lock", async () => {
@@ -58,7 +58,7 @@ describe("environment lock", () => {
     expect(error.message).toContain("older than 2 hours");
     expect(error.message).not.toContain("confirm to take it over");
     expect(error.message).toContain("/agentx/staging/lock");
-    expect(error.message).toMatch(/no AgentX command is running/);
+    expect(error.message).toMatch(/no Rovara command is running/);
   });
 
   it("says the lock was released while waiting for takeover confirmation, when the recheck finds it gone", async () => {
@@ -104,7 +104,7 @@ describe("environment lock", () => {
     expect(error.code).toBe("CONFIG_INVALID");
     expect(error.message).toContain("unreadable");
     expect(error.message).toContain("/agentx/staging/lock");
-    expect(error.message).toContain("no AgentX command is running");
+    expect(error.message).toContain("no Rovara command is running");
     expect(error.message).not.toContain("released");
   });
 
@@ -154,7 +154,7 @@ describe("environment lock", () => {
       .catch((caught: unknown) => caught) as { code?: string; message?: string };
     expect(error.code).toBe("CONFIG_INVALID");
     expect(error.message).toContain("carol");
-    expect(error.message).toContain("between this command's delete and re-create; wait for it to finish, then run the same agentx command again");
+    expect(error.message).toContain("between this command's delete and re-create; wait for it to finish, then run the same rovara command again");
     expect(error.message).not.toContain("took over the lock first");
   });
 
@@ -190,8 +190,8 @@ describe("environment lock", () => {
     expect(error.cause).toBe(deleteError);
     expect(error.message).toContain("/agentx/staging/lock");
     expect(error.message).toMatch(/may remain|left behind|still (?:be )?there/);
-    expect(error.message).toContain("agentx init");
-    expect(error.message).toContain("agentx deploy");
+    expect(error.message).toContain("rovara init");
+    expect(error.message).toContain("rovara deploy");
     expect(error.message).toContain("aws ssm delete-parameter");
     expect(error.message).toContain("--region");
   });
@@ -205,8 +205,8 @@ describe("environment lock", () => {
     expect(error.message).toContain("ssm unavailable");
     expect(error.message).toContain("/agentx/staging/lock");
     expect(error.message).toMatch(/may remain|left behind|still (?:be )?there/);
-    expect(error.message).toContain("agentx init");
-    expect(error.message).toContain("agentx deploy");
+    expect(error.message).toContain("rovara init");
+    expect(error.message).toContain("rovara deploy");
     expect(error.message).toContain("aws ssm delete-parameter");
     expect(error.message).toContain("--region");
   });
@@ -305,7 +305,7 @@ describe("environment lock", () => {
     const other = new MemoryParameterStore();
     other.values.set("/agentx/staging/lock", JSON.stringify({ holder: "bob", command: "init", acquiredAt: new Date(t0 - 60_000).toISOString() }));
     await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("locked by bob running \"init\" since 2026");
-    await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("; wait for it to finish, then run the same agentx command again");
+    await expect(withEnvironmentLock({ ...base, command: "init", store: other, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("; wait for it to finish, then run the same rovara command again");
     const own = new MemoryParameterStore();
     own.values.set("/agentx/staging/lock", JSON.stringify({ holder: base.holder, command: "deploy install", acquiredAt: new Date(t0 - 60_000).toISOString() }));
     await expect(withEnvironmentLock({ ...base, command: "init", store: own, now: () => t0, takeOverOwn: true, confirmTakeover }, async () => 1)).rejects.toThrow("running \"deploy install\"");

@@ -7,10 +7,10 @@ It answers [issue #66](https://github.com/PrepLabsAI/Rovara/issues/66).
 Both ways below need admin credentials in the environment's account. The operator role cannot
 delete the access stack's IAM roles or the kept data, by design.
 
-## With agentx destroy
+## With rovara destroy
 
 ```sh
-agentx --env <env> destroy --region <region>
+rovara --env <env> destroy --region <region>
 ```
 
 `--env` is required: `destroy` never falls back to the default environment name. Pass `--region`
@@ -75,7 +75,7 @@ region it looked in, and exits 2. If the environment is in another region, pass 
 
 ## By hand
 
-Use this if `agentx` is not available. Every command needs `--region <region>`. Where a command
+Use this if `rovara` is not available. Every command needs `--region <region>`. Where a command
 lists more than one id, act on each.
 
 **1. Record what the stacks keep.** Stack deletion keeps some resources on purpose. List each
@@ -197,7 +197,7 @@ aws ecr describe-repositories --region <region> \
 aws ecr delete-repository --force --repository-name <name> --region <region>
 ```
 
-**10. On this computer**, sign out of the environment with `agentx --env <env> logout --admin`,
+**10. On this computer**, sign out of the environment with `rovara --env <env> logout --admin`,
 then remove `~/.agentx/environments/<env>.yaml` and each file in `~/.agentx/projects/` whose
 header names `--env <env>`.
 

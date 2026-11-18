@@ -46,7 +46,7 @@ function secretObject(raw: string | undefined, secretId: string): Record<string,
     const parsed = JSON.parse(raw ?? "") as unknown;
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
   } catch { /* the one message below; never echo the value */ }
-  throw agentXError("CONFIG_INVALID", `secret ${secretId} is not an AgentX GitHub App secret, so its webhook cannot be set up`);
+  throw agentXError("CONFIG_INVALID", `secret ${secretId} is not a Rovara GitHub App secret, so its webhook cannot be set up`);
 }
 
 export async function ensureGithubWebhook(input: EnsureGithubWebhookInput): Promise<GithubWebhookOutcome> {

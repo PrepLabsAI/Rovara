@@ -68,7 +68,7 @@ describe("Suite 5: reviews", () => {
     const workflow = e2e.workflow();
     const open = openReviewFindings(workflow);
     expect(open).toHaveLength(25);
-    const answer = await e2e.mcp("agentx_resolve_review_findings", { task_id: e2e.taskId(), expected_revision: workflow.revision, candidate_digest: workflow.candidate!.digest,
+    const answer = await e2e.mcp("rovara_resolve_review_findings", { task_id: e2e.taskId(), expected_revision: workflow.revision, candidate_digest: workflow.candidate!.digest,
       resolutions: open.slice(0, 20).map((finding) => ({ finding_id: finding.findingId, action: "fix" })) });
     expect(answer.isError).toBe(true);
     expect(JSON.stringify(answer)).toContain("there are 25 blocking findings and AgentX resolves at most 20 at once; send the change back to coding instead");

@@ -1,7 +1,7 @@
 // The developer's AgentX tokens on this computer: used as long as they are valid, refreshed once,
 // under a lock file, when they are not (R19). A failed refresh deletes tokens only when the server
 // says the sign-in has ended (R18).
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { chmod, mkdir, open, readFile, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -50,7 +50,7 @@ async function withRefreshLock<T>(deps: DeveloperSessionDeps, env: string, work:
         await rm(path, { force: true });
         continue;
       }
-      if (Date.now() > deadline) throw agentXError("RUNTIME_UNAVAILABLE", `another agentx process is refreshing your sign-in to ${env}; try again in a moment`);
+      if (Date.now() > deadline) throw agentXError("RUNTIME_UNAVAILABLE", `another ${CLI_COMMAND_NAME} process is refreshing your sign-in to ${env}; try again in a moment`);
       await sleep(LOCK_POLL_MS);
     }
   }
@@ -87,7 +87,7 @@ export async function developerAccessToken(deps: DeveloperSessionDeps, env: stri
   const fresh = (tokens: StoredTokens): boolean => tokens.expiresAt - EARLY_MS > now();
 
   const stored = await deps.tokenStore.get(key);
-  if (stored === undefined) throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX environment ${resolved.env}; ${signIn}`);
+  if (stored === undefined) throw agentXError("AUTH_REQUIRED", `this computer is not signed in to Rovara environment ${resolved.env}; ${signIn}`);
   if (options.force !== true && fresh(stored)) return { ...resolved, accessToken: stored.accessToken };
 
   return withRefreshLock(deps, resolved.env, async () => {
@@ -95,7 +95,7 @@ export async function developerAccessToken(deps: DeveloperSessionDeps, env: stri
     const current = await deps.tokenStore.get(key);
     const replaced = options.force !== true || current?.accessToken !== stored.accessToken;
     if (current !== undefined && fresh(current) && replaced) return { ...resolved, accessToken: current.accessToken };
-    if (current?.refreshToken === undefined) throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${resolved.env} has ended; ${signIn}`);
+    if (current?.refreshToken === undefined) throw agentXError("AUTH_REQUIRED", `your Rovara sign-in for ${resolved.env} has ended; ${signIn}`);
     let response: Response;
     try {
       response = await deps.fetch(resolved.entry.tokenEndpoint, {
@@ -105,19 +105,19 @@ export async function developerAccessToken(deps: DeveloperSessionDeps, env: stri
         signal: AbortSignal.timeout(15_000),
       });
     } catch {
-      throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${resolved.entry.url}; check your connection and try again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `could not reach Rovara at ${resolved.entry.url}; check your connection and try again`);
     }
     const body: unknown = await response.json().catch(() => ({}));
     const fields = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
     const reason = serverReason(fields.error_description, "no reason given");
     if (response.status === 400 && fields.error === "invalid_grant") {
       await deps.tokenStore.delete(key);
-      throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${resolved.env} has ended (${reason}); ${signIn}`);
+      throw agentXError("AUTH_REQUIRED", `your Rovara sign-in for ${resolved.env} has ended (${reason}); ${signIn}`);
     }
-    if (response.status === 503) throw agentXError("RUNTIME_UNAVAILABLE", serverReason(fields.error_description, "AgentX could not refresh your sign-in just now; try again in a moment"));
-    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX could not refresh your sign-in (HTTP ${response.status}); try again`);
+    if (response.status === 503) throw agentXError("RUNTIME_UNAVAILABLE", serverReason(fields.error_description, "Rovara could not refresh your sign-in just now; try again in a moment"));
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Rovara could not refresh your sign-in (HTTP ${response.status}); try again`);
     const parsed = DeveloperTokenResponseSchema.safeParse(body);
-    if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered the refresh with something unexpected; try again");
+    if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered the refresh with something unexpected; try again");
     await deps.tokenStore.set(key, { accessToken: parsed.data.access_token, refreshToken: parsed.data.refresh_token, expiresAt: now() + parsed.data.expires_in * 1000 });
     return { ...resolved, accessToken: parsed.data.access_token };
   });

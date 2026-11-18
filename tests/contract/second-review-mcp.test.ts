@@ -10,8 +10,8 @@ const state = {
   current: { source: "default", models: [{ provider: "openai", modelId: "gpt-5.5" }], line: "Using default: gpt-5.5 (change)" },
 };
 
-describe("agentx_get_second_review", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_get_second_review")!;
+describe("rovara_get_second_review", () => {
+  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "rovara_get_second_review")!;
 
   it("is a read: it asks the control plane for the state and says who reviews, the notice, and where the owner changes it", async () => {
     const client = { getSecondReview: vi.fn(async () => state) };

@@ -61,7 +61,7 @@ describe("the install log file", () => {
     const path = initLogPath(home, "staging");
     await expect(openInitLog(path)).rejects.toMatchObject({
       code: "CONFIG_INVALID",
-      message: expect.stringContaining(`agentx init could not open its log file ${path} (`) as unknown,
+      message: expect.stringContaining(`rovara init could not open its log file ${path} (`) as unknown,
     });
   });
 

@@ -4,7 +4,7 @@
   "presentation": "legacy",
   "repeat": 3,
   "generatedAt": "2026-10-03T11:59:38.511Z",
-  "caseSetHash": "127edac6f231287f4bdb1e9c51d4ccbb038ff74ae4c2a9abda2be6b7a97be0d8",
+  "caseSetHash": "1b6aff81ba05551e5474cfbf9a45f7cc55bd10b797894fb375e12c273bfcc38a",
   "cases": [
     {
       "id": "asana-vs-github",
@@ -110,11 +110,11 @@
     },
     {
       "id": "channel-list-files",
-      "caseHash": "50cf0a0d84a88294901322678b5ce8b6476af4fe8b146c828e3aec722d3eaf47",
+      "caseHash": "28fbafe4bd409c937cf31488d13ecb7a65e2a3499b95691b7484a0d9e95c6a08",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -123,7 +123,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -132,7 +132,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -144,11 +144,11 @@
     },
     {
       "id": "channel-test-page-pr",
-      "caseHash": "7308658eccf0587f07654762d446927bec7af63e98bd5e0a26e75222f883fbb6",
+      "caseHash": "e5e2a7b8acb71e8997d7f599e3ede6b8761b5ca217dfbbc06719021d433392e3",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -157,7 +157,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -166,7 +166,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -178,11 +178,11 @@
     },
     {
       "id": "channel-test-page-pr-tested",
-      "caseHash": "10fb6f876a8d1b9820d881f77380d56d22e9384e78372a632f14b467883462ca",
+      "caseHash": "2793358c0cbeb6f3e220c7e5a29cc18e7afafebe26517279cb5fc9729844f0f5",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -191,7 +191,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -200,7 +200,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -212,11 +212,11 @@
     },
     {
       "id": "channel-summarize",
-      "caseHash": "6a9e17ead705c9cf942852b14334a0e423a1b58a0ce10a7541aa2f84709f1ef5",
+      "caseHash": "fcbd11d3573ad0fa59e3b04e6f7e82b25c51f0bc6d1e5d6328cb5b25d062f71e",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -225,7 +225,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -234,7 +234,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -246,11 +246,11 @@
     },
     {
       "id": "channel-inspect",
-      "caseHash": "c1d2f3097dee615511ec94e61cfe9e9c02d95969a9ade065d1f916d4969a9ed9",
+      "caseHash": "160f8eefab745ec8e0110743af6fcc49269cc6894334a488c69671fba0007215",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -259,7 +259,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -268,7 +268,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -447,7 +447,7 @@
       "passed": false,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -459,7 +459,7 @@
           "linesOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -471,7 +471,7 @@
           "linesOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -490,7 +490,7 @@
       "passed": false,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -502,7 +502,7 @@
           "linesOk": false
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -514,7 +514,7 @@
           "linesOk": false
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -529,11 +529,11 @@
     },
     {
       "id": "files-not-pr",
-      "caseHash": "0dfc7df77878761e676edac6ed894db36656810ba0dcd1e39df2658becdc47d1",
+      "caseHash": "6e1f14da80058ee042b83e71ba4d65fbaccb97b7fa77b56eeb0b1304e01f369b",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -542,7 +542,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -551,7 +551,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -597,11 +597,11 @@
     },
     {
       "id": "append-pr",
-      "caseHash": "7fc26306d043a622f4f2974932cf4e4a4b144ca485cfa7666f70ab5696fb7daf",
+      "caseHash": "d03a7d7fbad881e694ce705e8ae0d2b49209dd2a7fe1db427c95d7de21d123b8",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -610,7 +610,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -619,7 +619,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -699,11 +699,11 @@
     },
     {
       "id": "files-not-linear",
-      "caseHash": "19903a7dc0215b90ac580800417b3f20e2f68a53f5b5e89d319ce1fc512f3a9a",
+      "caseHash": "7c91273ac86b8d090ee0e49f8483d10eeab3036797d936f3de97173016272f09",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -712,7 +712,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -721,7 +721,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -767,11 +767,11 @@
     },
     {
       "id": "run-tests",
-      "caseHash": "2257c58a4f7113091e181914b027f5c6093ee71aa9cc535686b05d5a78214736",
+      "caseHash": "1dd60b461afd99f109b2265c2105acd520a566b891cf607ba9f838d75ebb461c",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -780,7 +780,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -789,7 +789,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -801,11 +801,11 @@
     },
     {
       "id": "explain-code",
-      "caseHash": "7ae175f9b094e741206dc191a7019f0de308af2a27a9e8edd3dd96521d56ea82",
+      "caseHash": "9985b07765ff25b505cd0cbb1dd8d9bf24303680d7558ea6b6a1237a699fc52b",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -814,7 +814,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -823,7 +823,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -835,11 +835,11 @@
     },
     {
       "id": "fix-typo",
-      "caseHash": "8e7720897013565516f83a75d5c484728d396ce19f9ab23e98c8db61828fc42a",
+      "caseHash": "b238975a50e8178f93aea60ab31264bdbcc28fa001e8b35214f6efb4b89995cc",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -848,7 +848,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -857,7 +857,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1073,11 +1073,11 @@
     },
     {
       "id": "create-pr",
-      "caseHash": "e9476d11cc8252dc546a2089efcd8a304fa671e7c3941a276b1045f89715b021",
+      "caseHash": "730ce9df7d49dacb9264455f310155cc234b299481458d7e3d29aca0d6535ee4",
       "passed": false,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": false,
           "phraseOk": null,
@@ -1086,7 +1086,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": false,
           "phraseOk": null,
@@ -1095,7 +1095,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": false,
           "phraseOk": null,
@@ -1107,11 +1107,11 @@
     },
     {
       "id": "sync-pr",
-      "caseHash": "9b366cb004cd9ae8c5664d98c0662f3d7f08382562242d2ce39c926da20cc5fc",
+      "caseHash": "9bd229e9fc291a92183c368200cff05f40abc11bda8341f9120464e1cfe5e9d4",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1120,7 +1120,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1129,7 +1129,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1141,11 +1141,11 @@
     },
     {
       "id": "edit-pr",
-      "caseHash": "874c68ce60fa217f19abf4a70eb22c06e42a697868a89f2c1d1f1db6729a75d5",
+      "caseHash": "983d8e0e806f9a22505fb5c26e37403fc412abb92612bc6e6a83572433881667",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1154,7 +1154,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1163,7 +1163,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1175,11 +1175,11 @@
     },
     {
       "id": "close-pr",
-      "caseHash": "e5bf3502635649fa9c6a7c9c3446038fe5e5021b264bfa8aea2bb8d2424f2ef1",
+      "caseHash": "520642860bb47efd7ae32fdac1904de5ec8ca7f272fbd5096308bf6c57aa0489",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1188,7 +1188,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1197,7 +1197,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1209,11 +1209,11 @@
     },
     {
       "id": "reopen-pr",
-      "caseHash": "529433faad652b35cb86c24c47fb97ae0daeb379977450bfe1227742d9fc567f",
+      "caseHash": "3f298bdaa49261209af2132f9f08c65e851c52995887a6769684f0c7c16b8bc6",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1222,7 +1222,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1231,7 +1231,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1243,11 +1243,11 @@
     },
     {
       "id": "replace-pr",
-      "caseHash": "ff39b687b03bbf73379de04518d25629e4afb996be8be2d150d8376021e5d977",
+      "caseHash": "53b3e2c8de76391c5b9ccfc207966b3d3e53dd8441d10e27c0dd6ff19c2c45e9",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1256,7 +1256,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1265,7 +1265,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1277,11 +1277,11 @@
     },
     {
       "id": "revert-pr",
-      "caseHash": "26cfaaf2bdac86490438a8da3f5a546ae6f3327950a2f84626f2fea62a357a17",
+      "caseHash": "81ef49ecbfd85c004dd95b7fac5318a49491a4ecfd784ed48ca963c86b45a3c4",
       "passed": true,
       "runs": [
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1290,7 +1290,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1299,7 +1299,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_manage_pull_request",
+          "tool": "rovara_manage_pull_request",
           "toolOk": true,
           "argsOk": true,
           "phraseOk": null,
@@ -1417,7 +1417,7 @@
       "passed": false,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -1426,7 +1426,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -1435,7 +1435,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -1451,7 +1451,7 @@
       "passed": false,
       "runs": [
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -1460,7 +1460,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,
@@ -1469,7 +1469,7 @@
           "siteOk": true
         },
         {
-          "tool": "agentx_submit_task",
+          "tool": "rovara_submit_task",
           "toolOk": false,
           "argsOk": true,
           "phraseOk": false,

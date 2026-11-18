@@ -180,7 +180,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
       const verdict = evaluateE2EAgentCase(stopped("MODEL_PROVIDER_FAILED", [intoCase(outcome.receipt)]));
       expect(verdict.verdict).toEqual({ kind: "unknown", code: "model-limit-reached" });
       const shown = displayed(definition, "model-limit-reached");
-      expect(shown.reason).toBe(`Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-5-5\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks`);
+      expect(shown.reason).toBe(`Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-5-5\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (rovara project model-check test --model <id>), then retry the checks`);
       const everything = JSON.stringify({ outcome, verdict, shown });
       for (const text of HOSTILE) expect(everything, text).not.toContain(text);
     } finally { await loopback.close(); }
@@ -204,7 +204,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
         ],
         [
           "model-limit-reached",
-          "Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-4-5-20251001-v1:0\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (agentx project model-check test --model <id>), then retry the checks",
+          "Amazon Bedrock refused the AI navigation call to \`us.anthropic.claude-haiku-4-5-20251001-v1:0\`: this account's limit for that model is used up or set to zero. Raise the limit, or choose another model and run its driving test (rovara project model-check test --model <id>), then retry the checks",
         ],
         [
           "model-key-rejected",
@@ -212,7 +212,7 @@ describe("23. nothing a provider said reaches a receipt, a verdict or a row", ()
         ],
         [
           "model-not-found",
-          "Amazon Bedrock says \`us.anthropic.claude-haiku-4-5-20251001-v1:0\` does not exist or is not available to this account. Choose another model, run its driving test (agentx project model-check test --model <id>), and approve setup again",
+          "Amazon Bedrock says \`us.anthropic.claude-haiku-4-5-20251001-v1:0\` does not exist or is not available to this account. Choose another model, run its driving test (rovara project model-check test --model <id>), and approve setup again",
         ],
         [
           "model-unreachable",

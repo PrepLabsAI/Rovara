@@ -8,10 +8,10 @@ import { secretFromSource } from "../../init/prompts.js";
 import { addConnectorRevision, connectorRerun, connectorSecretName, errorName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const JIRA_GUIDE = [
-  "Jira: AgentX acts as an Atlassian service account, with an API token.",
+  "Jira: Rovara acts as an Atlassian service account, with an API token.",
   "  1. admin.atlassian.com: Apps, AI settings, Rovo MCP server, Authentication: turn on Allow API token authentication.",
-  "  2. Directory, Service accounts: create one (for example AgentX), and give it Jira with the User role only.",
-  "  3. Add it to the project AgentX may use; make sure no other project lets it browse (docs/connectors/jira.md, Step 4).",
+  "  2. Directory, Service accounts: create one (for example Rovara), and give it Jira with the User role only.",
+  "  3. Add it to the project Rovara may use; make sure no other project lets it browse (docs/connectors/jira.md, Step 4).",
   "  4. On the service account, Credentials: create an API token (not OAuth) with read:jira-work, write:jira-work, read:jira-user,",
   "     read:jira:agent-interface, write:jira:agent-interface and search:jira:agent-interface. Copy it; it is about 192 characters.",
 ].join("\n");
@@ -60,7 +60,7 @@ export function widerAccessWarning(projectKey: string, others: readonly string[]
   const shown = others.slice(0, NAMED);
   const rest = others.length - shown.length;
   const list = rest > 0 ? `${shown.join(", ")} and ${rest} more` : shown.length > 1 ? `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)!}` : shown[0]!;
-  const text = `the Jira service account can also see issues in ${list}, so AgentX will be able to read issues in those projects too. Narrow the account to ${projectKey} in each other project's permission scheme (docs/connectors/jira.md, Step 4)`;
+  const text = `the Jira service account can also see issues in ${list}, so Rovara will be able to read issues in those projects too. Narrow the account to ${projectKey} in each other project's permission scheme (docs/connectors/jira.md, Step 4)`;
   // Project keys are at most 10 characters, so 5 of them always fit; the cut is only a guard.
   return text.length <= WARNING_LIMIT ? text : text.slice(0, WARNING_LIMIT);
 }
@@ -72,7 +72,7 @@ export async function addJira(input: ConnectorAddInput): Promise<{ ref: string; 
   const siteUrl = jiraSiteUrl(input.flags.jiraSite ?? await input.prompter.ask("Your Jira site (the <site> in <site>.atlassian.net)", { flag: "--jira-site" }));
   const cloudId = await input.services.vendors.jiraCloudId(siteUrl);
   const token = await secretFromSource({ what: "Jira API token", flag: "--jira-token", source: input.flags.jiraToken ?? {}, processEnv: input.processEnv, prompter: input.prompter });
-  const projectKey = (input.flags.jiraProject ?? await input.prompter.ask("The Jira project key AgentX may use (for example PAY)", { flag: "--jira-project" })).trim().toUpperCase();
+  const projectKey = (input.flags.jiraProject ?? await input.prompter.ask("The Jira project key Rovara may use (for example PAY)", { flag: "--jira-project" })).trim().toUpperCase();
   // F4: the schema's own pattern (JiraScopeSchema.projectKey), so a key the schema would refuse is
   // refused here first, before the token is ever stored.
   if (!/^[A-Z][A-Z0-9_]{1,9}$/.test(projectKey)) throw agentXError("CONFIG_INVALID", "a Jira project key is capital letters and digits, such as PAY");

@@ -5,7 +5,7 @@
 // Nothing about what init does changes here. This module is injected through the seams init already
 // has -- `Prompter`, `onEvent`, `write(line)` and `openBrowser(url)` -- so the terminal path and
 // `--yes` are untouched.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { InstallSurface, OpenManifestHost, OpenSlackInstallHost } from "../context.js";
 import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
@@ -26,7 +26,7 @@ const REMINDER_CHECK_MS = 5_000;
 const PAGE_OPEN_GRACE_MS = 1_000;
 
 export function pageClosedLine(url: string): string {
-  return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
+  return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; ${CLI_COMMAND_NAME} init continues from here next time.`;
 }
 
 /** Says once per wait, in the terminal, where to reopen a page that has been closed for a minute.
@@ -128,7 +128,7 @@ export async function startInstallWizard(input: {
     await Promise.race([hub.whenConnected(), grace]);
     if (timer !== undefined) clearTimeout(timer);
   }
-  input.write(opened ? `The AgentX installer is open in your browser: ${server.url}` : `The AgentX installer is at ${server.url}`);
+  input.write(opened ? `The Rovara installer is open in your browser: ${server.url}` : `The Rovara installer is at ${server.url}`);
   if (!opened) {
     input.write(`Open that address in a browser on this machine. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
   }
@@ -166,7 +166,7 @@ export function startCloudInstallWizard(input: {
 }): InstallWizard {
   const hub = createWizardHub(input.env, { ...(input.logPath === undefined ? {} : { logPath: input.logPath }) });
   const relay = startHubRelay({ hub, store: input.store, warn: input.write, ...input.timing });
-  input.write(`The AgentX installer is on its setup page: ${input.url}`);
+  input.write(`The Rovara installer is on its setup page: ${input.url}`);
   return wizardOn(hub, {
     url: input.url,
     ...(input.logPath === undefined ? {} : { logPath: input.logPath }),

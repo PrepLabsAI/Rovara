@@ -1,6 +1,6 @@
 // Engine host (migration plan v3.2 lane E2): the core engine switch's deployment half, on the synthesised templates. Ported from the monolith's core-engine infrastructure test.
 // What must hold:
-//   1. the switch: a stack parameter CoreEngine, off by default, plain text only, a plain variable on the broker, set by `agentx config set coreEngine.switch`, kept by an upgrade;
+//   1. the switch: a stack parameter CoreEngine, off by default, plain text only, a plain variable on the broker, set by `rovara config set coreEngine.switch`, kept by an upgrade;
 //   2. the core dispatch queue: its own queue and dead letters, a redrive limit above the core's 20 attempts, the existing dispatch queue unchanged, granted to the broker only, on the queues' own
 //      policies (the broker role's inline policy is at its size limit);
 //   3. the job schedules: one per scheduled row of the core's job table, enabled only while the switch is not off, through a role that can invoke the broker and nothing else;
@@ -134,7 +134,7 @@ describe("the switch (stack parameter CoreEngine)", () => {
     for (const word of ["CoreEngine", CORE_ENGINE_VARIABLE, "core-dispatch", CORE_JOB_EVENT_SOURCE]) expect(text, word).not.toContain(word);
   });
 
-  it("is set with `agentx config set coreEngine.switch`, refused before anything changes when it is not a clean value, and an upgrade keeps it", () => {
+  it("is set with `rovara config set coreEngine.switch`, refused before anything changes when it is not a clean value, and an upgrade keeps it", () => {
     const entry = configKey("coreEngine.switch");
     expect(entry.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "CoreEngine" });
     expect(entry.defaultValue).toBe("off");
@@ -520,7 +520,7 @@ describe("the test service images setting (stack parameter TestServiceImages)", 
     expect(users.sort()).toEqual(["Broker", "Dispatcher", "SessionsSteps"]);
   });
 
-  it("is an operator setting an upgrade keeps, set with `agentx config set testServices.images`", () => {
+  it("is an operator setting an upgrade keeps, set with `rovara config set testServices.images`", () => {
     expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TestServiceImages");
     const key = configKey("testServices.images");
     expect(key.target).toEqual({ kind: "stack-parameter", part: "control-plane", parameter: "TestServiceImages" });

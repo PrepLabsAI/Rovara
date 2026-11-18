@@ -5,7 +5,7 @@
 import { chmod, mkdir, open } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { Writable } from "node:stream";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 export function initLogPath(home: string, env: string): string {
   return join(home, ".agentx", "logs", `init-${env}.log`);
@@ -48,7 +48,7 @@ export async function openInitLog(path: string, options: OpenInitLogOptions = {}
     await handle.chmod(0o600);
   } catch (error) {
     await handle?.close().catch(() => undefined);
-    throw agentXError("CONFIG_INVALID", `agentx init could not open its log file ${path} (${messageOf(error)}); check that its folder is yours and can be written, or pass --no-ui`);
+    throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init could not open its log file ${path} (${messageOf(error)}); check that its folder is yours and can be written, or pass --no-ui`);
   }
   const stream = handle.createWriteStream();
   let broken = false;

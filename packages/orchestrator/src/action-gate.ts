@@ -72,7 +72,7 @@ export interface ActionGateOptions {
   worker?: WorkerAccess | undefined;
   /**
    * The host's positive signal that this thread's compute is already prepared (spec 014 D5): then
-   * agentx_submit_task and agentx_follow_up run as reads. Used only when no worker is given (a
+   * rovara_submit_task and rovara_follow_up run as reads. Used only when no worker is given (a
    * worker's own prepared() wins); absent with no worker, they fail closed as a change.
    */
   computePrepared?: boolean | undefined;
@@ -194,10 +194,10 @@ function inHouseAction(tool: string, args: Record<string, unknown>): string | un
   const repository = typeof args.repository === "string" ? ` in ${shortened(args.repository, VALUE_SHOWN)}` : "";
   const title = quoted(args.title, VALUE_SHOWN);
   switch (tool) {
-    case "agentx_submit_task": return `Start a coding task${prompt === undefined ? "" : `: ${prompt}`}`;
-    case "agentx_follow_up": return `Continue the coding task${prompt === undefined ? "" : `: ${prompt}`}`;
-    case "agentx_create_pull_request": return `Open a pull request${repository}${title === undefined ? "" : `: ${title}`}`;
-    case "agentx_manage_pull_request": {
+    case "rovara_submit_task": return `Start a coding task${prompt === undefined ? "" : `: ${prompt}`}`;
+    case "rovara_follow_up": return `Continue the coding task${prompt === undefined ? "" : `: ${prompt}`}`;
+    case "rovara_create_pull_request": return `Open a pull request${repository}${title === undefined ? "" : `: ${title}`}`;
+    case "rovara_manage_pull_request": {
       const action = typeof args.action === "string" ? args.action : "";
       const number = typeof args.pullRequestNumber === "number" ? ` #${args.pullRequestNumber}` : "";
       const verb = PULL_REQUEST_VERBS[action] ?? `${words(action) || "Change"}`;
@@ -205,8 +205,8 @@ function inHouseAction(tool: string, args: Record<string, unknown>): string | un
       const titled = (action === "edit" || action === "replace" || action === "revert") && title !== undefined ? `: ${title}` : "";
       return `${verb.charAt(0).toUpperCase()}${verb.slice(1)} pull request${number}${repository}${tail}${titled}`;
     }
-    case "agentx_task_status": return "Check the status of an earlier coding task";
-    case "agentx_task_result": return "Get the result of an earlier coding task";
+    case "rovara_task_status": return "Check the status of an earlier coding task";
+    case "rovara_task_result": return "Get the result of an earlier coding task";
     default: return undefined;
   }
 }
@@ -236,12 +236,12 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
   const where = typeof target === "string" ? ` in ${target}` : "";
   const split = tool.indexOf("__");
   // An in-house tool not described above is never named, even in words.
-  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("agentx_") ? "Run an AgentX action" : `Run ${words(tool)}`;
+  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("rovara_") ? "Run a Rovara action" : `Run ${words(tool)}`;
   return inertText(`${action}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 
 /** Told to the model when the gate itself could not decide or record a call: fixed words, no error text. */
-export const GATE_FAILURE_REASON = "Not run: AgentX could not check this action. Do not retry it in this turn. Tell the member AgentX could not check it.";
+export const GATE_FAILURE_REASON = "Not run: Rovara could not check this action. Do not retry it in this turn. Tell the member Rovara could not check it.";
 
 /**
  * What the model is told when a call is not run. A gate failure's recorded reason (with the error's
@@ -253,8 +253,8 @@ export function blockReason(decision: GateDecision): string {
   if (decision.outcome === "deny") {
     return `Not run: ${decision.reason}. An administrator's rule blocks this action; do not retry it. Tell the member why.`;
   }
-  const again = decision.differsFromConfirmation ? " Its arguments differ from the call they confirmed, so AgentX asked again." : "";
-  return "Not run yet: AgentX has already posted a confirmation request for this action to the member in this conversation." +
+  const again = decision.differsFromConfirmation ? " Its arguments differ from the call they confirmed, so Rovara asked again." : "";
+  return "Not run yet: Rovara has already posted a confirmation request for this action to the member in this conversation." +
     `${again} Do not call this tool again or try another way in this turn. ` +
     "Do not restate, summarise or mention this action, its details or the confirmation in your reply: the member already sees the request. " +
     "Report only anything else you did or found in this turn.";
@@ -338,7 +338,7 @@ export class ActionGate {
   failed(call: { toolCallId: string; toolName: string; input: Record<string, unknown> }, error: unknown): GateDecision {
     const decision: GateDecision = {
       toolCallId: call.toolCallId, tool: call.toolName, actionClass: "change", outcome: "deny", source: "gate_error",
-      reason: `AgentX could not check this action (${error instanceof Error ? error.name : "unknown error"})`, argumentsHash: safeHash(call.toolName, call.input),
+      reason: `Rovara could not check this action (${error instanceof Error ? error.name : "unknown error"})`, argumentsHash: safeHash(call.toolName, call.input),
     };
     this.record(decision);
     return decision;
@@ -434,10 +434,10 @@ export const GATE_MESSAGE_TYPE = "agentx-action-gate";
 export function confirmationNote(session: GateSession): string | undefined {
   if (session.approvals.length === 0) return undefined;
   return [
-    `<@${session.requesterId}> confirmed the action${session.approvals.length === 1 ? "" : "s"} AgentX asked about:`,
+    `<@${session.requesterId}> confirmed the action${session.approvals.length === 1 ? "" : "s"} Rovara asked about:`,
     // The summary is in words for the member (#215), so the model is also told each call's tool.
     ...session.approvals.map((approval, index) => `${index + 1}. ${approval.summary} (tool ${approval.tool})`),
-    "Call each confirmed tool again now with exactly the same arguments as before. AgentX runs only an exact match, once; any other call is checked afresh.",
+    "Call each confirmed tool again now with exactly the same arguments as before. Rovara runs only an exact match, once; any other call is checked afresh.",
   ].join("\n");
 }
 

@@ -1,6 +1,6 @@
 // FR-050's model access, alert subscription and budget; the region's capacity (the vCPU quota and
 // free Elastic IPs init checks, item 5); and spec 025 FR-046's sign-in checks, unchanged.
-import { KEYED_MODEL_PROVIDERS, environmentStackName, isKeyedModelProvider } from "@agentx/contracts";
+import { KEYED_MODEL_PROVIDERS, environmentStackName, isKeyedModelProvider, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { EC2_WORKER_VCPU_REQUIREMENT, modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
 import { runModelCheck } from "../init/run-model-check.js";
 import { plainMessage } from "../output.js";
@@ -16,7 +16,7 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
     const key = `${provider}/${modelId}`;
     let result = results.get(key);
     if (result === undefined) {
-      const wording = { changeModel: `agentx --env ${env} config set models.${role} <model id>`, rerun: "run agentx doctor again", region: "check this computer's network access to AWS (an environment cannot move regions), then run agentx doctor again" };
+      const wording = { changeModel: `${CLI_COMMAND_NAME} --env ${env} config set models.${role} <model id>`, rerun: `run ${CLI_COMMAND_NAME} doctor again`, region: `check this computer's network access to AWS (an environment cannot move regions), then run ${CLI_COMMAND_NAME} doctor again` };
       const outcome = await runModelCheck({ provider, modelId, region: settings.region, checks: services.checks, config: settings.models, sleep: services.sleep });
       if (!outcome.ok && outcome.class === "secret-unreadable" && isKeyedModelProvider(provider)) {
         // MODEL3: a missing key is its own error, naming the role and what happens to its work.
@@ -26,14 +26,14 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
         checks.push(check("models", role, "fail", chosen === undefined
           ? `the ${label} key secret for the ${role} model ${modelId} is missing, and no fallback model was chosen: the ${role}'s tasks fail by name until the key is restored`
           : `the ${label} key secret for the ${role} model ${modelId} is missing: its tasks run on Amazon Bedrock ${chosen} (models.fallback) until the key is restored`,
-        `restore the key, or choose a fallback with agentx --env ${env} config set models.fallback <bedrock model id>`));
+        `restore the key, or choose a fallback with ${CLI_COMMAND_NAME} --env ${env} config set models.fallback <bedrock model id>`));
         continue;
       }
       result = outcome.ok ? { ok: true, detail: `${modelId} answers a one-token test call` }
         : { ok: false, detail: modelCheckProblem({ modelId, role, region: settings.region, error: outcome.error, ...(outcome.quota === undefined ? {} : { quota: outcome.quota }), wording }) };
       results.set(key, result);
     }
-    checks.push(result.ok ? check("models", role, "ok", result.detail) : check("models", role, "fail", result.detail, `choose another model with agentx --env ${env} config set models.${role} <model id>`));
+    checks.push(result.ok ? check("models", role, "ok", result.detail) : check("models", role, "fail", result.detail, `choose another model with ${CLI_COMMAND_NAME} --env ${env} config set models.${role} <model id>`));
   }
   return checks;
 }
@@ -42,11 +42,11 @@ export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]
   const { env, settings, answers, services } = context;
   const controlPlaneName = settings.stacks["control-plane"] ?? environmentStackName(env, "control-plane");
   const controlPlane = await services.stacks.describe(controlPlaneName);
-  const set = `agentx --env ${env} config set alerts.address <email>`;
+  const set = `${CLI_COMMAND_NAME} --env ${env} config set alerts.address <email>`;
   const checks: DoctorCheck[] = [];
   const topicArn = controlPlane?.outputs.OperatorAlertsTopicArn;
   if (topicArn === undefined || topicArn === "") {
-    checks.push(check("alerts", "subscription", "fail", "the control-plane stack reports no alert topic", `agentx --env ${env} upgrade`));
+    checks.push(check("alerts", "subscription", "fail", "the control-plane stack reports no alert topic", `${CLI_COMMAND_NAME} --env ${env} upgrade`));
   } else {
     const subscriptions = await services.alerts.subscriptions(topicArn);
     const confirmed = subscriptions.filter((entry) => entry.arn.startsWith("arn:"));
@@ -56,7 +56,7 @@ export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]
         ? check("alerts", "subscription", "fail", `nobody is subscribed to agentx-${env}-alerts, so alarms go nowhere`, set)
         : check("alerts", "subscription", "warn", "no alert address is set, so alarms go nowhere", set));
     } else if (confirmed.length === 0) {
-      checks.push(check("alerts", "subscription", "warn", "the subscription is not confirmed yet", `confirm it (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx --env ${env} alerts test`));
+      checks.push(check("alerts", "subscription", "warn", "the subscription is not confirmed yet", `confirm it (the AWS Notifications email, or your webhook's SubscribeURL), then run ${CLI_COMMAND_NAME} --env ${env} alerts test`));
     } else {
       const protocols = [...new Set(confirmed.map((entry) => entry.protocol))].join(", ");
       checks.push(check("alerts", "subscription", "ok", `${confirmed.length} confirmed ${confirmed.length === 1 ? "subscription" : "subscriptions"} (${protocols})`));
@@ -75,7 +75,7 @@ export async function alertChecks(context: DoctorContext): Promise<DoctorCheck[]
     // CloudFormation neither recreates a budget deleted outside it nor reverts an edited amount, so a
     // no-change upgrade leaves both as they are. The budget exists only while BudgetMonthlyUsd is not
     // 0 (the HasBudget condition): setting 0 removes it, and setting the amount again creates it.
-    const recreate = `agentx --env ${env} config set budget.monthlyUsd 0, then agentx --env ${env} config set budget.monthlyUsd ${monthly}: the first removes the budget from the control-plane stack, the second creates it again (an upgrade with no change leaves it as it is)`;
+    const recreate = `${CLI_COMMAND_NAME} --env ${env} config set budget.monthlyUsd 0, then ${CLI_COMMAND_NAME} --env ${env} config set budget.monthlyUsd ${monthly}: the first removes the budget from the control-plane stack, the second creates it again (an upgrade with no change leaves it as it is)`;
     if (limit === undefined) checks.push(check("alerts", "budget", "fail", `the budget agentx-${env}-monthly is missing`, recreate));
     else if (limit !== Number(monthly)) checks.push(check("alerts", "budget", "warn", `the budget is $${limit} a month, but budget.monthlyUsd is ${monthly}`, `set agentx-${env}-monthly back to $${monthly} in the AWS Budgets console, or run ${recreate}`));
     else checks.push(check("alerts", "budget", "ok", `$${monthly} a month, ${scope === "tag" ? "costs tagged agentx:env (the tag must be active in Billing, Cost allocation tags)" : "the whole account"}`));

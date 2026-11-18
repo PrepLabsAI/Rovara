@@ -1,5 +1,5 @@
-// Plan 3 Task 35a: the MCP tools for agents. The start tools pass `agent` and `input` through; `agentx_list_agents` and `agentx_run_agent` reach
-// the agent routes; `agentx_list_approvals` returns each pending approval with its summary, full arguments and plain confirmation link, and `agentx_open_approval` asks for one approval's ticketed link for the person. No tool decides a
+// Plan 3 Task 35a: the MCP tools for agents. The start tools pass `agent` and `input` through; `rovara_list_agents` and `rovara_run_agent` reach
+// the agent routes; `rovara_list_approvals` returns each pending approval with its summary, full arguments and plain confirmation link, and `rovara_open_approval` asks for one approval's ticketed link for the person. No tool decides a
 // write approval, a step or chain-gate approval, a spend request or a comment-trigger opt-out (R3-4): the person decides on the page.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -34,34 +34,34 @@ async function connect(client: Partial<ControlPlaneClient>) {
 }
 
 describe("the agent tools in the list", () => {
-  it("adds agentx_list_agents, agentx_run_agent and agentx_list_approvals", async () => {
+  it("adds rovara_list_agents, rovara_run_agent and rovara_list_approvals", async () => {
     const names = (await (await connect({})).listTools()).tools.map((tool) => tool.name);
-    expect(names).toEqual(expect.arrayContaining(["agentx_list_agents", "agentx_run_agent", "agentx_list_approvals"]));
+    expect(names).toEqual(expect.arrayContaining(["rovara_list_agents", "rovara_run_agent", "rovara_list_approvals"]));
   });
 
   it("has no tool that decides an approval, a spend request or a comment-trigger opt-out (R3-4)", async () => {
     const { tools } = await (await connect({})).listTools();
     const governed = tools.filter((tool) => /approv|spend|opt.?out|comment.?trigger|budget|guardrail/i.test(tool.name));
-    expect(governed.map((tool) => tool.name).sort()).toEqual(["agentx_list_approvals", "agentx_open_approval"]);
+    expect(governed.map((tool) => tool.name).sort()).toEqual(["rovara_list_approvals", "rovara_open_approval"]);
     for (const tool of tools) expect(tool.name, tool.name).not.toMatch(/(approve|decline|deny|reject)/);
     // The client the tools are written against has no way to decide one either.
     const client = httpControlPlaneClient({ session: async () => ({ baseUrl: CELL, accessToken: "t", signInCommand: "x" }), fetch: vi.fn<typeof fetch>() });
     expect(Object.keys(client).filter((name) => /decide|approve|decline|deny|optOut|spendRequest/i.test(name) && !/Workflow/.test(name))).toEqual([]);
-    const listing = tools.find((tool) => tool.name === "agentx_list_approvals")!;
+    const listing = tools.find((tool) => tool.name === "rovara_list_approvals")!;
     expect(listing.description).toMatch(/confirm_url/);
     expect(listing.description).toMatch(/cannot approve|can't approve|never approve/i);
   });
 });
 
-describe("agentx_start_task and agentx_start_workflow take an agent and its input", () => {
+describe("rovara_start_task and rovara_start_workflow take an agent and its input", () => {
   it("passes agent and input through, with the instructions as the input's text", async () => {
     const seen: StartDeveloperTaskRequest[] = [];
     const mcp = await connect({ startTask: async (request) => { seen.push(request); return view; } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: {
+    await mcp.callTool({ name: "rovara_start_task", arguments: {
       project: "payments", instructions: "Triage the failing build",
       agent: { agent_id: AGT, version: "draft" }, input: { context: [{ kind: "alert", ref: "https://ci.acme.dev/run/1", title: "CI run" }] },
     } });
-    await mcp.callTool({ name: "agentx_start_workflow", arguments: {
+    await mcp.callTool({ name: "rovara_start_workflow", arguments: {
       project: "payments", instructions: "Fix it", workflow_path: "quick", agent: { agent_id: "rovara-code", version: 2 },
     } });
     expect(seen[0]).toMatchObject({ project: "payments", instructions: "Triage the failing build", agent: { agentId: AGT, version: "draft" }, input: { text: "Triage the failing build", context: [{ kind: "alert", ref: "https://ci.acme.dev/run/1", title: "CI run" }] } });
@@ -71,17 +71,17 @@ describe("agentx_start_task and agentx_start_workflow take an agent and its inpu
   it("sends neither when they are left out", async () => {
     const seen: StartDeveloperTaskRequest[] = [];
     const mcp = await connect({ startTask: async (request) => { seen.push(request); return view; } });
-    await mcp.callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "Fix it" } });
+    await mcp.callTool({ name: "rovara_start_task", arguments: { project: "payments", instructions: "Fix it" } });
     expect(seen[0]).not.toHaveProperty("agent");
     expect(seen[0]).not.toHaveProperty("input");
   });
 });
 
-describe("agentx_list_agents and agentx_run_agent", () => {
+describe("rovara_list_agents and rovara_run_agent", () => {
   it("lists the agents a project may run", async () => {
     const listAgents = vi.fn(async () => [{ agentId: AGT, name: "Triage helper", builtin: false, status: "active", access: "use" }]);
     const mcp = await connect({ listAgents });
-    const result = await mcp.callTool({ name: "agentx_list_agents", arguments: { project: "payments" } });
+    const result = await mcp.callTool({ name: "rovara_list_agents", arguments: { project: "payments" } });
     expect(listAgents).toHaveBeenCalledWith({ project: "payments" });
     expect(structured(result)).toMatchObject({ agents: [{ agent_id: AGT, name: "Triage helper", builtin: false }] });
   });
@@ -89,19 +89,19 @@ describe("agentx_list_agents and agentx_run_agent", () => {
   it("starts a run of an agent and answers with its task", async () => {
     const runAgent = vi.fn(async () => view);
     const mcp = await connect({ runAgent, getTask: async () => view });
-    const result = await mcp.callTool({ name: "agentx_run_agent", arguments: { agent_id: AGT, project: "payments", input: "Look at the build", version: "draft" } });
+    const result = await mcp.callTool({ name: "rovara_run_agent", arguments: { agent_id: AGT, project: "payments", input: "Look at the build", version: "draft" } });
     expect(runAgent).toHaveBeenCalledWith(AGT, { requestId: "33333333-3333-4333-8333-333333333333", project: "payments", version: "draft", input: { text: "Look at the build" } });
     expect(structured(result)).toMatchObject({ task_id: TASK });
   });
 });
 
-describe("agentx_start with run_agent refuses the share fields (item H3)", () => {
+describe("rovara_start with run_agent refuses the share fields (item H3)", () => {
   it("refuses share, share_to_channel (and channel), and starts nothing", async () => {
     const runAgent = vi.fn(async () => view);
     const startTask = vi.fn(async () => view);
     const mcp = await connect({ runAgent, startTask });
     for (const extra of [{ share: true }, { share: false }, { share_to_channel: true }, { channel: "payments-dev" }]) {
-      const result = await mcp.callTool({ name: "agentx_start", arguments: { project: "payments", instructions: "Look at the build", run_agent: true, agent: { agent_id: AGT }, ...extra } });
+      const result = await mcp.callTool({ name: "rovara_start", arguments: { project: "payments", instructions: "Look at the build", run_agent: true, agent: { agent_id: AGT }, ...extra } });
       expect(result).toMatchObject({ isError: true });
       expect(JSON.stringify((result as { content: unknown }).content)).toContain("INVALID_REQUEST");
     }
@@ -110,7 +110,7 @@ describe("agentx_start with run_agent refuses the share fields (item H3)", () =>
   });
 });
 
-describe("agentx_run_agent when the version asked for waits for the agent's owner (owner decision 2026-10-22)", () => {
+describe("rovara_run_agent when the version asked for waits for the agent's owner (owner decision 2026-10-22)", () => {
   const WAITING = { status: "NEEDS_OWNER_APPROVAL", confirmUrl: CONFIRM, changes: ["Runs version 1 of Triage on payments, which is less safe than the version that runs now (version 3)"] };
 
   it("is an error that says nothing started and gives the link for the owner, and no task", async () => {
@@ -122,13 +122,13 @@ describe("agentx_run_agent when the version asked for waits for the agent's owne
     expect(refused!.message).toContain("Nothing started");
     expect(refused!.nextStep).toMatch(/owner/);
     const mcp = await connect({ runAgent: client.runAgent.bind(client) });
-    const result = await mcp.callTool({ name: "agentx_run_agent", arguments: { agent_id: AGT, project: "payments", input: "go", version: 1 } });
+    const result = await mcp.callTool({ name: "rovara_run_agent", arguments: { agent_id: AGT, project: "payments", input: "go", version: 1 } });
     expect((result as { isError?: boolean }).isError).toBe(true);
     expect(text(result)).toContain(CONFIRM);
   });
 });
 
-describe("agentx_list_approvals", () => {
+describe("rovara_list_approvals", () => {
   it("returns each pending approval with its summary, full arguments and the bare confirmation link, and mints no ticket (review M2)", async () => {
     const args = { title: "Flaky retry test", labels: ["bug"] };
     const approvalConfirmLink = vi.fn(async () => ({ confirmUrl: `${CONFIRM}?ticket=t1`, ticketed: true }));
@@ -137,7 +137,7 @@ describe("agentx_list_approvals", () => {
       getApproval: vi.fn(async () => ({ approvalId: APR, kind: "write", status: "PENDING", summary: "Create a Linear issue", arguments: args, confirmUrl: CONFIRM })),
       approvalConfirmLink,
     };
-    const result = await (await connect(client)).callTool({ name: "agentx_list_approvals", arguments: {} });
+    const result = await (await connect(client)).callTool({ name: "rovara_list_approvals", arguments: {} });
     expect(structured(result)).toEqual({ approvals: [{ approval_id: APR, kind: "write", status: "PENDING", summary: "Create a Linear issue", arguments: args, confirm_url: CONFIRM }] });
     expect(text(result)).toContain(CONFIRM);
     expect(text(result)).not.toContain("ticket=");
@@ -150,7 +150,7 @@ describe("agentx_list_approvals", () => {
       listApprovals: vi.fn(async () => [{ approvalId: APR, kind: "write", status: "PENDING", confirmUrl: CONFIRM }]),
       getApproval: vi.fn(async () => one),
     };
-    const result = await (await connect(client)).callTool({ name: "agentx_list_approvals", arguments: {} });
+    const result = await (await connect(client)).callTool({ name: "rovara_list_approvals", arguments: {} });
     expect((structured(result)["approvals"] as Array<Record<string, unknown>>)[0]).toMatchObject({ scope: "payments-api", repository: "acme/payments-api" });
     expect(text(result)).toContain("acme/payments-api");
   });
@@ -180,15 +180,15 @@ describe("agentx_list_approvals", () => {
   });
 
   it("is in the module's tool definitions with an output schema", () => {
-    const definition = DEVELOPER_TOOLS.find((tool) => tool.name === "agentx_list_approvals");
+    const definition = DEVELOPER_TOOLS.find((tool) => tool.name === "rovara_list_approvals");
     expect(definition?.outputSchema).toHaveProperty("approvals");
   });
 });
 
-describe("agentx_open_approval (review M2)", () => {
+describe("rovara_open_approval (review M2)", () => {
   it("asks for one approval's confirmation link, once, and decides nothing", async () => {
     const approvalConfirmLink = vi.fn(async () => ({ confirmUrl: `${CONFIRM}?ticket=t1`, ticketed: true }));
-    const result = await (await connect({ approvalConfirmLink })).callTool({ name: "agentx_open_approval", arguments: { approval_id: APR } });
+    const result = await (await connect({ approvalConfirmLink })).callTool({ name: "rovara_open_approval", arguments: { approval_id: APR } });
     expect(approvalConfirmLink).toHaveBeenCalledTimes(1);
     expect(approvalConfirmLink).toHaveBeenCalledWith(APR);
     expect(structured(result)).toEqual({ approval_id: APR, confirm_url: `${CONFIRM}?ticket=t1` });
@@ -197,16 +197,16 @@ describe("agentx_open_approval (review M2)", () => {
 
   it("says the link is for the person and must not be fetched by the assistant", async () => {
     const { tools } = await (await connect({})).listTools();
-    const tool = tools.find((entry) => entry.name === "agentx_open_approval")!;
+    const tool = tools.find((entry) => entry.name === "rovara_open_approval")!;
     expect(tool.description).toMatch(/for the person/i);
     expect(tool.description).toMatch(/do not (fetch|open)|must not (be )?(fetch|open)/i);
-    const listing = tools.find((entry) => entry.name === "agentx_list_approvals")!;
-    expect(listing.description).toMatch(/agentx_open_approval/);
+    const listing = tools.find((entry) => entry.name === "rovara_list_approvals")!;
+    expect(listing.description).toMatch(/rovara_open_approval/);
   });
 
   it("refuses an ID that is not an approval's before sending anything", async () => {
     const approvalConfirmLink = vi.fn(async () => ({ confirmUrl: CONFIRM, ticketed: false }));
-    const result = await (await connect({ approvalConfirmLink })).callTool({ name: "agentx_open_approval", arguments: { approval_id: ".." } });
+    const result = await (await connect({ approvalConfirmLink })).callTool({ name: "rovara_open_approval", arguments: { approval_id: ".." } });
     expect((result as { isError?: boolean }).isError).toBe(true);
     expect(approvalConfirmLink).not.toHaveBeenCalled();
   });
@@ -215,7 +215,7 @@ describe("agentx_open_approval (review M2)", () => {
 describe("the start tools with an agent (review M10)", () => {
   it("names the instructions' 8,192-byte limit, not the context, when they are too long for an agent", async () => {
     const startTask = vi.fn(async () => view);
-    const result = await (await connect({ startTask })).callTool({ name: "agentx_start_task", arguments: { project: "payments", instructions: "x".repeat(9_000), agent: { agent_id: AGT } } });
+    const result = await (await connect({ startTask })).callTool({ name: "rovara_start_task", arguments: { project: "payments", instructions: "x".repeat(9_000), agent: { agent_id: AGT } } });
     expect((result as { isError?: boolean }).isError).toBe(true);
     expect(text(result)).toContain("8,192");
     expect(text(result)).toMatch(/instructions/);

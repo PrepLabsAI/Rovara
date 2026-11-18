@@ -3,7 +3,7 @@
 // written only by deployEnvironment once the Slack stack exists; these two let a stopped init
 // resume before that, from any machine with access to the account.
 import { z } from "zod";
-import { agentXError, AGENTX_NAME_PATTERN, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest } from "@agentx/contracts";
+import { agentXError, AGENTX_NAME_PATTERN, EnvironmentNameSchema, environmentSettingsPrefix, ImageDigest, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { AlertEmailSchema, ACCOUNT_PATTERN, BudgetAnswersSchema, GITHUB_LOGIN_PATTERN, IdentityAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 
@@ -139,7 +139,7 @@ const ANSWERS_SIZE_HINT = "shorten the longest answer (for example the admin val
  * shortened (every field comes from GitHub, Slack or agentx itself), so this is agentx's own bug to
  * fix, not something to work around; deleting the parameter is always safe because the answers
  * (which everything else needs to resume) live in a separate parameter. */
-const PROGRESS_SIZE_HINT = "this is an internal limit, not something you did; report it as an AgentX bug, and delete the install/progress parameter to restart agentx init safely (its answers are stored separately and are unaffected)";
+const PROGRESS_SIZE_HINT = `this is an internal limit, not something you did; report it as a Rovara bug, and delete the install/progress parameter to restart ${CLI_COMMAND_NAME} init safely (its answers are stored separately and are unaffected)`;
 
 async function writeJson(store: ParameterStore, name: string, what: string, env: string, hint: string, value: unknown): Promise<void> {
   const json = JSON.stringify(value);
@@ -184,14 +184,14 @@ async function readJson<T extends { env: string }>(store: ParameterStore, name: 
   if (parsed.data.env !== env) {
     throw agentXError(
       "CONFIG_INVALID",
-      `${name} is stored for environment ${env} but names environment ${parsed.data.env}; run agentx init --env ${parsed.data.env}, or delete ${name} to start over`,
+      `${name} is stored for environment ${env} but names environment ${parsed.data.env}; run ${CLI_COMMAND_NAME} init --env ${parsed.data.env}, or delete ${name} to start over`,
     );
   }
   return parsed.data;
 }
 
 export async function readInstallAnswers(store: ParameterStore, env: string): Promise<InitAnswers | undefined> {
-  return readJson(store, installAnswersParameterName(env), InitAnswersSchema, env, `install answers for environment ${env} are invalid or were written by a newer agentx; upgrade agentx and run it again`);
+  return readJson(store, installAnswersParameterName(env), InitAnswersSchema, env, `install answers for environment ${env} are invalid or were written by a newer ${CLI_COMMAND_NAME}; upgrade ${CLI_COMMAND_NAME} and run it again`);
 }
 
 export async function writeInstallAnswers(store: ParameterStore, answers: InitAnswers): Promise<void> {
@@ -203,7 +203,7 @@ export async function writeInstallAnswers(store: ParameterStore, answers: InitAn
 export async function readInstallProgress(store: ParameterStore, env: string): Promise<InstallProgress | undefined> {
   return readJson(
     store, installProgressParameterName(env), InstallProgressSchema, env,
-    `install progress for environment ${env} is invalid or was written by a newer agentx; upgrade agentx and run it again`,
+    `install progress for environment ${env} is invalid or was written by a newer ${CLI_COMMAND_NAME}; upgrade ${CLI_COMMAND_NAME} and run it again`,
     dropUnknownSteps,
   );
 }

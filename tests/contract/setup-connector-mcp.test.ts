@@ -1,4 +1,4 @@
-// Spec 055 phase 3: agentx connector add mcp. The server's own tool list is the test read; the
+// Spec 055 phase 3: rovara connector add mcp. The server's own tool list is the test read; the
 // engineer approves tools; the credential is pinned to the endpoint's host; the project gets a new
 // revision only once the control plane confirms the connector is connected.
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -23,7 +23,7 @@ beforeEach(async () => {
   await writeProjectFile(configDir, {
     name: "payments-api", revision: 1,
     repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
   });
 });
 afterEach(async () => { await rm(configDir, { recursive: true, force: true }); });
@@ -51,7 +51,7 @@ const keyFlags: McpAddFlags = { endpoint: ENDPOINT, auth: "key", key: { envName:
 const registeredConnector = (plane: ReturnType<typeof fakeControlPlane>) =>
   (plane.registered.at(-1) as { definition: { revision: number; integrations: { connectors: Array<Record<string, unknown>> } } }).definition;
 
-describe("agentx connector add mcp: an API key", () => {
+describe("rovara connector add mcp: an API key", () => {
   it("lists the server's tools as its test read, approves read-only ones by default, and registers a pinned credential", async () => {
     const plane = fakeControlPlane();
     const vendors = fakeVendors();
@@ -155,7 +155,7 @@ describe("agentx connector add mcp: an API key", () => {
   });
 });
 
-describe("agentx connector add mcp: OAuth", () => {
+describe("rovara connector add mcp: OAuth", () => {
   const TOKEN_URL = "https://auth.vendor.example/token";
   /** The sign-in as admin/authorize.ts does it: stores the refresh token beside the client and registers the pinned credential. */
   function fakeAuthorize(plane: ReturnType<typeof fakeControlPlane>) {

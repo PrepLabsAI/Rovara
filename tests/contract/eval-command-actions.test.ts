@@ -66,7 +66,7 @@ describe("command-only action evaluation (#104)", () => {
     expect(scoreRun(closeCase, run("I haven't closed the workspace. Send close this workspace to run its safety check.")))
       .toMatchObject({ notContainsOk: true, phraseOk: true });
     expect(scoreRun(modelCase, run(modelGuidance))).toMatchObject({ toolOk: true, containsOk: true, notContainsOk: true, phraseOk: true });
-    expect(scoreRun(closeCase, { ...run(closeGuidance), tool: "agentx_submit_task" })).toMatchObject({ toolOk: false });
+    expect(scoreRun(closeCase, { ...run(closeGuidance), tool: "rovara_submit_task" })).toMatchObject({ toolOk: false });
     expect(scoreRun(closeCase, run("Done."))).toMatchObject({ containsOk: false, phraseOk: false });
   });
 

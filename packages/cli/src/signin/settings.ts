@@ -1,7 +1,7 @@
 // Spec 025 FR-006 and FR-010 (R7): the developer sign-in choice, kept in SSM beside the environment
 // settings. No secret value is ever stored here, only the company client secret's name.
 import { z } from "zod";
-import { EnvironmentNameSchema, SlackTeamIdSchema, agentXError, environmentSettingsPrefix } from "@agentx/contracts";
+import { EnvironmentNameSchema, SlackTeamIdSchema, agentXError, environmentSettingsPrefix, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 
 export const DeveloperSignInSettingsSchema = z.object({
@@ -61,10 +61,10 @@ export async function readSignInSettings(store: ParameterStore, env: string): Pr
   const stored = await store.get(signInParameterName(env));
   if (stored === undefined) return undefined;
   let json: unknown;
-  try { json = JSON.parse(stored.value); } catch { throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} is not valid JSON; run agentx signin enable again`); }
+  try { json = JSON.parse(stored.value); } catch { throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} is not valid JSON; run ${CLI_COMMAND_NAME} signin enable again`); }
   const parsed = DeveloperSignInSettingsSchema.safeParse(json);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} is invalid (${firstIssue(parsed.error)}); run agentx signin enable again`);
-  if (parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} names environment ${parsed.data.env}; run agentx signin enable again`);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} is invalid (${firstIssue(parsed.error)}); run ${CLI_COMMAND_NAME} signin enable again`);
+  if (parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `${signInParameterName(env)} names environment ${parsed.data.env}; run ${CLI_COMMAND_NAME} signin enable again`);
   return parsed.data;
 }
 

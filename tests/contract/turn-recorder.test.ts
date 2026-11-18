@@ -12,7 +12,7 @@ function recorder() {
   const turn = new TurnRecorder(() => (clock += 10));
   turn.offer({
     manifest: "What this channel can do:",
-    tools: [{ name: "agentx_submit_task", description: "Run work." }, { name: "github__list_issues", description: "List issues." }],
+    tools: [{ name: "rovara_submit_task", description: "Run work." }, { name: "github__list_issues", description: "List issues." }],
     connectorOf: new Map([["github__list_issues", "github"]]),
     model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
   });
@@ -24,7 +24,7 @@ describe("turn recorder", () => {
     const observation = recorder().observation();
     expect(observation.model).toEqual({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" });
     expect(observation.manifestHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(observation.offeredTools.map((tool) => tool.name)).toEqual(["agentx_submit_task", "github__list_issues"]);
+    expect(observation.offeredTools.map((tool) => tool.name)).toEqual(["rovara_submit_task", "github__list_issues"]);
     expect(JSON.stringify(observation)).not.toContain("List issues.");
   });
 
@@ -32,8 +32,8 @@ describe("turn recorder", () => {
     const turn = recorder();
     turn.toolStarted({ toolCallId: "1", toolName: "agentx_update_pull_request", args: { repository: "api" } });
     turn.toolEnded({ toolCallId: "1", toolName: "agentx_update_pull_request", isError: true, result: text("Tool agentx_update_pull_request not found") });
-    turn.toolStarted({ toolCallId: "2", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "2", toolName: "agentx_submit_task", isError: true, result: text("Validation failed for tool \"agentx_submit_task\":\n  - prompt: required") });
+    turn.toolStarted({ toolCallId: "2", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "2", toolName: "rovara_submit_task", isError: true, result: text("Validation failed for tool \"rovara_submit_task\":\n  - prompt: required") });
     turn.toolStarted({ toolCallId: "3", toolName: "github__list_issues", args: { state: "OPEN" } });
     turn.connectorFailed("3", "FORBIDDEN");
     turn.toolEnded({ toolCallId: "3", toolName: "github__list_issues", isError: true, result: text("GitHub MCP tool is not approved for this project") });
@@ -43,7 +43,7 @@ describe("turn recorder", () => {
     const calls = turn.observation().calls;
     expect(calls.map(({ name, validation, outcome, reason, connector }) => ({ name, validation, outcome, reason, connector }))).toEqual([
       { name: "agentx_update_pull_request", validation: "unknown_tool", outcome: "FAILED", reason: undefined, connector: undefined },
-      { name: "agentx_submit_task", validation: "schema_error", outcome: "FAILED", reason: undefined, connector: undefined },
+      { name: "rovara_submit_task", validation: "schema_error", outcome: "FAILED", reason: undefined, connector: undefined },
       { name: "github__list_issues", validation: "policy_denied", outcome: "FAILED", reason: "FORBIDDEN", connector: "github" },
       { name: "github__list_issues", validation: "ok", outcome: "FAILED", reason: "schema_changed", connector: "github" },
     ]);
@@ -53,9 +53,9 @@ describe("turn recorder", () => {
 
   it("maps operation statuses and collects the worker operations the turn started", () => {
     const turn = recorder();
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: { prompt: "list files" } });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: operation, status: "INTERRUPTED" }) });
-    turn.toolStarted({ toolCallId: "2", toolName: "agentx_follow_up", args: { prompt: "and tests" } });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: { prompt: "list files" } });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ operationId: operation, status: "INTERRUPTED" }) });
+    turn.toolStarted({ toolCallId: "2", toolName: "rovara_follow_up", args: { prompt: "and tests" } });
     const observation = turn.observation();
     expect(observation.calls.map((call) => [call.outcome, call.operationId])).toEqual([["FAILED", operation], ["IN_PROGRESS", undefined]]);
     expect(observation.workerOperations).toEqual([operation]);
@@ -63,16 +63,16 @@ describe("turn recorder", () => {
 
   it("records a lazy worker refusal as a failed call", () => {
     const turn = recorder();
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: { prompt: "list files" } });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "WORKSPACE_LIMIT_REACHED", message: "No coding work can run." }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: { prompt: "list files" } });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "WORKSPACE_LIMIT_REACHED", message: "No coding work can run." }) });
     expect(turn.observation().calls.map(({ outcome, validation }) => ({ outcome, validation }))).toEqual([{ outcome: "FAILED", validation: "ok" }]);
   });
 
   it("redacts and caps arguments, and fingerprints the redacted form", () => {
     const turn = recorder();
     const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: { apiKey: "k", prompt: `use ${token} ${"x".repeat(5_000)}` } });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: { apiKey: "k", prompt: `use ${token} ${"x".repeat(5_000)}` } });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
     const [call] = turn.observation().calls;
     expect(call?.arguments).not.toContain(token);
     expect(call?.arguments).toContain("\"apiKey\":\"[REDACTED]\"");
@@ -83,8 +83,8 @@ describe("turn recorder", () => {
 
   it("reads a status named like an Object property as an unrecognized status", () => {
     const turn = recorder();
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "constructor" }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "constructor" }) });
     expect(TurnObservationSchema.parse(turn.observation()).calls[0]?.outcome).toBe("FAILED");
   });
 
@@ -92,9 +92,9 @@ describe("turn recorder", () => {
     const turn = recorder();
     let reads = 0;
     const args = { get prompt() { reads += 1; return "list files"; } };
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args });
     turn.observation();
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
     turn.observation();
     expect(reads).toBe(1);
   });
@@ -109,10 +109,10 @@ describe("turn recorder", () => {
   it("keeps only worker operations the contract accepts as UUIDs", () => {
     const turn = recorder();
     const loose = "0f0e0d0c-0b0a-0908-0706-050403020100";
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: loose, status: "RUNNING" }) });
-    turn.toolStarted({ toolCallId: "2", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "2", toolName: "agentx_submit_task", isError: false, result: text({ operationId: operation, status: "RUNNING" }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ operationId: loose, status: "RUNNING" }) });
+    turn.toolStarted({ toolCallId: "2", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "2", toolName: "rovara_submit_task", isError: false, result: text({ operationId: operation, status: "RUNNING" }) });
     const observation = TurnObservationSchema.parse(turn.observation());
     expect(observation.workerOperations).toEqual([operation]);
     expect(observation.calls[0]?.operationId).toBe(loose);
@@ -121,8 +121,8 @@ describe("turn recorder", () => {
   it("keeps at most 50 calls and says so", () => {
     const turn = recorder();
     for (let index = 0; index < 55; index += 1) {
-      turn.toolStarted({ toolCallId: String(index), toolName: "agentx_submit_task", args: { prompt: "p" } });
-      turn.toolEnded({ toolCallId: String(index), toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
+      turn.toolStarted({ toolCallId: String(index), toolName: "rovara_submit_task", args: { prompt: "p" } });
+      turn.toolEnded({ toolCallId: String(index), toolName: "rovara_submit_task", isError: false, result: text({ status: "SUCCEEDED" }) });
     }
     const observation = turn.observation();
     expect(observation.calls).toHaveLength(50);
@@ -185,8 +185,8 @@ describe("turn recorder", () => {
   it("routes arguments through redactArguments and never records request or response text", () => {
     const turn = recorder();
     const key = "sk_live_0123456789abcdefABCDEF";
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: { prompt: "log in with password=hunter2abc", apiKey: key } });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED", echo: "password=hunter2abc" }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: { prompt: "log in with password=hunter2abc", apiKey: key } });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "SUCCEEDED", echo: "password=hunter2abc" }) });
     turn.agentEnded([
       { role: "user", content: [{ type: "text", text: "please use password=hunter2abc" }] },
       { role: "assistant", content: [{ type: "text", text: `done with ${key}` }], stopReason: "stop" },
@@ -205,7 +205,7 @@ describe("turn recorder", () => {
     const turn = recorder();
     const circular: Record<string, unknown> = { prompt: "p" };
     circular.self = circular;
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: circular });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: circular });
     const observation = turn.observation();
     expect(observation.calls[0]?.arguments).toBe(UNRECORDABLE_ARGUMENTS);
     expect(TurnObservationSchema.parse(observation).calls).toHaveLength(1);
@@ -220,15 +220,15 @@ describe("turn recorder check reports (spec 051)", () => {
   it("keeps each worker operation's report once", () => {
     const turn = recorder();
     expect(turn.checkReports()).toEqual([]);
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
-    turn.toolStarted({ toolCallId: "2", toolName: "agentx_task_result", args: {} });
-    turn.toolEnded({ toolCallId: "2", toolName: "agentx_task_result", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
+    turn.toolStarted({ toolCallId: "2", toolName: "rovara_task_result", args: {} });
+    turn.toolEnded({ toolCallId: "2", toolName: "rovara_task_result", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
     expect(turn.checkReports()).toEqual([checks]);
   });
 
   it("knows a pull request that opened as a draft, and only from a successful publish result (Ruling Z)", () => {
-    const pullRequest = (draft: unknown, name = "agentx_create_pull_request", status = "SUCCEEDED") => {
+    const pullRequest = (draft: unknown, name = "rovara_create_pull_request", status = "SUCCEEDED") => {
       const turn = recorder();
       turn.toolStarted({ toolCallId: "1", toolName: name, args: {} });
       turn.toolEnded({ toolCallId: "1", toolName: name, isError: false, result: text({ operationId: operation, status, result: { number: 7, ...(draft === undefined ? {} : { draft }) } }) });
@@ -238,15 +238,15 @@ describe("turn recorder check reports (spec 051)", () => {
     expect(pullRequest(false)).toBe(false);
     expect(pullRequest(undefined)).toBe(false);
     expect(pullRequest("yes")).toBe(false);
-    expect(pullRequest(true, "agentx_task_result")).toBe(false);
-    expect(pullRequest(true, "agentx_create_pull_request", "FAILED")).toBe(false);
+    expect(pullRequest(true, "rovara_task_result")).toBe(false);
+    expect(pullRequest(true, "rovara_create_pull_request", "FAILED")).toBe(false);
     expect(recorder().draftPullRequest()).toBe(false);
   });
 
   it("ignores a report that does not parse", () => {
     const turn = recorder();
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED", checks: { status: "bogus" } }) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text({ status: "SUCCEEDED", checks: { status: "bogus" } }) });
     expect(turn.checkReports()).toEqual([]);
   });
 });
@@ -260,8 +260,8 @@ describe("a task result carries the check report (spec 051)", () => {
     expect(shown.checks).toEqual({ ...full, checks: [{ ...entry, output: "" }] });
     // The reply's verdict reads only that, so the recorder still builds it.
     const turn = recorder();
-    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
-    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text(shown) });
+    turn.toolStarted({ toolCallId: "1", toolName: "rovara_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "rovara_submit_task", isError: false, result: text(shown) });
     expect(turn.checkReports()).toEqual([shown.checks]);
   });
 

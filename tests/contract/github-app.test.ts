@@ -823,7 +823,7 @@ describe("GitHub App repository credentials", () => {
     );
   });
 
-  it("reads the App id from the secret agentx init stores, without reflecting invalid secret data", () => {
+  it("reads the App id from the secret rovara init stores, without reflecting invalid secret data", () => {
     const pem = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----";
     expect(appIdFromSecret(JSON.stringify({ appId: "5002502", slug: "agentx-acme", account: "acme", privateKey: pem }))).toBe("5002502");
     for (const secret of [pem, JSON.stringify({ privateKey: pem }), JSON.stringify({ appId: "12a", privateKey: pem }), "sensitive-invalid-value"]) {

@@ -2,7 +2,7 @@
 // failed. --json prints the whole report to stdout as {"ok": <no check failed>, "data": <report>};
 // on a failure, stderr also gets agentx's usual {"ok": false, "error": ...} document and the exit
 // code is 2.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { Command } from "commander";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
@@ -39,7 +39,7 @@ export function registerDoctorCommand(program: Command, context: DoctorCommandCo
       // document on stderr (and exit code 2) says the same, as every agentx error does.
       context.stdout.write(globals.json ? `${JSON.stringify({ ok: report.failed === 0, data: report })}\n` : reportText(report));
       if (report.failed > 0) {
-        throw agentXError("CONFIG_INVALID", `${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run agentx doctor again`);
+        throw agentXError("CONFIG_INVALID", `${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run ${CLI_COMMAND_NAME} doctor again`);
       }
     });
 }

@@ -243,7 +243,7 @@ describe("the install wizard's server", () => {
     expect(nonce).toBeDefined();
     const body = await response.text();
     expect(body).toContain(`<script nonce="${nonce}">window.close()</script>`);
-    expect(body).toContain("GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.");
+    expect(body).toContain("GitHub sent Rovara the new app. You can close this tab and go back to the Install Rovara tab.");
     await expect(host.code).resolves.toBe("0123456789abcdef0123");
   });
 });

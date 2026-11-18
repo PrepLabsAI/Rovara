@@ -8,18 +8,25 @@ import { connectorApprovals } from "./connectors-node.js";
  * orchestrator's ORCHESTRATION_TOOL_NAMES by a test, as IN_HOUSE_TOOL_COUNT is.
  */
 export const IN_HOUSE_TOOL_NAMES = [
-  "agentx_submit_task",
-  "agentx_create_pull_request",
-  "agentx_task_status",
-  "agentx_task_result",
-  "agentx_follow_up",
-  "agentx_manage_pull_request",
+  "rovara_submit_task",
+  "rovara_create_pull_request",
+  "rovara_task_status",
+  "rovara_task_result",
+  "rovara_follow_up",
+  "rovara_manage_pull_request",
 ] as const;
+
+/**
+ * A stored rule written before the tools were renamed names an in-house tool as `agentx_...`; it is read as
+ * the same text with `rovara_` so it keeps applying. Only a rule without a connector is read this way, and
+ * `agentx__` (a connector named agentx) is left alone. The old id is not offered to anyone as a tool.
+ */
+export const inHouseToolPattern = (pattern: string): string => pattern.replace(/^agentx_(?!_)/, "rovara_");
 
 /**
  * One administrator rule. With `connector`, `tool` matches that connector's own tool names
  * (`save_item`); without it, `tool` matches the names the model sees (`tracker__save_item`,
- * `agentx_create_pull_request`). `whenArguments` limits the rule to calls that set one of those
+ * `rovara_create_pull_request`). `whenArguments` limits the rule to calls that set one of those
  * arguments. A rule either decides (`outcome`) or reclassifies the action (`treatAs`): a read and a
  * create run, a change goes to the classifier, a destructive action always asks.
  */
@@ -78,7 +85,7 @@ export function actionPolicyProblems(project: PolicyProject): string[] {
   for (const [index, rule] of (project.actionPolicy?.rules ?? []).entries()) {
     const label = `action policy rule ${index + 1}`;
     if (rule.connector === undefined) {
-      if (!presented.some((name) => toolPatternMatches(rule.tool, name))) problems.push(`${label}: ${rule.tool} matches no tool this project offers`);
+      if (!presented.some((name) => toolPatternMatches(inHouseToolPattern(rule.tool), name))) problems.push(`${label}: ${rule.tool} matches no tool this project offers`);
       continue;
     }
     const connector = connectors.find((entry) => entry.name === rule.connector);

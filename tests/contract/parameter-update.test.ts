@@ -34,12 +34,12 @@ describe("parameter-only stack updates (R6)", () => {
 
   it("refuses a stack deployed from a release without developer sign-in, naming the missing parameter", async () => {
     const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
-    await expect(run(cf, { SlackTeamId: "T0TEAM1" })).rejects.toThrow(`stack ${STACK} was deployed from an AgentX release without developer sign-in (it has no SlackTeamId parameter); upgrade the environment to a release with developer sign-in, then run this again`);
+    await expect(run(cf, { SlackTeamId: "T0TEAM1" })).rejects.toThrow(`stack ${STACK} was deployed from a Rovara release without developer sign-in (it has no SlackTeamId parameter); upgrade the environment to a release with developer sign-in, then run this again`);
   });
 
   it("asks for an upgrade, not for developer sign-in, when only the enabled-since parameters are missing (FR-045)", async () => {
     const cf = fakeCloudFormation({ parameters: { SlackTeamId: "", DeveloperSignInSlack: "disabled" } });
-    await expect(run(cf, { SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled", DeveloperSignInSlackSince: "1790000000" })).rejects.toThrow(`stack ${STACK} was deployed from an older AgentX release (it has no DeveloperSignInSlackSince parameter); upgrade the environment with agentx deploy, then run this again`);
+    await expect(run(cf, { SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled", DeveloperSignInSlackSince: "1790000000" })).rejects.toThrow(`stack ${STACK} was deployed from an older Rovara release (it has no DeveloperSignInSlackSince parameter); upgrade the environment with rovara deploy, then run this again`);
     expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
   });
 
@@ -126,15 +126,15 @@ describe("parameter-only stack updates (R6)", () => {
     const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
     const legacy = (changes: Record<string, string>) =>
       updateStackParameters({ cloudFormation: cf, stackName: "AgentXControlPlane", roleArn: ROLE, changes, label: "config", confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 });
-    await expect(legacy({ McpConfirmElicitation: "disabled" })).rejects.toThrow("stack AgentXControlPlane has no McpConfirmElicitation parameter; that setting exists only in environments installed with agentx init, not in the legacy deployment; nothing changed");
+    await expect(legacy({ McpConfirmElicitation: "disabled" })).rejects.toThrow("stack AgentXControlPlane has no McpConfirmElicitation parameter; that setting exists only in environments installed with rovara init, not in the legacy deployment; nothing changed");
     expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
     // Any other missing parameter on the legacy stack keeps the upgrade advice.
-    await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
+    await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; it runs an older Rovara release, so upgrade it with rovara upgrade, then run this again");
   });
 
   it("still asks a named environment on an older release to upgrade for McpConfirmElicitation", async () => {
     const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
     await expect(updateStackParameters({ cloudFormation: cf, stackName: STACK, roleArn: ROLE, changes: { McpConfirmElicitation: "disabled" }, label: "config", confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 }))
-      .rejects.toThrow(`stack ${STACK} has no McpConfirmElicitation parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again`);
+      .rejects.toThrow(`stack ${STACK} has no McpConfirmElicitation parameter; it runs an older Rovara release, so upgrade it with rovara upgrade, then run this again`);
   });
 });

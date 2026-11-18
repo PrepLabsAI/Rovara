@@ -14,7 +14,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
 import { z } from "zod";
-import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentStackName, EnvironmentNameSchema, STACK_PARTS, type StackPart, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { CallerIdentity } from "../environments/adopt.js";
 import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
@@ -95,7 +95,7 @@ function requireOidcAdminAndClient(answers: { identity: z.infer<typeof IdentityA
     context.addIssue({ code: "custom", path: ["identity", "adminValues"], message: "is required with your own OIDC provider" });
   }
   if (identity.clientId === undefined) {
-    context.addIssue({ code: "custom", path: ["identity", "clientId"], message: "is required with your own OIDC provider (agentx login needs it)" });
+    context.addIssue({ code: "custom", path: ["identity", "clientId"], message: `is required with your own OIDC provider (${CLI_COMMAND_NAME} login needs it)` });
   }
 }
 
@@ -538,7 +538,7 @@ export type DeployCommandResult = DeployEnvironmentResult & {
 /** The exact `agentx deploy` command that deploys `missingParts` with the same release, answers and engine. */
 export function resumeCommand(options: DeployCommandOptions, missingParts: DeployPart[]): string {
   return [
-    "agentx deploy --mode install",
+    `${CLI_COMMAND_NAME} deploy --mode install`,
     ...(options.engine === "cdk" ? [`--engine cdk --source ${options.source ?? "<source>"}`] : []),
     `--parts ${missingParts.join(",")}`,
     `--release ${options.releaseDir}`,
@@ -580,7 +580,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       confirm = deps.confirm;
     } else {
       const interactive = (deps.isInteractive ?? (() => process.stdin.isTTY === true))();
-      if (!interactive) throw agentXError("CONFIG_INVALID", "agentx deploy needs --yes when stdin is not a terminal");
+      if (!interactive) throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} deploy needs --yes when stdin is not a terminal`);
       confirm = interactiveConfirm(services.stderr, readlineAsk());
     }
   }

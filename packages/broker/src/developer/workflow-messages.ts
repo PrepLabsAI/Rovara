@@ -3,7 +3,7 @@
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
+  WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
 import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
@@ -731,7 +731,7 @@ const PULL_REQUEST_UPDATE_CAUSES: Record<string, { cause: string; then: string }
 /** The approved fix could not be pushed to the pull requests: which, and why, when AgentX knows. */
 function pullRequestUpdateFailed(workflow: WorkflowSnapshot): string {
   const failure = workflow.pullRequestUpdateFailure;
-  if (failure?.cause === "WORKER_OUTDATED") return `I couldn't push the fix because this AgentX worker is out of date. Ask an admin to run agentx upgrade. ${STILL_WATCHING}`;
+  if (failure?.cause === "WORKER_OUTDATED") return `I couldn't push the fix because this Rovara worker is out of date. Ask an admin to run ${CLI_COMMAND_NAME} upgrade. ${STILL_WATCHING}`;
   const failed = (workflow.pullRequests ?? []).filter((pullRequest) => failure?.numbers.includes(pullRequest.number) === true);
   if (failed.length === 0) return `${plainBlockReason(workflow.blockReason)} ${STILL_WATCHING}`;
   const cause = failure?.cause === undefined ? undefined : PULL_REQUEST_UPDATE_CAUSES[failure.cause];

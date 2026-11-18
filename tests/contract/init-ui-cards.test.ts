@@ -32,30 +32,30 @@ const EVERY_CARD: WizardCard[] = [
   awsCard({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice", region: "us-east-1", profile: "dev" }),
   awsSignedOutCard({ profile: "dev", problem: "AUTH_REQUIRED: your AWS session has expired. Refresh your AWS session first (for example aws sso login or aws login)", signIn: "aws sso login --profile dev" }),
   prerequisitesCard({ status: "failed", checks: [{ label: "EC2 vCPU quota", ok: false, detail: "Ask AWS for more in Service Quotas." }] }),
-  githubCard({ stage: "create", appName: "AgentX acme (staging)", account: "acme", startUrl: "http://127.0.0.1:5000/github/start?t=x" }),
-  githubCard({ stage: "install", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme", installUrl: "https://github.com/apps/agentx-acme-staging/installations/new" }),
-  githubCard({ stage: "repositories", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme", settingsUrl: "https://github.com/organizations/acme/settings/installations/1" }),
-  githubCard({ stage: "done", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme" }),
-  githubCard({ stage: "failed", problem: "no GitHub App was created within 15 minutes; run agentx init again" }),
-  slackAppCard({ stage: "create", appName: "AgentX acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }),
-  slackAppCard({ stage: "credentials", appName: "AgentX acme (staging)" }),
+  githubCard({ stage: "create", appName: "Rovara acme (staging)", account: "acme", startUrl: "http://127.0.0.1:5000/github/start?t=x" }),
+  githubCard({ stage: "install", appName: "Rovara acme (staging)", slug: "agentx-acme-staging", account: "acme", installUrl: "https://github.com/apps/agentx-acme-staging/installations/new" }),
+  githubCard({ stage: "repositories", appName: "Rovara acme (staging)", slug: "agentx-acme-staging", account: "acme", settingsUrl: "https://github.com/organizations/acme/settings/installations/1" }),
+  githubCard({ stage: "done", appName: "Rovara acme (staging)", slug: "agentx-acme-staging", account: "acme" }),
+  githubCard({ stage: "failed", problem: "no GitHub App was created within 15 minutes; run rovara init again" }),
+  slackAppCard({ stage: "create", appName: "Rovara acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }),
+  slackAppCard({ stage: "credentials", appName: "Rovara acme (staging)" }),
   slackAppCard({ stage: "bot", user: "agentx-acme-staging", team: "Acme" }),
   slackAppCard({ stage: "refused", problem: "Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions" }),
-  slackAppCard({ stage: "approval", appName: "AgentX acme (staging)" }),
-  slackAppCard({ stage: "done", appName: "AgentX acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" }),
+  slackAppCard({ stage: "approval", appName: "Rovara acme (staging)" }),
+  slackAppCard({ stage: "done", appName: "Rovara acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" }),
   slackUrlsCard({ stage: "verify", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
-  slackUrlsCard({ stage: "failed", problem: "the URL answered 401; run agentx init again", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
+  slackUrlsCard({ stage: "failed", problem: "the URL answered 401; run rovara init again", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
   adminCard({ stage: "signing-in", who: "you@example.com", passwordEmail: "you@example.com" }),
-  adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes; run agentx init again", retry: false }),
+  adminCard({ stage: "failed", problem: "the Rovara sign-in did not finish within 10 minutes; run rovara init again", retry: false }),
   projectCard({ name: "payments-api", revision: 1, repository: "acme/payments-api" }),
   channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }),
-  channelCard({ stage: "failed", channelName: "payments", problem: "the bot was not invited within 10 minutes; run agentx init again" }),
+  channelCard({ stage: "failed", channelName: "payments", problem: "the bot was not invited within 10 minutes; run rovara init again" }),
   connectorsCard({ projectName: "payments-api", connected: [] }),
   alertsCard({ stage: "confirm", shownAs: "ops@example.com" }),
   alertsCard({ stage: "failed", problem: "CloudWatch refused SetAlarmState" }),
   alertsCard({ stage: "none" }),
   replyCard({ stage: "waiting", channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM", botName: "agentx-acme-staging", minutes: 10 }),
-  replyCard({ stage: "failed", channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM", problem: "no reply within 10 minutes; run agentx init again" }),
+  replyCard({ stage: "failed", channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM", problem: "no reply within 10 minutes; run rovara init again" }),
 ];
 
 describe("spec 048 card copy", () => {
@@ -73,22 +73,22 @@ describe("spec 048 card copy", () => {
 
   it("FR-027: the GitHub app keeps its name on every card, and its slug only in the details", () => {
     for (const shown of EVERY_CARD.filter((entry) => entry.id === "github" && entry.status !== "failed")) {
-      expect(shown.lines.join(" ")).toContain("AgentX acme (staging)");
+      expect(shown.lines.join(" ")).toContain("Rovara acme (staging)");
       expect(shown.lines.join(" ")).not.toContain("agentx-acme-staging");
     }
-    expect(githubCard({ stage: "done", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme" }).details).toEqual(["GitHub app slug: agentx-acme-staging"]);
+    expect(githubCard({ stage: "done", appName: "Rovara acme (staging)", slug: "agentx-acme-staging", account: "acme" }).details).toEqual(["GitHub app slug: agentx-acme-staging"]);
   });
 
   it("FR-027: Slack's workspace and bot are named, and their IDs are only in the details", () => {
-    const done = slackAppCard({ stage: "done", appName: "AgentX acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" });
-    expect(done.lines).toEqual(['"AgentX acme (staging)" is installed in the Acme workspace.']);
+    const done = slackAppCard({ stage: "done", appName: "Rovara acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" });
+    expect(done.lines).toEqual(['"Rovara acme (staging)" is installed in the Acme workspace.']);
     expect(done.details).toEqual(["Slack app ID: A0APP", "Slack workspace ID: T0TEAM"]);
     expect(channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }).commands).toEqual([{ label: "Invite the bot", command: "/invite @agentx-acme-staging" }]);
   });
 
   it("FR-034: the Slack create card says up front that a Request URL error is expected", () => {
-    expect(slackAppCard({ stage: "create", appName: "AgentX acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }).lines)
-      .toContain("Slack may show a red error next to the Request URL. That is expected; AgentX fixes it in a later step.");
+    expect(slackAppCard({ stage: "create", appName: "Rovara acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }).lines)
+      .toContain("Slack may show a red error next to the Request URL. That is expected; Rovara fixes it in a later step.");
   });
 });
 
@@ -182,12 +182,12 @@ describe("links", () => {
     hub.showCard(card({
       link: { url: "javascript:alert(1)", label: "Create" },
       details: ["raw error ARN"],
-      commands: [{ label: "Continue later with", command: "agentx --env staging init" }],
+      commands: [{ label: "Continue later with", command: "rovara --env staging init" }],
     }));
     const shown = hub.state().cards?.[0];
     expect(shown).not.toHaveProperty("link");
     expect(shown?.details).toEqual(["raw error ARN"]);
-    expect(shown?.commands).toEqual([{ label: "Continue later with", command: "agentx --env staging init" }]);
+    expect(shown?.commands).toEqual([{ label: "Continue later with", command: "rovara --env staging init" }]);
   });
 
   it("clearLink drops the run's link, and does nothing when there is none", () => {
@@ -205,13 +205,13 @@ describe("links", () => {
 
   it("clears the run's link when its step ends, or when the next one starts", () => {
     const hub = createWizardHub("staging");
-    hub.setSteps([{ id: "github-app", title: "Create the GitHub app" }, { id: "control-plane", title: "Start the AgentX service" }]);
+    hub.setSteps([{ id: "github-app", title: "Create the GitHub app" }, { id: "control-plane", title: "Start the Rovara service" }]);
     hub.showLink({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
     expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
     hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create the GitHub app" });
     expect(hub.state().link).toBeUndefined();
     hub.showLink({ url: "https://api.slack.com/apps", label: "Open api.slack.com" });
-    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Start the AgentX service" });
+    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Start the Rovara service" });
     expect(hub.state().link).toBeUndefined();
   });
 });
@@ -253,24 +253,24 @@ describe("the page", () => {
 });
 
 describe("cards that offer to try again on the page (M18)", () => {
-  it("a refused Slack token says nothing of running agentx init again, and says nothing was saved once", () => {
-    expect(slackAppCard({ stage: "refused", problem: "Slack bots.info did not return the app id (no app_id); run agentx init again" }).lines)
+  it("a refused Slack token says nothing of running rovara init again, and says nothing was saved once", () => {
+    expect(slackAppCard({ stage: "refused", problem: "Slack bots.info did not return the app id (no app_id); run rovara init again" }).lines)
       .toEqual(["Slack bots.info did not return the app id (no app_id)", "Nothing was saved."]);
-    expect(slackAppCard({ stage: "refused", problem: "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again" }).lines)
-      .toEqual(["nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace"]);
+    expect(slackAppCard({ stage: "refused", problem: "nothing was saved; copy the Bot User OAuth Token from the Rovara app in the right workspace, then run rovara init again" }).lines)
+      .toEqual(["nothing was saved; copy the Bot User OAuth Token from the Rovara app in the right workspace"]);
     expect(slackAppCard({ stage: "refused", problem: "that token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved" }).lines)
       .toEqual(["that token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved"]);
     expect(slackAppCard({ stage: "refused", problem: "Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions" }).lines)
       .toEqual(["Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions", "Nothing was saved."]);
   });
 
-  it("a failed Request URL check says to run the check again below, not agentx init", () => {
-    const problem = "Slack has not verified https://abc.execute-api.us-east-1.amazonaws.com/slack/events. On https://api.slack.com/apps/A0APP/event-subscriptions, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run agentx init again";
+  it("a failed Request URL check says to run the check again below, not rovara init", () => {
+    const problem = "Slack has not verified https://abc.execute-api.us-east-1.amazonaws.com/slack/events. On https://api.slack.com/apps/A0APP/event-subscriptions, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run rovara init again";
     const failed = slackUrlsCard({ stage: "failed", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions", problem });
     expect(failed.lines).toEqual(["Slack's check of the address did not pass.", "Fix it, then choose Check again below."]);
     expect(failed.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
     expect(failed.details).toEqual([problem]);
-    expect(JSON.stringify(failed.lines)).not.toContain("run agentx init again");
+    expect(JSON.stringify(failed.lines)).not.toContain("run rovara init again");
   });
 });
 
@@ -279,15 +279,15 @@ const WHERE = { channelName: "payments", channelId: "C0PAY00001", teamId: "T0123
 describe("the finishing cards", () => {
   it("admin: the new user, the sign-in wait, a failed sign-in, and who signed in", () => {
     expect(adminCard({ stage: "signing-in", who: "alice@example.com", passwordEmail: "alice@example.com" })).toEqual({
-      id: "admin", title: "Your AgentX sign-in", status: "waiting",
+      id: "admin", title: "Your Rovara sign-in", status: "waiting",
       lines: [
         "First, check your email at alice@example.com for your temporary password. It comes from no-reply@verificationemail.com with the subject \"Your temporary password\", can take a few minutes, and often lands in Spam. It works for 7 days.",
         "Then press Sign in, enter alice@example.com and the temporary password, and choose your own password. This page moves on by itself when you have.",
       ],
     });
     expect(adminCard({ stage: "signing-in", who: "alice@example.com" }).lines).toHaveLength(1);
-    expect(adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes" })).toMatchObject({ status: "failed", lines: ["the AgentX sign-in did not finish within 10 minutes", "Choose Sign in again below."] });
-    expect(adminCard({ stage: "done", username: "alice@example.com" })).toMatchObject({ status: "ok", lines: ["You are signed in to AgentX as alice@example.com."] });
+    expect(adminCard({ stage: "failed", problem: "the Rovara sign-in did not finish within 10 minutes" })).toMatchObject({ status: "failed", lines: ["the Rovara sign-in did not finish within 10 minutes", "Choose Sign in again below."] });
+    expect(adminCard({ stage: "done", username: "alice@example.com" })).toMatchObject({ status: "ok", lines: ["You are signed in to Rovara as alice@example.com."] });
   });
 
   it("project and channel", () => {
@@ -300,22 +300,22 @@ describe("the finishing cards", () => {
     expect(channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" })).toEqual({
       id: "channel", title: "Slack channel", status: "waiting",
       lines: [
-        "AgentX's bot cannot see #payments yet.",
+        "Rovara's bot cannot see #payments yet.",
         "If #payments is private, invite the bot in it with the command below. If it does not exist yet, create it in Slack.",
         "This page moves on by itself when the bot can see it (up to 10 minutes).",
       ],
       commands: [{ label: "Invite the bot", command: "/invite @agentx-acme-staging" }],
     });
-    expect(channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" })).toMatchObject({ status: "ok", lines: ["AgentX answers in #payments for payments-api."] });
+    expect(channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" })).toMatchObject({ status: "ok", lines: ["Rovara answers in #payments for payments-api."] });
   });
 
   it("a channel wait that timed out is failed, with the problem whole, since the page offers no retry", () => {
     const problem = "the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again";
-    expect(channelCard({ stage: "failed", channelName: "payments", problem })).toEqual({ id: "channel", title: "Slack channel", status: "failed", lines: ["AgentX's bot still cannot see #payments."], details: [problem] });
+    expect(channelCard({ stage: "failed", channelName: "payments", problem })).toEqual({ id: "channel", title: "Slack channel", status: "failed", lines: ["Rovara's bot still cannot see #payments."], details: [problem] });
   });
 
   it("a GitHub App wait that failed is failed, with the problem whole and no link", () => {
-    const problem = "the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again";
+    const problem = "the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run rovara init again";
     expect(githubCard({ stage: "failed", problem })).toEqual({ id: "github", title: "GitHub app", status: "failed", lines: ["The GitHub app was not set up."], details: [problem] });
   });
 
@@ -346,9 +346,9 @@ describe("the finishing cards", () => {
   it("I1: alerts while the test alarm is out, and a test alarm that failed", () => {
     expect(alertsCard({ stage: "testing", shownAs: "ops@example.com" })).toEqual({
       id: "alerts", title: "Alerts", status: "waiting",
-      lines: ["Alerts go to ops@example.com. AgentX sent a test alert; answer below whether it arrived."],
+      lines: ["Alerts go to ops@example.com. Rovara sent a test alert; answer below whether it arrived."],
     });
-    const problem = "the test alarm did not arrive; check the subscription is confirmed and your spam folder, then run agentx alerts test";
+    const problem = "the test alarm did not arrive; check the subscription is confirmed and your spam folder, then run rovara alerts test";
     expect(alertsCard({ stage: "failed", problem })).toEqual({ id: "alerts", title: "Alerts", status: "failed", lines: ["The test alert could not be sent."], details: [problem] });
   });
 
@@ -359,40 +359,40 @@ describe("the finishing cards", () => {
       lines: [
         'In #payments, post a message that mentions @agentx-acme-staging, for example "@agentx-acme-staging what can you do?".',
         "Type @ and pick agentx-acme-staging from Slack's list. If you see two bots with similar names, pick agentx-acme-staging.",
-        "Waiting up to 10 minutes for AgentX to reply in the thread. This page moves on by itself.",
+        "Waiting up to 10 minutes for Rovara to reply in the thread. This page moves on by itself.",
       ],
       link: { url: "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001", label: "Open #payments in Slack" },
     });
-    expect(replyCard({ stage: "failed", ...WHERE, problem: "no AgentX reply in #payments within 10 minutes" })).toMatchObject({
-      status: "failed", lines: ["AgentX did not reply.", "When it is fixed, choose Watch again below."], details: ["no AgentX reply in #payments within 10 minutes"],
+    expect(replyCard({ stage: "failed", ...WHERE, problem: "no Rovara reply in #payments within 10 minutes" })).toMatchObject({
+      status: "failed", lines: ["Rovara did not reply.", "When it is fixed, choose Watch again below."], details: ["no Rovara reply in #payments within 10 minutes"],
     });
-    expect(replyCard({ stage: "done", channelName: "payments", seconds: 12 })).toMatchObject({ status: "ok", lines: ["AgentX replied in #payments in 12 seconds."] });
+    expect(replyCard({ stage: "done", channelName: "payments", seconds: 12 })).toMatchObject({ status: "ok", lines: ["Rovara replied in #payments in 12 seconds."] });
   });
 
   it("R2: a failed test reply shows plain words on the page, and keeps the raw problem in its details", () => {
-    const problem = "the bot is not in #payments; invite it, then run agentx --env staging init again";
+    const problem = "the bot is not in #payments; invite it, then run rovara --env staging init again";
     const failed = replyCard({ stage: "failed", ...WHERE, problem });
-    expect(failed.lines).toEqual(["AgentX did not reply.", "When it is fixed, choose Watch again below."]);
+    expect(failed.lines).toEqual(["Rovara did not reply.", "When it is fixed, choose Watch again below."]);
     expect(failed.details).toEqual([problem]);
     expect(JSON.stringify(failed.lines)).not.toContain("init again");
   });
 
-  it("R2: onPageProblem also strips a closing run agentx --env <env> init again", () => {
-    expect(onPageProblem("Slack refused conversations.history (missing_scope), fix it, then run agentx --env staging init again"))
+  it("R2: onPageProblem also strips a closing run rovara --env <env> init again", () => {
+    expect(onPageProblem("Slack refused conversations.history (missing_scope), fix it, then run rovara --env staging init again"))
       .toBe("Slack refused conversations.history (missing_scope), fix it");
-    expect(onPageProblem("no AgentX reply in #payments within 10 minutes; check the worker logs, then run agentx --env staging init again."))
-      .toBe("no AgentX reply in #payments within 10 minutes; check the worker logs");
-    expect(onPageProblem("Slack said ratelimited; run agentx --env prod-eu init again")).toBe("Slack said ratelimited");
+    expect(onPageProblem("no Rovara reply in #payments within 10 minutes; check the worker logs, then run rovara --env staging init again."))
+      .toBe("no Rovara reply in #payments within 10 minutes; check the worker logs");
+    expect(onPageProblem("Slack said ratelimited; run rovara --env prod-eu init again")).toBe("Slack said ratelimited");
   });
 
-  it("M1: the admin card drops a failed sign-in's closing run agentx init again, since the page offers to sign in again", () => {
-    expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run agentx init again" }).lines[0])
+  it("M1: the admin card drops a failed sign-in's closing run rovara init again, since the page offers to sign in again", () => {
+    expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run rovara init again" }).lines[0])
       .toBe("your sign-in token has no email or sub claim; fix it");
   });
 
   it("M2: an admin card the page offers no retry for keeps the problem whole in its details, and asks nothing", () => {
-    expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run agentx init again", retry: false }))
-      .toEqual({ id: "admin", title: "Your AgentX sign-in", status: "failed", lines: ["The sign-in did not finish."], details: ["your sign-in token has no email or sub claim; fix it, then run agentx init again"] });
+    expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run rovara init again", retry: false }))
+      .toEqual({ id: "admin", title: "Your Rovara sign-in", status: "failed", lines: ["The sign-in did not finish."], details: ["your sign-in token has no email or sub claim; fix it, then run rovara init again"] });
   });
 
 });
@@ -405,15 +405,15 @@ const READY_PROGRESS = {
 };
 
 describe("spec 048 the ready screen", () => {
-  it("FR-059 and #222: says how to try AgentX by name, and gives commands that work as shown, each with --env", () => {
+  it("FR-059 and #222: says how to try Rovara by name, and gives commands that work as shown, each with --env", () => {
     const card = readyCard({
       env: "staging", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
       invocation: FROM_SOURCE, root: false, alertsOn: true, created: ["agentx-staging-access"], logPath: "/home/a/.agentx/logs/init-staging.log",
     });
     expect(card.lines).toEqual([
       "Try it: in #payments, mention @agentx-acme-staging and ask it something.",
-      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
-      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "Send your developers the sign-in command below. They run it once, then use Rovara from Claude Code, Codex or Cursor.",
+      "The Rovara CLI is not published yet, so this command works on this computer. Other computers need their own copy of the Rovara CLI first.",
       "No issue trackers connected yet.",
       "Everything here is also in /home/a/.agentx/logs/init-staging.log.",
     ]);
@@ -423,7 +423,7 @@ describe("spec 048 the ready screen", () => {
       { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
       { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
       { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
-      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
+      { label: "Remove Rovara", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
     ]);
     expect(card.details).toEqual(["What was created: agentx-staging-access"]);
     expect(lintCopy([
@@ -437,7 +437,7 @@ describe("spec 048 the ready screen", () => {
       env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
       invocation: FROM_SOURCE, root: true, alertsOn: true, created: [],
     });
-    expect(card.lines).toContain("You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role.");
+    expect(card.lines).toContain("You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the Rovara operator role.");
   });
 
   it("names the published package only when the CLI is the published one", () => {

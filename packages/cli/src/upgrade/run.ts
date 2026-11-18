@@ -2,7 +2,7 @@
 // target release's notes and every change, deploy in upgrade order (stopping at the first failure,
 // which leaves earlier stacks upgraded and is safe to re-run), then run doctor.
 import { GetTemplateCommand } from "@aws-sdk/client-cloudformation";
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { CONFIG_KEYS } from "../config/keys.js";
 import { progressLine, type Ask, type PreparedDeployment } from "../deploy/commands.js";
 import { deployEnvironment, keptOperatorParameters, templateParameterNames } from "../deploy/deploy-environment.js";
@@ -144,7 +144,7 @@ async function exportUpgrade(input: { options: UpgradeOptions; deps: UpgradeDepe
 /** The settings an upgrade may run on. Read before the environment lock, and read again under it. */
 function upgradableSettings(settings: EnvironmentSettings | undefined, env: string): EnvironmentSettings {
   if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
-  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx upgrade works on environments installed with agentx init; ${env} uses the legacy stack names`);
+  if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} upgrade works on environments installed with ${CLI_COMMAND_NAME} init; ${env} uses the legacy stack names`);
   return settings;
 }
 
@@ -171,7 +171,7 @@ async function setUpGithubWebhook(env: string, deps: UpgradeDependencies): Promi
     deps.write(`GitHub webhook: ${outcome.status}`);
     for (const line of [activeHintLine(outcome), missingEventsLine(outcome)]) if (line !== undefined) deps.write(line);
   } catch (error) {
-    deps.write(`GitHub webhook: could not be set up (${plainMessage(error)}); run agentx upgrade again`);
+    deps.write(`GitHub webhook: could not be set up (${plainMessage(error)}); run ${CLI_COMMAND_NAME} upgrade again`);
   }
 }
 
@@ -189,19 +189,19 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   // Ruling F19 (FR-013): the bundle holds the published templates; deploying them onto cdk-deployed
   // stacks would switch the environment's engine.
   if (options.exportDir !== undefined && first.engine === "cdk") {
-    throw agentXError("CONFIG_INVALID", "upgrade --export writes the published templates; a cdk environment upgrades with --source. Run agentx upgrade --source <dir> with admin credentials instead");
+    throw agentXError("CONFIG_INVALID", `upgrade --export writes the published templates; a cdk environment upgrades with --source. Run ${CLI_COMMAND_NAME} upgrade --source <dir> with admin credentials instead`);
   }
   if (first.engine === "cdk" && options.source === undefined) {
     throw agentXError("CONFIG_INVALID", "the cdk engine upgrades from a checkout of the target release's tag; pass --source <dir>");
   }
-  if (options.exportDir === undefined && !options.yes && !deps.isInteractive()) throw agentXError("CONFIG_INVALID", "agentx upgrade needs --yes when stdin is not a terminal");
+  if (options.exportDir === undefined && !options.yes && !deps.isInteractive()) throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} upgrade needs --yes when stdin is not a terminal`);
 
   const caller = await deps.identity.get();
   const operator = isOperatorRole(caller.arn, env);
   // Ruling F20: the cdk engine reads CDK's bootstrap version parameter and deploys through the
   // bootstrap roles and bucket, none of which the operator role may use.
   if (operator && first.engine === "cdk") {
-    throw agentXError("CONFIG_INVALID", "a cdk environment upgrades with admin credentials (the operator role cannot use CDK's bootstrap resources); run agentx upgrade again with admin credentials");
+    throw agentXError("CONFIG_INVALID", `a cdk environment upgrades with admin credentials (the operator role cannot use CDK's bootstrap resources); run ${CLI_COMMAND_NAME} upgrade again with admin credentials`);
   }
 
   const version = options.releaseDir === undefined ? options.to ?? deps.cliVersion : undefined;
@@ -210,7 +210,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   // the source's tag before anything deploys.
   const source = first.engine === "cdk" && options.releaseDir === undefined && version === undefined ? options.source : undefined;
   if (options.releaseDir === undefined && version === undefined && source === undefined) {
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
+    throw agentXError("CONFIG_INVALID", `this ${CLI_COMMAND_NAME} was built from source, so it has no release of its own; pass --to <version> or --release <dir>`);
   }
   const release = source !== undefined
     ? await deps.sourceRelease({ source, ...(options.images === undefined ? {} : { images: options.images }) })
@@ -235,7 +235,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   const { settings, parts } = await withEnvironmentLock({ store: deps.store, env, holder: caller.arn, command: "upgrade", now: deps.now, takeOverOwn: true, ...(confirmTakeover === undefined ? {} : { confirmTakeover }) }, async () => {
     const settings = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
     if (settings.engine !== first.engine) {
-      throw agentXError("CONFIG_INVALID", `environment ${env}'s settings changed to the ${settings.engine} engine while agentx upgrade was starting; run agentx upgrade again`);
+      throw agentXError("CONFIG_INVALID", `environment ${env}'s settings changed to the ${settings.engine} engine while ${CLI_COMMAND_NAME} upgrade was starting; run ${CLI_COMMAND_NAME} upgrade again`);
     }
     const direction = upgradeDirection(env, settings.version, target);
     deps.write(direction === "same" ? `Environment ${env} already runs ${target}; checking that every stack is on it` : `Upgrading ${env} from ${settings.version} to ${target} (${settings.engine} engine)`);
@@ -250,7 +250,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
       parts = parts.filter((part) => part !== "access");
       const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
       if (await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env })) {
-        throw agentXError("CONFIG_INVALID", `release ${target} changes the access stack, which only admin credentials can deploy. Ask your platform team to deploy it (agentx --env ${env} upgrade --export <dir> writes what they need), or run agentx upgrade with admin credentials; then run agentx upgrade again`);
+        throw agentXError("CONFIG_INVALID", `release ${target} changes the access stack, which only admin credentials can deploy. Ask your platform team to deploy it (${CLI_COMMAND_NAME} --env ${env} upgrade --export <dir> writes what they need), or run ${CLI_COMMAND_NAME} upgrade with admin credentials; then run ${CLI_COMMAND_NAME} upgrade again`);
       }
     }
 
@@ -272,7 +272,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
         const refusal = await guardData({ stackName: request.stackName, data: risks.data, allowReplace, yes: options.yes, ask: deps.ask });
         if (refusal !== undefined) throw agentXError("CONFIG_INVALID", refusal);
         if (!options.yes && !/^y(es)?$/i.test((await deps.ask(`Deploy ${request.stackName}? [y/N] `)).trim())) {
-          throw agentXError("CONFIG_INVALID", `upgrade stopped before ${request.stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run agentx upgrade again to continue`);
+          throw agentXError("CONFIG_INVALID", `upgrade stopped before ${request.stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run ${CLI_COMMAND_NAME} upgrade again to continue`);
         }
       });
       try {
@@ -300,16 +300,16 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   // Outside the lock on purpose: it changes only GitHub's hook and the App secret, never the environment's settings or stacks.
   await setUpGithubWebhook(env, deps);
 
-  deps.write("Checking the environment with agentx doctor");
+  deps.write(`Checking the environment with ${CLI_COMMAND_NAME} doctor`);
   let report: DoctorReport;
   try {
     report = await deps.doctor(env);
   } catch (error) {
-    throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but doctor could not run: ${plainMessage(error)}; run agentx doctor`);
+    throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but doctor could not run: ${plainMessage(error)}; run ${CLI_COMMAND_NAME} doctor`);
   }
   deps.write(reportText(report).trimEnd());
   if (report.failed > 0) {
-    throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but ${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run agentx doctor again`);
+    throw agentXError("CONFIG_INVALID", `upgraded ${env} to ${target}, but ${report.failed} doctor ${report.failed === 1 ? "check" : "checks"} failed; fix what each one names, then run ${CLI_COMMAND_NAME} doctor again`);
   }
   return { env, from: settings.version, to: target, parts, doctor: { failed: report.failed, warned: report.warned } };
 }

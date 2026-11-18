@@ -2,7 +2,7 @@
 // neutral port (`mapping.ts`). The conformance suite (tests/support/ports/code-host-conformance.ts) runs against it with GitHub-shaped fixtures.
 //
 // What GitHub restricts stays restricted, and is stated rather than hidden. The adapter holds these itself, whatever client sits under it:
-//  - `branchHead` reads Rovara's own working branches only (`agentx/<uuid>`); the branch goes into an API address.
+//  - `branchHead` reads Rovara's own working branches only (`rovara/<uuid>`, or the older `agentx/<uuid>`); the branch goes into an API address.
 //  - `listBranches` is org-scoped (a system scope is refused) and takes pages 1 to 1000.
 //  - `reply` posts Rovara's own fixed text only (200 characters, one line, no mention).
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
@@ -22,8 +22,8 @@ import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
 
-/** Rovara's working branches: `agentx/<uuid>`. */
-const WORKING_BRANCH = /^agentx\/[0-9a-f-]{36}$/iu;
+/** Rovara's working branches: `rovara/<uuid>` (and the older `agentx/<uuid>`). */
+const WORKING_BRANCH = /^(?:rovara|agentx)\/[0-9a-f-]{36}$/iu;
 const MAX_BRANCH_PAGE = 1_000;
 
 export const GITHUB_CODE_HOST_CAPABILITIES: CodeHostCapabilities = {

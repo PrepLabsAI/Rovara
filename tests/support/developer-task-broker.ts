@@ -210,7 +210,7 @@ export async function createDeveloperTaskBroker(options: {
 
 const ADMIN = { subject: "admin-subject", admin: true };
 
-/** Binds another Slack channel of the test team to a project, as `agentx admin slack bind` does. */
+/** Binds another Slack channel of the test team to a project, as `rovara admin slack bind` does. */
 export async function bindChannel(handler: Handler, channelId: string, projectName = "payments"): Promise<void> {
   const response = await call(handler, { method: "PUT", path: `/v1/admin/slack/bindings/${SLACK_TEAM}/${channelId}`, user: ADMIN, body: { projectName } });
   if (response.status !== 200) throw new Error(`binding failed: ${JSON.stringify(response.body)}`);

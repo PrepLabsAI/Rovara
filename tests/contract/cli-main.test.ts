@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createCliProgram } from "../../packages/cli/src/main.js";
 
-describe("AgentX executable command surface", () => {
+describe("Rovara executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { discoverModelCheck, drivingTestCostLine, formatTiers, testModelCheck, type ModelCheckInput } from "../../packages/cli/src/setup/model-check.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 
-// M1.4 Task 4.10C: `agentx project model-check discover | test`, against a fake control plane.
+// M1.4 Task 4.10C: `rovara project model-check discover | test`, against a fake control plane.
 
 const session = { controlPlaneUrl: "https://cp.example.test", accessToken: "admin-token" };
 const MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -45,8 +45,8 @@ describe("discover", () => {
     expect(text).toContain("`us.anthropic.claude-haiku-5-5`: this account's limit for the model is zero; US-only `L-47520EB7` 0, Global `L-F26CA8D1` 0");
     expect(text).toContain("`global.anthropic.claude-haiku-5-5`  $0.0051");
     expect(text).toContain("and 3 more");
-    expect(text).toContain(`agentx --env agentxlivetest123 project model-check test --model ${MODEL}`);
-    expect(text).toContain(`agentx --env agentxlivetest123 config set models.e2eAgent ${MODEL}`);
+    expect(text).toContain(`rovara --env agentxlivetest123 project model-check test --model ${MODEL}`);
+    expect(text).toContain(`rovara --env agentxlivetest123 config set models.e2eAgent ${MODEL}`);
   });
 
   it("falls back to the tiers on record, and says why, when the runner cannot be asked", async () => {
@@ -86,7 +86,7 @@ describe("test", () => {
     expect(p.lines[0]).toContain("worst case $0.0565");
     expect(prompter.asked[0]).toContain(`Run the driving test of ${MODEL}`);
     expect(p.requests[0]!.body).toEqual({ kind: "drive", modelId: MODEL });
-    expect(p.lines.join("\n")).toContain(`agentx --env agentxlivetest123 config set models.e2eAgent ${MODEL}`);
+    expect(p.lines.join("\n")).toContain(`rovara --env agentxlivetest123 config set models.e2eAgent ${MODEL}`);
   });
 
   it("with no --model it drives the installation's own model, whose cost the control plane's tiers give", async () => {

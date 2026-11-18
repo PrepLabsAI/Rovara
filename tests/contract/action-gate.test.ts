@@ -119,9 +119,9 @@ describe("the action gate's decisions", () => {
   it("fails closed: a present worker decides over computePrepared, which applies only without a worker", async () => {
     const classifier = vi.fn(allow);
     const unprepared = gate({ classifier, computePrepared: true, worker: { prepared: () => false, ensureReady: async () => undefined } });
-    expect(await unprepared.gate.decide(call("agentx_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
+    expect(await unprepared.gate.decide(call("rovara_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
     const noWorker = gate({ classifier, computePrepared: true });
-    expect(await noWorker.gate.decide(call("agentx_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
+    expect(await noWorker.gate.decide(call("rovara_submit_task", { prompt: "run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
     expect(classifier).toHaveBeenCalledOnce();
   });
 
@@ -221,7 +221,7 @@ describe("the action gate's decisions", () => {
     const decision = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });
     expect(decision).toMatchObject({ outcome: "ask", kind: "destructive" });
     const reason = blockReason(decision);
-    expect(reason).toContain("AgentX has already posted a confirmation request for this action to the member in this conversation");
+    expect(reason).toContain("Rovara has already posted a confirmation request for this action to the member in this conversation");
     expect(reason).toContain("Do not restate, summarise or mention this action, its details or the confirmation in your reply");
     expect(reason).toContain("Report only anything else you did or found in this turn.");
     // Nothing that invites an empty answer: an empty answer counts as TurnEmptyResponse.
@@ -229,7 +229,7 @@ describe("the action gate's decisions", () => {
     expect(reason).toContain("Do not call this tool again or try another way in this turn.");
     for (const value of ["TRK-9", "duplicate", "TRK-4", "close_item", member, "waiting for their confirmation"]) expect(reason).not.toContain(value);
     const again = await g.decide(call("tracker__close_item", { id: "TRK-9", reason: "duplicate of TRK-4" }), { memberMessages: messages });
-    expect(blockReason({ ...again, differsFromConfirmation: true })).toContain("Its arguments differ from the call they confirmed, so AgentX asked again.");
+    expect(blockReason({ ...again, differsFromConfirmation: true })).toContain("Its arguments differ from the call they confirmed, so Rovara asked again.");
   });
 
   it("lets yes to all skip the classifier's asks only, never destructive, administrator, large-write or hint asks", async () => {
@@ -251,9 +251,9 @@ describe("the action gate's decisions", () => {
     let ready = false;
     const worker = { prepared: () => ready, ensureReady: async () => undefined };
     const { gate: g } = gate({ classifier, worker });
-    expect(await g.decide(call("agentx_submit_task", { prompt: "list the files" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
+    expect(await g.decide(call("rovara_submit_task", { prompt: "list the files" }), { memberMessages: messages })).toMatchObject({ actionClass: "change", source: "classifier" });
     ready = true;
-    expect(await g.decide(call("agentx_submit_task", { prompt: "now run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
+    expect(await g.decide(call("rovara_submit_task", { prompt: "now run the tests" }), { memberMessages: messages })).toMatchObject({ actionClass: "read", outcome: "allow" });
     expect(classifier).toHaveBeenCalledOnce();
   });
 
@@ -271,7 +271,7 @@ describe("the action gate's decisions", () => {
     expect(session.decisions).toEqual([decision]);
     expect(onDecision).toHaveBeenCalledWith(decision);
     const failed = g.failed(call("tracker__save_item", {}), new TypeError("boom"));
-    expect(failed).toMatchObject({ outcome: "deny", source: "gate_error", reason: "AgentX could not check this action (TypeError)" });
+    expect(failed).toMatchObject({ outcome: "deny", source: "gate_error", reason: "Rovara could not check this action (TypeError)" });
     expect(session.decisions).toHaveLength(2);
   });
 });
@@ -282,16 +282,16 @@ describe("the approval text says what will happen in plain words (#215)", () => 
 
   it("describes a coding task by its prompt, never by a tool name or a character count", () => {
     expect(prompt143.length).toBeGreaterThan(80);
-    const text = describeAction("agentx_submit_task", { prompt: prompt143 });
+    const text = describeAction("rovara_submit_task", { prompt: prompt143 });
     expect(text).toBe(`Start a coding task: "${prompt143}"`);
     expect(text).not.toMatch(toolName);
     expect(text).not.toMatch(/\(\d+ characters\)/u);
-    expect(describeAction("agentx_submit_task", { prompt: "replace ZZZ-NOT-THERE with x in README.md" })).toBe('Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"');
-    expect(describeAction("agentx_follow_up", { prompt: "now run the tests" })).toBe('Continue the coding task: "now run the tests"');
+    expect(describeAction("rovara_submit_task", { prompt: "replace ZZZ-NOT-THERE with x in README.md" })).toBe('Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"');
+    expect(describeAction("rovara_follow_up", { prompt: "now run the tests" })).toBe('Continue the coding task: "now run the tests"');
   });
 
   it("shortens a long prompt instead of counting its characters, on one Slack-safe line", () => {
-    const text = describeAction("agentx_submit_task", { prompt: `<!channel> \`go\`\n${"word ".repeat(100)}` });
+    const text = describeAction("rovara_submit_task", { prompt: `<!channel> \`go\`\n${"word ".repeat(100)}` });
     expect(text.startsWith('Start a coding task: "&lt;!channel&gt; go word word')).toBe(true);
     expect(text.endsWith('…"')).toBe(true);
     expect(text.length).toBeLessThanOrEqual(300);
@@ -299,10 +299,10 @@ describe("the approval text says what will happen in plain words (#215)", () => 
   });
 
   it("describes pull request work in words", () => {
-    expect(describeAction("agentx_create_pull_request", { repository: "web", title: "Fix login", body: "b".repeat(500) })).toBe('Open a pull request in web: "Fix login"');
-    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "close" })).toBe("Close pull request #12 in demo");
-    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "edit", title: "New title" })).toBe('Edit pull request #12 in demo: "New title"');
-    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 3, action: "sync" })).toBe("Update pull request #3 in demo with its base branch");
+    expect(describeAction("rovara_create_pull_request", { repository: "web", title: "Fix login", body: "b".repeat(500) })).toBe('Open a pull request in web: "Fix login"');
+    expect(describeAction("rovara_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "close" })).toBe("Close pull request #12 in demo");
+    expect(describeAction("rovara_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "edit", title: "New title" })).toBe('Edit pull request #12 in demo: "New title"');
+    expect(describeAction("rovara_manage_pull_request", { repository: "demo", pullRequestNumber: 3, action: "sync" })).toBe("Update pull request #3 in demo with its base branch");
   });
 
   it("describes a connector action by its connector and action in words, with its values shortened, not counted", () => {
@@ -318,11 +318,11 @@ describe("the approval text says what will happen in plain words (#215)", () => 
     const token = `ghp_${"A".repeat(36)}`;
     const shown = describeAction("tracker__save_item", { body: `use ${token} please` });
     expect(shown).not.toContain(token);
-    expect(describeAction("agentx_submit_task", { prompt: `push with ${token}` })).not.toContain(token);
-    const cut = describeAction("agentx_submit_task", { prompt: "&".repeat(400) });
+    expect(describeAction("rovara_submit_task", { prompt: `push with ${token}` })).not.toContain(token);
+    const cut = describeAction("rovara_submit_task", { prompt: "&".repeat(400) });
     expect(cut).not.toMatch(/&(?:a|am|amp)?…/u);
     expect(cut.length).toBeLessThanOrEqual(300);
-    expect(describeAction("agentx_new_thing", { a: 1 })).toBe("Run an AgentX action: a 1");
+    expect(describeAction("rovara_new_thing", { a: 1 })).toBe("Run a Rovara action: a 1");
   });
 
   it("keeps the classifier's own summary, and puts the plain words in the ask", async () => {
@@ -343,8 +343,8 @@ describe("the approval text says what will happen in plain words (#215)", () => 
   });
 
   it("still names the confirmed tool to the model, which must call it again exactly", () => {
-    const session = createGateSession(member, { approvals: [{ tool: "agentx_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' }] });
-    expect(confirmationNote(session)).toContain('1. Start a coding task: "list files" (tool agentx_submit_task)');
+    const session = createGateSession(member, { approvals: [{ tool: "rovara_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' }] });
+    expect(confirmationNote(session)).toContain('1. Start a coding task: "list files" (tool rovara_submit_task)');
   });
 });
 
@@ -359,7 +359,7 @@ describe("gate helpers", () => {
     expect(describeCall("tracker__close_item", { target: "payments", id: "TRK-9" })).toBe("tracker__close_item in payments: id=TRK-9");
     expect(describeCall("tracker__save_item", { title: "<!channel> `x`\nnext", body: "b".repeat(200), labels: ["a"], extra: { a: 1 } }))
       .toBe("tracker__save_item: title=&lt;!channel&gt; x next, body=(200 characters), labels=(1 items), extra=(object)");
-    expect(describeCall("agentx_task_status", {})).toBe("agentx_task_status");
+    expect(describeCall("rovara_task_status", {})).toBe("rovara_task_status");
     expect(describeCall("t", Object.fromEntries(Array.from({ length: 8 }, (_, index) => [`k${index}`, index])))).toBe("t: k0=0, k1=1, k2=2, k3=3, k4=4, k5=5, and 2 more");
   });
 

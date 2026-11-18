@@ -16,7 +16,7 @@ Please include:
 
 - what an attacker can do, and what they need first (for example, a Slack member in a bound
   channel, a signed-in developer, or access to the AWS account);
-- the steps to reproduce it, against the version you tested (`agentx --version`);
+- the steps to reproduce it, against the version you tested (`rovara --version`);
 - any logs or output, with tokens, secrets and message text removed.
 
 ## What happens next
@@ -30,7 +30,7 @@ Please include:
 
 ## Supported versions
 
-We fix security problems in the latest release. Upgrade with `agentx --env <name> upgrade`; see
+We fix security problems in the latest release. Upgrade with `rovara --env <name> upgrade`; see
 [Running Rovara](docs/day-two.md).
 
 ## Scope

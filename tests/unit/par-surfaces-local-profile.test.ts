@@ -114,28 +114,28 @@ describe("--env local is the rovara up on this computer", () => {
 describe("the MCP tools against rovara up", () => {
   it("lists the projects, starts a plan-first task, reads it, and lists tasks and sessions with the filters the tools send", async () => {
     const h = await launch();
-    const whoami = await h.tool("agentx_whoami");
+    const whoami = await h.tool("rovara_whoami");
     expect(whoami.isError, whoami.text).toBe(false);
     expect(whoami.value).toMatchObject({ environment: "local" });
-    const projects = await h.tool("agentx_list_projects");
+    const projects = await h.tool("rovara_list_projects");
     expect(projects.isError, projects.text).toBe(false);
     expect(projects.value.projects.map((entry) => entry.name)).toEqual(["payments"]);
-    const started = await h.tool("agentx_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
+    const started = await h.tool("rovara_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
     expect(started.isError, started.text).toBe(false);
     const taskId = started.value.task_id;
     expect(taskId).toMatch(/^[0-9a-f-]{36}$/);
-    const read = await h.tool("agentx_get_task", { task_id: taskId });
+    const read = await h.tool("rovara_get_task", { task_id: taskId });
     expect(read.isError, read.text).toBe(false);
     expect(read.value).toMatchObject({ task_id: taskId, project: "payments" });
     // The list's `project` and `status` are honoured (they were ignored before): a project with no task has none, the task's own status finds it.
-    expect((await h.tool("agentx_list_tasks", { project: "payments" })).value.tasks.map((task) => task.task_id)).toEqual([taskId]);
-    expect((await h.tool("agentx_list_tasks", { project: "billing" })).value.tasks).toEqual([]);
-    expect((await h.tool("agentx_list_tasks", { status: "CLOSED" })).value.tasks).toEqual([]);
-    const sessions = await h.tool("agentx_list_sessions");
+    expect((await h.tool("rovara_list_tasks", { project: "payments" })).value.tasks.map((task) => task.task_id)).toEqual([taskId]);
+    expect((await h.tool("rovara_list_tasks", { project: "billing" })).value.tasks).toEqual([]);
+    expect((await h.tool("rovara_list_tasks", { status: "CLOSED" })).value.tasks).toEqual([]);
+    const sessions = await h.tool("rovara_list_sessions");
     expect(sessions.isError, sessions.text).toBe(false);
     expect(sessions.value.sessions).toHaveLength(1);
     const sessionId = sessions.value.sessions[0]!.id;
-    const session = await h.tool("agentx_get_session", { session_id: sessionId });
+    const session = await h.tool("rovara_get_session", { session_id: sessionId });
     expect(session.isError, session.text).toBe(false);
     // No answer of any tool holds a page address or a page session.
     for (const text of [whoami.text, projects.text, started.text, read.text, sessions.text, session.text]) expect(text).not.toMatch(/\/s\/[A-Za-z0-9_-]{43}/);
@@ -143,9 +143,9 @@ describe("the MCP tools against rovara up", () => {
 
   it("cannot approve a plan: the tool is told to have the owner open the page, and the answer carries no address", async () => {
     const h = await launch();
-    const started = await h.tool("agentx_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
+    const started = await h.tool("rovara_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
     const taskId = started.value.task_id;
-    const decided = await h.tool("agentx_decide_workflow", {
+    const decided = await h.tool("rovara_decide_workflow", {
       task_id: taskId, request_id: "22222222-2222-4222-8222-222222222222", expected_revision: 1, decision: "APPROVE", reason: "ship it", artifact_digest: "a".repeat(64),
     });
     expect(decided.isError).toBe(true);
@@ -156,38 +156,38 @@ describe("the MCP tools against rovara up", () => {
 
   it("stops a session and says a message to a running step is saved and not passed on", async () => {
     const h = await launch();
-    await h.tool("agentx_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
-    const sessionId = (await h.tool("agentx_list_sessions")).value.sessions[0]!.id;
-    const told = await h.tool("agentx_tell_session_agent", { session_id: sessionId, text: "use /health" });
+    await h.tool("rovara_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
+    const sessionId = (await h.tool("rovara_list_sessions")).value.sessions[0]!.id;
+    const told = await h.tool("rovara_tell_session_agent", { session_id: sessionId, text: "use /health" });
     expect(told.isError, told.text).toBe(false);
-    const stopped = await h.tool("agentx_stop_session", { session_id: sessionId });
+    const stopped = await h.tool("rovara_stop_session", { session_id: sessionId });
     expect(stopped.isError, stopped.text).toBe(false);
   });
 
   it("cancels and closes a task, and waits on it, with the same tools as Cloud", async () => {
     const h = await launch();
-    const started = await h.tool("agentx_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
+    const started = await h.tool("rovara_start", { project: "payments", instructions: "Add a /health endpoint", workflow_path: "quick" });
     const taskId = started.value.task_id;
-    const waited = await h.tool("agentx_wait_for_task", { task_id: taskId, wait_seconds: 1 });
+    const waited = await h.tool("rovara_wait_for_task", { task_id: taskId, wait_seconds: 1 });
     expect(waited.isError, waited.text).toBe(false);
-    const cancelled = await h.tool("agentx_cancel_task", { task_id: taskId });
+    const cancelled = await h.tool("rovara_cancel_task", { task_id: taskId });
     expect(cancelled.isError, cancelled.text).toBe(false);
-    const closed = await h.tool("agentx_close_task", { task_id: taskId });
+    const closed = await h.tool("rovara_close_task", { task_id: taskId });
     expect(closed.isError, closed.text).toBe(false);
-    const gone = await h.tool("agentx_get_task", { task_id: taskId });
+    const gone = await h.tool("rovara_get_task", { task_id: taskId });
     expect(gone.isError, gone.text).toBe(false);
   });
 
   it("does not offer or serve the tools whose features are not in Code yet", async () => {
     const h = await launch();
     // Tools stay listed (the names are the same as Cloud's); the ones waiting on features not built yet answer plainly that the route is not here.
-    const agents = await h.tool("agentx_list_agents");
+    const agents = await h.tool("rovara_list_agents");
     expect(agents.text).toContain("NOT_ON_THIS_INSTALL");
     expect(agents.text).toContain("do not retry");
     expect(agents.isError).toBe(true);
-    const approvals = await h.tool("agentx_list_approvals");
+    const approvals = await h.tool("rovara_list_approvals");
     expect(approvals.isError).toBe(true);
-    const share = await h.tool("agentx_share_task", { task_id: "44444444-4444-4444-8444-444444444444", mode: "view" });
+    const share = await h.tool("rovara_share_task", { task_id: "44444444-4444-4444-8444-444444444444", mode: "view" });
     expect(share.isError).toBe(true);
     expect(share.text).toContain("not on this install yet");
     expect(approvals.text).toContain("not on this install yet");

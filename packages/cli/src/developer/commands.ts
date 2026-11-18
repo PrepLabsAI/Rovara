@@ -1,5 +1,5 @@
 // agentx whoami and agentx logout (FR-011).
-import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
@@ -39,19 +39,19 @@ export async function developerRequest<T>(
       signal: AbortSignal.timeout(20_000),
     });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach Rovara at ${session.entry.url}; check your connection and try again`);
   }
   if (response.status === 401) {
     const reason = refusalReason(await response.json().catch(() => undefined));
-    throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
+    throw agentXError("AUTH_REQUIRED", `your Rovara sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
   }
   if (options.explain === true && (response.status === 400 || response.status === 403 || response.status === 404)) {
     const reason = refusalMessage(await response.json().catch(() => undefined));
     if (reason !== undefined) throw agentXError(response.status === 400 ? "CONFIG_INVALID" : response.status === 403 ? "FORBIDDEN" : "NOT_FOUND", reason);
   }
-  if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
+  if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered HTTP ${response.status}; try again`);
   const parsed = schema.safeParse(await response.json().catch(() => undefined));
-  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
   return { env: session.env, url: session.entry.url, body: parsed.data };
 }
 
@@ -84,7 +84,7 @@ export function whoamiText(result: { env: string; url: string; projects: Develop
   const { developer, projects, notices } = result.projects;
   const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
   const link = developer.slackUserId === undefined ? "" : ` (${developer.slackUserId})`;
-  const lines = [`Signed in to AgentX environment ${result.env} (${result.url}) as ${sanitizeServerText(developer.name)}, with ${method}${link}.`];
+  const lines = [`Signed in to Rovara environment ${result.env} (${result.url}) as ${sanitizeServerText(developer.name)}, with ${method}${link}.`];
   if (projects.length === 0) {
     lines.push("You cannot use any project yet: join a project's Slack channel, or ask an admin for access.");
   } else {
@@ -118,7 +118,7 @@ export async function developerLogout(deps: DeveloperSessionDeps, env: string | 
   } catch (error) {
     // No developer sign-in here: the person may mean the admin one, which --admin ends.
     if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
-      throw agentXError("AUTH_REQUIRED", `${error.message.slice(error.code.length + 2)}; for the admin login, run agentx logout --admin`);
+      throw agentXError("AUTH_REQUIRED", `${error.message.slice(error.code.length + 2)}; for the admin login, run ${CLI_COMMAND_NAME} logout --admin`);
     }
     throw error;
   }
@@ -154,13 +154,13 @@ export async function developerLogout(deps: DeveloperSessionDeps, env: string | 
 
 /** The text agentx logout prints. */
 export function logoutText(result: DeveloperLogoutResult): string {
-  const local = `Signed out of AgentX environment ${result.env}`;
+  const local = `Signed out of Rovara environment ${result.env}`;
   if (result.problem === "unreachable") {
-    return `${local} on this computer. AgentX could not be reached to end the sign-in there, so the server session may stay until it expires.\n`;
+    return `${local} on this computer. Rovara could not be reached to end the sign-in there, so the server session may stay until it expires.\n`;
   }
   if (result.problem === "not_confirmed") {
     const reason = result.reason === undefined ? "" : ` (${result.reason})`;
-    return `${local} on this computer. AgentX did not confirm it ended the sign-in there${reason}, so the server session may stay until it expires.\n`;
+    return `${local} on this computer. Rovara did not confirm it ended the sign-in there${reason}, so the server session may stay until it expires.\n`;
   }
   return `${local}.\n`;
 }

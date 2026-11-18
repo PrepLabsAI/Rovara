@@ -156,7 +156,7 @@ export async function createCallbackListener(
       // The server refused or could not finish the sign-in: stop at once with its reason
       // (Review Focus 1) instead of waiting for the timeout.
       const description = sanitizeServerText(url.searchParams.get("error_description") ?? failure);
-      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(`AgentX sign-in did not finish: ${description}\nYou can close this window and return to the terminal.`);
+      response.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(`Rovara sign-in did not finish: ${description}\nYou can close this window and return to the terminal.`);
       rejectCode(failure === "temporarily_unavailable"
         ? agentXError("RUNTIME_UNAVAILABLE", `sign-in could not finish: ${description}`)
         : agentXError("AUTH_REQUIRED", `sign-in refused: ${description}`));
@@ -167,7 +167,7 @@ export async function createCallbackListener(
       rejectCode(agentXError("AUTH_REQUIRED", messages.noAnswer));
       return;
     }
-    response.writeHead(200, { "content-type": "text/plain" }).end("AgentX authentication complete. You can close this window.");
+    response.writeHead(200, { "content-type": "text/plain" }).end("Rovara authentication complete. You can close this window.");
     resolveCode(authorizationCode);
   });
   await new Promise<void>((resolve, reject) => {

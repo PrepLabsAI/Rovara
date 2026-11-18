@@ -109,8 +109,8 @@ describe("the AWS calls behind the alerts (the operator role's IAM scope, Task 1
     expect(await api.subscriptions(TOPIC)).toEqual([{ arn: `${TOPIC}:1`, protocol: "email", endpoint: "ops@example.com" }]);
     await api.subscribe(TOPIC, "email", "ops@example.com");
     await api.subscribe(TOPIC, "https", WEBHOOK);
-    await api.setAlarmState(alarm, "ALARM", "agentx alerts test: a test alarm, not a real problem");
-    await api.setAlarmState(alarm, "OK", "agentx alerts test: done");
+    await api.setAlarmState(alarm, "ALARM", "rovara alerts test: a test alarm, not a real problem");
+    await api.setAlarmState(alarm, "OK", "rovara alerts test: done");
     expect(await api.wentToAlarm(alarm, since)).toBe(true);
     expect(await api.budget("123456789012", "agentx-staging-monthly")).toBe(100);
 
@@ -120,8 +120,8 @@ describe("the AWS calls behind the alerts (the operator role's IAM scope, Task 1
       { command: "SubscribeCommand", input: { TopicArn: TOPIC, Protocol: "https", Endpoint: WEBHOOK } },
     ]);
     expect(cloudWatch.calls).toEqual([
-      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "ALARM", StateReason: "agentx alerts test: a test alarm, not a real problem" } },
-      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "OK", StateReason: "agentx alerts test: done" } },
+      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "ALARM", StateReason: "rovara alerts test: a test alarm, not a real problem" } },
+      { command: "SetAlarmStateCommand", input: { AlarmName: "agentx-staging-TestAlarm", StateValue: "OK", StateReason: "rovara alerts test: done" } },
       { command: "DescribeAlarmHistoryCommand", input: { AlarmName: "agentx-staging-TestAlarm", HistoryItemType: "StateUpdate", StartDate: since, MaxRecords: 10 } },
     ]);
     expect(budgets.calls).toEqual([{ command: "DescribeBudgetCommand", input: { AccountId: "123456789012", BudgetName: "agentx-staging-monthly" } }]);
@@ -142,7 +142,7 @@ describe("the AWS calls behind the alerts (the operator role's IAM scope, Task 1
   });
 });
 
-describe("agentx alerts test (FR-046)", () => {
+describe("rovara alerts test (FR-046)", () => {
   it("sets the test alarm to ALARM and back to OK, checks its history, then asks", async () => {
     const api = fakeAlerts({ existing: CONFIRMED });
     const prompter = scriptedPrompter([true]);
@@ -153,7 +153,7 @@ describe("agentx alerts test (FR-046)", () => {
 
   it("says what to check when the alarm did not arrive", async () => {
     await expect(sendTestAlarm({ api: fakeAlerts({ existing: CONFIRMED }), topicArn: TOPIC, env: "staging", shownAs: "ops@example.com", prompter: scriptedPrompter([false]), write: () => undefined, ...clock() }))
-      .rejects.toThrow("the test alarm did not arrive; check the subscription is confirmed (aws sns list-subscriptions-by-topic --topic-arn <the agentx-staging-alerts topic>) and your spam folder, then run agentx alerts test");
+      .rejects.toThrow("the test alarm did not arrive; check the subscription is confirmed (aws sns list-subscriptions-by-topic --topic-arn <the agentx-staging-alerts topic>) and your spam folder, then run rovara alerts test");
   });
 
   it("fails before asking when CloudWatch never recorded the ALARM change, and still sets the alarm back to OK", async () => {
@@ -175,7 +175,7 @@ describe("agentx alerts test (FR-046)", () => {
     const api = fakeAlerts({ existing: [{ arn: "PendingConfirmation", protocol: "email", endpoint: "ops@example.com" }], confirmAfterPolls: 1_000 });
     const prompter = scriptedPrompter([]);
     await expect(sendTestAlarm({ api, topicArn: TOPIC, env: "staging", shownAs: "ops@example.com", prompter, write: () => undefined, ...clock() }))
-      .rejects.toThrow("no subscription to the agentx-staging-alerts topic is confirmed yet; confirm it (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx alerts test");
+      .rejects.toThrow("no subscription to the agentx-staging-alerts topic is confirmed yet; confirm it (the AWS Notifications email, or your webhook's SubscribeURL), then run rovara alerts test");
     expect(api.states).toEqual([]);
     expect(prompter.asked).toEqual([]);
   });
@@ -183,12 +183,12 @@ describe("agentx alerts test (FR-046)", () => {
   it("sends nothing when nobody is subscribed at all", async () => {
     const api = fakeAlerts();
     await expect(sendTestAlarm({ api, topicArn: TOPIC, env: "staging", shownAs: "the alert address", prompter: scriptedPrompter([]), write: () => undefined, ...clock() }))
-      .rejects.toThrow("nobody is subscribed to the agentx-staging-alerts topic; run agentx init --env staging to subscribe the alert address, then run agentx alerts test");
+      .rejects.toThrow("nobody is subscribed to the agentx-staging-alerts topic; run rovara init --env staging to subscribe the alert address, then run rovara alerts test");
     expect(api.states).toEqual([]);
   });
 });
 
-describe("agentx alerts test on the command line", () => {
+describe("rovara alerts test on the command line", () => {
   function fakeSetupContext(api: ReturnType<typeof fakeAlerts>, outputs: Record<string, string> | undefined = { OperatorAlertsTopicArn: TOPIC }) {
     const time = clock();
     const lines: string[] = [];
@@ -233,7 +233,7 @@ describe("agentx alerts test on the command line", () => {
     const api = fakeAlerts({ existing: CONFIRMED });
     const result = await cli(fakeSetupContext(api, {}).context);
     expect(result.code).not.toBe(0);
-    expect(result.stderr).toContain("the control-plane stack reports no OperatorAlertsTopicArn; run agentx init --env staging to update it, then run agentx alerts test");
+    expect(result.stderr).toContain("the control-plane stack reports no OperatorAlertsTopicArn; run rovara init --env staging to update it, then run rovara alerts test");
     expect(api.states).toEqual([]);
   });
 });
@@ -254,7 +254,7 @@ describe("the alerts step", () => {
     const api = fakeAlerts({ confirmAfterPolls: 1_000 });
     const progress = progressHandle();
     const first = await alertsStep().run(context({ api }), progress);
-    expect(first).toMatchObject({ status: "waiting", message: "Confirm the alert subscription for ops@example.com (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx init --env staging --region us-east-1 again." });
+    expect(first).toMatchObject({ status: "waiting", message: "Confirm the alert subscription for ops@example.com (the AWS Notifications email, or your webhook's SubscribeURL), then run rovara init --env staging --region us-east-1 again." });
     expect(progress.value().alerts).toBeUndefined();
     expect(api.states).toEqual([]);
 
@@ -295,14 +295,14 @@ describe("the alerts step", () => {
 
   it("says how to store the webhook again when its secret is missing", async () => {
     const made = context({ api: fakeAlerts(), answers: { alert: { kind: "webhook", display: "https://events.pagerduty.com/...", secretName: "agentx/staging/alert-endpoint" } } });
-    await expect(alertsStep().run(made, progressHandle())).rejects.toThrow("secret agentx/staging/alert-endpoint is missing; run agentx init with --alert-webhook-file or --alert-webhook-env to store it again");
+    await expect(alertsStep().run(made, progressHandle())).rejects.toThrow("secret agentx/staging/alert-endpoint is missing; run rovara init with --alert-webhook-file or --alert-webhook-env to store it again");
   });
 
   it("skips cleanly with --no-alerts: no subscription, no test alarm, no question", async () => {
     const api = fakeAlerts();
     const progress = progressHandle();
     expect(await alertsStep().run(context({ api, answers: { alert: { kind: "none" } } }), progress))
-      .toEqual({ status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" });
+      .toEqual({ status: "done", note: "no alert address (rovara config set alerts.address, phase 15e)" });
     expect(api.reads()).toBe(0);
     expect(api.subscribed).toEqual([]);
     expect(api.states).toEqual([]);
@@ -318,7 +318,7 @@ describe("the alerts step", () => {
 
   it("fails with what to check when the budget does not exist", async () => {
     const made = context({ api: fakeAlerts(), answers: { alert: { kind: "none" }, budget: { monthlyUsd: 250, scope: "account" } } });
-    await expect(alertsStep().run(made, progressHandle())).rejects.toThrow("the budget agentx-staging-monthly does not exist; check the control-plane stack's BudgetMonthlyUsd parameter, then run agentx init again");
+    await expect(alertsStep().run(made, progressHandle())).rejects.toThrow("the budget agentx-staging-monthly does not exist; check the control-plane stack's BudgetMonthlyUsd parameter, then run rovara init again");
   });
 });
 
@@ -331,7 +331,7 @@ describe("the connectors step", () => {
       await writeProjectFile(configDir, {
         name: "payments-api", revision: 1,
         repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
       });
       const vendors = fakeVendors({ jiraCloudId: "0f1e2d3c-4b5a-4968-8776-655443322110", jiraInside: ["PAY-1"], jiraOutside: ["HR-4"] });
       const made = initContext({
@@ -355,8 +355,8 @@ describe("the connectors step", () => {
     const progress = progressHandle({ ...withProject().value(), connectors: [{ type: "linear", ref: "linear" }] });
     expect(await connectorsStep().run(initContext({ prompter }), progress)).toEqual({ status: "done", note: "connected Linear" });
     expect(prompter.asked).toEqual([
-      "Connect Jira to payments-api now? (You can add it later with agentx connector add jira)",
-      "Connect Asana to payments-api now? (You can add it later with agentx connector add asana)",
+      "Connect Jira to payments-api now? (You can add it later with rovara connector add jira)",
+      "Connect Asana to payments-api now? (You can add it later with rovara connector add asana)",
     ]);
   });
 
@@ -369,7 +369,7 @@ describe("the connectors step", () => {
   it("asks nothing with --connectors none, and says how to add them later", async () => {
     const made = initContext({ prompter: scriptedPrompter([]), flags: { connectors: "none" } });
     expect(await connectorsStep().run(made, withProject())).toEqual({ status: "done", note: "no connectors" });
-    expect(made.lines).toContain("No connectors added; add them later with agentx --env staging connector add linear|jira|asana");
+    expect(made.lines).toContain("No connectors added; add them later with rovara --env staging connector add linear|jira|asana");
   });
 
   it("points a connector that fails inside init at rerunning init, not the day-2 command", async () => {
@@ -378,7 +378,7 @@ describe("the connectors step", () => {
       await writeProjectFile(configDir, {
         name: "payments-api", revision: 1,
         repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
       });
       const plane = fakeControlPlane();
       plane.preflight.linear = { status: "not_connected", problem: "Linear rejected the credential twice" };
@@ -389,7 +389,7 @@ describe("the connectors step", () => {
         setup: setupServices({ fetch: plane.fetch, configDir, stackOutputs: async () => ({ Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c" }) }),
         adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }),
       });
-      await expect(connectorsStep().run(made, withProject())).rejects.toThrow("Fix it, then run agentx --env staging init again");
+      await expect(connectorsStep().run(made, withProject())).rejects.toThrow("Fix it, then run rovara --env staging init again");
     } finally {
       await rm(configDir, { recursive: true, force: true });
     }

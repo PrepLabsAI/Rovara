@@ -11,7 +11,7 @@ import type { ModelCheckResult } from "../../packages/model-runtime/src/model-ch
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { STAGING_SETTINGS } from "../support/setup-fakes.js";
 
-// M1.4 Task 4.10D fix round 1 (review I-2): `agentx admin project register --file`, the documented way to set a project's models, runs the same model check as project add.
+// M1.4 Task 4.10D fix round 1 (review I-2): `rovara admin project register --file`, the documented way to set a project's models, runs the same model check as project add.
 
 const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
 const SONNET = { provider: "anthropic", modelId: "claude-sonnet-4-6", label: "Sonnet" };
@@ -96,7 +96,7 @@ describe("admin project register --file checks the project's models", () => {
     const result = await register(c, answers({ "anthropic/claude-sonnet-4-6": fail("model-not-found") }));
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toContain("The project's models were not checked");
-    expect(result.stderr).toContain("agentx --env staging doctor");
+    expect(result.stderr).toContain("rovara --env staging doctor");
     expect(JSON.stringify(result.body)).not.toContain("lastCheck");
   });
 

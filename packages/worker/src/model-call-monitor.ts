@@ -1,4 +1,4 @@
-import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { MODEL_PROVIDERS, canonicalModelName, editionFromEnvironment, modelNotEnabledSentence, type Edition, type E2EModelFailureClass, type ModelProvider, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_DETAIL, MODEL_NOT_OFFERED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime";
 import type { WorkerLogSink } from "./worker-log.js";
 
@@ -217,7 +217,7 @@ export function modelFailureNextAction(note: Extract<ModelCallNote, { outcome: "
 }
 
 /** DEC 254g: what to do when the model gateway does not offer the model (fixed words). */
-export const MODEL_NOT_OFFERED_NEXT = "the model is not offered: the model gateway does not offer this model to this company; choose a model it offers (agentx config set coreEngine.agentModel checks it against the gateway), then retry";
+export const MODEL_NOT_OFFERED_NEXT = `the model is not offered: the model gateway does not offer this model to this company; choose a model it offers (${CLI_COMMAND_NAME} config set coreEngine.agentModel checks it against the gateway), then retry`;
 
 export const MODEL_CALL_HEARTBEAT_MS = 60_000;
 export const MODEL_CALL_MAX_HEARTBEATS = 60;

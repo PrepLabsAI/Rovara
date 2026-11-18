@@ -3,7 +3,7 @@
 // a re-run after the stacks are gone still knows them. Also the plan shown before confirming, the
 // typed confirmation, and the vendor steps printed at the end.
 import { z } from "zod";
-import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
+import { agentXError, EnvironmentNameSchema, environmentSettingsPrefix, environmentStackName, STACK_PARTS, type StackPart, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { CONNECTOR_TYPES, SSM_STANDARD_VALUE_LIMIT, type ConnectorType } from "../init/install-state.js";
 
@@ -48,14 +48,14 @@ export async function readInventory(store: ParameterStore, env: string): Promise
   let json: unknown;
   try { json = JSON.parse(stored.value); } catch { json = undefined; }
   const parsed = InventorySchema.safeParse(json);
-  if (!parsed.success || parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `${inventoryParameterName(env)} is not an agentx destroy inventory for ${env}; delete it only if you are sure nothing of ${env} is left, then run agentx destroy again`);
+  if (!parsed.success || parsed.data.env !== env) throw agentXError("CONFIG_INVALID", `${inventoryParameterName(env)} is not a ${CLI_COMMAND_NAME} destroy inventory for ${env}; delete it only if you are sure nothing of ${env} is left, then run ${CLI_COMMAND_NAME} destroy again`);
   return parsed.data;
 }
 
 export async function writeInventory(store: ParameterStore, inventory: Inventory): Promise<void> {
   const json = JSON.stringify(InventorySchema.parse(inventory));
   if (Buffer.byteLength(json) > SSM_STANDARD_VALUE_LIMIT) {
-    throw agentXError("CONFIG_INVALID", `the list of resources environment ${inventory.env}'s stacks keep is larger than SSM's ${SSM_STANDARD_VALUE_LIMIT}-byte limit; report this as an AgentX bug, and tear the environment down with docs/teardown.md meanwhile`);
+    throw agentXError("CONFIG_INVALID", `the list of resources environment ${inventory.env}'s stacks keep is larger than SSM's ${SSM_STANDARD_VALUE_LIMIT}-byte limit; report this as a Rovara bug, and tear the environment down with docs/teardown.md meanwhile`);
   }
   await store.put(inventoryParameterName(inventory.env), json);
 }
@@ -78,16 +78,16 @@ export function mergeInventory(stored: Inventory | undefined, found: Omit<Invent
 export function confirmationPrompts(input: { env: string; account: string; recorded: boolean }): Array<{ question: string; expected: string }> {
   const prompts = [{ question: `Type the environment's name, ${input.env}, to delete it and everything in it: `, expected: input.env }];
   if (input.env === "production" || !input.recorded) {
-    const why = input.env === "production" ? "This environment is named production." : `AgentX has no record of creating ${input.env} (no settings and no install answers).`;
+    const why = input.env === "production" ? "This environment is named production." : `Rovara has no record of creating ${input.env} (no settings and no install answers).`;
     prompts.push({ question: `${why} Type the AWS account id, ${input.account}, to go on: `, expected: input.account });
   }
   return prompts;
 }
 
 const REVOKE: Record<ConnectorType, string> = {
-  linear: "Revoke the Linear API key AgentX used: Linear, Settings, Security and access, API keys.",
+  linear: "Revoke the Linear API key Rovara used: Linear, Settings, Security and access, API keys.",
   jira: "Revoke the Jira service account's API token: id.atlassian.com, Security, API tokens, signed in as the service account.",
-  asana: "Delete the Asana app AgentX used, or remove its bot from the project: app.asana.com/0/my-apps.",
+  asana: "Delete the Asana app Rovara used, or remove its bot from the project: app.asana.com/0/my-apps.",
 };
 
 export function vendorSteps(inventory: Inventory): string[] {
@@ -134,7 +134,7 @@ export function destroyPlanText(plan: DestroyPlan): string[] {
   const kept = plan.keepData ? retained.filter((resource) => KEPT_BY_KEEP_DATA.has(resource.type)) : [];
   const controlPlane = environmentStackName(plan.env, "control-plane");
   return [
-    `This deletes AgentX environment ${plan.env} in account ${plan.account}, region ${plan.region}:`,
+    `This deletes Rovara environment ${plan.env} in account ${plan.account}, region ${plan.region}:`,
     ...(plan.stacks.length === 0 ? [] : [`  stacks, in this order: ${plan.stacks.map((stack) => `${stack.name} (${stack.status})`).join(", ")}`]),
     ...(plan.instances + plan.volumes === 0 ? [] : [`  EC2 workers: ${plural(plan.instances, "instance", "instances")} and ${plural(plan.volumes, "workspace volume", "workspace volumes")}; deleting the volumes deletes every worker session's workspace`]),
     ...(deleted.length === 0 ? [] : [`  what the stacks keep, deleted after them: ${listed(counted(deleted))}`]),

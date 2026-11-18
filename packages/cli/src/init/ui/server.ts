@@ -16,7 +16,7 @@
 // this listener's own Host, and is then held to the manifest flow's own state, once.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { ManifestHost, OpenManifestHost } from "../context.js";
 import { WIZARD_CSP, WIZARD_CSS, WIZARD_JS, wizardHtml } from "./page.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply } from "./protocol.js";
@@ -46,7 +46,7 @@ export const CALLBACK_HEADERS: Record<string, string> = {
   "x-frame-options": "DENY",
 };
 export const CALLBACK_PAGE = (text: string, nonce?: string) =>
-  `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
+  `<!doctype html><meta charset="utf-8"><title>Install Rovara</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
 
 interface ManifestRoute {
   state: string;
@@ -151,15 +151,15 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
       response.writeHead(status, { ...CALLBACK_HEADERS, "content-security-policy": csp ?? "", "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
       response.end(body);
     };
-    if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different agentx init run.");
+    if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, `This page is from a different ${CLI_COMMAND_NAME} init run.`);
     const code = url.searchParams.get("code");
-    if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install AgentX tab.");
+    if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install Rovara tab.");
     manifest = undefined;
     clearTimeout(route.timer);
     route.resolve(code);
     // GitHub has not converted the code yet; the Install AgentX tab says whether that worked. It
     // claims only what is true so far: GitHub sent the code, not that AgentX already has the app.
-    return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.", true);
+    return answer(200, "GitHub sent Rovara the new app. You can close this tab and go back to the Install Rovara tab.", true);
   };
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -248,13 +248,13 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
 
   await new Promise<void>((resolvePromise, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
-      reject(agentXError("CONFIG_INVALID", `could not open a local port on 127.0.0.1 for the install wizard (${error.code ?? error.name}); check that no firewall or security tool blocks local ports, or run agentx init --no-ui`));
+      reject(agentXError("CONFIG_INVALID", `could not open a local port on 127.0.0.1 for the install wizard (${error.code ?? error.name}); check that no firewall or security tool blocks local ports, or run ${CLI_COMMAND_NAME} init --no-ui`));
     };
     server.once("error", onError);
     server.listen(input.port ?? 0, "127.0.0.1", () => { server.removeListener("error", onError); resolvePromise(); });
   });
   const address = server.address();
-  if (address === null || typeof address === "string") throw agentXError("CONFIG_INVALID", "the install wizard's listener did not bind a TCP port; run agentx init --no-ui");
+  if (address === null || typeof address === "string") throw agentXError("CONFIG_INVALID", `the install wizard's listener did not bind a TCP port; run ${CLI_COMMAND_NAME} init --no-ui`);
   const { port } = address;
   expectedOrigin = `http://127.0.0.1:${port}`;
   expectedHost = `127.0.0.1:${port}`;
@@ -274,7 +274,7 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
       code.catch(() => undefined);
       const timer = setTimeout(() => {
         if (manifest?.timer === timer) manifest = undefined;
-        rejectCode(agentXError("CONFIG_INVALID", `no GitHub App was created within ${Math.round(next.timeoutMs / 60_000)} minutes; run agentx init again`));
+        rejectCode(agentXError("CONFIG_INVALID", `no GitHub App was created within ${Math.round(next.timeoutMs / 60_000)} minutes; run ${CLI_COMMAND_NAME} init again`));
       }, next.timeoutMs);
       timer.unref();
       manifest = { state: next.state, page: next.page, resolve: resolveCode, reject: rejectCode, timer };

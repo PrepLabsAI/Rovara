@@ -88,7 +88,7 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
       };
     },
     async taskResult(workspaceId, operationId, signal) {
-      // The same wait and final response agentx_task_result gives the model (issue 157).
+      // The same wait and final response rovara_task_result gives the model (issue 157).
       const result = await client(workspaceId).taskResult({ workspaceId, operationId }, signal === undefined ? {} : { signal }) as {
         status: string; response?: string; error?: string; checks?: unknown;
       };

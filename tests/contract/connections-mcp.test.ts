@@ -3,8 +3,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 
-describe("agentx_list_connections", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_list_connections")!;
+describe("rovara_list_connections", () => {
+  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "rovara_list_connections")!;
 
   it("lists each connection with where it points, whether a key is saved and its last check, and says where to change them", async () => {
     const client = { listConnections: vi.fn(async () => ({ connections: [
@@ -27,8 +27,8 @@ describe("agentx_list_connections", () => {
   });
 });
 
-describe("agentx_get_context_sources", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_get_context_sources")!;
+describe("rovara_get_context_sources", () => {
+  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "rovara_get_context_sources")!;
 
   it("shows a project's sources and the changes that wait for the owner", async () => {
     const client = { getContextSources: vi.fn(async () => ({

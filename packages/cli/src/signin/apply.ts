@@ -2,7 +2,7 @@
 // settings (spec 025 FR-045, R6, R7). Runs under the environment lock. Client secrets are written
 // only once the change is confirmed (F21), and are never printed.
 import { DescribeStacksCommand, ExecuteChangeSetCommand, type Stack } from "@aws-sdk/client-cloudformation";
-import { AgentXError, agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { updateStackParameters } from "../deploy/parameter-update.js";
 import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -74,10 +74,10 @@ const notApplied = (stackName: string) => agentXError("CONFIG_INVALID", `the sig
 export async function applySignInChange(input: ApplySignInInput): Promise<{ changed: boolean; settings: DeveloperSignInSettings }> {
   const roleArn = input.settings.access?.cloudFormationRoleArn;
   if (input.settings.naming !== "environment" || roleArn === undefined) {
-    throw agentXError("CONFIG_INVALID", `developer sign-in needs an environment installed with agentx init; ${input.env} uses the legacy stack names`);
+    throw agentXError("CONFIG_INVALID", `developer sign-in needs an environment installed with ${CLI_COMMAND_NAME} init; ${input.env} uses the legacy stack names`);
   }
   const stackName = input.settings.stacks["control-plane"];
-  const rerun = input.rerun ?? "the same agentx signin command";
+  const rerun = input.rerun ?? `the same ${CLI_COMMAND_NAME} signin command`;
   const work = async () => {
     const current = await readSignInSettings(input.store, input.env);
     const choice = typeof input.next === "function" ? input.next(current) : input.next;
@@ -99,7 +99,7 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `${parsed.error.issues[0]?.message ?? "developer sign-in settings are invalid"}; check the answers and run this again`);
     const next = parsed.data;
     const teamId = input.slackTeamId ?? await readSlackTeamId(input.store, input.env);
-    if (next.slack && teamId === undefined) throw agentXError("CONFIG_INVALID", "Slack sign-in needs the Slack team ID; run agentx signin enable slack, which records it");
+    if (next.slack && teamId === undefined) throw agentXError("CONFIG_INVALID", `Slack sign-in needs the Slack team ID; run ${CLI_COMMAND_NAME} signin enable slack, which records it`);
     const withGithub = githubEverOn(current) || githubEverOn(next);
     const before = describeSignIn(current, withGithub);
     const after = describeSignIn(next, withGithub);

@@ -75,7 +75,7 @@ describe("project registration from the command line", () => {
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ project: { definition: { name: "payments" } }, duplicate: false }, { status: 201 }));
     const { exitCode, stderr, enrollments } = await runRegister(context, fetchImplementation);
     expect(exitCode).toBe(0);
-    expect(stderr).toContain("Warning: this control plane did not check connectors at registration; deploy the latest AgentX release to get the preflight report.\n");
+    expect(stderr).toContain("Warning: this control plane did not check connectors at registration; deploy the latest Rovara release to get the preflight report.\n");
     expect(enrollments.some((entry) => entry.kind === "registered")).toBe(false);
   });
 });

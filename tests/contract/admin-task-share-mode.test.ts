@@ -1,4 +1,4 @@
-// Spec 025 C25 (owner answer to Q2, 2026-09-29): an AgentX admin may switch a shared task between
+// Spec 025 C25 (owner answer to Q2, 2026-09-29): a Rovara admin may switch a shared task between
 // view only and continue, within the project's policy, through the admin API; nobody else but the
 // owning developer may.
 import { randomUUID } from "node:crypto";
@@ -100,8 +100,8 @@ describe("an admin switches a shared task's mode (C25)", () => {
   });
 });
 
-describe("agentx admin task share-mode", () => {
-  it("refuses a --task that is not a task ID before signing in or calling AgentX", async () => {
+describe("rovara admin task share-mode", () => {
+  it("refuses a --task that is not a task ID before signing in or calling Rovara", async () => {
     const fetchImplementation = vi.fn();
     let stderr = "";
     const code = await executeCli(["admin", "task", "share-mode", "--task", "not-a-task", "--mode", "view"], {
@@ -113,7 +113,7 @@ describe("agentx admin task share-mode", () => {
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
 
-  it("posts the mode with the admin token and a fresh request ID, and reports AgentX's refusal", async () => {
+  it("posts the mode with the admin token and a fresh request ID, and reports Rovara's refusal", async () => {
     const fetch = vi.fn(async () => Response.json({ task: { taskId: "t" } }));
     await setTaskShareMode({ controlPlaneUrl: "https://agentx.example.test/", accessToken: "admin-token", taskId: "44444444-4444-4444-8444-444444444444", mode: "view" }, fetch);
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];

@@ -41,8 +41,8 @@ describe("spec 048 FR-009: the download's progress", () => {
     const seen: Array<{ receivedBytes: number; totalBytes?: number }> = [];
     await readWithProgress(new Response(streamOf([1_500_000, 1_500_000])), (progress) => seen.push(progress));
     expect(seen.every((progress) => progress.totalBytes === undefined)).toBe(true);
-    expect(releaseCard({ stage: "downloading", ...seen.at(-1)! }).lines).toEqual(["Downloading AgentX: 3.0 MB so far."]);
-    expect(releaseCard({ stage: "downloading", receivedBytes: 5_000_000, totalBytes: 4_000_000 }).lines).toEqual(["Downloading AgentX (about 4.0 MB): 100% done."]);
+    expect(releaseCard({ stage: "downloading", ...seen.at(-1)! }).lines).toEqual(["Downloading Rovara: 3.0 MB so far."]);
+    expect(releaseCard({ stage: "downloading", receivedBytes: 5_000_000, totalBytes: 4_000_000 }).lines).toEqual(["Downloading Rovara (about 4.0 MB): 100% done."]);
     for (const line of releaseCard({ stage: "downloading", receivedBytes: 0, totalBytes: 0 }).lines) expect(line).not.toMatch(/NaN|Infinity/);
   });
 });
@@ -255,7 +255,7 @@ describe("fetching the release for this CLI", () => {
   // (sourceRelease below), so the only thing left to say is how to give one or the other.
   it("asks a CLI built from source to pass --release, or --engine cdk with --source", async () => {
     await expect(fetchRelease({ version: undefined, home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
-      .rejects.toThrow("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
+      .rejects.toThrow("this rovara was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   });
 });
 
@@ -296,7 +296,7 @@ describe("readReleaseManifest (doctor's release check)", () => {
   });
 });
 
-// Issue 152: a source-built agentx with --engine cdk --source builds its release from the checkout:
+// Issue 152: a source-built rovara with --engine cdk --source builds its release from the checkout:
 // the version from its tag, the images from the flags or the tag's published release.json.
 describe("sourceRelease (issue 152)", () => {
   const HEAD = "e".repeat(40);

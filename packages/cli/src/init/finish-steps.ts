@@ -1,6 +1,6 @@
 // The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
 // is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
@@ -28,7 +28,7 @@ import { STEP_PLAN } from "./ui/journey.js";
  * admin session need them (F21: one message, used by both). */
 export async function readSettingsOrThrow(store: ParameterStore, env: string): Promise<EnvironmentSettings> {
   const settings = await readEnvironmentSettings(store, env);
-  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx --env ${env} init again`);
+  if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run ${CLI_COMMAND_NAME} --env ${env} init again`);
   return settings;
 }
 
@@ -41,7 +41,7 @@ function oidcAdminName(accessToken: string): string {
   const name = [...tokenClaimValues(accessToken, "email"), ...tokenClaimValues(accessToken, "sub")]
     .find((value) => value.length >= 3 && value.length <= 128);
   if (name === undefined) {
-    throw agentXError("CONFIG_INVALID", "your sign-in token has no email or sub claim of 3 to 128 characters to record the admin by; make your identity provider put one in the access token, then run agentx init again");
+    throw agentXError("CONFIG_INVALID", `your sign-in token has no email or sub claim of 3 to 128 characters to record the admin by; make your identity provider put one in the access token, then run ${CLI_COMMAND_NAME} init again`);
   }
   return name;
 }
@@ -56,7 +56,7 @@ export async function adminUserForSetupPage(context: InitContext, progress: Prog
   if (email === undefined) return;
   const outputs = await (await context.deployment()).deployer.outputs(environmentStackName(context.env, "identity"));
   const poolId = outputs?.UserPoolId;
-  if (poolId === undefined) throw agentXError("CONFIG_INVALID", `stack ${environmentStackName(context.env, "identity")} has no output UserPoolId; run agentx init again`);
+  if (poolId === undefined) throw agentXError("CONFIG_INVALID", `stack ${environmentStackName(context.env, "identity")} has no output UserPoolId; run ${CLI_COMMAND_NAME} init again`);
   await ensureCognitoAdmin({
     cognito: context.setup.cognito, poolId, email, write: context.write,
     confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
@@ -89,7 +89,7 @@ export function adminUserStep(): InitStep<InitContext> {
       if (settings.identity.mode === "cognito") {
         // Spec 048 FR-020: your email is a setting now; the question stays for an install recorded
         // before that, whose answers have none.
-        const email = recorded?.username ?? context.flags.adminEmail ?? context.answers.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
+        const email = recorded?.username ?? context.flags.adminEmail ?? context.answers.adminEmail ?? await context.prompter.ask("Your email address, for your Rovara admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
         // A user who has not signed in yet (new, or made by an earlier run) signs in with the
@@ -116,7 +116,7 @@ export function adminUserStep(): InitStep<InitContext> {
         throw agentXError("CONFIG_INVALID", `the install's identity settings do not match its answers: /agentx/${context.env}/settings says your own OIDC provider, but the answers say Cognito; check which install wrote /agentx/${context.env}/settings, or start a new install with another --env`);
       }
       if (identity.adminClaim === undefined || identity.adminValues === undefined) {
-        throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
+        throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; Rovara cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
       const session = await signIn("an administrator of your company's sign-in");
       let username: string;
@@ -165,7 +165,7 @@ export function firstProjectStep(): InitStep<InitContext> {
       if (!shown) context.surface?.card(projectCard({ name: project.name, revision: project.revision }));
       if (project.channelId === undefined) {
         const slack = progress.current().slack;
-        if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
+        if (slack === undefined) throw agentXError("CONFIG_INVALID", `install progress has no Slack app facts; the Slack app step must finish first, so run ${CLI_COMMAND_NAME} init again`);
         let waitingFor: string | undefined;
         let bound: Awaited<ReturnType<typeof addChannel>>;
         try {
@@ -219,15 +219,15 @@ export function connectorsStep(): InitStep<InitContext> {
     async run(context, progress) {
       const wanted = context.flags.connectors === undefined ? undefined : parseConnectorsFlag(context.flags.connectors);
       const project = progress.current().project;
-      if (project === undefined) throw agentXError("CONFIG_INVALID", "install progress has no project; the first-project step must finish first, so run agentx init again");
+      if (project === undefined) throw agentXError("CONFIG_INVALID", `install progress has no project; the first-project step must finish first, so run ${CLI_COMMAND_NAME} init again`);
       const done = new Set((progress.current().connectors ?? []).map((entry) => entry.type));
       for (const type of CONNECTOR_TYPES) {
         if (done.has(type)) continue;
-        const yes = wanted !== undefined ? wanted.has(type) : await context.prompter.confirm(`Connect ${CONNECTOR_LABELS[type]} to ${project.name} now? (You can add it later with agentx connector add ${type})`, { defaultValue: false });
+        const yes = wanted !== undefined ? wanted.has(type) : await context.prompter.confirm(`Connect ${CONNECTOR_LABELS[type]} to ${project.name} now? (You can add it later with ${CLI_COMMAND_NAME} connector add ${type})`, { defaultValue: false });
         if (!yes) continue;
         const session = await context.adminSession();
         // A connector that fails here is fixed by rerunning init, not the day-2 command.
-        const base = { env: context.env, rerun: `agentx --env ${context.env} init`, session, projectName: project.name, secrets: context.secrets, prompter: context.prompter, processEnv: context.processEnv, write: context.write, services: context.setup, flags: context.flags };
+        const base = { env: context.env, rerun: `${CLI_COMMAND_NAME} --env ${context.env} init`, session, projectName: project.name, secrets: context.secrets, prompter: context.prompter, processEnv: context.processEnv, write: context.write, services: context.setup, flags: context.flags };
         const result: { ref: string; revision: number; warning?: string } = type === "linear" ? await addLinear(base) : type === "jira" ? await addJira(base) : await addAsana(base);
         // Owner decision 6: a Jira connector that sees more than its project is saved with a
         // warning, and the warning is kept in the install progress (for 15e's doctor).
@@ -240,7 +240,7 @@ export function connectorsStep(): InitStep<InitContext> {
       }
       const connected = (progress.current().connectors ?? []).map((entry) => CONNECTOR_LABELS[entry.type]);
       // --connectors none, which --yes without --connectors also means (main.ts).
-      if (wanted?.size === 0 && connected.length === 0) context.write(`No connectors added; add them later with agentx --env ${context.env} connector add linear|jira|asana`);
+      if (wanted?.size === 0 && connected.length === 0) context.write(`No connectors added; add them later with ${CLI_COMMAND_NAME} --env ${context.env} connector add linear|jira|asana`);
       context.surface?.card(connectorsCard({
         projectName: project.name,
         connected: (progress.current().connectors ?? []).map((entry) => ({ label: CONNECTOR_LABELS[entry.type], ...(entry.warning === undefined ? {} : { warning: entry.warning }) })),
@@ -283,17 +283,17 @@ export function alertsStep(): InitStep<InitContext> {
       const settings = await requireSettings(context);
       if (answers.budget !== undefined) {
         const limit = await context.setup.alerts.budget(settings.account, `agentx-${context.env}-monthly`);
-        if (limit === undefined) throw agentXError("CONFIG_INVALID", `the budget agentx-${context.env}-monthly does not exist; check the control-plane stack's BudgetMonthlyUsd parameter, then run agentx init again`);
+        if (limit === undefined) throw agentXError("CONFIG_INVALID", `the budget agentx-${context.env}-monthly does not exist; check the control-plane stack's BudgetMonthlyUsd parameter, then run ${CLI_COMMAND_NAME} init again`);
         context.write(`Budget agentx-${context.env}-monthly: $${limit} a month.${answers.budget.scope === "tag" ? ` ${BUDGET_TAG_NOTE}` : ""}`);
       }
       // --no-alerts: nothing to subscribe and nothing to test.
       if (answers.alert.kind === "none") {
         context.surface?.card(alertsCard({ stage: "none" }));
-        return { status: "done", note: "no alert address (agentx config set alerts.address, phase 15e)" };
+        return { status: "done", note: `no alert address (${CLI_COMMAND_NAME} config set alerts.address, phase 15e)` };
       }
       const recorded = progress.current().alerts ?? { subscribed: false, tested: false };
       const shownAs = answers.alert.kind === "email" ? answers.alert.address : answers.alert.display;
-      const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: "run agentx init again" });
+      const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: `run ${CLI_COMMAND_NAME} init again` });
       if (!recorded.subscribed) {
         const target = await alertTargetFrom(context, answers.alert);
         const surface = context.surface;
@@ -310,7 +310,7 @@ export function alertsStep(): InitStep<InitContext> {
           if (!(await context.prompter.confirm("Have you confirmed the subscription? Answer Yes to check again.", { defaultValue: true }))) break;
           state = await subscribe();
         }
-        if (state === "pending") return { status: "waiting", message: `Confirm the alert subscription for ${shownAs} (the AWS Notifications email, or your webhook's SubscribeURL), then run agentx init --env ${context.env} --region ${answers.region} again.` };
+        if (state === "pending") return { status: "waiting", message: `Confirm the alert subscription for ${shownAs} (the AWS Notifications email, or your webhook's SubscribeURL), then run ${CLI_COMMAND_NAME} init --env ${context.env} --region ${answers.region} again.` };
         // Recorded before the test alarm, so a failed test is retried without subscribing again.
         await progress.update({ alerts: { subscribed: true, tested: false } });
       }
@@ -332,7 +332,7 @@ export function alertsStep(): InitStep<InitContext> {
 /** The webhook address, from its secret: it is never in the answers, the progress or the output. */
 async function requireWebhook(context: InitContext, name: string): Promise<string> {
   const value = await context.secrets.get(name);
-  if (value === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; run agentx init with --alert-webhook-file or --alert-webhook-env to store it again`);
+  if (value === undefined) throw agentXError("CONFIG_INVALID", `secret ${name} is missing; run ${CLI_COMMAND_NAME} init with --alert-webhook-file or --alert-webhook-env to store it again`);
   return checkAlertWebhook(value.trim());
 }
 
@@ -345,7 +345,7 @@ export function e2eStep(): InitStep<InitContext> {
     async run(context, progress) {
       const { project, slack } = progress.current();
       if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {
-        throw agentXError("CONFIG_INVALID", "install progress has no bound channel; the first-project step must finish first, so run agentx init again");
+        throw agentXError("CONFIG_INVALID", `install progress has no bound channel; the first-project step must finish first, so run ${CLI_COMMAND_NAME} init again`);
       }
       const where = { channelName: project.channelName, channelId: project.channelId, teamId: slack.teamId };
       const show = (card: ReplyCardInput) => context.surface?.card(replyCard(card));
@@ -359,7 +359,7 @@ export function e2eStep(): InitStep<InitContext> {
           show({ stage: "waiting", ...where, botName: botNameOf(progress.current(), context.answers.slack.appName), minutes: Math.round(REPLY_WAIT_MS / 60_000) });
           return waitForThreadedReply({
             env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: where.channelId,
-            channelName: where.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
+            channelName: where.channelName, botUserId: slack.botUserId, rerun: `${CLI_COMMAND_NAME} --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
             reported,
           });
         },
@@ -385,7 +385,7 @@ export function readyText(input: { env: string; controlPlaneUrl: string; progres
   const connectors = progress.connectors ?? [];
   const connected = connectors.map((entry) => CONNECTOR_LABELS[entry.type]);
   return [
-    `AgentX environment ${env} is ready.`,
+    `Rovara environment ${env} is ready.`,
     ...(project?.channelName === undefined ? [] : [`  Talk to it: mention @${input.botName} in #${project.channelName} (project ${project.name}).`]),
     // Repeated here: the developer-signin step prints it only on the run that executes it, and a
     // resume (after the alert confirmation wait, say) finishes without that step.

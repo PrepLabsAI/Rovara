@@ -1,6 +1,6 @@
 # Architecture
 
-The index of AgentX's architecture documentation, maintained by the-loop. Each work item's
+The index of Rovara's architecture documentation, maintained by the-loop. Each work item's
 `design.md` (under `docs/specs/<id>/`) that changes the architecture updates this page.
 
 | Page | Covers |

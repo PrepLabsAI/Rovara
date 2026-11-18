@@ -30,7 +30,7 @@ defaults to your AWS configuration.
 ## Check it
 
 ```sh
-agentx --env <env> doctor --region <region>
+rovara --env <env> doctor --region <region>
 ```
 
 `doctor` checks every piece and prints, for each problem, what is wrong and how to fix it. The
@@ -54,12 +54,12 @@ checks, in order:
 - **alerts**: the alert subscription is confirmed, and the budget matches its setting.
 - **capacity**: the region's EC2 vCPU quota, and free EC2-VPC Elastic IPs. Fewer than two free is
   a warning: this environment keeps working, but another one in this region would not fit.
-- **sign-in**: every check of `agentx signin check`.
+- **sign-in**: every check of `rovara signin check`.
 - **chatgpt**: [Sign in with ChatGPT](chatgpt.md): whether it's on and which model tasks prefer, how
   many people have connected a plan, and whether the control plane reaches `auth.openai.com` and
   `api.openai.com`. An unreachable host fails while it's on, and only warns while it's off. The
   control plane alone knows these, so doctor reads them through this computer's admin sign-in
-  (`agentx --env <env> login --admin`); without one, the group is skipped.
+  (`rovara --env <env> login --admin`); without one, the group is skipped.
 
 `--json` prints the whole report as one JSON document on stdout. The exit code is 0 when no check
 failed (warnings and skips are fine), and 2 when any check failed or doctor could not start.
@@ -78,10 +78,10 @@ checks only the channel `init` bound. Channels bound later are not listed.
 ## Upgrade
 
 ```sh
-agentx --env <env> upgrade --region <region> [--to <version>]
+rovara --env <env> upgrade --region <region> [--to <version>]
 ```
 
-Without `--to`, it upgrades to the release of the `agentx` you run. So
+Without `--to`, it upgrades to the release of the `rovara` you run. So
 `npx @preplabsai/rovara-code@<version> --env <env> upgrade --region <region>` is the usual form.
 `--release <dir>` uses a release directory instead of downloading one.
 
@@ -92,7 +92,7 @@ key, secret, queue or log group, because that loses its data. To accept one, typ
 id when asked, or name it in advance:
 
 ```sh
-agentx --env <env> upgrade --region <region> --allow-replace <LogicalId>
+rovara --env <env> upgrade --region <region> --allow-replace <LogicalId>
 ```
 
 Repeat `--allow-replace` for each. `--yes` deploys without asking, but still prints every change
@@ -106,7 +106,7 @@ strictly, is the tolerant side while the two differ.
 back. Stacks before it stay on the new release. Run the same command again: it continues. When
 every stack is done, it records the new version in the settings and runs `doctor`.
 
-**Locking.** `upgrade` holds the environment's lock while it runs, so no other `agentx` command
+**Locking.** `upgrade` holds the environment's lock while it runs, so no other `rovara` command
 changes the environment at the same time. A run that was cut off leaves its lock. At a terminal,
 the same caller's next `upgrade` asks at once whether to take that lock over; say yes only if the
 earlier run is no longer going. A lock someone else holds is refused until it is 2 hours old
@@ -132,17 +132,17 @@ export (below) and run `upgrade` again once they deployed it.
 target release's tag (the operator role cannot use CDK's bootstrap resources):
 
 ```sh
-agentx --env <env> upgrade --region <region> --to <version> --source <checkout of v<version>>
+rovara --env <env> upgrade --region <region> --to <version> --source <checkout of v<version>>
 ```
 
-`--to` or `--release`, when given, must be the checkout's tag. An `agentx` built from source needs
+`--to` or `--release`, when given, must be the checkout's tag. A `rovara` built from source needs
 neither: it upgrades to the checkout's tag, and reads the images from `--worker-image` and
 `--slack-image`, or else from that tag's `release.json` on GitHub.
 
 **For a pipeline: `upgrade --export`.** This writes the upgrade as files and changes nothing:
 
 ```sh
-agentx --env <env> upgrade --region <region> --to <version> --export <dir>
+rovara --env <env> upgrade --region <region> --to <version> --export <dir>
 ```
 
 The bundle holds each stack's template and parameters, the changed code packages, `SHA256SUMS`,
@@ -150,25 +150,25 @@ and a `README.md` with every command: check the checksums, upload the packages, 
 stack, create a change set, read it, execute it and wait. The platform team runs every command
 from the bundle's directory. A changed access stack is included, to deploy with their own
 credentials. No file holds a secret: kept values are marked `UsePreviousValue`. When they are
-done, run `agentx --env <env> upgrade --to <version>` once more: it finds nothing left, records
+done, run `rovara --env <env> upgrade --to <version>` once more: it finds nothing left, records
 the version and runs `doctor`. A cdk environment cannot export.
 
 ## Change settings
 
 ```sh
-agentx --env <env> config list --region <region>
-agentx --env <env> config get <key> --region <region>
-agentx --env <env> config set <key> <value> --region <region>
+rovara --env <env> config list --region <region>
+rovara --env <env> config get <key> --region <region>
+rovara --env <env> config set <key> <value> --region <region>
 ```
 
-The admin sign-in (`agentx --env <env> login --admin`) lasts 6 hours and is never refreshed: after
-that, every `agentx admin` command asks you to sign in again. An environment whose identity
+The admin sign-in (`rovara --env <env> login --admin`) lasts 6 hours and is never refreshed: after
+that, every `rovara admin` command asks you to sign in again. An environment whose identity
 stack is not managed by Rovara (one that brings its own OIDC provider) sets this on its own app
 client, as the access and ID token validity.
 
 `set` shows the change and asks first (`--yes` skips the question). With this computer's admin
-sign-in (`agentx --env <env> login --admin`), every change `set` makes is recorded in the admin
-change history (`agentx --env <env> admin changes`) with the admin who made it, the `cli` client,
+sign-in (`rovara --env <env> login --admin`), every change `set` makes is recorded in the admin
+change history (`rovara --env <env> admin changes`) with the admin who made it, the `cli` client,
 the key, the value before and after, and when it was asked, applied or failed. It is recorded
 after the yes and before anything changes; if Rovara cannot record it, nothing changes. If the
 outcome cannot be recorded, or a stack update may still be running when `set` stops, `set` warns
@@ -176,7 +176,7 @@ and the record stays `applying`. `alerts.address` is recorded only as changed, n
 Without the admin sign-in, the operator role alone can still change a setting, but `set` warns
 first that the change will not be recorded. A stack-parameter change needs a sign-in with at
 least 35 minutes left, so its outcome can be recorded too. The record is an audit trail for
-admins, not a control: the operator role alone can always change a setting unrecorded. Changes made outside `agentx config
+admins, not a control: the operator role alone can always change a setting unrecorded. Changes made outside `rovara config
 set` (the CloudFormation console, say) are not recorded. Each key lives in exactly one place:
 
 | Key | Where it lives | Default | Notes |
@@ -188,7 +188,7 @@ set` (the CloudFormation console, say) are not recorded. Each key lives in exact
 | `models.fallback` | stack parameter ModelFallback on agentx-<env>-runtime and agentx-<env>-slack | none | the Bedrock model the coding worker, the orchestrator and the classifier run on when their provider's key secret is missing: `none` (no fallback: the call fails by name) or a Bedrock model id of Rovara's model catalog, tested with one call before it is set. It sets both stacks, one after the other, after one yes. When a fallback runs, the task page (for the worker) and the Slack reply (for the orchestrator) say which model ran and why; the classifier and router only log it |
 | `models.chatgpt.enabled` | control-plane setting CHATGPT.enabled | false | true or false; [Sign in with ChatGPT](chatgpt.md); changes through the admin change path, with the admin sign-in |
 | `models.chatgpt.preferredModel` | control-plane setting CHATGPT.preferredModel | gpt-6.1-sol | used only where a person's plan allows it; changes through the admin change path, with the admin sign-in |
-| `limits.workspacesPerMember` | control-plane setting WORKSPACE_LIMITS.perPerson (install-time default SlackMemberWorkspaceLimit) | 3 | 1 to 50; changes through the admin change path, with the admin sign-in (`agentx --env <env> login --admin`) |
+| `limits.workspacesPerMember` | control-plane setting WORKSPACE_LIMITS.perPerson (install-time default SlackMemberWorkspaceLimit) | 3 | 1 to 50; changes through the admin change path, with the admin sign-in (`rovara --env <env> login --admin`) |
 | `limits.workspacesPerOrg` | control-plane setting WORKSPACE_LIMITS.perOrganization (install-time default SlackOrganizationWorkspaceLimit) | 20 | 1 to 1000; changes through the admin change path, with the admin sign-in |
 | `limits.threadTurnsPerMinute` | stack parameter SlackThreadTurnsPerMinute on agentx-<env>-control-plane | 6 | 1 to 60 |
 | `slack.appPostedMessages` | stack parameter SlackAppPostedMessages on agentx-<env>-control-plane | accept | accept or ignore |
@@ -227,12 +227,12 @@ aws sns unsubscribe --subscription-arn <the ARN it prints> --region <region>
 ```
 
 A new email address gets alarms once its owner confirms the subscription. Then send a test alarm
-with `agentx --env <env> alerts test`.
+with `rovara --env <env> alerts test`.
 
 ## Replace the Slack bot token
 
 When Slack refuses the bot token (doctor shows "Slack refused the bot token", with Slack's error
-code such as `invalid_auth` or `token_revoked`), get a new one and store it. `agentx init` does not
+code such as `invalid_auth` or `token_revoked`), get a new one and store it. `rovara init` does not
 do this for a finished install.
 
 1. Open the Slack app at api.slack.com/apps, choose **Install App**, reinstall it to the
@@ -247,7 +247,7 @@ do this for a finished install.
 6. Check it:
 
    ```sh
-   agentx --env <env> doctor --region <region>
+   rovara --env <env> doctor --region <region>
    ```
 
 Nothing needs a restart. The Slack service and the control plane's Slack functions keep the
@@ -256,17 +256,17 @@ save. `doctor` reads the secret itself, so it checks the new token at once.
 
 ## Projects, channels and connectors
 
-- `agentx --env <env> project add --repository <owner/name>`: registers another project on EC2
+- `rovara --env <env> project add --repository <owner/name>`: registers another project on EC2
   workers, and writes its file to `~/.agentx/projects/<name>.yaml`.
-- `agentx --env <env> channel add --project <name> --channel <channel>`: binds a Slack channel,
+- `rovara --env <env> channel add --project <name> --channel <channel>`: binds a Slack channel,
   invites the bot, and waits for a mention to get a threaded reply (`--no-check` skips the wait).
-- `agentx --env <env> connector add linear|jira|asana --project <name>`: adds a connector, tests a
+- `rovara --env <env> connector add linear|jira|asana --project <name>`: adds a connector, tests a
   read, and registers the project's next revision.
-- `agentx --env <env> connector add mcp --project <name> --endpoint <url>`: connects any other
+- `rovara --env <env> connector add mcp --project <name> --endpoint <url>`: connects any other
   remote MCP server with an API key or an OAuth sign-in, lists its tools as the test read, and
   registers the project's next revision with the tools you approve
   ([connectors/custom-mcp.md](connectors/custom-mcp.md)).
-- `agentx --env <env> alerts test`: sends a test alarm to the alert address and asks whether it
+- `rovara --env <env> alerts test`: sends a test alarm to the alert address and asks whether it
   arrived.
 
 The worker image has Python 3, pip, venv and uv. Debian bookworm's system Python is externally
@@ -275,11 +275,11 @@ managed, so a Python project's setup command should make a virtual environment
 
 ## Developer sign-in
 
-- `agentx --env <env> signin show`: which methods are on, and what the control plane offers.
-- `agentx --env <env> signin enable slack|oidc`: turns a method on; shows the change and asks.
-- `agentx --env <env> signin disable slack|oidc`: turns a method off; everyone signed in with it
+- `rovara --env <env> signin show`: which methods are on, and what the control plane offers.
+- `rovara --env <env> signin enable slack|oidc`: turns a method on; shows the change and asks.
+- `rovara --env <env> signin disable slack|oidc`: turns a method off; everyone signed in with it
   is signed out at once.
-- `agentx --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
+- `rovara --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
 
 Developers need no AWS credentials: they run `npx @preplabsai/rovara-code login <control plane URL>`.
 To hand tasks to Rovara from Claude Code, Codex or Cursor, and to share them to Slack, they follow
@@ -291,12 +291,12 @@ A developer can share a task from their AI tool into a project's Slack channel, 
 to the channel (continue). A project's `developerTasks` settings decide whether sharing is required,
 the default mode and whether continue is allowed; see
 [docs/project-configuration.md](project-configuration.md#developer-tasks). To switch a shared task's
-mode, sign in as an admin (`agentx --env <env> login`) and run:
+mode, sign in as an admin (`rovara --env <env> login`) and run:
 
 ```sh
-agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
+rovara --env <env> admin task share-mode --task <task-id> --mode view|continue
 ```
 
 The mode stays within the project's settings: with continue not allowed, the task stays view only.
-An admin cannot share a private task or move a shared one to another channel. `agentx --env <env>
+An admin cannot share a private task or move a shared one to another channel. `rovara --env <env>
 admin turns export --since 7d` shows task IDs.

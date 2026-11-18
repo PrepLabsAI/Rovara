@@ -30,7 +30,7 @@ describe("the release test workflow (SC-003 to SC-005, question 6)", () => {
     expect(all).toContain(" config set alerts.slowTurnMinutes 7 --yes");
   });
 
-  it("always tears down every environment it made with agentx destroy, the name piped in", async () => {
+  it("always tears down every environment it made with rovara destroy, the name piped in", async () => {
     const wf = await workflow();
     expect(wf.jobs.teardown?.if).toBe("always()");
     expect(wf.jobs.teardown?.needs).toEqual(["lane", "export"]);
@@ -121,7 +121,7 @@ describe("the release test workflow (SC-003 to SC-005, question 6)", () => {
     expect(gate.match(/Slack redirect URL/g)).toHaveLength(1);
   });
 
-  // A cancelled run kills agentx before its finally releases /agentx/<env>/lock, and destroy
+  // A cancelled run kills rovara before its finally releases /agentx/<env>/lock, and destroy
   // refuses a locked environment, so each destroy first removes the lock this run left.
   it("removes this run's own lock before every destroy, so a cancelled run is still torn down", async () => {
     const all = await text();

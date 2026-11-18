@@ -46,8 +46,8 @@ describe("turn recording in the real Pi runtime", () => {
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("github__list_issues", { state: "OPEN" })], { stopReason: "toolUse" }),
       fauxAssistantMessage([fauxToolCall("agentx_update_pull_request", { repository: "demo", pullRequestNumber: 3 })], { stopReason: "toolUse" }),
-      fauxAssistantMessage([fauxToolCall("agentx_submit_task", {})], { stopReason: "toolUse" }),
-      fauxAssistantMessage([fauxToolCall("agentx_submit_task", { prompt: "list files" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("rovara_submit_task", {})], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("rovara_submit_task", { prompt: "list files" })], { stopReason: "toolUse" }),
       fauxAssistantMessage(""),
     ]);
     try {
@@ -55,13 +55,13 @@ describe("turn recording in the real Pi runtime", () => {
     } finally { await runtime.dispose(); }
     const observation = TurnObservationSchema.parse(recorder.observation());
     expect(observation.offeredTools.map((tool) => tool.name)).toEqual([
-      "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request", "github__list_issues",
+      "rovara_submit_task", "rovara_create_pull_request", "rovara_follow_up", "rovara_manage_pull_request", "github__list_issues",
     ]);
     expect(observation.calls.map(({ name, connector, validation, outcome }) => ({ name, connector, validation, outcome }))).toEqual([
       { name: "github__list_issues", connector: "github", validation: "ok", outcome: "SUCCEEDED" },
       { name: "agentx_update_pull_request", connector: undefined, validation: "unknown_tool", outcome: "FAILED" },
-      { name: "agentx_submit_task", connector: undefined, validation: "schema_error", outcome: "FAILED" },
-      { name: "agentx_submit_task", connector: undefined, validation: "ok", outcome: "SUCCEEDED" },
+      { name: "rovara_submit_task", connector: undefined, validation: "schema_error", outcome: "FAILED" },
+      { name: "rovara_submit_task", connector: undefined, validation: "ok", outcome: "SUCCEEDED" },
     ]);
     expect(observation.workerOperations).toEqual([operation]);
     expect(observation).toMatchObject({ stopReason: "stop", emptyResponse: true, model: { provider: "agentx-faux", modelId: "scripted" } });

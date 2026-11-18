@@ -11,7 +11,7 @@
 //     own check): a company admin with no grant on the project may see and dismiss, and gets the fixed 403 on Start.
 //   - A ticket id that is not this project's waiting ticket (another project's, another company's, started, unknown) is one 404. Fixed words throughout, never the request's own.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXNameSchema, IntakeDismissBodySchema, IntakeStartBodySchema, agentXError } from "@agentx/contracts";
+import { AgentXNameSchema, IntakeDismissBodySchema, IntakeStartBodySchema, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -22,7 +22,7 @@ export const INTAKE_ADMIN_ONLY = "Only a company owner or admin, or the project'
 export const INTAKE_NO_TICKET = "no such waiting ticket";
 export const INTAKE_CANNOT_START = "You can't start work on this project.";
 export const INTAKE_UNAVAILABLE = "The waiting tickets could not be read just now; try again.";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 export interface HostedIntakeRouteContext {
   documentClient: { send(command: unknown): Promise<unknown> };

@@ -739,7 +739,7 @@ export class GitHubAppCredentialProvider {
 
   /** The commit a branch points at now, as GitHub says; throws when the branch does not exist. */
   async getBranchHead(repositoryUrl: string, branch: string): Promise<string> {
-    if (!/^agentx\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (!/^(?:rovara|agentx)\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
     const repository = await this.installed(parseGitHubRepository(repositoryUrl));
     const token = await this.createInstallationToken(repository, { contents: "read" });
     const response = await this.fetchImplementation(

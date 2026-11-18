@@ -100,7 +100,7 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
 
 const options = { env: "staging", yes: true, allowReplace: [] as string[] };
 
-describe("agentx upgrade (FR-042 to FR-044)", () => {
+describe("rovara upgrade (FR-042 to FR-044)", () => {
   it("keeps every core setting across an upgrade", async () => {
     const coreSettings = {
       CoreEngine: "on:org_aaaaaaaaaaaaaaaaaaaa",
@@ -137,7 +137,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
       const h = await harness();
       await runUpgrade(options, h.deps);
       expect(h.lines).toContain("GitHub webhook: configured");
-      expect(h.lines.indexOf("GitHub webhook: configured")).toBeLessThan(h.lines.indexOf("Checking the environment with agentx doctor"));
+      expect(h.lines.indexOf("GitHub webhook: configured")).toBeLessThan(h.lines.indexOf("Checking the environment with rovara doctor"));
       expect(h.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
       expect((JSON.parse(h.githubSecrets.values.get(GITHUB_APP_SECRET)!) as { webhookSecret: string }).webhookSecret).toBe(HAND_SET_WEBHOOK_SECRET);
     });
@@ -249,7 +249,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("refuses while another command holds the environment lock, deploying nothing", async () => {
     const h = await harness();
     h.store.values.set(lockParameterName("staging"), JSON.stringify({ holder: "arn:aws:sts::123456789012:assumed-role/Admin/bob", command: "config set", acquiredAt: new Date(T0).toISOString() }));
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "config set" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same agentx command again`);
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow(`locked by arn:aws:sts::123456789012:assumed-role/Admin/bob running "config set" since ${new Date(T0).toISOString()}; wait for it to finish, then run the same rovara command again`);
     expect(h.deployer.deployed).toEqual([]);
   });
 
@@ -314,9 +314,9 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect(h.deployer.deployed).toEqual([]);
   });
 
-  it("needs a version when this agentx was built from source", async () => {
+  it("needs a version when this rovara was built from source", async () => {
     const h = await harness({ cliVersion: undefined });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("this rovara was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
   });
 
   it("refuses --to that does not match the release directory", async () => {
@@ -328,7 +328,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("refuses the legacy deployment and an environment that is not installed", async () => {
     const h = await harness();
     await writeEnvironmentSettings(h.store, { ...INSTALLED, naming: "legacy" });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("agentx upgrade works on environments installed with agentx init; staging uses the legacy stack names");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("rovara upgrade works on environments installed with rovara init; staging uses the legacy stack names");
     await expect(runUpgrade({ ...options, env: "other" }, h.deps)).rejects.toThrow("environment other is not installed in this account and region");
   });
 
@@ -341,7 +341,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   it("under the operator role, stops before deploying when the release changes the access stack (question 9)", async () => {
     const h = await harness({ caller: OPERATOR, loadRelease: async () => release("1.3.0", [], CHANGED_ACCESS_TEMPLATE) });
     await expect(runUpgrade(options, h.deps)).rejects.toThrow("release 1.3.0 changes the access stack, which only admin credentials can deploy");
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("agentx --env staging upgrade --export <dir>");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("rovara --env staging upgrade --export <dir>");
     expect(h.deployer.deployed).toEqual([]);
   });
 
@@ -380,14 +380,14 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
 
   it("fails when doctor finds a problem after the upgrade (FR-044)", async () => {
     const h = await harness({ doctor: async () => ({ ...healthy, failed: 2 }) });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but 2 doctor checks failed; fix what each one names, then run agentx doctor again");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but 2 doctor checks failed; fix what each one names, then run rovara doctor again");
     expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
     expect(h.deployer.deployed).toHaveLength(6);
   });
 
   it("says the upgrade finished when doctor itself cannot run", async () => {
     const h = await harness({ doctor: async () => { throw new Error("connect ETIMEDOUT 140.82.112.3:443"); } });
-    await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but doctor could not run: connect ETIMEDOUT 140.82.112.3:443; run agentx doctor");
+    await expect(runUpgrade(options, h.deps)).rejects.toThrow("upgraded staging to 1.3.0, but doctor could not run: connect ETIMEDOUT 140.82.112.3:443; run rovara doctor");
     expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
   });
 
@@ -415,7 +415,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
 
   it("needs --yes when stdin is not a terminal", async () => {
     const h = await harness({ isInteractive: () => false });
-    await expect(runUpgrade({ ...options, yes: false }, h.deps)).rejects.toThrow("agentx upgrade needs --yes when stdin is not a terminal");
+    await expect(runUpgrade({ ...options, yes: false }, h.deps)).rejects.toThrow("rovara upgrade needs --yes when stdin is not a terminal");
   });
 
   it("with --export, writes the bundle and deploys nothing", async () => {
@@ -460,7 +460,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect(new Set(described).size).toBe(described.length);
   });
 
-  it("applies the same sign-in values as agentx upgrade when SSM and the stack disagree (ruling F29)", async () => {
+  it("applies the same sign-in values as rovara upgrade when SSM and the stack disagree (ruling F29)", async () => {
     const declared = ["BudgetMonthlyUsd", "SlackTeamId", "DeveloperSignInSlack"];
     const controlPlane = { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****", SlackTeamId: "T0OLD", DeveloperSignInSlack: "enabled" };
     const upgraded = await harness({ controlPlane, loadRelease: async () => release("1.3.0", declared) });
@@ -487,7 +487,7 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
   });
 });
 
-describe("agentx upgrade with the cdk engine", () => {
+describe("rovara upgrade with the cdk engine", () => {
   const cdk = async (overrides: Parameters<typeof harness>[0] = {}) => {
     const h = await harness(overrides);
     await writeEnvironmentSettings(h.store, { ...INSTALLED, engine: "cdk" });
@@ -590,7 +590,7 @@ function withoutWrite(deps: UpgradeDependencies): Partial<UpgradeDependencies> {
   return copy;
 }
 
-describe("the agentx upgrade command", () => {
+describe("the rovara upgrade command", () => {
   function capture() {
     const out: string[] = [];
     const err: string[] = [];
@@ -638,7 +638,7 @@ describe("the agentx upgrade command", () => {
     const io = capture();
     const slack = `123456789012.dkr.ecr.us-east-1.amazonaws.com/s@sha256:${"e".repeat(64)}`;
     const code = await executeCli(["--env", "staging", "upgrade", "--yes", "--source", "/src", "--slack-image", slack], { ...io, upgrade: withoutWrite(h.deps) });
-    expect(io.err.join("")).not.toContain("AgentX error");
+    expect(io.err.join("")).not.toContain("Rovara error");
     expect(code).toBe(0);
     expect(built).toEqual([{ source: "/src", images: { slack } }]);
   });

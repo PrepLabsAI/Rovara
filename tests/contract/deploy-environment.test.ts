@@ -326,7 +326,7 @@ describe("deploy environment", () => {
 
     await expect(
       deployEnvironment({ mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: attempt.deployer, store, secrets, holder: HOLDER, deployedParameters: nothingDeployed }),
-    ).rejects.toThrow("environment staging uses the legacy stack names; upgrading it with agentx deploy is not supported yet");
+    ).rejects.toThrow("environment staging uses the legacy stack names; upgrading it with rovara deploy is not supported yet");
     expect(attempt.requests).toEqual([]);
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
     expect(secrets.creates).toEqual([]);
@@ -340,7 +340,7 @@ describe("deploy environment", () => {
 
     await expect(
       deployEnvironment({ mode: "install", engine: "templates", answers, release: fakeRelease(), deployer, store, secrets, holder: HOLDER }),
-    ).rejects.toThrow("bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
+    ).rejects.toThrow("bringing your own OIDC provider requires clientId to write environment settings (needed for rovara login)");
 
     expect(requests).toEqual([]);
     expect(store.values.has("/agentx/staging/lock")).toBe(false);
@@ -601,7 +601,7 @@ describe("deploy environment", () => {
   });
 });
 
-/** Sets up `store`'s lock parameter as already held by `holder`, the way agentx init's step runner
+/** Sets up `store`'s lock parameter as already held by `holder`, the way rovara init's step runner
  * leaves it while it calls deployEnvironment repeatedly with lockHeld. */
 function seedOwnLock(store: MemoryParameterStore, holder: string): void {
   store.values.set(lockParameterName(ENV), JSON.stringify({ holder, command: "init", acquiredAt: "2026-09-27T00:00:00.000Z" }));

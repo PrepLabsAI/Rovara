@@ -100,7 +100,7 @@ describe("rovara chatgpt connect (#339)", () => {
     expect(h.finished).toEqual([{ code: "the-code", state: STATE, clientId: "oaiapp_issued" }]);
     expect(h.answers).toEqual([200]);
     expect(h.out.join("")).toBe([
-      "Connected your ChatGPT plan (maya@acme.com) to AgentX environment staging.",
+      "Connected your ChatGPT plan (maya@acme.com) to Rovara environment staging.",
       "Models your plan offers: gpt-6.1-sol, gpt-5.5.",
       "",
     ].join("\n"));
@@ -171,13 +171,13 @@ describe("rovara chatgpt status and disconnect (#339)", () => {
     const h = await signedIn();
     expect(await h.run(["chatgpt", "status"])).toBe(0);
     expect(h.out.join("")).toBe([
-      "Your ChatGPT plan (maya@acme.com) is connected to AgentX environment staging since 2026-10-11T12:00:00.000Z.",
+      "Your ChatGPT plan (maya@acme.com) is connected to Rovara environment staging since 2026-10-11T12:00:00.000Z.",
       "Models your plan offers: gpt-6.1-sol, gpt-5.5.",
       "",
     ].join("\n"));
     const none = await signedIn({ view: () => Response.json({ connected: false }) });
     expect(await none.run(["chatgpt", "status"])).toBe(0);
-    expect(none.out.join("")).toBe("ChatGPT is not connected to AgentX environment staging. Connect it with npx @preplabsai/rovara-code chatgpt connect.\n");
+    expect(none.out.join("")).toBe("ChatGPT is not connected to Rovara environment staging. Connect it with npx @preplabsai/rovara-code chatgpt connect.\n");
   });
 
   it("status says a revoked connection needs connecting again", async () => {
@@ -201,7 +201,7 @@ describe("rovara chatgpt status and disconnect (#339)", () => {
   it("disconnect removes the connection", async () => {
     const h = await signedIn();
     expect(await h.run(["chatgpt", "disconnect"])).toBe(0);
-    expect(h.out.join("")).toBe("Disconnected ChatGPT from AgentX environment staging. You can also remove Rovara from your ChatGPT account's connected apps.\n");
+    expect(h.out.join("")).toBe("Disconnected ChatGPT from Rovara environment staging. You can also remove Rovara from your ChatGPT account's connected apps.\n");
     expect(h.fetchImplementation.mock.calls.map(([input, init]) => `${init?.method ?? "GET"} ${urlOf(input)}`)).toEqual([`DELETE ${URL_}/v1/dev/chatgpt/connection`]);
   });
 });

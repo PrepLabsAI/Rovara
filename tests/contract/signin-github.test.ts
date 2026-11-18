@@ -1,4 +1,4 @@
-// DEC 254h: agentx signin enable|disable github. Only the GitHub OAuth app's client id passes through the CLI; the client secret is stored by the
+// DEC 254h: rovara signin enable|disable github. Only the GitHub OAuth app's client id passes through the CLI; the client secret is stored by the
 // owner under agentx/<env>/developer-github and never read, written or printed here.
 import { describe, expect, it } from "vitest";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
@@ -39,7 +39,7 @@ async function services(prompts: Array<string | boolean>, overrides: Partial<Sig
 
 const GITHUB_PARAMETERS = { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM", DeveloperSignInGithub: "disabled", DeveloperGithubClientId: "", DeveloperGithubSince: "0" };
 
-describe("agentx signin enable github (DEC 254h)", () => {
+describe("rovara signin enable github (DEC 254h)", () => {
   it("sets the client id and turns GitHub on, keeping Slack, with no secret asked for or stored", async () => {
     const h = await services([true], {}, GITHUB_PARAMETERS);
     await writeSignInSettings(h.store, slackOn);
@@ -90,7 +90,7 @@ describe("agentx signin enable github (DEC 254h)", () => {
     await expect(writeSignInSettings(h.store, { ...slackOn, github: { clientId: "Ov23liAbCdEf0123", clientSecretName: "agentx/prod/developer-github" } })).rejects.toThrow("must be agentx/staging/developer-github");
   });
 
-  it("is reachable as agentx signin enable github --signin-github-client-id <id>", async () => {
+  it("is reachable as rovara signin enable github --signin-github-client-id <id>", async () => {
     const h = await services([], {}, GITHUB_PARAMETERS);
     await writeSignInSettings(h.store, slackOn);
     await writeSlackTeamId(h.store, "staging", "T0TEAM");
@@ -111,7 +111,7 @@ describe("agentx signin enable github (DEC 254h)", () => {
     const h = await services([true], {}, { ...SIGN_IN_PARAMETERS, DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
     await writeSignInSettings(h.store, slackOn);
     await writeSlackTeamId(h.store, "staging", "T0TEAM");
-    await expect(runSigninEnable(h.s, "staging", "github", { githubClientId: "Ov23liAbCdEf0123" }, {}, true)).rejects.toThrow("was deployed from an older AgentX release");
+    await expect(runSigninEnable(h.s, "staging", "github", { githubClientId: "Ov23liAbCdEf0123" }, {}, true)).rejects.toThrow("was deployed from an older Rovara release");
     expect(await readSignInSettings(h.store, "staging")).not.toHaveProperty("github");
   });
 });

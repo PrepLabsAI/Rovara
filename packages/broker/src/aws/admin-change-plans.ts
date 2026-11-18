@@ -6,7 +6,7 @@ import {
   ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, WorkspaceInstanceSchema, agentXError, developerTaskPolicy,
   redactSecrets, redactText, workspaceRecordFields,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ConfirmationMethod, type ChannelByNameResponse, type ProjectDefinition,
-  SLACK_CHANNEL, channelBindingKey, channelBindingPartition, channelBindingSortPrefix,
+  SLACK_CHANNEL, channelBindingKey, channelBindingPartition, channelBindingSortPrefix, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { chatGptSettingsOf, readChatGptSettingsRecord, writeChatGptSettings } from "../chatgpt/settings.js";
@@ -162,7 +162,7 @@ async function labelled(deps: PlanDependencies, channelId: string, options: Plan
 }
 
 const teamOf = (deps: PlanDependencies): string => {
-  if (deps.reads.slackTeamId === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team, so channels cannot be bound from an AI tool; use agentx admin slack bind");
+  if (deps.reads.slackTeamId === undefined) throw agentXError("CONFIG_INVALID", `this environment records no Slack team, so channels cannot be bound from an AI tool; use ${CLI_COMMAND_NAME} admin slack bind`);
   return deps.reads.slackTeamId;
 };
 const bindingOf = async (deps: PlanDependencies, teamId: string, channelId: string) => {
@@ -189,7 +189,7 @@ const planBind: Planner = async (deps, identity, input, options) => {
   if (current?.projectName === input.project) throw agentXError("CONFIG_INVALID", `channel ${label} is already bound to ${input.project}; there is nothing to change`);
   if (current !== undefined) await deps.handlers.requireAdministrator(identity, current.projectName);
   const latest = await latestProjectRecord(deps.reads, input.project);
-  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${input.project} is not registered; register it with agentx admin project register`);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${input.project} is not registered; register it with ${CLI_COMMAND_NAME} admin project register`);
   const now = current === undefined ? "It is bound to nothing today." : `It is bound to ${current.projectName} today; its existing threads keep their workspaces.`;
   return {
     ...effects(channel, (shown) => `Bind channel ${shown} to project ${input.project}. ${now} New threads in ${shortName(shown)} will use ${input.project} revision ${latest.definition.revision}.`),
@@ -205,7 +205,7 @@ const planUnbind: Planner = async (deps, identity, input, options) => {
   const channel = await resolveChannel(deps, teamId, input.channel, options);
   const { channelId, label } = channel;
   const current = await bindingOf(deps, teamId, channelId);
-  if (current === undefined) throw agentXError("NOT_FOUND", `channel ${label} is not bound to any project; list the bindings with agentx admin slack bindings`);
+  if (current === undefined) throw agentXError("NOT_FOUND", `channel ${label} is not bound to any project; list the bindings with ${CLI_COMMAND_NAME} admin slack bindings`);
   await deps.handlers.requireAdministrator(identity, current.projectName);
   return {
     ...effects(channel, (shown) => `Unbind channel ${shown} from project ${current.projectName}. New messages there will get no reply; existing thread workspaces are kept.`),
@@ -225,7 +225,7 @@ const planRevision: Planner = async (deps, identity, input, options) => {
   if (typeof name !== "string" || !AgentXNameSchema.safeParse(name).success) throw agentXError("CONFIG_INVALID", "the definition needs the project's name, such as \"payments\"");
   const latest = await latestProjectRecord(deps.reads, name);
   // Q5: a new revision keeps its project's runtime binding; a first revision needs the CLI's flags.
-  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${name} has no revision yet; register its first revision with agentx admin project register`);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${name} has no revision yet; register its first revision with ${CLI_COMMAND_NAME} admin project register`);
   await deps.handlers.requireAdministrator(identity, name);
   const latestRevision = latest.definition.revision;
   // Before the vendor preflight, so a revision that can never register contacts no vendor.
@@ -321,7 +321,7 @@ async function projectMustExist(deps: PlanDependencies, identity: AuthenticatedI
   requireAdminClaim(identity);
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("CONFIG_INVALID", "project must be a project name such as payments");
   const latest = await latestProjectRecord(deps.reads, project);
-  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered; check the project's name, or register it with agentx admin project register`);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered; check the project's name, or register it with ${CLI_COMMAND_NAME} admin project register`);
   return latest;
 }
 
@@ -400,7 +400,7 @@ const planEndSessions: Planner = async (deps, identity, input) => {
   const resolved = await resolveDeveloper(deps.actions, input.developer, await resolveCompany(deps.actions.companies, identity.ownerKey));
   if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in to AgentX, so there is no sign-in to end`);
   return {
-    effect: `End every AgentX sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.`,
+    effect: `End every Rovara sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching Rovara at once; they may sign in again with ${CLI_COMMAND_NAME} login. Their running tasks keep running.`,
     details: { developerId: resolved.developerId, via: resolved.via },
     snapshot: { sessionsEndedAt: resolved.profile.sessionsEndedAt ?? null, profile: { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
     apply: async () => endSessions(deps.actions, resolved.developerId),
@@ -434,11 +434,11 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   if (clash !== undefined) throw agentXError("CONFIG_INVALID", `sign-in client ${clash.clientId} already uses the audience ${registration.audience}; give each client its own`);
   const where = [
     ...(registration.redirectUris.length === 0 ? [] : [`a browser returning to ${registration.redirectUris.join(", ")}`]),
-    ...(registration.loopback ? ["a terminal (a loopback redirect, as agentx login uses)"] : []),
+    ...(registration.loopback ? [`a terminal (a loopback redirect, as ${CLI_COMMAND_NAME} login uses)`] : []),
   ].join(" and ");
   const secret = !confidential ? "" : keepSecret === true
     ? " It is confidential, and keeps its current secret."
-    : " It is confidential: it signs in with its own secret, which AgentX keeps only as a hash.";
+    : " It is confidential: it signs in with its own secret, which Rovara keeps only as a hash.";
   const replaced = current === undefined ? "" : " Its people stay signed in until they next refresh, which then follows these settings.";
   // Spec 065: what it may then do as the signed-in person, beyond reading who they are.
   const scopes = registration.scopes ?? [];
@@ -446,10 +446,10 @@ const planRegisterSignInClient: Planner = async (deps, identity, input) => {
   // Spec 066: full access, or what a client's tokens reach.
   const fullAccess = registration.fullAccess === true;
   const reach = fullAccess
-    ? ", which AgentX's developer API accepts as the signed-in person, with all their rights, as it does the AgentX CLI's (full access)"
-    : scopes.length === 0 ? ", which AgentX's own API never accepts"
+    ? ", which Rovara's developer API accepts as the signed-in person, with all their rights, as it does the Rovara CLI's (full access)"
+    : scopes.length === 0 ? ", which Rovara's own API never accepts"
       // Plan v3.2 lane ID: its scopes open the developer API routes that name them, and no others.
-      : ", which AgentX's developer API accepts only on the routes its scopes open";
+      : ", which Rovara's developer API accepts only on the routes its scopes open";
   return {
     effect: `${current === undefined ? "Register" : "Replace"} sign-in client ${input.clientId} (${registration.name}): Rovara users sign in to it from ${where}, and it gets tokens addressed to ${registration.audience}${reach}.${secret}${replaced}${fullAccess ? "" : actions}`,
     details: { clientId: input.clientId, audience: registration.audience, redirectUris: registration.redirectUris, loopback: registration.loopback, confidential, keepsSecret: keepSecret === true, scopes, fullAccess },
@@ -560,7 +560,7 @@ export function companyImportRefusalText(preview: CompanyImportPreview): string 
     const people = preview.refused.filter((entry) => entry.reason === reason).map((entry) => entry.personId);
     if (people.length > 0) parts.push(`${IMPORT_PERSON_REFUSAL[reason]}: ${importIds(people)}`);
   }
-  return `Company ${preview.companyId} cannot be ${preview.mode === "undo" ? "un-imported" : "imported"}, and nothing was written: ${parts.join("; ")}. Run agentx admin company import --from-install ${preview.companyId}${preview.mode === "undo" ? " --undo" : ""} to see the whole preview.`;
+  return `Company ${preview.companyId} cannot be ${preview.mode === "undo" ? "un-imported" : "imported"}, and nothing was written: ${parts.join("; ")}. Run ${CLI_COMMAND_NAME} admin company import --from-install ${preview.companyId}${preview.mode === "undo" ? " --undo" : ""} to see the whole preview.`;
 }
 const skippedText = (preview: CompanyImportPreview) => {
   if (preview.skipped.length === 0) return "";
@@ -585,7 +585,7 @@ const planImportInstallCompany: Planner = async (deps, identity, input) => {
   return {
     effect: nothing
       ? `Nothing to import for company ${preview.companyId}: its company record and every member that would be copied are already in Code's records.${skippedText(preview)}`
-      : `Copy company ${preview.companyId} from the install's old records into Code's company records: ${preview.company === "write" ? "its company record and " : ""}${preview.members.length} members with their roles${roles.length === 0 ? "" : ` (${roles.join("; ")})`}.${skippedText(preview)} Every row is new and marked as imported; nothing is overwritten. agentx admin company import --from-install ${preview.companyId} --undo removes them.`,
+      : `Copy company ${preview.companyId} from the install's old records into Code's company records: ${preview.company === "write" ? "its company record and " : ""}${preview.members.length} members with their roles${roles.length === 0 ? "" : ` (${roles.join("; ")})`}.${skippedText(preview)} Every row is new and marked as imported; nothing is overwritten. ${CLI_COMMAND_NAME} admin company import --from-install ${preview.companyId} --undo removes them.`,
     details: { companyId: preview.companyId, companyRecord: preview.company, people: preview.members.length, skipped: preview.skipped.length },
     snapshot: plan,
     apply: async (applier) => {
@@ -778,6 +778,6 @@ export async function planChange(deps: PlanDependencies, identity: Authenticated
     deps = { ...deps, reads: { ...deps.reads, workspace, slackTeamId: workspace.teamId } };
   }
   const planner = PLANNERS[input.kind];
-  if (planner === undefined) throw agentXError("CONFIG_INVALID", `${input.kind} is not a change this AgentX can plan; update AgentX, or make the change with the agentx admin command`);
+  if (planner === undefined) throw agentXError("CONFIG_INVALID", `${input.kind} is not a change this Rovara can plan; update Rovara, or make the change with the ${CLI_COMMAND_NAME} admin command`);
   return planner(deps, identity, input, options);
 }

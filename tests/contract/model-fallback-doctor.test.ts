@@ -14,7 +14,7 @@ describe("doctor: a missing provider secret", () => {
     const worker = (await modelChecks(doctorContext({ settings: openai, services: doctorServices({ checks: missing }) }))).find((entry) => entry.name === "worker")!;
     expect(worker.status).toBe("fail");
     expect(worker.detail).toBe("the OpenAI key secret for the worker model gpt-5.4 is missing, and no fallback model was chosen: the worker's tasks fail by name until the key is restored");
-    expect(worker.fix).toBe("restore the key, or choose a fallback with agentx --env staging config set models.fallback <bedrock model id>");
+    expect(worker.fix).toBe("restore the key, or choose a fallback with rovara --env staging config set models.fallback <bedrock model id>");
   });
 
   it("names the chosen fallback when the runtime stack has one, and is still an error", async () => {

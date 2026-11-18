@@ -1,4 +1,4 @@
-import { SlackWorkspaceScopeSchema } from "@agentx/contracts";
+import { SlackWorkspaceScopeSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager } from "./slack-install-identity.js";
@@ -94,8 +94,8 @@ function githubFrom(env: NodeJS.ProcessEnv): Pick<DeveloperIdentityLambdaConfig,
   const github = { github: sinceFrom(env.DEVELOPER_GITHUB_SINCE) };
   const clientId = env.DEVELOPER_GITHUB_CLIENT_ID ?? "";
   const secretId = env.DEVELOPER_GITHUB_SECRET_ID ?? "";
-  if (!GITHUB_CLIENT_ID.test(clientId)) return { ...github, githubProblem: "DEVELOPER_GITHUB_CLIENT_ID is not set; ask an admin to run agentx signin enable github" };
-  if (secretId === "") return { ...github, githubProblem: "DEVELOPER_GITHUB_SECRET_ID is not set; ask an admin to run agentx signin enable github" };
+  if (!GITHUB_CLIENT_ID.test(clientId)) return { ...github, githubProblem: `DEVELOPER_GITHUB_CLIENT_ID is not set; ask an admin to run ${CLI_COMMAND_NAME} signin enable github` };
+  if (secretId === "") return { ...github, githubProblem: `DEVELOPER_GITHUB_SECRET_ID is not set; ask an admin to run ${CLI_COMMAND_NAME} signin enable github` };
   return { ...github, githubSettings: { clientId, secretId } };
 }
 
@@ -112,7 +112,7 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
   };
   if (issuer === "") return config;
   const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in", ...sinceFrom(env.DEVELOPER_OIDC_SINCE) } };
-  const problem = (text: string) => ({ ...withOidc, oidcProblem: `${text}; ask an admin to run agentx signin enable oidc` });
+  const problem = (text: string) => ({ ...withOidc, oidcProblem: `${text}; ask an admin to run ${CLI_COMMAND_NAME} signin enable oidc` });
   const clientId = env.DEVELOPER_OIDC_CLIENT_ID ?? "";
   if (clientId === "") return problem("DEVELOPER_OIDC_CLIENT_ID is not set");
   const requiredClaim = env.DEVELOPER_OIDC_REQUIRED_CLAIM ?? "";
@@ -137,10 +137,10 @@ function parseSecretObject(text: string, what: string): Record<string, unknown> 
   try {
     value = JSON.parse(text);
   } catch {
-    throw new ProviderNotConfiguredError(`the ${what} is not valid JSON; ask an admin to run agentx signin check`);
+    throw new ProviderNotConfiguredError(`the ${what} is not valid JSON; ask an admin to run ${CLI_COMMAND_NAME} signin check`);
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ProviderNotConfiguredError(`the ${what} is not a JSON object; ask an admin to run agentx signin check`);
+    throw new ProviderNotConfiguredError(`the ${what} is not a JSON object; ask an admin to run ${CLI_COMMAND_NAME} signin check`);
   }
   return value as Record<string, unknown>;
 }
@@ -149,7 +149,7 @@ function parseSecretObject(text: string, what: string): Record<string, unknown> 
 export function parseSlackSignInSecret(json: string): { botToken: string; clientId?: string; clientSecret?: string } {
   const value = parseSecretObject(json, "Slack secret");
   if (typeof value.botToken !== "string" || !value.botToken.startsWith("xoxb-")) {
-    throw new ProviderNotConfiguredError("the Slack secret has no bot token yet; ask an admin to run agentx signin check");
+    throw new ProviderNotConfiguredError(`the Slack secret has no bot token yet; ask an admin to run ${CLI_COMMAND_NAME} signin check`);
   }
   return {
     botToken: value.botToken,
@@ -161,14 +161,14 @@ export function parseSlackSignInSecret(json: string): { botToken: string; client
 /** DEC 254h: the GitHub OAuth app's secret, `{"clientSecret": "..."}`, as the company sign-in's. Its value is never logged or echoed. */
 export function parseGithubClientSecret(json: string): string {
   const secret = parseSecretObject(json, "GitHub sign-in secret").clientSecret;
-  if (typeof secret !== "string" || secret === "") throw new ProviderNotConfiguredError("the GitHub sign-in secret has no clientSecret; ask an admin to store it, then run agentx signin check");
+  if (typeof secret !== "string" || secret === "") throw new ProviderNotConfiguredError(`the GitHub sign-in secret has no clientSecret; ask an admin to store it, then run ${CLI_COMMAND_NAME} signin check`);
   return secret;
 }
 
 export function parseOidcClientSecret(json: string): string {
   const secret = parseSecretObject(json, "company sign-in secret").clientSecret;
   if (typeof secret !== "string" || secret === "") {
-    throw new ProviderNotConfiguredError("the company sign-in secret has no clientSecret; ask an admin to run agentx signin enable oidc");
+    throw new ProviderNotConfiguredError(`the company sign-in secret has no clientSecret; ask an admin to run ${CLI_COMMAND_NAME} signin enable oidc`);
   }
   return secret;
 }
@@ -272,12 +272,12 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
   const oidcProvider = (): SignInProvider | undefined => {
     if (config.oidc === undefined) return undefined;
     if (config.oidcProblem !== undefined) return unconfiguredProvider("oidc", config.oidcProblem);
-    if (oidcSettings === undefined || oidcSecretId === "") return unconfiguredProvider("oidc", "DEVELOPER_OIDC_SECRET_ID is not set; ask an admin to run agentx signin enable oidc");
+    if (oidcSettings === undefined || oidcSecretId === "") return unconfiguredProvider("oidc", `DEVELOPER_OIDC_SECRET_ID is not set; ask an admin to run ${CLI_COMMAND_NAME} signin enable oidc`);
     return oidcSignInProvider({ ...oidcSettings, clientSecret: cachedSecret(secrets, oidcSecretId, parseOidcClientSecret), fetch, jwksFor, now });
   };
   const oidc = oidcProvider();
   const github = config.github === undefined ? undefined
-    : config.githubSettings === undefined ? unconfiguredProvider("github", config.githubProblem ?? "GitHub sign-in is not set up; ask an admin to run agentx signin enable github")
+    : config.githubSettings === undefined ? unconfiguredProvider("github", config.githubProblem ?? `GitHub sign-in is not set up; ask an admin to run ${CLI_COMMAND_NAME} signin enable github`)
       : githubSignInProvider({ clientId: config.githubSettings.clientId, clientSecret: cachedSecret(secrets, config.githubSettings.secretId, parseGithubClientSecret), fetch, now });
   if (config.githubProblem !== undefined) log({ event: "signin.not_configured", method: "github", detail: config.githubProblem });
   if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });

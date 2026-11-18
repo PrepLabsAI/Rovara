@@ -1,7 +1,7 @@
 // The GitHub App credentials as the broker and the plan evidence job build them: one definition, from the same environment
 // (GITHUB_APP_CREDENTIAL_REF, GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_SECRET_ARN) and the same secret.
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { AgentXError, agentXError, companyScoped, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, REPOSITORY_ACCESS_STATES, type ClientRepositoriesResponse, type RepositoryAccessState } from "@agentx/contracts";
+import { AgentXError, agentXError, companyScoped, GITHUB_DISCONNECTED_MESSAGE, IMPLICIT_COMPANY_ID, OrgIdSchema, REPOSITORY_ACCESS_STATES, type ClientRepositoriesResponse, type RepositoryAccessState, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { boundedCompanyReads } from "./company-check.js";
@@ -47,7 +47,7 @@ export function createGitHubAppCredentials(secretsManager: Pick<SecretsManagerCl
       appSecret = undefined;
       // The secret has no version until `agentx init` creates the GitHub App.
       if (error instanceof Error && error.name === "ResourceNotFoundException") {
-        throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty; finish agentx init to create the GitHub App");
+        throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App private-key secret is empty; finish ${CLI_COMMAND_NAME} init to create the GitHub App`);
       }
       throw error;
     });

@@ -40,12 +40,12 @@ async function seeded(): Promise<MemoryParameterStore> {
   return store;
 }
 
-describe("agentx doctor", () => {
+describe("rovara doctor", () => {
   it("prints every check and exits 0 when nothing fails", async () => {
     const io = capture();
     const code = await executeCli(["--env", "staging", "doctor"], { ...io, doctor: { store: await seeded(), services: () => doctorServices() } });
     expect(code).toBe(0);
-    expect(io.out.join("")).toContain("agentx doctor: environment staging (release 1.2.3, templates engine, us-east-1)");
+    expect(io.out.join("")).toContain("rovara doctor: environment staging (release 1.2.3, templates engine, us-east-1)");
   });
 
   it("exits non-zero when a check fails, naming how many (FR-051)", async () => {
@@ -54,7 +54,7 @@ describe("agentx doctor", () => {
     const code = await executeCli(["--env", "staging", "doctor"], { ...io, doctor: { store: await seeded(), services } });
     expect(code).toBe(2);
     expect(io.out.join("")).toContain("FAIL  slack       bot token: Slack refused the bot token (invalid_auth)");
-    expect(io.err.join("")).toContain("1 doctor check failed; fix what each one names, then run agentx doctor again");
+    expect(io.err.join("")).toContain("1 doctor check failed; fix what each one names, then run rovara doctor again");
   });
 
   it("prints machine-readable results with --json", async () => {
@@ -74,7 +74,7 @@ describe("agentx doctor", () => {
     const report = JSON.parse(io.out.join("")) as { ok: boolean; data: { failed: number } };
     expect(report).toMatchObject({ ok: false, data: { failed: 1 } });
     const error = JSON.parse(io.err.join("")) as { ok: boolean; error: { code: string; message: string } };
-    expect(error).toMatchObject({ ok: false, error: { code: "CONFIG_INVALID", message: "1 doctor check failed; fix what each one names, then run agentx doctor again" } });
+    expect(error).toMatchObject({ ok: false, error: { code: "CONFIG_INVALID", message: "1 doctor check failed; fix what each one names, then run rovara doctor again" } });
     expectNoSecret(io);
   });
 
@@ -95,7 +95,7 @@ describe("agentx doctor", () => {
     store.get = async () => { throw new Error("Region is missing"); };
     const code = await executeCli(["--env", "staging", "doctor"], { ...io, doctor: { store, services: () => doctorServices() } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("could not read environment staging's settings (Region is missing); sign in to AWS for this account, pass --region if your AWS configuration names none, then run agentx doctor again");
+    expect(io.err.join("")).toContain("could not read environment staging's settings (Region is missing); sign in to AWS for this account, pass --region if your AWS configuration names none, then run rovara doctor again");
   });
 });
 
@@ -115,7 +115,7 @@ describe("doctorStackReader", () => {
 });
 
 describe("doctor's real services (carry-forwards)", () => {
-  it("runs agentx signin check's own checks (spec 025 FR-046), not a copy", async () => {
+  it("runs rovara signin check's own checks (spec 025 FR-046), not a copy", async () => {
     const store = new MemoryParameterStore();
     const services = realDoctorServices({ settings: SETTINGS, store, fetch: (async () => { throw new Error("no network in tests"); }), home: "/nonexistent-agentx-home", configDir: "/nonexistent-agentx-projects", stderr: { write: () => undefined } });
     // No sign-in settings are stored, so checkDeveloperSignIn answers before any AWS or Slack call.

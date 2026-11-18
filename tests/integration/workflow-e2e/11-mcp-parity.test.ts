@@ -1,7 +1,7 @@
 // Suite 11: MCP parity. An AI tool is an equal path: the same broker transitions, owner checks and thread messages as the
 // Slack buttons. 11.3 (an MCP-started task's Slack press) is covered by developer-task-workflow-flow.test.ts. Here: an
 // MCP-started Quick task to its draft PR, a Slack-started task decided through MCP, each recovery tool against its Slack
-// button, PR feedback decided through MCP [R4, decision D4], and agentx_get_task's next step at every stage.
+// button, PR feedback decided through MCP [R4, decision D4], and rovara_get_task's next step at every stage.
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it } from "vitest";
@@ -27,7 +27,7 @@ import { EDITS, MERGED, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, j
 import { PAGE_ORIGIN } from "../../support/page-browser.js";
 
 const WAITING_FOR_MERGE = "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
-const FEEDBACK_READY = (revision: number) => `PR feedback is ready for your decision. Read it with agentx_get_pr_feedback, then approve, request changes or dismiss it with agentx_decide_pr_feedback and expected_revision ${revision}. Nothing changes in the code until you approve.`;
+const FEEDBACK_READY = (revision: number) => `PR feedback is ready for your decision. Read it with rovara_get_pr_feedback, then approve, request changes or dismiss it with rovara_decide_pr_feedback and expected_revision ${revision}. Nothing changes in the code until you approve.`;
 const SAVED_NOTE = "Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.";
 const FIX_APPROVED = "PR feedback approved. Updating the code now; the checks and reviews run again after.";
 const BAILEY = { slackUserId: "U0BAILEY01", name: "Bailey Stone" };
@@ -261,18 +261,18 @@ describe("Suite 11: MCP parity", () => {
 
   it("11.1 an MCP-started Quick task: the owner approves the exact plan through MCP, and the reviewed code opens one draft PR", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    const started = await tool(e2e, "agentx_start_workflow", { project: "payments", instructions: "Add a greet(name) function", workflow_path: "quick" });
+    const started = await tool(e2e, "rovara_start_workflow", { project: "payments", instructions: "Add a greet(name) function", workflow_path: "quick" });
     expect(workflowOf(started)).toMatchObject({ stage: "PLAN", state: "RUNNING" });
     await e2e.settle();
-    const waited = await tool(e2e, "agentx_wait_for_task", { task_id: e2e.taskId(), wait_seconds: 5 });
+    const waited = await tool(e2e, "rovara_wait_for_task", { task_id: e2e.taskId(), wait_seconds: 5 });
     const plan = workflowOf(waited);
     expect(plan).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     // A wrong digest is refused, and nothing moves.
-    const wrong = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: "7b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a41", expected_revision: plan.revision,
+    const wrong = await e2e.mcp("rovara_decide_workflow", { task_id: e2e.taskId(), request_id: "7b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a41", expected_revision: plan.revision,
       decision: "APPROVE", reason: "Looks right.", artifact_digest: "0".repeat(64) });
     expect(wrong.isError).toBe(true);
     expect(e2e.workflow().revision).toBe(plan.revision);
-    await tool(e2e, "agentx_decide_workflow", { task_id: e2e.taskId(), request_id: "7b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a42", expected_revision: plan.revision,
+    await tool(e2e, "rovara_decide_workflow", { task_id: e2e.taskId(), request_id: "7b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a42", expected_revision: plan.revision,
       decision: "APPROVE", reason: "Looks right.", artifact_digest: plan.approval_document!.sha256 });
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
@@ -280,18 +280,18 @@ describe("Suite 11: MCP parity", () => {
     expect(e2e.github.pullRequests).toHaveLength(1);
     expect(e2e.github.pullRequests[0]!.tree).toBe(e2e.workflow().candidate!.repositories[0]!.treeSha);
     expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
-    const after = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const after = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     expect(workflowOf(after)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(after.text).toContain(WAITING_FOR_MERGE);
-    expect(after.text).not.toContain("agentx_open_pull_request");
+    expect(after.text).not.toContain("rovara_open_pull_request");
   }, 120_000);
 
   it("11.2 a Slack-started task approved through MCP: the Slack card is retired, the thread says so, and the old card's press is refused", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
     await atPlanReview(e2e);
     const card = e2e.slack.lastPostWithAction("agentx_workflow_approve");
-    const plan = workflowOf(await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() }));
-    await tool(e2e, "agentx_decide_workflow", { task_id: e2e.taskId(), request_id: "8b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a43", expected_revision: plan.revision,
+    const plan = workflowOf(await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() }));
+    await tool(e2e, "rovara_decide_workflow", { task_id: e2e.taskId(), request_id: "8b1c2d3e-4f50-4a61-8b72-9c8d7e6f5a43", expected_revision: plan.revision,
       decision: "APPROVE", reason: "Looks right.", artifact_digest: plan.approval_document!.sha256 });
     await e2e.deliverNotices();
     expect(retired(e2e, card.ts)).toBe(true);
@@ -317,23 +317,23 @@ describe("Suite 11: MCP parity", () => {
     slack: (e2e: WorkflowE2E) => Promise<void>;
     mcp: (e2e: WorkflowE2E) => Promise<void>;
   }> = [
-    { name: "agentx_retry_workflow (planning) and Retry planning",
+    { name: "rovara_retry_workflow (planning) and Retry planning",
       options: () => ({ model: { plan: PLAN, edits: EDITS } }),
       reach: async (e2e) => { e2e.worker.failNext("task:PLAN", "timeout:1800000"); expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200); await e2e.settle(); },
       slack: (e2e) => e2e.click("agentx_workflow_retry_plan"),
-      mcp: async (e2e) => { await tool(e2e, "agentx_retry_workflow", { task_id: e2e.taskId(), instructions: "Plan the request again." }); } },
-    { name: "agentx_retry_workflow (coding) and Retry coding",
+      mcp: async (e2e) => { await tool(e2e, "rovara_retry_workflow", { task_id: e2e.taskId(), instructions: "Plan the request again." }); } },
+    { name: "rovara_retry_workflow (coding) and Retry coding",
       options: () => ({ model: { plan: PLAN, edits: EDITS } }),
       reach: async (e2e) => { await atPlanReview(e2e); e2e.worker.failNext("task:IMPLEMENT", "timeout:1800000"); await e2e.click("agentx_workflow_approve"); await e2e.settle(); },
       slack: (e2e) => e2e.click("agentx_workflow_retry_implementation"),
-      mcp: async (e2e) => { await tool(e2e, "agentx_retry_workflow", { task_id: e2e.taskId(), instructions: "Retry the coding step." }); } },
-    { name: "agentx_send_workflow_back and Send back to coding",
+      mcp: async (e2e) => { await tool(e2e, "rovara_retry_workflow", { task_id: e2e.taskId(), instructions: "Retry the coding step." }); } },
+    { name: "rovara_send_workflow_back and Send back to coding",
       // The check fails until the change is sent back.
       options: () => ({ model: { plan: PLAN, edits: EDITS }, checkResult: () => (checksFail ? { exitCode: 1, stdout: "", stderr: "1 failing" } : undefined) }),
       reach: async (e2e) => { checksFail = true; await atPlanReview(e2e); await e2e.click("agentx_workflow_approve"); await e2e.settle(); checksFail = false; },
       slack: async (e2e) => { await e2e.click("agentx_workflow_send_back"); if (e2e.slack.views.length > 0) await e2e.submitView({}); },
-      mcp: async (e2e) => { await tool(e2e, "agentx_send_workflow_back", { task_id: e2e.taskId(), expected_revision: e2e.workflow().revision, instructions: "Fix the problems listed above, then report what changed." }); } },
-    { name: "agentx_resolve_review_findings and Resolve findings",
+      mcp: async (e2e) => { await tool(e2e, "rovara_send_workflow_back", { task_id: e2e.taskId(), expected_revision: e2e.workflow().revision, instructions: "Fix the problems listed above, then report what changed." }); } },
+    { name: "rovara_resolve_review_findings and Resolve findings",
       options: () => ({ model: { plan: PLAN, edits: EDITS, reviews: reviewerFindings(1, { role: "CODE" }) } }),
       reach: async (e2e) => { await atPlanReview(e2e); await e2e.click("agentx_workflow_approve"); await e2e.settle(); },
       slack: async (e2e) => {
@@ -344,20 +344,20 @@ describe("Suite 11: MCP parity", () => {
       },
       mcp: async (e2e) => {
         const workflow = e2e.workflow();
-        await tool(e2e, "agentx_resolve_review_findings", { task_id: e2e.taskId(), expected_revision: workflow.revision, candidate_digest: workflow.candidate!.digest,
+        await tool(e2e, "rovara_resolve_review_findings", { task_id: e2e.taskId(), expected_revision: workflow.revision, candidate_digest: workflow.candidate!.digest,
           resolutions: openReviewFindings(workflow).map((finding) => ({ finding_id: finding.findingId, action: "accept", note: "Names are trimmed upstream." })) });
       } },
-    { name: "agentx_retry_workflow_publish and Retry opening the pull request",
+    { name: "rovara_retry_workflow_publish and Retry opening the pull request",
       options: () => ({ model: { plan: PLAN, edits: EDITS } }),
       reach: async (e2e) => { e2e.github.failNext("push", 403); await atPlanReview(e2e); await e2e.click("agentx_workflow_approve"); await e2e.settle(); },
       slack: (e2e) => e2e.click("agentx_workflow_retry_publish"),
-      mcp: async (e2e) => { await tool(e2e, "agentx_retry_workflow_publish", { task_id: e2e.taskId(), expected_revision: e2e.workflow().revision }); } },
-    { name: "agentx_close_task and Close task",
+      mcp: async (e2e) => { await tool(e2e, "rovara_retry_workflow_publish", { task_id: e2e.taskId(), expected_revision: e2e.workflow().revision }); } },
+    { name: "rovara_close_task and Close task",
       options: () => ({ model: { plan: PLAN, edits: EDITS } }),
       reach: async (e2e) => { await openDraftPr(e2e); },
       slack: async (e2e) => { await e2e.click("agentx_workflow_close"); await e2e.submitView({}); },
       // The confirmed Slack modal explicitly authorizes discarding unpublished changes; match that owner intent here.
-      mcp: async (e2e) => { await tool(e2e, "agentx_close_task", { task_id: e2e.taskId(), discard_unpublished: true }); } },
+      mcp: async (e2e) => { await tool(e2e, "rovara_close_task", { task_id: e2e.taskId(), discard_unpublished: true }); } },
   ];
   for (const recovery of recoveries) {
     it(`11.4 ${recovery.name}: the same state change and thread messages`, async () => {
@@ -377,10 +377,10 @@ describe("Suite 11: MCP parity", () => {
     }, 120_000);
   }
 
-  it("11.4 agentx_close_task preserves unpublished work without explicit discard authorization", async () => {
+  it("11.4 rovara_close_task preserves unpublished work without explicit discard authorization", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
     await openDraftPr(e2e);
-    const answer = await tool(e2e, "agentx_close_task", { task_id: e2e.taskId() });
+    const answer = await tool(e2e, "rovara_close_task", { task_id: e2e.taskId() });
     expect(answer.value.closed).toBe(false);
     await e2e.settle();
     const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META");
@@ -398,23 +398,23 @@ describe("Suite 11: MCP parity", () => {
 
   it("11.5 [R4] PR feedback approved through MCP: the Slack card is retired, the thread says what a press says, and the fix is pushed", async () => {
     const { e2e, pullRequest, card } = await feedbackProposed();
-    const task = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const task = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     expect(task.text).toContain(FEEDBACK_READY(workflowOf(task).revision));
     expect(workflowOf(task).feedback_review).toMatchObject({ status: "PENDING", review_complete: true });
-    const proposal = await tool(e2e, "agentx_get_pr_feedback", { task_id: e2e.taskId() });
+    const proposal = await tool(e2e, "rovara_get_pr_feedback", { task_id: e2e.taskId() });
     expect(proposal.value).toMatchObject({ status: "PENDING", review_complete: true, recommended_finding_ids: [expect.any(String)],
       findings: [expect.objectContaining({ recommended: true, kind: "fix", comments: [expect.objectContaining({ author: "octocat", text: "Please trim the name." })] })] });
     const { revision, review_digest, proposal_digest, bundle_digests } = proposal.value as { revision: number; review_digest: string; proposal_digest: string; bundle_digests: string[] };
     // Someone else's AI tool sees no such task, and a stale revision is refused; nothing moves.
-    const other = await e2e.mcp("agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision, review_digest, proposal_digest, bundle_digests }, OMAR);
+    const other = await e2e.mcp("rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision, review_digest, proposal_digest, bundle_digests }, OMAR);
     expect(other.isError).toBe(true);
     expect(other.error?.code).toBe("TASK_NOT_FOUND");
-    const stale = await e2e.mcp("agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision - 1, review_digest, proposal_digest, bundle_digests });
+    const stale = await e2e.mcp("rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision - 1, review_digest, proposal_digest, bundle_digests });
     expect(stale.isError).toBe(true);
     expect(e2e.workflow().revision).toBe(revision);
     expect(e2e.workflow().feedbackDecisions).toBeUndefined();
     const from = said(e2e).length;
-    await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision, review_digest, proposal_digest, bundle_digests });
+    await tool(e2e, "rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "APPROVE", expected_revision: revision, review_digest, proposal_digest, bundle_digests });
     await e2e.settle();
     expect(retired(e2e, card.ts)).toBe(true);
     expect(e2e.workflow().feedbackDecisions).toEqual([expect.objectContaining({ decision: "APPROVE", actorRole: "TASK_OWNER" })]);
@@ -433,18 +433,18 @@ describe("Suite 11: MCP parity", () => {
   it("11.5 [R4] Request changes through MCP keeps the PR as it is and saves the note, as the Slack form does", async () => {
     const { e2e, pullRequest } = await feedbackProposed();
     const head = pullRequest.commit;
-    const proposal = await tool(e2e, "agentx_get_pr_feedback", { task_id: e2e.taskId() });
+    const proposal = await tool(e2e, "rovara_get_pr_feedback", { task_id: e2e.taskId() });
     const { revision, review_digest, proposal_digest, bundle_digests } = proposal.value as { revision: number; review_digest: string; proposal_digest: string; bundle_digests: string[] };
-    const missing = await e2e.mcp("agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "REQUEST_CHANGES", expected_revision: revision, review_digest, proposal_digest, bundle_digests });
+    const missing = await e2e.mcp("rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "REQUEST_CHANGES", expected_revision: revision, review_digest, proposal_digest, bundle_digests });
     expect(missing.isError).toBe(true);
-    await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "REQUEST_CHANGES", expected_revision: revision, review_digest, proposal_digest, bundle_digests,
+    await tool(e2e, "rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "REQUEST_CHANGES", expected_revision: revision, review_digest, proposal_digest, bundle_digests,
       note: "Keep greet's signature; only trim inside it." });
     await e2e.settle();
     expect(said(e2e).at(-1)).toBe(SAVED_NOTE);
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(e2e.workflow().feedbackDecisions?.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES", ownerNote: "Keep greet's signature; only trim inside it." });
     expect(pullRequest.commit).toBe(head);
-    const after = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const after = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     expect(after.text).toContain(WAITING_FOR_MERGE);
   }, 120_000);
 
@@ -453,21 +453,21 @@ describe("Suite 11: MCP parity", () => {
     const { e2e } = await feedbackProposed((prompt) => (++calls === 1 ? reviewerHangs : feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" })),
       { workerTimeouts: { feedbackReviewMs: 200 } });
     const failed = e2e.slack.lastPostWithAction("agentx_feedback_review_retry");
-    const task = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const task = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     const review = workflowOf(task).feedback_review!;
     expect(review).toMatchObject({ status: "PENDING", review_complete: false });
-    expect(task.text).toContain(`Retry it with agentx_decide_pr_feedback, decision RETRY_REVIEW and review_digest ${review.review_digest}`);
-    const retried = await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });
+    expect(task.text).toContain(`Retry it with rovara_decide_pr_feedback, decision RETRY_REVIEW and review_digest ${review.review_digest}`);
+    const retried = await tool(e2e, "rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });
     expect(retried.value).toMatchObject({ started: true });
     await e2e.settle();
     expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 1 comment; 1 recommendation\./);
     expect(retired(e2e, failed.ts)).toBe(true);
     // A second retry of the same failed review starts nothing.
-    const again = await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });
+    const again = await tool(e2e, "rovara_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });
     expect(again.value).toMatchObject({ started: false });
   }, 120_000);
 
-  it("11.5 a fix that changed nothing: agentx_keep_pull_request keeps the PR as it is, as the Slack button does", async () => {
+  it("11.5 a fix that changed nothing: rovara_keep_pull_request keeps the PR as it is, as the Slack button does", async () => {
     let fixRuns = 0;
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: (latest) => {
       if (!latest.includes("Implement only the owner-approved PR feedback")) return editsOrFix(latest);
@@ -483,42 +483,42 @@ describe("Suite 11: MCP parity", () => {
     expect(fixRuns).toBe(1);
     const card = e2e.slack.posts.at(-1)!;
     expect(actionIds(card)).toContain("agentx_workflow_keep_pull_requests");
-    const task = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const task = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     const { revision } = workflowOf(task);
-    expect(task.text).toContain(`The approved fix didn't change any code, so nothing was pushed to the pull request. To run the fix again, use agentx_retry_workflow with expected_revision ${revision}. To keep the pull request as it is and wait for its merge, use agentx_keep_pull_request with expected_revision ${revision}.`);
-    const other = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision }, OMAR);
+    expect(task.text).toContain(`The approved fix didn't change any code, so nothing was pushed to the pull request. To run the fix again, use rovara_retry_workflow with expected_revision ${revision}. To keep the pull request as it is and wait for its merge, use rovara_keep_pull_request with expected_revision ${revision}.`);
+    const other = await e2e.mcp("rovara_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision }, OMAR);
     expect(other.isError).toBe(true);
-    const stale = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision - 1 });
+    const stale = await e2e.mcp("rovara_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision - 1 });
     expect(stale.isError).toBe(true);
     expect(e2e.workflow().revision).toBe(revision);
-    await tool(e2e, "agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision });
+    await tool(e2e, "rovara_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision });
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(said(e2e).at(-1)).toBe("Got it. The pull request stays as it is; I'll finish this task when it's merged.");
     expect(retired(e2e, card.ts)).toBe(true);
-    const after = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const after = await tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     expect(after.text).toContain(WAITING_FOR_MERGE);
     expect(e2e.github.pushLog.filter((push) => push.during === "maintain")).toEqual([]);
   }, 120_000);
 
-  it("11.5 a request ID already used for a dismissal is refused by agentx_keep_pull_request, never answered as a keep", async () => {
+  it("11.5 a request ID already used for a dismissal is refused by rovara_keep_pull_request, never answered as a keep", async () => {
     // Found in review: any earlier dismissal with the same request ID was taken for this Keep's replay.
     const { e2e } = await feedbackProposed();
-    const proposal = await tool(e2e, "agentx_get_pr_feedback", { task_id: e2e.taskId() });
+    const proposal = await tool(e2e, "rovara_get_pr_feedback", { task_id: e2e.taskId() });
     const { revision, review_digest, proposal_digest, bundle_digests } = proposal.value as { revision: number; review_digest: string; proposal_digest: string; bundle_digests: string[] };
     const requestId = "11511111-2222-4333-8444-555555555555";
-    await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), request_id: requestId, decision: "DISMISS", expected_revision: revision, review_digest, proposal_digest, bundle_digests,
+    await tool(e2e, "rovara_decide_pr_feedback", { task_id: e2e.taskId(), request_id: requestId, decision: "DISMISS", expected_revision: revision, review_digest, proposal_digest, bundle_digests,
       note: "Not needed." });
     await e2e.settle();
-    const reused = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), request_id: requestId, expected_revision: revision });
+    const reused = await e2e.mcp("rovara_keep_pull_request", { task_id: e2e.taskId(), request_id: requestId, expected_revision: revision });
     expect(reused.isError).toBe(true);
     expect(reused.error).toMatchObject({ code: "INVALID_REQUEST", message: "this request ID was already used for another decision on this task; use a new one" });
     expect(e2e.workflow().feedbackDecisions?.filter((decision) => decision.decision === "DISMISS")).toHaveLength(1);
   }, 120_000);
 
-  it("11.6 agentx_get_task's stage and next step match the thread at every stage, through the merge", async () => {
+  it("11.6 rovara_get_task's stage and next step match the thread at every stage, through the merge", async () => {
     const { e2e, pullRequest } = await feedbackProposed();
-    const at = async () => tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const at = async () => tool(e2e, "rovara_get_task", { task_id: e2e.taskId() });
     const proposed = await at();
     expect(workflowOf(proposed)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(proposed.text).toContain(FEEDBACK_READY(workflowOf(proposed).revision));
@@ -526,7 +526,7 @@ describe("Suite 11: MCP parity", () => {
     await e2e.click("agentx_feedback_review_recommended");
     const coding = await at();
     expect(workflowOf(coding)).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    expect(coding.text).not.toContain("agentx_open_pull_request");
+    expect(coding.text).not.toContain("rovara_open_pull_request");
     await e2e.settle();
     const pushed = await at();
     expect(said(e2e).at(-1)).toBe(PUSHED_FIX(pullRequest.number));
@@ -539,7 +539,7 @@ describe("Suite 11: MCP parity", () => {
     expect(said(e2e).at(-1)).toBe(MERGED);
     expect(workflowOf(merged)).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
     expect(merged.text).toContain("The pull request is merged. This task is complete.");
-    expect(merged.text).not.toContain("agentx_open_pull_request");
+    expect(merged.text).not.toContain("rovara_open_pull_request");
   }, 120_000);
 
   it("11.7 signed People, MCP proposals and a current-owner Retry preserve the parked operation", async () => {
@@ -581,26 +581,26 @@ describe("Suite 11: MCP parity", () => {
     ]);
     directory.members.get(BAILEY.slackUserId)!.add("C0123456789");
 
-    const view = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const view = await tool(e2e, "rovara_get_task_people", { task_id: e2e.taskId() });
     const person = (view.value.people as Array<{ person_id: string; name: string }>).find((entry) => entry.name === BAILEY.name)!;
     const beforeProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
-    const proposed = await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555",
+    const proposed = await tool(e2e, "rovara_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555",
       expected_people_revision: 2, person_id: person.person_id, role: "commenter" });
     expect(proposed.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555555" });
-    const polled = await tool(e2e, "agentx_get_task_people_request", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555" });
+    const polled = await tool(e2e, "rovara_get_task_people_request", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555" });
     expect(polled.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555555",
       confirmation_url: proposed.value.confirmation_url, expires_at: proposed.value.expires_at });
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(1);
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toHaveLength(1);
 
-    const external = await e2e.mcp("agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555556",
+    const external = await e2e.mcp("rovara_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555556",
       expected_people_revision: 2, person_id: person.person_id, role: "owner" }, linkedExternal);
     expect(external.isError).toBe(true);
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
 
     e2e.people.changesEnabled(false);
-    const disabled = await e2e.mcp("agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555557",
+    const disabled = await e2e.mcp("rovara_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555557",
       expected_people_revision: 2, person_id: person.person_id, role: "owner" });
     expect(disabled.isError).toBe(true);
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
@@ -628,7 +628,7 @@ describe("Suite 11: MCP parity", () => {
       people: [expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "commenter" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer" })] });
     expect(e2e.slack.views.at(-1)?.view).toMatchObject({ callback_id: "agentx_task_take_ownership" });
     const beforeTakeoverProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
-    const takeoverProposal = await tool(e2e, "agentx_take_task_ownership", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555559",
+    const takeoverProposal = await tool(e2e, "rovara_take_task_ownership", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555559",
       expected_people_revision: beforeTakeoverProposal!.revision }, SLACK_BAILEY);
     expect(takeoverProposal.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555559" });
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeTakeoverProposal);
@@ -642,7 +642,7 @@ describe("Suite 11: MCP parity", () => {
     expect(e2e.invocations).toHaveLength(invocationsBeforeApproval);
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
 
-    await tool(e2e, "agentx_retry_workflow", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555558",
+    await tool(e2e, "rovara_retry_workflow", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555558",
       instructions: "Continue the accepted coding run." }, SLACK_BAILEY);
     expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ status: "PENDING", operationId: queued.operationId, invocation: queued.invocation });
     expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_RETRY")).toEqual([
@@ -1012,23 +1012,23 @@ describe("Suite 11: MCP parity", () => {
       developerId: external.developerId, slackUserId: external.slackUserId, name: external.name, role: "commenter",
     }] });
 
-    const externalAnswer = await e2e.mcp("agentx_get_task_people", { task_id: e2e.taskId() }, external);
+    const externalAnswer = await e2e.mcp("rovara_get_task_people", { task_id: e2e.taskId() }, external);
     expect(externalAnswer.isError).toBe(false);
     const externalView = externalAnswer.value as { can_manage: boolean; people: Array<{ role: string; effective_role: string; you: boolean }> };
     expect(externalView.can_manage).toBe(false);
     expect(externalView.people.some((person) => person.role === "commenter" && person.effective_role === "commenter" && person.you)).toBe(true);
-    const nativeView = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const nativeView = await tool(e2e, "rovara_get_task_people", { task_id: e2e.taskId() });
     const externalPerson = (nativeView.value.people as Array<{ person_id: string; name: string }>).find((person) => person.name.startsWith(external.name))!;
     const baileyPerson = (nativeView.value.people as Array<{ person_id: string; name: string }>).find((person) => person.name === BAILEY.name)!;
     const grantId = "11911111-2222-4333-8444-555555555551";
-    await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: grantId,
+    await tool(e2e, "rovara_set_task_person", { task_id: e2e.taskId(), request_id: grantId,
       expected_people_revision: nativeView.value.revision, person_id: externalPerson.person_id, role: "owner" });
     expect((await peoplePageRequest(e2e, nativePageSession, "POST", `api/people/requests/${grantId}/confirm`, { requestId: grantId })).status).toBe(200);
 
-    const ownerView = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() }, external);
+    const ownerView = await tool(e2e, "rovara_get_task_people", { task_id: e2e.taskId() }, external);
     expect(ownerView.value).toMatchObject({ can_manage: true });
     const requestId = "11911111-2222-4333-8444-555555555552";
-    const proposed = await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: requestId,
+    const proposed = await tool(e2e, "rovara_set_task_person", { task_id: e2e.taskId(), request_id: requestId,
       expected_people_revision: ownerView.value.revision, person_id: baileyPerson.person_id, role: "viewer" }, external);
     expect(proposed.value).toMatchObject({ status: "PENDING", request_id: requestId });
     const eventsBefore = e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;
@@ -1043,9 +1043,9 @@ describe("Suite 11: MCP parity", () => {
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(eventsBefore + 1);
     expect((await peoplePageRequest(e2e, externalPageSession, "POST", `api/people/requests/${requestId}/confirm`, { requestId })).json).toEqual(committed.json);
 
-    const afterGrant = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const afterGrant = await tool(e2e, "rovara_get_task_people", { task_id: e2e.taskId() });
     const removalId = "11911111-2222-4333-8444-555555555553";
-    await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: removalId,
+    await tool(e2e, "rovara_set_task_person", { task_id: e2e.taskId(), request_id: removalId,
       expected_people_revision: afterGrant.value.revision, person_id: externalPerson.person_id, role: "denied" });
     expect((await peoplePageRequest(e2e, nativePageSession, "POST", `api/people/requests/${removalId}/confirm`, { requestId: removalId })).status).toBe(200);
     const afterRemovalEvents = e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;

@@ -56,10 +56,10 @@ async function harness(input: { account?: FakeAccount; typed?: string[]; caller?
   return { deps, account, store, lines, asked, home, configDir, env };
 }
 
-describe("agentx destroy (FR-055, item 3)", () => {
+describe("rovara destroy (FR-055, item 3)", () => {
   it("refuses a region other than the environment's, before asking or deleting anything", async () => {
     const h = await harness();
-    await expect(runDestroy({ env: "staging", keepData: false }, { ...h.deps, region: "eu-west-1" })).rejects.toThrow("environment staging is installed in us-east-1, not eu-west-1; run agentx --env staging destroy --region us-east-1");
+    await expect(runDestroy({ env: "staging", keepData: false }, { ...h.deps, region: "eu-west-1" })).rejects.toThrow("environment staging is installed in us-east-1, not eu-west-1; run rovara --env staging destroy --region us-east-1");
     expect(h.asked).toEqual([]);
     expect(h.account.calls).toEqual([]);
   });
@@ -131,7 +131,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(h.store.values.has(settingsParameterName("staging"))).toBe(true);
   });
 
-  it("asks for the account id too for production, and for an environment AgentX has no record of", async () => {
+  it("asks for the account id too for production, and for an environment Rovara has no record of", async () => {
     const production = await harness({ env: "production", typed: ["production", "123456789012"] });
     await runDestroy({ env: "production", keepData: false }, production.deps);
     expect(production.asked).toHaveLength(2);
@@ -142,9 +142,9 @@ describe("agentx destroy (FR-055, item 3)", () => {
   it("refuses the legacy deployment, the operator role, and credentials for another account", async () => {
     const legacy = await harness();
     await writeEnvironmentSettings(legacy.store, { ...SETTINGS, naming: "legacy" });
-    await expect(runDestroy({ env: "staging", keepData: false }, legacy.deps)).rejects.toThrow("agentx destroy never removes the legacy deployment");
+    await expect(runDestroy({ env: "staging", keepData: false }, legacy.deps)).rejects.toThrow("rovara destroy never removes the legacy deployment");
     const operator = await harness({ caller: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" });
-    await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("agentx destroy needs admin credentials");
+    await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("rovara destroy needs admin credentials");
     const other = await harness();
     other.deps.identity = { get: async () => ({ account: "999999999999", arn: ADMIN }) };
     await expect(runDestroy({ env: "staging", keepData: false }, other.deps)).rejects.toThrow("environment staging is installed in account 123456789012, but your AWS credentials are for 999999999999");
@@ -201,7 +201,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     h.deps.isInteractive = () => false;
     const held = JSON.stringify({ holder: ADMIN, command: "destroy", acquiredAt: new Date(0).toISOString() });
     h.store.values.set(lockParameterName("staging"), held);
-    await expect(runDestroy({ env: "staging", keepData: false }, h.deps)).rejects.toThrow(`environment staging is locked by ${ADMIN} running "destroy" since ${new Date(0).toISOString()} (your own earlier "destroy"; confirm the takeover only if that run is no longer going; to clear it, delete ${lockParameterName("staging")} once you are sure no AgentX command is running)`);
+    await expect(runDestroy({ env: "staging", keepData: false }, h.deps)).rejects.toThrow(`environment staging is locked by ${ADMIN} running "destroy" since ${new Date(0).toISOString()} (your own earlier "destroy"; confirm the takeover only if that run is no longer going; to clear it, delete ${lockParameterName("staging")} once you are sure no Rovara command is running)`);
     expect(h.asked).toHaveLength(1);
     expect(h.store.values.get(lockParameterName("staging"))).toBe(held);
     expect(h.account.calls.filter((call) => call.startsWith("delete"))).toEqual([]);
@@ -212,8 +212,8 @@ describe("agentx destroy (FR-055, item 3)", () => {
     h.store.values.set(installAnswersParameterName("staging"), "{\"SECRETanswer\": ");
     h.store.values.set(installProgressParameterName("staging"), "[\"SECRETprogress\"]");
     await runDestroy({ env: "staging", keepData: false }, h.deps);
-    expect(h.lines).toContain(`Could not read ${installAnswersParameterName("staging")}, so agentx destroy goes on without the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment.`);
-    expect(h.lines).toContain(`Could not read ${installProgressParameterName("staging")}, so agentx destroy goes on without the install progress: the steps printed at the end name no app of this environment.`);
+    expect(h.lines).toContain(`Could not read ${installAnswersParameterName("staging")}, so rovara destroy goes on without the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment.`);
+    expect(h.lines).toContain(`Could not read ${installProgressParameterName("staging")}, so rovara destroy goes on without the install progress: the steps printed at the end name no app of this environment.`);
     expect(h.lines.join("\n")).not.toContain("SECRET");
   });
 
@@ -288,7 +288,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     const account = installedAccount("production");
     account.stacks.set("AgentXControlPlane", { status: "UPDATE_COMPLETE", terminationProtection: false, outputs: {}, template: "{}", resources: [] });
     const h = await harness({ env: "production", account, installed: false, typed: ["production", "123456789012"] });
-    await expect(runDestroy({ env: "production", keepData: false }, h.deps)).rejects.toThrow("agentx destroy never removes the legacy deployment");
+    await expect(runDestroy({ env: "production", keepData: false }, h.deps)).rejects.toThrow("rovara destroy never removes the legacy deployment");
     expect(h.account.calls).toEqual([]);
     expect(h.asked).toEqual([]);
     expect(h.store.calls.filter((call) => call.op === "delete")).toEqual([]);
@@ -306,7 +306,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     const h = await harness();
     const first = await runDestroy({ env: "staging", keepData: true }, h.deps);
     expect(h.store.values.has(inventoryParameterName("staging"))).toBe(true);
-    expect(first.manualSteps).toContain("Run agentx destroy again, without --keep-data, to remove what was kept.");
+    expect(first.manualSteps).toContain("Run rovara destroy again, without --keep-data, to remove what was kept.");
     h.deps.confirmLine = async (question) => (question.includes("account id") ? "123456789012" : "staging");
     const second = await runDestroy({ env: "staging", keepData: false }, h.deps);
     // Only the inventory was left: the settings delete that finds nothing is not counted.
@@ -407,7 +407,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
 
   it("tells the operator role that destroy needs admin credentials, and that a role without delete rights fails partway", async () => {
     const operator = await harness({ caller: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" });
-    await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("any other role without the rights to delete all of it fails partway; run agentx destroy again with admin credentials to continue");
+    await expect(runDestroy({ env: "staging", keepData: false }, operator.deps)).rejects.toThrow("any other role without the rights to delete all of it fails partway; run rovara destroy again with admin credentials to continue");
   });
 
   it("sweeps agentx/<env>/github even though the retained agentx/<env>/github-app shares its start", async () => {

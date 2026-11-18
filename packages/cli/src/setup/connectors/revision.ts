@@ -4,7 +4,7 @@
 // (a missing or unparseable preflight report, or the connector simply absent from it), is never
 // reported as set up (F17).
 import { stat } from "node:fs/promises";
-import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig, type ProjectDefinition } from "@agentx/contracts";
+import { agentXError, environmentConnectorSecretPrefix, type ConnectorConfig, type ProjectDefinition, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { loadProjectConfig } from "../../config.js";
 import type { InitSecrets, FinishFlags } from "../../init/context.js";
 import type { ConnectorType } from "../../init/install-state.js";
@@ -30,7 +30,7 @@ export function errorName(error: unknown): string {
 
 /** The command to run again after fixing a connector: the caller's own, else the day-2 command. */
 export function connectorRerun(input: Pick<ConnectorAddInput, "env" | "projectName" | "rerun">, type: ConnectorType): string {
-  return input.rerun ?? `agentx --env ${input.env} connector add ${type} --project ${input.projectName}`;
+  return input.rerun ?? `${CLI_COMMAND_NAME} --env ${input.env} connector add ${type} --project ${input.projectName}`;
 }
 
 /** The project file project add (or agentx init) wrote. It lives only on the machine that ran it,
@@ -40,7 +40,7 @@ export async function loadProjectFile(input: { projectName: string; configDir: s
   if (!exists) {
     throw agentXError(
       "CONFIG_INVALID",
-      `project ${input.projectName} has no file in ${input.configDir}; agentx init or agentx project add wrote it on the machine that ran it, in that run's --config-dir. Run this there, or copy ${input.projectName}.yaml into ${input.configDir} (or pass --config-dir <the directory that holds it>), then run ${input.rerun} again`,
+      `project ${input.projectName} has no file in ${input.configDir}; ${CLI_COMMAND_NAME} init or ${CLI_COMMAND_NAME} project add wrote it on the machine that ran it, in that run's --config-dir. Run this there, or copy ${input.projectName}.yaml into ${input.configDir} (or pass --config-dir <the directory that holds it>), then run ${input.rerun} again`,
     );
   }
   return loadProjectConfig({ projectName: input.projectName, configDirectory: input.configDir, allowLoopback: false });

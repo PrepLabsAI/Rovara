@@ -247,8 +247,8 @@ const TaskPlanResponseSchema = z.object({
 export type TaskPlanView = z.infer<typeof TaskPlanResponseSchema>["plan"];
 /** The feedback page's view of a PR feedback proposal; the tool reads only the fields it shows. */
 const FeedbackReviewResponseSchema = z.object({ review: z.record(z.string(), z.unknown()) });
-const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
-const DEFAULT_SIGN_IN = `npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`;
+const UNREADABLE = "Rovara answered with something this version of the CLI cannot read; upgrade it";
+const DEFAULT_SIGN_IN = `npx ${CLI_PACKAGE_NAME} login <your Rovara URL>`;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** No call, retries included, takes longer than this. */
 const DEADLINE_MS = 45_000;
@@ -296,11 +296,11 @@ export function httpControlPlaneClient(options: {
     } catch (error) {
       if (error instanceof ToolError) throw error;
       if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
-        const message = plainText(error.message.replace(/^AUTH_REQUIRED: /, ""), "this computer is not signed in to AgentX");
+        const message = plainText(error.message.replace(/^AUTH_REQUIRED: /, ""), "this computer is not signed in to Rovara");
         throw new ToolError("SIGN_IN_REQUIRED", message, signInStep(message, DEFAULT_SIGN_IN));
       }
       // Only AgentX's own words are shown; any other error's text could hold anything.
-      const message = error instanceof AgentXError ? plainText(error.message.replace(/^[A-Z_]+: /, ""), "AgentX could not be reached") : "AgentX could not be reached";
+      const message = error instanceof AgentXError ? plainText(error.message.replace(/^[A-Z_]+: /, ""), "Rovara could not be reached") : "Rovara could not be reached";
       throw new ToolError("CONTROL_PLANE_UNAVAILABLE", message);
     }
   }
@@ -309,12 +309,12 @@ export function httpControlPlaneClient(options: {
     const maxTries = repeatable(method, body) ? tries : 1;
     const started = now();
     const deadlineMs = Math.min(call.deadlineMs ?? defaultDeadlineMs, defaultDeadlineMs);
-    const cancelled = () => new ToolError("CONTROL_PLANE_UNAVAILABLE", "the call was cancelled before AgentX answered");
+    const cancelled = () => new ToolError("CONTROL_PLANE_UNAVAILABLE", "the call was cancelled before Rovara answered");
     const isCancelled = (): boolean => call.signal?.aborted === true;
     // The tokens sent, and any AgentX refused, never appear in what a tool returns.
     const secrets = authorized ? [current.accessToken, ...refused] : [];
     const unreachable = (attempt: number) =>
-      new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${plainText(current.baseUrl, "its URL")}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
+      new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach Rovara at ${plainText(current.baseUrl, "its URL")}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
     /** Waits before the next try, or answers false when there is no try left or no time for one. */
     const again = async (attempt: number): Promise<boolean> => {
       if (attempt >= maxTries || isCancelled()) return false;

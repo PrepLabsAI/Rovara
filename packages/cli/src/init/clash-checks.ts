@@ -3,7 +3,7 @@
 // already, the GitHub owner exists and is the kind the answers say, and the app name fits both
 // platforms and is free on GitHub. Each is a PrerequisiteCheck for the checklist; nothing is
 // created, and a GitHub that cannot answer is "could not check", never a wrong answer.
-import { environmentStackName } from "@agentx/contracts";
+import { environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { installOrder } from "../deploy/parameters.js";
 import type { StackStatusReader } from "./context.js";
 import { githubAppSlug, type GitHubApi } from "./github-app.js";
@@ -40,7 +40,7 @@ export async function clashChecks(input: {
       checks.push({
         label: "Install name", ok: false,
         detail: page
-          ? `This AWS account and region already have an AgentX install named ${answers.env}. Choose another install name.`
+          ? `This AWS account and region already have a Rovara install named ${answers.env}. Choose another install name.`
           : `environment ${answers.env} already has stacks or settings in this account and region; choose another --env`,
         ...(page && existing.length > 0 ? { technical: existing.join(", ") } : {}),
       });
@@ -51,8 +51,8 @@ export async function clashChecks(input: {
     checks.push({
       label: "Install name", ok: false,
       detail: page
-        ? "AgentX could not check whether the install name is free. Check your access to AWS, then check again."
-        : `could not check whether environment ${answers.env} is free (${reason(error)}); check your AWS access and run agentx init again`,
+        ? "Rovara could not check whether the install name is free. Check your access to AWS, then check again."
+        : `could not check whether environment ${answers.env} is free (${reason(error)}); check your AWS access and run ${CLI_COMMAND_NAME} init again`,
       ...(page ? { technical: reason(error) } : {}),
     });
   }
@@ -79,7 +79,7 @@ export async function clashChecks(input: {
     } catch (error) {
       checks.push({
         label: "GitHub owner", ok: false,
-        detail: page ? `AgentX could not reach GitHub to check ${owner}. Check your network, then check again.` : `could not check the GitHub owner ${owner} (${reason(error)}); check your network and run agentx init again`,
+        detail: page ? `Rovara could not reach GitHub to check ${owner}. Check your network, then check again.` : `could not check the GitHub owner ${owner} (${reason(error)}); check your network and run ${CLI_COMMAND_NAME} init again`,
         ...(page ? { technical: reason(error) } : {}),
       });
     }
@@ -98,7 +98,7 @@ export async function clashChecks(input: {
     } catch (error) {
       checks.push({
         label: "App name", ok: false,
-        detail: page ? "AgentX could not reach GitHub to check the app name. Check your network, then check again." : `could not check the app name on GitHub (${reason(error)}); check your network and run agentx init again`,
+        detail: page ? "Rovara could not reach GitHub to check the app name. Check your network, then check again." : `could not check the app name on GitHub (${reason(error)}); check your network and run ${CLI_COMMAND_NAME} init again`,
         ...(page ? { technical: reason(error) } : {}),
       });
     }

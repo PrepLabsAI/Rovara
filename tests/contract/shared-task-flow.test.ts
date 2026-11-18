@@ -98,7 +98,7 @@ function channelTurn(harness: Harness, subject: string, reply: string) {
 
 /** Starts a shared task through the MCP tool and posts its start message; the workspace is still preparing. */
 async function startShared(harness: Harness, slack: ReturnType<typeof notifier>, tool: Awaited<ReturnType<typeof signedInClient>>["tool"], shareMode: "view" | "continue") {
-  const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test", share_to_channel: true, share_mode: shareMode });
+  const started = await tool("rovara_start_task", { project: "payments", instructions: "Fix the flaky retry test", share_to_channel: true, share_mode: shareMode });
   const taskId = String(started.value.task_id);
   await slack.pump();
   const task = taskRecord(harness, taskId);
@@ -112,12 +112,12 @@ describe("a shared task through its life (US3)", () => {
     const { tool, expectNoTokenLeaked } = await signedInClient(harness, MAYA);
 
     // US3 scenario 1: the start message within the start, then a reply at each change.
-    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix the flaky retry test", share_to_channel: true, share_mode: "continue" });
+    const started = await tool("rovara_start_task", { project: "payments", instructions: "Fix the flaky retry test", share_to_channel: true, share_mode: "continue" });
     expect(started.value).toMatchObject({ shared: true, share_mode: "continue", share_posting: true });
     const taskId = String(started.value.task_id);
     await slack.pump();
     expect(slack.posts[0]!.text).toContain("started a task from Claude Code");
-    const read = await tool("agentx_get_task", { task_id: taskId });
+    const read = await tool("rovara_get_task", { task_id: taskId });
     const threadUrl = String(read.value.thread_url);
     expect(threadUrl).toMatch(/^https:\/\/slack\.com\/archives\//);
     const task = taskRecord(harness, taskId);
@@ -148,8 +148,8 @@ describe("a shared task through its life (US3)", () => {
     expect(slack.posts).toHaveLength(3);
 
     // US3 scenario 7: the developer sees the channel's turn, and can still switch to view only.
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ channel_turns: [{ author: "`Priya`", slack_user: PRIYA, request: "also run the linter", outcome: "answered" }] });
-    expect((await tool("agentx_share_task", { task_id: taskId, share_mode: "view" })).value).toMatchObject({ share_mode: "view" });
+    expect((await tool("rovara_get_task", { task_id: taskId })).value).toMatchObject({ channel_turns: [{ author: "`Priya`", slack_user: PRIYA, request: "also run the linter", outcome: "answered" }] });
+    expect((await tool("rovara_share_task", { task_id: taskId, share_mode: "view" })).value).toMatchObject({ share_mode: "view" });
     expect(taskRecord(harness, taskId).share).toMatchObject({ mode: "view" });
     expect(sharedRecord(harness, subject)).toMatchObject({ mode: "view" });
     await slack.pump();
@@ -158,12 +158,12 @@ describe("a shared task through its life (US3)", () => {
     expect(service.posts.at(-1)).toBe(VIEW_ONLY_NOTICE);
     expect(service.ran).toHaveLength(1);
     // The developer runs one more instruction; its end reaches the notifier only after the close.
-    expect((await tool("agentx_continue_task", { task_id: taskId, instructions: "Tidy the test names." })).value).toMatchObject({ status: "RUNNING" });
+    expect((await tool("rovara_continue_task", { task_id: taskId, instructions: "Tidy the test names." })).value).toMatchObject({ status: "RUNNING" });
     await harness.finish(workspaceId, String(active()), "SUCCEEDED");
     const lateEnd = slack.hold();
 
     // FR-032 and Q3: the close posts "closed", and the thread then drives nothing.
-    await tool("agentx_close_task", { task_id: taskId });
+    await tool("rovara_close_task", { task_id: taskId });
     await harness.finish(workspaceId, String(active()), "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
     await slack.pump();
     expect(slack.posts.at(-1)!.text).toBe("The task is closed, and its workspace is released. This thread no longer drives it.");
@@ -188,7 +188,7 @@ describe("a shared task through its life (US3)", () => {
     await registerRevision(harness.handler, 2, { share: "required", shareMode: { default: "view", allowContinue: false } });
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
-    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: false, share_mode: "continue" });
+    const started = await tool("rovara_start_task", { project: "payments", instructions: "Fix it", share_to_channel: false, share_mode: "continue" });
     expect(started.value).toMatchObject({ shared: true, share_mode: "view", share_reason: "required by project", share_mode_reason: "continue not allowed by project" });
     const taskId = String(started.value.task_id);
     expect(taskRecord(harness, taskId).share).toMatchObject({ mode: "view", sharedReason: "required" });
@@ -207,18 +207,18 @@ describe("a shared task through its life (US3)", () => {
     const harness = await createDeveloperTaskBroker();
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
-    const taskId = String((await tool("agentx_start_task", { project: "payments", instructions: "Fix it" })).value.task_id);
+    const taskId = String((await tool("rovara_start_task", { project: "payments", instructions: "Fix it" })).value.task_id);
     await slack.pump();
     expect(slack.posts).toEqual([]);
     expect(taskRecord(harness, taskId).share).toBeUndefined();
-    await tool("agentx_share_task", { task_id: taskId });
+    await tool("rovara_share_task", { task_id: taskId });
     await slack.pump();
     expect(slack.posts).toHaveLength(1);
     expect(slack.posts[0]!.text).toContain("Status: STARTING");
     const task = taskRecord(harness, taskId);
     expect(task.share).toMatchObject({ mode: "view", sharedReason: "requested", threadTs: expect.any(String) as unknown });
     expect(sharedRecord(harness, subjectOf(task))).toMatchObject({ taskId, mode: "view" });
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ thread_url: `https://slack.com/archives/${task.share.channelId}/p${task.share.threadTs.replace(".", "")}` });
+    expect((await tool("rovara_get_task", { task_id: taskId })).value).toMatchObject({ thread_url: `https://slack.com/archives/${task.share.channelId}/p${task.share.threadTs.replace(".", "")}` });
   });
 });
 
@@ -243,7 +243,7 @@ describe("the owner's answers, end to end", () => {
     await service.handle(service.mention(PRIYA, "add a test for the timeout"));
     expect(service.posts.at(-1)).toBe(`<@${PRIYA}> Added the test.`);
     expect(service.records).toEqual([expect.objectContaining({ taskId, disposition: "answered" })]);
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ share_mode: "continue", channel_turns: [{ slack_user: PRIYA, outcome: "answered" }] });
+    expect((await tool("rovara_get_task", { task_id: taskId })).value).toMatchObject({ share_mode: "continue", channel_turns: [{ slack_user: PRIYA, outcome: "answered" }] });
   });
 
   it("lets a teammate's stop in a continue thread cancel the developer's own run (Q8)", async () => {
@@ -262,7 +262,7 @@ describe("the owner's answers, end to end", () => {
     // The worker stops the developer's run.
     await harness.finish(workspaceId, developerRun, "CANCELLED");
     expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${developerRun}`)).toMatchObject({ status: "CANCELLED" });
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "CANCELLED" });
+    expect((await tool("rovara_get_task", { task_id: taskId })).value).toMatchObject({ status: "CANCELLED" });
     await slack.pump();
     expect(slack.posts.at(-1)).toMatchObject({ threadTs: taskRecord(harness, taskId).share.threadTs, text: "The task ended CANCELLED." });
   });
@@ -341,7 +341,7 @@ describe("the owner's answers, end to end", () => {
     await bindChannel(harness.handler, PRIVATE);
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
-    const refused = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
+    const refused = await tool("rovara_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
     // Final review M6: the next step matches the message, not the generic "ask an admin to bind one".
     expect(refused).toMatchObject({ isError: true, error: {
       code: "CHANNEL_REQUIRED",
@@ -353,7 +353,7 @@ describe("the owner's answers, end to end", () => {
     expect(slack.posts).toEqual([]);
 
     joined = true;
-    const started = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
+    const started = await tool("rovara_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true, channel: PRIVATE });
     expect(started).toMatchObject({ isError: false, value: { shared: true, channel: { id: PRIVATE } } });
     const taskId = String(started.value.task_id);
     await slack.pump();
@@ -370,7 +370,7 @@ describe("the owner's answers, end to end", () => {
     grantProject(harness.db, MAYA);
     const slack = notifier(harness);
     const { tool } = await signedInClient(harness, MAYA);
-    const refused = await tool("agentx_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true });
+    const refused = await tool("rovara_start_task", { project: "payments", instructions: "Fix it", share_to_channel: true });
     expect(refused).toMatchObject({ isError: true, error: {
       code: "SLACK_UNAVAILABLE",
       message: "AgentX cannot tell whether that channel is private; ask your AgentX admin to finish the Slack setup, or share to a channel you are a member of",
@@ -396,7 +396,7 @@ describe("the owner's answers, end to end", () => {
     expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepare}`)).toMatchObject({ status: "FAILED", error: STUCK_SETUP_MESSAGE });
     await slack.pump();
     expect(slack.posts.map((post) => post.text).slice(1)).toEqual([`The workspace could not be set up, so the task did not run: ${STUCK_SETUP_MESSAGE}`]);
-    expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "FAILED", failure: { category: "setup_failed", message: STUCK_SETUP_MESSAGE } });
+    expect((await tool("rovara_get_task", { task_id: taskId })).value).toMatchObject({ status: "FAILED", failure: { category: "setup_failed", message: STUCK_SETUP_MESSAGE } });
   });
 });
 

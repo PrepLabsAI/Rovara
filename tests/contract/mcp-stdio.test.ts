@@ -1,4 +1,4 @@
-// Spec 025 FR-026: the built CLI's `agentx mcp`, spoken to over real stdio. stdout carries only MCP
+// Spec 025 FR-026: the built CLI's `rovara mcp`, spoken to over real stdio. stdout carries only MCP
 // messages, at startup, on errors and at shutdown; logs go to stderr; no token appears in either.
 // It needs the built CLI (npm run build, or typecheck, which also emits it).
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -33,7 +33,7 @@ beforeAll(() => {
 
 interface FakeControlPlane { url: string; issuer: string; requests: Array<{ method: string; path: string; authorization: string | undefined }>; close(): Promise<void> }
 
-/** AgentX on a loopback port: the configuration, the developer's projects, and one STARTING task. */
+/** Rovara on a loopback port: the configuration, the developer's projects, and one STARTING task. */
 async function fakeControlPlane(): Promise<FakeControlPlane> {
   const requests: FakeControlPlane["requests"] = [];
   const server: Server = createServer((request: IncomingMessage, response) => {
@@ -166,7 +166,7 @@ afterEach(async () => {
   await Promise.all(planes.splice(0).map((plane) => plane.close()));
 });
 
-describe("agentx mcp over stdio (FR-026)", () => {
+describe("rovara mcp over stdio (FR-026)", () => {
   it("speaks only MCP on stdout, lists the tools, and answers SIGN_IN_REQUIRED when not signed in", async () => {
     const home = await mkdtemp(join(tmpdir(), "agentx-mcp-stdio-"));
     const transport = new StdioClientTransport({ command: process.execPath, args: [CLI, "mcp"], env: { HOME: home, PATH: process.env.PATH ?? "" }, stderr: "pipe" });
@@ -178,10 +178,10 @@ describe("agentx mcp over stdio (FR-026)", () => {
       const { tools } = await client.listTools();
       expect(tools).toHaveLength(46);
       // Ruling F3: the tools were listed first, and the error result still passes the SDK's checks.
-      const result = await client.callTool({ name: "agentx_whoami", arguments: {} });
-      expect(toolError(result)).toMatchObject({ code: "SIGN_IN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login <your AgentX URL>" });
+      const result = await client.callTool({ name: "rovara_whoami", arguments: {} });
+      expect(toolError(result)).toMatchObject({ code: "SIGN_IN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login <your Rovara URL>" });
       // The server did not crash: it answers the next call too.
-      expect(toolError(await client.callTool({ name: "agentx_list_projects", arguments: {} }))).toMatchObject({ code: "SIGN_IN_REQUIRED" });
+      expect(toolError(await client.callTool({ name: "rovara_list_projects", arguments: {} }))).toMatchObject({ code: "SIGN_IN_REQUIRED" });
       // Anything on stdout that is not an MCP message would surface here as a client error.
       expect(errors).toEqual([]);
     } finally {
@@ -189,7 +189,7 @@ describe("agentx mcp over stdio (FR-026)", () => {
     }
   }, 30_000);
 
-  it("works signed in against AgentX on a loopback port, keeps stdout to MCP and never shows the token", async () => {
+  it("works signed in against Rovara on a loopback port, keeps stdout to MCP and never shows the token", async () => {
     const plane = await fakeControlPlane();
     planes.push(plane);
     const { home, path } = await signedInHome(plane);
@@ -197,20 +197,20 @@ describe("agentx mcp over stdio (FR-026)", () => {
     children.push(mcp.child);
 
     const initialized = await mcp.initialize();
-    expect(initialized.result).toMatchObject({ serverInfo: { name: "agentx" } });
+    expect(initialized.result).toMatchObject({ serverInfo: { name: "rovara" } });
     expect(((await mcp.request("tools/list")).result?.tools as unknown[]).length).toBe(46);
 
-    const whoami = await mcp.callTool("agentx_whoami");
+    const whoami = await mcp.callTool("rovara_whoami");
     expect(whoami.isError).not.toBe(true);
     expect(whoami.structuredContent).toMatchObject({ environment: "staging", developer_name: "Maya Chen", sign_in_method: "slack", admin: false, control_plane_api_version: "1.2" });
     expect(plane.requests.filter((entry) => entry.path === "/v1/dev/projects")).toEqual([{ method: "GET", path: "/v1/dev/projects", authorization: `Bearer ${ACCESS_TOKEN}` }]);
 
-    // An error AgentX answers, and a line that is not JSON, both leave stdout clean and the server up.
-    const missing = await mcp.callTool("agentx_get_task", { task_id: "00000000-0000-4000-8000-000000000000" });
+    // An error Rovara answers, and a line that is not JSON, both leave stdout clean and the server up.
+    const missing = await mcp.callTool("rovara_get_task", { task_id: "00000000-0000-4000-8000-000000000000" });
     expect(missing.isError).toBe(true);
     expect(missing).not.toHaveProperty("structuredContent");
     mcp.child.stdin.write("this is not json\n");
-    expect((await mcp.callTool("agentx_list_projects")).structuredContent).toMatchObject({ projects: [] });
+    expect((await mcp.callTool("rovara_list_projects")).structuredContent).toMatchObject({ projects: [] });
 
     mcp.child.stdin.end();
     expect(await mcp.exited).toEqual({ code: 0, signal: null });
@@ -229,10 +229,10 @@ describe("agentx mcp over stdio (FR-026)", () => {
     children.push(mcp.child);
     await mcp.initialize();
 
-    const waiting = mcp.request("tools/call", { name: "agentx_wait_for_task", arguments: { task_id: TASK_ID, wait_seconds: 600 } });
-    // The wait has started once AgentX has been asked about the task.
+    const waiting = mcp.request("tools/call", { name: "rovara_wait_for_task", arguments: { task_id: TASK_ID, wait_seconds: 600 } });
+    // The wait has started once Rovara has been asked about the task.
     for (let tries = 0; !plane.requests.some((entry) => entry.path === `/v1/dev/tasks/${TASK_ID}`); tries += 1) {
-      if (tries > 200) throw new Error("the wait never asked AgentX about the task");
+      if (tries > 200) throw new Error("the wait never asked Rovara about the task");
       await new Promise((done) => setTimeout(done, 25));
     }
     const started = Date.now();

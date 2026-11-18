@@ -1,7 +1,7 @@
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -159,7 +159,7 @@ export function isOperatorRole(callerArn: string, env: string): boolean {
 /** FR-058 and FR-059: the ready screen stays up, so the page's outcome names nothing the ready
  * card already says in full (the card is the one place the developer sign-in and day-two commands
  * live); the terminal still gets READY_LINE and the full readyText goes to the log file. */
-export const READY_OUTCOME = "AgentX is installed.";
+export const READY_OUTCOME = "Rovara is installed.";
 
 /** FR-059: how long the ready screen stays up on its own, once the install is complete. */
 export const READY_HOLD_MS = 30 * 60_000;
@@ -186,7 +186,7 @@ export async function holdReadyScreen(input: { closeRequested: Promise<void>; ms
 }
 
 export const OPERATOR_ACCESS_REFUSAL =
-  "the access stack needs admin rights, and you are using the AgentX operator role; ask your platform team to deploy it (agentx init --export, then deploy-access.sh), or run agentx init with admin credentials";
+  `the access stack needs admin rights, and you are using the Rovara operator role; ask your platform team to deploy it (${CLI_COMMAND_NAME} init --export, then deploy-access.sh), or run ${CLI_COMMAND_NAME} init with admin credentials`;
 
 /** The note an `access` step deployed by a platform team from an export bundle is recorded with. */
 export const PLATFORM_TEAM_ACCESS_NOTE = "deployed by your platform team from the export bundle";
@@ -274,7 +274,7 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     slackIdentity: async (token) => {
       const answer = await slackWebApi(input.fetch).authTest(token);
       if (answer.ok !== true || answer.team_id === undefined || answer.user_id === undefined) {
-        throw agentXError("CONFIG_INVALID", "Slack refused the stored bot token; run agentx init again to store a new one");
+        throw agentXError("CONFIG_INVALID", `Slack refused the stored bot token; run ${CLI_COMMAND_NAME} init again to store a new one`);
       }
       return { teamId: answer.team_id, botUserId: answer.user_id };
     },
@@ -475,7 +475,7 @@ async function resumedAlertWebhook(input: { answers: InitAnswers; flags: InitFla
   if (display !== alert.display) {
     throw agentXError(
       "CONFIG_INVALID",
-      `${webhookFlagDisplay(source)} (${display}) differs from what this install started with (${alert.display}); an install's answers cannot change halfway. Give an address on the same host, or run agentx init without that flag to keep the stored one`,
+      `${webhookFlagDisplay(source)} (${display}) differs from what this install started with (${alert.display}); an install's answers cannot change halfway. Give an address on the same host, or run ${CLI_COMMAND_NAME} init without that flag to keep the stored one`,
     );
   }
   return address;
@@ -518,7 +518,7 @@ async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: 
   const deployed = (await input.stackStatus.parameters?.(accessStack))?.PermissionsBoundaryArn;
   const wanted = bundle.permissionsBoundaryArn ?? "";
   if (deployed !== undefined && deployed !== wanted) {
-    const describe = (arn: string) => (arn === "" ? "AgentX's default boundary" : arn);
+    const describe = (arn: string) => (arn === "" ? "Rovara's default boundary" : arn);
     throw agentXError("CONFIG_INVALID", `the bundle's permission boundary (${describe(wanted)}) differs from the one the access stack ${accessStack} was deployed with (${describe(deployed)}); use the bundle the platform team deployed from`);
   }
 }
@@ -547,7 +547,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (bundle !== undefined && bundle.env !== env) throw agentXError("CONFIG_INVALID", `the bundle is for environment ${bundle.env}; pass --env ${bundle.env}`);
   // A resume reads the install from the region's SSM, so --yes never guesses it (a bundle names it).
   if (options.yes && options.region === undefined && bundle === undefined) {
-    throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
+    throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init needs to know the AWS region; with --yes, pass --region <region>`);
   }
   const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
@@ -557,7 +557,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
   if (fromSource && options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
   if (options.releaseDir === undefined && version === undefined && !fromSource) {
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
+    throw agentXError("CONFIG_INVALID", `this ${CLI_COMMAND_NAME} was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>`);
   }
 
   // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
@@ -569,7 +569,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   });
   let prompter: Prompter;
   if (uiMode.mode === "page") {
-    if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
+    if (options.yes) throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init --ui asks its questions on a page; --yes answers them without asking. Use one or the other`);
     session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
     if (options.cloud !== undefined) {
       session.setupStore = (deps.setupStore ?? ((table) => dynamoSetupStore({ client: new DynamoDBClient({}), table, env })))(options.cloud.table);
@@ -606,7 +606,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   } else {
     if (uiMode.noBrowser === true) write(NO_BROWSER_LINE);
     if (process.stdin.isTTY !== true) {
-      throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
+      throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer`);
     }
     prompter = processPrompter(services.stderr);
   }
@@ -649,7 +649,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   session.releaseLoaded = true;
   // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
   if (isPrereleaseVersion(release.manifest.version)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
+    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; ${CLI_COMMAND_NAME} init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
   }
 
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
@@ -723,15 +723,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   }
   if (stored === undefined && existingSettings !== undefined) {
     throw agentXError("CONFIG_INVALID", existingSettings.naming === "legacy"
-      ? `environment ${env} is the deployment adopted with fixed stack names; agentx init cannot install over it. Choose another --env`
-      : `environment ${env} is already installed, but not by agentx init; there is nothing to resume. Choose another --env, or use agentx deploy --mode upgrade`);
+      ? `environment ${env} is the deployment adopted with fixed stack names; ${CLI_COMMAND_NAME} init cannot install over it. Choose another --env`
+      : `environment ${env} is already installed, but not by ${CLI_COMMAND_NAME} init; there is nothing to resume. Choose another --env, or use ${CLI_COMMAND_NAME} deploy --mode upgrade`);
   }
   // With a bundle and no install yet, the bundle is what is resumed.
   if (options.resume && stored === undefined && bundle === undefined) {
     const nothing = `there is no install of environment ${env} to resume in account ${caller.account} (${region})`;
     throw agentXError("CONFIG_INVALID", isOperatorRole(caller.arn, env)
-      ? `${nothing}; you are using the AgentX operator role, so if your platform team deployed the access stack from an export bundle, run agentx init --resume --from-bundle <the bundle directory>`
-      : `${nothing}; run agentx init without --resume to start one`);
+      ? `${nothing}; you are using the Rovara operator role, so if your platform team deployed the access stack from an export bundle, run ${CLI_COMMAND_NAME} init --resume --from-bundle <the bundle directory>`
+      : `${nothing}; run ${CLI_COMMAND_NAME} init without --resume to start one`);
   }
   // A first run under --yes (no install under way, and no --resume): the finishing steps can ask
   // nothing, so what they need is checked here, before anything is created. The Cognito admin's
@@ -739,11 +739,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // refuses with its flag named only when it still needs the value.
   if (options.yes && !options.resume && stored === undefined) {
     const missing = [
-      ...(options.flags.identity !== "oidc" && options.finishFlags.adminEmail === undefined ? [["--admin-email <email>", "the email of your AgentX admin user"]] : []),
+      ...(options.flags.identity !== "oidc" && options.finishFlags.adminEmail === undefined ? [["--admin-email <email>", "the email of your Rovara admin user"]] : []),
       ...(options.finishFlags.channel === undefined ? [["--channel <name>", "the Slack channel for the first project"]] : []),
     ];
     const [first] = missing;
-    if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
+    if (first !== undefined) throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init --yes needs ${first[0]} (${first[1]}); pass it, or run ${CLI_COMMAND_NAME} init without --yes to be asked`);
   }
 
   // FR-018: a first run checks the account and region before any setting is asked. On the page a
@@ -819,7 +819,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     initialAnswers = stored;
     if (stored.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${stored.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${stored.account}`);
     if (stored.releaseVersion !== release.manifest.version) {
-      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${stored.releaseVersion}, but this agentx has release ${release.manifest.version}; run npx ${CLI_PACKAGE_NAME}@${stored.releaseVersion} init --env ${env}, or pass --release <dir> for ${stored.releaseVersion}`);
+      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${stored.releaseVersion}, but this ${CLI_COMMAND_NAME} has release ${release.manifest.version}; run npx ${CLI_PACKAGE_NAME}@${stored.releaseVersion} init --env ${env}, or pass --release <dir> for ${stored.releaseVersion}`);
     }
     assertResumeFlagsMatch(stored, options.flags);
     await assertEngineSource(stored);
@@ -942,7 +942,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const saveAnswers = async () => {
     if (firstRun !== undefined) {
       if ((await readInstallAnswers(store, env)) !== undefined) {
-        throw agentXError("CONFIG_INVALID", `another agentx init started installing environment ${env} while this one was asking its questions; nothing was saved. Run agentx init again to continue that install`);
+        throw agentXError("CONFIG_INVALID", `another ${CLI_COMMAND_NAME} init started installing environment ${env} while this one was asking its questions; nothing was saved. Run ${CLI_COMMAND_NAME} init again to continue that install`);
       }
       // The saved answers carry the stored OpenRouter key's ARN, which every step reads.
       context.answers = await persistInitAnswers({ store, secrets, collected: firstRun });
@@ -1058,7 +1058,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       ...(options.yes ? {} : {
         confirmTakeover: (held: LockRecord) => activePrompter.confirm(
           held.holder === caller.arn && held.command === "init"
-            ? `Environment ${env} is locked by your own earlier agentx init since ${held.acquiredAt}. Take the lock over? Say yes only if that run is no longer going.`
+            ? `Environment ${env} is locked by your own earlier ${CLI_COMMAND_NAME} init since ${held.acquiredAt}. Take the lock over? Say yes only if that run is no longer going.`
             : `Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}, more than 2 hours ago. Take the lock over? Say yes only if that command is no longer running.`,
           { defaultValue: false },
         ),

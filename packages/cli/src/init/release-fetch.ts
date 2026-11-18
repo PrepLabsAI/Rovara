@@ -4,7 +4,7 @@
 // its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
-import { agentXError, ReleaseManifestSchema, type ReleaseManifest } from "@agentx/contracts";
+import { agentXError, ReleaseManifestSchema, type ReleaseManifest, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 import { sourceReleaseVersion } from "../deploy/cdk-source.js";
 import type { LoadedRelease } from "../deploy/release.js";
@@ -134,7 +134,7 @@ export async function fetchRelease(input: { version: string | undefined; home: s
   const { version } = input;
   if (version === undefined) {
     // Issue 152: --engine cdk --source needs no release (sourceRelease), so init never gets here with it.
-    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
+    throw agentXError("CONFIG_INVALID", `this ${CLI_COMMAND_NAME} was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>`);
   }
   const urls = releaseAssetUrls(version);
   const published = await download(input.fetch, urls.manifest, version);
@@ -142,7 +142,7 @@ export async function fetchRelease(input: { version: string | undefined; home: s
   const cached = await readFile(join(dir, "release.json")).catch(() => undefined);
   if (cached !== undefined && cached.equals(published)) return dir;
 
-  input.write(`Downloading AgentX release ${version} from GitHub`);
+  input.write(`Downloading Rovara release ${version} from GitHub`);
   const tarball = await download(input.fetch, urls.tarball, version, input.onProgress);
   await mkdir(dirname(dir), { recursive: true });
   const scratch = await mkdtemp(join(dirname(dir), `.${version}.`));

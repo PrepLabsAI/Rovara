@@ -27,7 +27,7 @@ describe("the closed-tab reminder", () => {
     expect(lines).toEqual([pageClosedLine(URL)]);
     advance(PAGE_CLOSED_MS * 5);
     expect(lines).toHaveLength(1);
-    expect(pageClosedLine(URL)).toBe(`The install page is closed. Open ${URL} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`);
+    expect(pageClosedLine(URL)).toBe(`The install page is closed. Open ${URL} to continue, or press Ctrl-C to stop; rovara init continues from here next time.`);
   });
 
   it("reminds at the next check when a question arrives after the page has been closed for 2 minutes", () => {
@@ -92,7 +92,7 @@ describe("the closed-tab reminder", () => {
     advance(PAGE_CLOSED_MS);
     const id = hub.state().question?.id ?? "";
     hub.answer(id, "ops@example.com");
-    void prompter.ask("Slack app name", { flag: "--slack-app-name", defaultValue: "AgentX" });
+    void prompter.ask("Slack app name", { flag: "--slack-app-name", defaultValue: "Rovara" });
     advance(PAGE_CLOSED_MS);
     expect(lines).toEqual([pageClosedLine(URL), pageClosedLine(URL)]);
   });

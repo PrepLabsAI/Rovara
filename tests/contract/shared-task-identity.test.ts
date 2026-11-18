@@ -412,7 +412,7 @@ describe("the developer meets a channel turn (C14, D4)", () => {
     expect(message).toContain("a request from `Priya` in its shared Slack thread");
     // F18: the running turn may already have answered, so the count is a floor.
     expect(message).toContain("at least 2 more channel messages are waiting");
-    expect(message).toContain("agentx_share_task");
+    expect(message).toContain("rovara_share_task");
     const pr = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/pull-requests`, { requestId: randomUUID(), title: "t" });
     expect(String((pr.body.error as { message: string }).message)).toContain("Priya");
   });
@@ -475,6 +475,6 @@ describe("the developer meets a channel turn (C14, D4)", () => {
     const h = await continueThread();
     await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "first" });
     const again = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "second" });
-    expect((again.body.error as { message: string }).message).toBe(`task ${h.taskId} is still working; wait for it with agentx_wait_for_task, or stop it with agentx_cancel_task`);
+    expect((again.body.error as { message: string }).message).toBe(`task ${h.taskId} is still working; wait for it with rovara_wait_for_task, or stop it with rovara_cancel_task`);
   });
 });

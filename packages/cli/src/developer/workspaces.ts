@@ -50,7 +50,7 @@ export function workspacesOfProject(response: DeveloperWorkspacesResponse, proje
 /** The text `agentx workspaces --no-ui` prints: every project, with the workspaces in it. */
 export function workspacesText(result: DeveloperWorkspacesResult): string {
   const { developer, projects, notices } = result.workspaces;
-  const lines = [`AgentX environment ${result.env} (${result.url}), signed in as ${sanitizeServerText(developer.name)}.`];
+  const lines = [`Rovara environment ${result.env} (${result.url}), signed in as ${sanitizeServerText(developer.name)}.`];
   if (projects.length === 0) {
     lines.push("You cannot use any project yet: join a project's Slack channel, or ask an admin for access.");
   }

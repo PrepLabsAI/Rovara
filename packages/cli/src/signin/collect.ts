@@ -101,8 +101,8 @@ export async function collectOidc(input: { env: string; prompter: Prompter; proc
   await checkOidcDiscovery(input.fetch, issuer);
   const clientId = flags.oidcClientId ?? await prompter.ask("Client ID of the company sign-in app", { flag: SIGNIN_FLAG_NAMES.oidcClientId });
   const clientSecret = await secretFromSource({ what: "company sign-in client secret", flag: SIGNIN_FLAG_NAMES.oidcClientSecret, source: input.secretFlags.oidcClientSecret ?? {}, processEnv: input.processEnv, prompter });
-  const claim = (flags.oidcRequiredClaim ?? await prompter.ask("Claim a person must carry to use AgentX, for example groups (leave empty for none)", { flag: SIGNIN_FLAG_NAMES.oidcRequiredClaim, defaultValue: "" })).trim();
-  const values = claim === "" ? [] : (flags.oidcRequiredValues ?? await prompter.ask(`Values of ${claim} that may use AgentX, comma-separated`, { flag: SIGNIN_FLAG_NAMES.oidcRequiredValues }))
+  const claim = (flags.oidcRequiredClaim ?? await prompter.ask("Claim a person must carry to use Rovara, for example groups (leave empty for none)", { flag: SIGNIN_FLAG_NAMES.oidcRequiredClaim, defaultValue: "" })).trim();
+  const values = claim === "" ? [] : (flags.oidcRequiredValues ?? await prompter.ask(`Values of ${claim} that may use Rovara, comma-separated`, { flag: SIGNIN_FLAG_NAMES.oidcRequiredValues }))
     .split(",").map((value) => value.trim()).filter(Boolean);
   if (claim !== "" && values.length === 0) throw agentXError("CONFIG_INVALID", `name at least one value of ${claim} with ${SIGNIN_FLAG_NAMES.oidcRequiredValues}`);
   const displayName = (flags.oidcDisplayName ?? await prompter.ask("Name on the sign-in button, for example Okta", { flag: SIGNIN_FLAG_NAMES.oidcDisplayName, defaultValue: "Company sign-in" })).trim().slice(0, 40);

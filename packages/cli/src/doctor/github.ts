@@ -5,6 +5,7 @@ import { storedWebhookSecret } from "../github/webhook-setup.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 import { jsonObject } from "./secrets.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** GitHub keeps only about 3 days of an App's webhook deliveries, so nothing older is ever listed. */
 const DELIVERY_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
@@ -25,7 +26,7 @@ async function deliveriesCheck(context: DoctorContext, jwt: string, settingsPage
   try {
     deliveries = await context.services.github.listHookDeliveries(jwt);
   } catch (error) {
-    return check("github", name, "warn", `could not read the App's recent webhook deliveries from GitHub: ${plainMessage(error)}`, "run agentx doctor again in a minute");
+    return check("github", name, "warn", `could not read the App's recent webhook deliveries from GitHub: ${plainMessage(error)}`, `run ${CLI_COMMAND_NAME} doctor again in a minute`);
   }
   const since = context.services.now() - DELIVERY_WINDOW_MS;
   const recent = deliveries
@@ -33,12 +34,12 @@ async function deliveriesCheck(context: DoctorContext, jwt: string, settingsPage
     .filter((delivery) => Number.isFinite(delivery.at) && delivery.at >= since)
     .sort((left, right) => right.at - left.at);
   const latest = recent[0];
-  if (latest === undefined) return check("github", name, "warn", "no successful deliveries to AgentX in the last 3 days", fix);
+  if (latest === undefined) return check("github", name, "warn", "no successful deliveries to Rovara in the last 3 days", fix);
   if (latest.statusCode >= 200 && latest.statusCode < 400 && latest.status === "OK") {
-    return check("github", name, "ok", "GitHub delivered an event to AgentX in the last 3 days");
+    return check("github", name, "ok", "GitHub delivered an event to Rovara in the last 3 days");
   }
   const answer = latest.statusCode > 0 ? `HTTP ${latest.statusCode}` : "it got no answer";
-  return check("github", name, "warn", `GitHub's latest delivery to AgentX failed (${answer})`, fix);
+  return check("github", name, "warn", `GitHub's latest delivery to Rovara failed (${answer})`, fix);
 }
 
 export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[]> {
@@ -60,7 +61,7 @@ export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[
     if (/\bHTTP 401\b/.test(plainMessage(error))) {
       return [check("github", "GitHub App", "fail", "GitHub refused the app's key (HTTP 401)", `generate a new private key on the app's settings page and store it in ${githubAppSecretName(env)}`)];
     }
-    return [check("github", "GitHub App", "fail", `could not reach GitHub to list the app's installations: ${plainMessage(error)}`, "check this computer's network access to github.com, then run agentx doctor again")];
+    return [check("github", "GitHub App", "fail", `could not reach GitHub to list the app's installations: ${plainMessage(error)}`, `check this computer's network access to github.com, then run ${CLI_COMMAND_NAME} doctor again`)];
   }
   const wanted = progress?.github?.installationId;
   const installation = wanted === undefined
@@ -77,11 +78,11 @@ export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[
     const message = plainMessage(error);
     // GitHub answers 403 or 404 for a suspended or removed installation; anything else is not blamed on it.
     const fix = /\bHTTP (403|404)\b/.test(message)
-      ? "the installation may be suspended; check it in the installation settings on GitHub, then run agentx doctor again"
-      : "run agentx doctor again in a minute; if it keeps failing, check githubstatus.com and the app's installation settings on GitHub";
+      ? `the installation may be suspended; check it in the installation settings on GitHub, then run ${CLI_COMMAND_NAME} doctor again`
+      : `run ${CLI_COMMAND_NAME} doctor again in a minute; if it keeps failing, check githubstatus.com and the app's installation settings on GitHub`;
     return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but its repositories could not be read: ${message}`, fix)];
   }
-  if (count === 0) return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but it sees no repository`, "choose the repositories AgentX may use in the app's installation settings on GitHub")];
+  if (count === 0) return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but it sees no repository`, "choose the repositories Rovara may use in the app's installation settings on GitHub")];
   return [check("github", "GitHub App", "ok", `installed on ${installation.account.login}, sees ${count} ${count === 1 ? "repository" : "repositories"}`)];
 }
 
@@ -98,7 +99,7 @@ export async function githubWebhookChecks(context: DoctorContext): Promise<Docto
   } catch {
     return [];
   }
-  const upgradeFix = `run agentx --env ${env} upgrade: it`;
+  const upgradeFix = `run ${CLI_COMMAND_NAME} --env ${env} upgrade: it`;
   const checks: DoctorCheck[] = [];
   let settingsPage: string | undefined;
   let hookUrl: string | undefined;
@@ -119,7 +120,7 @@ export async function githubWebhookChecks(context: DoctorContext): Promise<Docto
       ? check("github", "GitHub webhook", "ok", `subscribed to pull request and comment events; check that Active is on at ${settingsPage}`)
       : check("github", "GitHub webhook", "warn", `the App is not subscribed to ${missing.join(", ")}`, `GitHub's API cannot add events: tick ${missing.join(", ")} at ${settingsPage}/permissions, and check that Active is on at ${settingsPage}`));
   } catch (error) {
-    checks.push(check("github", "GitHub webhook", "warn", `could not read the App's webhook settings from GitHub: ${plainMessage(error)}`, "run agentx doctor again in a minute"));
+    checks.push(check("github", "GitHub webhook", "warn", `could not read the App's webhook settings from GitHub: ${plainMessage(error)}`, `run ${CLI_COMMAND_NAME} doctor again in a minute`));
   }
   checks.push(storedWebhookSecret(jsonObject(raw) ?? {}) === undefined
     ? check("github", "GitHub webhook secret", "warn", `${secretName} holds no webhook secret, so GitHub's deliveries cannot be verified`, `${upgradeFix} stores a webhook secret and gives it to GitHub`)

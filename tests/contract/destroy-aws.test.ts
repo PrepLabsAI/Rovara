@@ -62,7 +62,7 @@ describe("the destroy adapter", () => {
     expect(fake.calls.map((call) => call.name)).toEqual(["DescribeUserPool", "UpdateUserPool", "DeleteUserPoolDomain", "DeleteUserPool"]);
     expect(fake.calls[1]!.input).toMatchObject({ UserPoolId: "us-east-1_AbC", DeletionProtection: "INACTIVE" });
     const foreign = fakeClients({ DescribeUserPool: () => ({ UserPool: { Id: "us-east-1_AbC", DeletionProtection: "INACTIVE", Domain: "someone-else" } }) });
-    await expect(awsDestroyApi(foreign.clients).deleteUserPool("us-east-1_AbC", "agentx-staging-123456789012")).rejects.toThrow("user pool us-east-1_AbC has the domain someone-else, which is not agentx-staging-123456789012; delete that domain yourself, then run agentx destroy again");
+    await expect(awsDestroyApi(foreign.clients).deleteUserPool("us-east-1_AbC", "agentx-staging-123456789012")).rejects.toThrow("user pool us-east-1_AbC has the domain someone-else, which is not agentx-staging-123456789012; delete that domain yourself, then run rovara destroy again");
   });
 
   it("finds workers by all three tags, and drops any answer that does not carry them", async () => {
@@ -136,13 +136,13 @@ describe("waiting for a stack delete", () => {
 
   it("gives up only after 3 hours, saying a re-run keeps waiting", async () => {
     const time = clock();
-    await expect(waitForStackDelete({ api: stackApi(["DELETE_IN_PROGRESS"]), name: "s", write: () => undefined, ...time })).rejects.toThrow("stack s is still DELETE_IN_PROGRESS after 3 hours; it may still finish. Run agentx destroy again to keep waiting and continue");
+    await expect(waitForStackDelete({ api: stackApi(["DELETE_IN_PROGRESS"]), name: "s", write: () => undefined, ...time })).rejects.toThrow("stack s is still DELETE_IN_PROGRESS after 3 hours; it may still finish. Run rovara destroy again to keep waiting and continue");
     expect(time.now()).toBeGreaterThanOrEqual(STACK_DELETE_TIMEOUT_MS);
   });
 
   it("stops on DELETE_FAILED with the failing resources", async () => {
     await expect(waitForStackDelete({ api: stackApi(["DELETE_FAILED"]), name: "agentx-staging-foundation", write: () => undefined, ...clock() }))
-      .rejects.toThrow("stack agentx-staging-foundation could not be deleted: WorkerSecurityGroup: resource sg-1 has a dependent object. Fix that, then run agentx destroy again to continue");
+      .rejects.toThrow("stack agentx-staging-foundation could not be deleted: WorkerSecurityGroup: resource sg-1 has a dependent object. Fix that, then run rovara destroy again to continue");
   });
 
   it("retries a volume that is still attached until it is free", async () => {
@@ -156,7 +156,7 @@ describe("waiting for a stack delete", () => {
     const time = clock();
     const api = { workerInstances: async () => [{ id: "i-1", state: "shutting-down", tags: {} }] } as unknown as DestroyApi;
     await expect(waitForInstancesGone({ api, env: "staging", ids: ["i-1"], ...time }))
-      .rejects.toThrow("worker instances i-1 are still shutting-down after 30 minutes; check them in the EC2 console, then run agentx destroy again");
+      .rejects.toThrow("worker instances i-1 are still shutting-down after 30 minutes; check them in the EC2 console, then run rovara destroy again");
     expect(time.now()).toBeGreaterThanOrEqual(30 * 60_000);
   });
 
@@ -224,7 +224,7 @@ describe("the destroy adapter, fix round 1", () => {
 
   it("throws when S3 cannot delete some objects", async () => {
     const fake = fakeClients({ ListObjectVersions: () => ({ Versions: [{ Key: "k", VersionId: "v" }], IsTruncated: false }), DeleteObjects: () => ({ Errors: [{ Key: "k", Code: "AccessDenied" }] }) });
-    await expect(awsDestroyApi(fake.clients).deleteBucket("b", () => undefined)).rejects.toThrow("bucket b: 1 objects could not be deleted (AccessDenied); run agentx destroy again");
+    await expect(awsDestroyApi(fake.clients).deleteBucket("b", () => undefined)).rejects.toThrow("bucket b: 1 objects could not be deleted (AccessDenied); run rovara destroy again");
     expect(fake.calls.map((call) => call.name)).not.toContain("DeleteBucket");
   });
 
@@ -298,9 +298,9 @@ describe("waits, fix round 1", () => {
   it("ends every AWS error that stops a wait with what to do next", async () => {
     const throttled = () => { throw Object.assign(new Error("Rate exceeded"), { name: "Throttling" }); };
     const api = { stack: throttled, workerInstances: throttled, deleteVolume: throttled } as unknown as DestroyApi;
-    await expect(waitForStackDelete({ api, name: "s", write: () => undefined, ...clock() })).rejects.toThrow(/Rate exceeded.*run agentx destroy again to continue$/);
-    await expect(waitForInstancesGone({ api, env: "staging", ids: ["i-1"], ...clock() })).rejects.toThrow(/Rate exceeded.*run agentx destroy again to continue$/);
-    await expect(deleteVolumesWhenFree({ api, ids: ["vol-1"], ...clock() })).rejects.toThrow(/Rate exceeded.*run agentx destroy again to continue$/);
+    await expect(waitForStackDelete({ api, name: "s", write: () => undefined, ...clock() })).rejects.toThrow(/Rate exceeded.*run rovara destroy again to continue$/);
+    await expect(waitForInstancesGone({ api, env: "staging", ids: ["i-1"], ...clock() })).rejects.toThrow(/Rate exceeded.*run rovara destroy again to continue$/);
+    await expect(deleteVolumesWhenFree({ api, ids: ["vol-1"], ...clock() })).rejects.toThrow(/Rate exceeded.*run rovara destroy again to continue$/);
   });
 
   it("counts a volume that is already gone or being deleted as done", async () => {
@@ -369,7 +369,7 @@ describe("deleting a secret that is being force-deleted", () => {
     const fake = fakeClients({ DescribeSecret: () => ({ Name: "agentx/staging/a", DeletedDate: new Date() }), RestoreSecret: refused });
     let time = 0;
     await expect(awsDestroyApi(fake.clients, { sleep: async (ms) => { time += ms; } }).deleteSecret("agentx/staging/a"))
-      .rejects.toThrow("secret agentx/staging/a refused RestoreSecret and is still listed after 2 minutes; run agentx destroy again to continue");
+      .rejects.toThrow("secret agentx/staging/a refused RestoreSecret and is still listed after 2 minutes; run rovara destroy again to continue");
     expect(time).toBe(120_000);
     expect(fake.calls.map((call) => call.name)).not.toContain("DeleteSecret");
   });

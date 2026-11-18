@@ -1,4 +1,4 @@
-// Issue #235: Ctrl-C at a question of `agentx init --no-ui` is a stop the person chose, not an
+// Issue #235: Ctrl-C at a question of `rovara init --no-ui` is a stop the person chose, not an
 // internal error: one plain line that says how to continue, and a non-zero exit.
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -60,13 +60,13 @@ async function run(error: () => Error, argv: string[] = [], cliInvocation: CliIn
   return { code, err: err.join(""), out: out.join("") };
 }
 
-describe("Ctrl-C at an agentx init --no-ui question (#235)", () => {
+describe("Ctrl-C at a rovara init --no-ui question (#235)", () => {
   it("prints one plain line saying how to continue, no INTERNAL_ERROR, and exits non-zero", async () => {
     const { code, err, out } = await run(readlineCtrlC);
     expect(code).toBe(130);
-    expect(err.endsWith("Stopped. Run agentx init --env livefinal again to continue from here.\n")).toBe(true);
+    expect(err.endsWith("Stopped. Run rovara init --env livefinal again to continue from here.\n")).toBe(true);
     expect(err).not.toContain("INTERNAL_ERROR");
-    expect(err).not.toContain("AgentX error");
+    expect(err).not.toContain("Rovara error");
     expect(err).not.toContain("Aborted with Ctrl+C");
     expect(out).toBe("");
   });
@@ -74,25 +74,25 @@ describe("Ctrl-C at an agentx init --no-ui question (#235)", () => {
   it("says the same for Ctrl-C at a hidden question", async () => {
     const { code, err } = await run(() => agentXError("CONFIG_INVALID", "cancelled"));
     expect(code).toBe(130);
-    expect(err.endsWith("Stopped. Run agentx init --env livefinal again to continue from here.\n")).toBe(true);
-    expect(err).not.toContain("AgentX error");
+    expect(err.endsWith("Stopped. Run rovara init --env livefinal again to continue from here.\n")).toBe(true);
+    expect(err).not.toContain("Rovara error");
   });
 
   it("keeps a real failure at a question as the error it is", async () => {
     const { code, err } = await run(() => agentXError("CONFIG_INVALID", "the answer file is unreadable"));
     expect(code).toBe(2);
-    expect(err).toContain("AgentX error [CONFIG_INVALID]: the answer file is unreadable");
+    expect(err).toContain("Rovara error [CONFIG_INVALID]: the answer file is unreadable");
     expect(err).not.toContain("Stopped.");
   });
 
   it("with --json, says it as JSON", async () => {
     const { code, err } = await run(readlineCtrlC, ["--json"]);
     expect(code).toBe(130);
-    expect(JSON.parse(err.trim().split("\n").at(-1)!)).toEqual({ ok: false, error: { code: "STOPPED", message: "Stopped. Run agentx init --env livefinal again to continue from here." } });
+    expect(JSON.parse(err.trim().split("\n").at(-1)!)).toEqual({ ok: false, error: { code: "STOPPED", message: "Stopped. Run rovara init --env livefinal again to continue from here." } });
   });
 
-  // Owner decision 2026-10-02: the same line, through npx with its version, when AgentX ran that way.
-  it("shows that command through npx, with its version, when AgentX ran that way", async () => {
+  // Owner decision 2026-10-02: the same line, through npx with its version, when Rovara ran that way.
+  it("shows that command through npx, with its version, when Rovara ran that way", async () => {
     const { code, err } = await run(readlineCtrlC, [], NPX_CLI_INVOCATION);
     expect(code).toBe(130);
     expect(err.endsWith(`Stopped. Run npx @preplabsai/rovara-code@${NPX_CLI_INVOCATION.version} init --env livefinal again to continue from here.\n`)).toBe(true);

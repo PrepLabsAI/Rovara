@@ -1,4 +1,4 @@
-// FR-036 to FR-039: agentx connector add jira. The token's own search for an issue inside the
+// FR-036 to FR-039: rovara connector add jira. The token's own search for an issue inside the
 // project is the test read (FR-038); issues found outside the project do not stop it (owner
 // decision 6, 2026-09-28): the connector is saved with a warning naming those projects. The
 // project gets a new revision, only once the control plane confirms the connector is connected.
@@ -22,7 +22,7 @@ beforeEach(async () => {
   await writeProjectFile(configDir, {
     name: "payments-api", revision: 1,
     repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+    setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
   });
 });
 afterEach(async () => { await rm(configDir, { recursive: true, force: true }); });
@@ -53,7 +53,7 @@ describe("the Jira site", () => {
   });
 });
 
-describe("agentx connector add jira (FR-036 to FR-039)", () => {
+describe("rovara connector add jira (FR-036 to FR-039)", () => {
   it("proves the token sees the project before storing it, then scopes it with siteUrl", async () => {
     const plane = fakeControlPlane();
     const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: [] });
@@ -78,7 +78,7 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     const lines: string[] = [];
     const vendors = fakeVendors({ jiraCloudId: CLOUD, jiraInside: ["PAY-1"], jiraOutside: ["HR-4", "FIN-2", "HR-9"] });
     const result = await addJira(input({ plane, vendors, secrets, lines, script: ["acme", TOKEN, "PAY"] }));
-    const warning = "the Jira service account can also see issues in HR and FIN, so AgentX will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)";
+    const warning = "the Jira service account can also see issues in HR and FIN, so Rovara will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)";
     expect(result).toEqual({ ref: "jira", revision: 2, warning });
     expect(lines).toContain(`Warning: ${warning}`);
     // Saved all the same: the secret, the credential and the revision.
@@ -91,9 +91,9 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
 
   it("names the first five other projects and counts the rest", () => {
     expect(widerAccessWarning("PAY", ["HR", "FIN", "OPS", "LEGAL", "SALES", "IT", "QA"])).toBe(
-      "the Jira service account can also see issues in HR, FIN, OPS, LEGAL, SALES and 2 more, so AgentX will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)",
+      "the Jira service account can also see issues in HR, FIN, OPS, LEGAL, SALES and 2 more, so Rovara will be able to read issues in those projects too. Narrow the account to PAY in each other project's permission scheme (docs/connectors/jira.md, Step 4)",
     );
-    expect(widerAccessWarning("PAY", ["HR"])).toContain("can also see issues in HR, so AgentX");
+    expect(widerAccessWarning("PAY", ["HR"])).toContain("can also see issues in HR, so Rovara");
     expect(widerAccessWarning("PAY", ["A".repeat(10), "B".repeat(10), "C".repeat(10), "D".repeat(10), "E".repeat(10), "F"]).length).toBeLessThanOrEqual(300);
   });
 
@@ -120,7 +120,7 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
     const secrets = memoryInitSecrets();
     const vendors = { ...fakeVendors({ jiraCloudId: CLOUD }), jiraSearch: async () => { throw new TypeError("fetch failed: upstream said SECRET-vendor-detail"); } };
     const failure = addJira({ ...input({ secrets, script: ["acme", TOKEN, "PAY"] }), services: { ...input().services, vendors } });
-    await expect(failure).rejects.toThrow("could not search Jira through Rovo MCP (TypeError), so nothing was stored; check that Rovo MCP allows API token authentication (docs/connectors/jira.md, Step 1), then run agentx --env staging connector add jira --project payments-api again");
+    await expect(failure).rejects.toThrow("could not search Jira through Rovo MCP (TypeError), so nothing was stored; check that Rovo MCP allows API token authentication (docs/connectors/jira.md, Step 1), then run rovara --env staging connector add jira --project payments-api again");
     await expect(failure).rejects.not.toThrow("SECRET-vendor-detail");
     expect(secrets.values.size).toBe(0);
   });
@@ -134,7 +134,7 @@ describe("agentx connector add jira (FR-036 to FR-039)", () => {
       await writeProjectFile(legacyDir, {
         name: "payments-api", revision: 1,
         repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+        setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
         integrations: { githubMcp: { tools: [{ name: "list_issues", access: "read" }] } },
       });
       const secrets = memoryInitSecrets();

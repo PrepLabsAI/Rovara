@@ -33,6 +33,6 @@ it.each(["missing","revoked","malformed","moved","read"])("independent code AND 
  if(damage==="malformed")h.db.set({...member,companyId:"bad-company"});
  if(damage==="moved")h.db.set({...member,companyId:COMPANY_B.orgId});
  if(damage==="read")vi.spyOn(h.company,"membership").mockRejectedValue(new Error("private-canary"));
- const ended={status:400,body:{error:"invalid_grant",error_description:"your AgentX sign-in has ended; run agentx login again"}};
+ const ended={status:400,body:{error:"invalid_grant",error_description:"your Rovara sign-in has ended; run rovara login again"}};
  expect(await h.exchange(code)).toEqual(ended);expect(await h.refresh(signed.body.refresh_token as string)).toEqual(ended);
 });

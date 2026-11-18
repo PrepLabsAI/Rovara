@@ -728,7 +728,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
             "body exceeds 32768 UTF-8 bytes",
           )
           .optional(),
-        headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+        headBranch: z.string().regex(/^(?:rovara|agentx)\/[0-9a-f-]{36}$/i),
         repositoryGrant: z.string().min(1),
         mode: z.enum(["create", "replace", "revert"]).default("create"),
         targetPullRequestNumber: z.number().int().positive().optional(),
@@ -810,7 +810,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         project: StoredProjectDefinitionSchema,
         repository: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
         pullRequestNumber: z.number().int().positive(),
-        headBranch: z.string().regex(/^agentx\/[0-9a-f-]{36}$/i),
+        headBranch: z.string().regex(/^(?:rovara|agentx)\/[0-9a-f-]{36}$/i),
         baseBranch: z.string().min(1).max(255),
         expectedHeadCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
         repositoryGrant: z.string().min(1),

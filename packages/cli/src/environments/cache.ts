@@ -1,6 +1,6 @@
 import { access, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import YAML from "yaml";
 import type { DeploymentSettings } from "../deployment.js";
 import type { EnvironmentSettings } from "./settings.js";
@@ -55,7 +55,7 @@ export async function writeEnvironmentCache(home: string, settings: EnvironmentS
       // open() applies the mode only to a new file; tighten it explicitly too, in case an earlier
       // run left a temp file behind with looser permissions.
       await handle.chmod(0o600);
-      await handle.writeFile(`# AgentX environment ${settings.env}; rebuilt from SSM by agentx env use.\n${YAML.stringify(cacheFromSettings(settings))}`);
+      await handle.writeFile(`# Rovara environment ${settings.env}; rebuilt from SSM by ${CLI_COMMAND_NAME} env use.\n${YAML.stringify(cacheFromSettings(settings))}`);
     } finally {
       await handle.close();
     }
@@ -81,5 +81,5 @@ export async function resolveDeploymentFile(input: { home: string; env: string; 
   if (await exists(cached)) return cached;
   const legacy = join(input.home, ".agentx", "deployment.yaml");
   if (input.env === "production" && (await exists(legacy))) return legacy;
-  throw agentXError("CONFIG_INVALID", `no settings for environment ${input.env} on this machine; run agentx --env ${input.env} env use`);
+  throw agentXError("CONFIG_INVALID", `no settings for environment ${input.env} on this machine; run ${CLI_COMMAND_NAME} --env ${input.env} env use`);
 }

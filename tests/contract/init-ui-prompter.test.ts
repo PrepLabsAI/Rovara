@@ -36,10 +36,10 @@ describe("browserPrompter", () => {
 
   it("ask takes the default for an empty field, and refuses an empty one without a default", async () => {
     const withDefault = setup();
-    const defaulted = withDefault.prompter.ask("Slack app name", { flag: "--slack-app-name", defaultValue: "AgentX" });
-    expect(shown(withDefault.hub).defaultValue).toBe("AgentX");
+    const defaulted = withDefault.prompter.ask("Slack app name", { flag: "--slack-app-name", defaultValue: "Rovara" });
+    expect(shown(withDefault.hub).defaultValue).toBe("Rovara");
     expect(post(withDefault.hub, "")).toBeUndefined();
-    await expect(defaulted).resolves.toBe("AgentX");
+    await expect(defaulted).resolves.toBe("Rovara");
 
     const required = setup();
     void required.prompter.ask("GitHub organization", { flag: "--github-account" });
@@ -67,7 +67,7 @@ describe("browserPrompter", () => {
   it("choose offers every choice, takes the default for an empty answer, and refuses anything else", async () => {
     // A flag with no entry in the page's question-copy catalog (question-copy.ts), so the
     // choices here pass through unrelabelled: this test is about choose's own mechanics.
-    const choices = [{ value: "cognito" as const, label: "AgentX signs people in" }, { value: "oidc" as const, label: "Your own provider" }];
+    const choices = [{ value: "cognito" as const, label: "Rovara signs people in" }, { value: "oidc" as const, label: "Your own provider" }];
     const picked = setup();
     const chosen = picked.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(shown(picked.hub)).toMatchObject({ kind: "choose", defaultValue: "cognito", choices });
@@ -134,7 +134,7 @@ describe("browserPrompter", () => {
     expect(post(hub, token)).toBeUndefined();
     await expect(answer).resolves.toBe(token);
     hub.log("done: Create and install the Slack app");
-    hub.finish("AgentX environment staging is installed.");
+    hub.finish("Rovara environment staging is installed.");
     expect(JSON.stringify(hub.snapshot())).not.toContain("SECRETbotTOKEN");
   });
 
@@ -183,7 +183,7 @@ describe("the wizard's state", () => {
     });
     hub.log("fetching the release");
     hub.setSteps([{ id: "prerequisites", title: "Check your AWS account" }]);
-    hub.finish("AgentX environment staging is installed.");
+    hub.finish("Rovara environment staging is installed.");
     hub.close();
     expect(seen).toEqual(["log:fetching the release", "state:running:1", "state:finished:1", "closed"]);
   });

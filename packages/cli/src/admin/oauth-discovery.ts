@@ -109,7 +109,7 @@ export async function discoverOAuth(endpoint: URL, fetchImplementation: Fetch = 
   const resource = httpsUrl(metadata.resource, "resource");
   const resourceUrl = new URL(resource);
   if (resourceUrl.origin !== endpoint.origin || !endpoint.href.replace(/\/$/, "").startsWith(resource.replace(/\/$/, ""))) {
-    throw agentXError("CONFIG_INVALID", `the server's metadata describes ${resource}, not ${endpoint.href}, so AgentX does not use it`);
+    throw agentXError("CONFIG_INVALID", `the server's metadata describes ${resource}, not ${endpoint.href}, so Rovara does not use it`);
   }
   const servers = Array.isArray(metadata.authorization_servers) ? metadata.authorization_servers : [];
   if (servers.length === 0) throw agentXError("CONFIG_INVALID", `${endpoint.host} names no authorization server in its metadata`);
@@ -128,10 +128,10 @@ export async function discoverOAuth(endpoint: URL, fetchImplementation: Fetch = 
   }
   if (server === undefined) throw agentXError("CONFIG_INVALID", `the authorization server ${issuerUrl.host} publishes no OAuth metadata; pass --authorize-url and --token-url`);
   if (typeof server.issuer !== "string" || !sameWithoutSlash(server.issuer, issuer)) {
-    throw agentXError("CONFIG_INVALID", `the authorization server's metadata names a different issuer than ${issuer}, so AgentX does not use it`);
+    throw agentXError("CONFIG_INVALID", `the authorization server's metadata names a different issuer than ${issuer}, so Rovara does not use it`);
   }
   const methods = Array.isArray(server.code_challenge_methods_supported) ? server.code_challenge_methods_supported : [];
-  if (!methods.includes("S256")) throw agentXError("CONFIG_INVALID", `the authorization server ${issuerUrl.host} does not list PKCE S256 support, which AgentX requires`);
+  if (!methods.includes("S256")) throw agentXError("CONFIG_INVALID", `the authorization server ${issuerUrl.host} does not list PKCE S256 support, which Rovara requires`);
   const authorizeUrl = httpsUrl(server.authorization_endpoint, "authorization endpoint");
   const tokenUrl = httpsUrl(server.token_endpoint, "token endpoint");
   const tokenProblem = publicHttpsUrlProblem(tokenUrl, "token endpoint");
@@ -156,18 +156,18 @@ export async function registerClient(registrationUrl: string, redirectUri: strin
       signal: AbortSignal.timeout(TIMEOUT_MS),
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify({
-        client_name: "AgentX", redirect_uris: [redirectUri], grant_types: ["authorization_code", "refresh_token"],
+        client_name: "Rovara", redirect_uris: [redirectUri], grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"], token_endpoint_auth_method: "client_secret_post",
       }),
     });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach ${new URL(registrationUrl).origin} to register AgentX as a client`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not reach ${new URL(registrationUrl).origin} to register Rovara as a client`);
   }
   let body: unknown;
   try { body = JSON.parse(await readLimitedText(response, MAX_METADATA)) as unknown; } catch { body = undefined; }
   if (!response.ok || !isRecord(body) || typeof body.client_id !== "string" || body.client_id === "" || body.client_id.length > 1_024) {
     const code = isRecord(body) && typeof body.error === "string" && /^[a-z_]{1,64}$/.test(body.error) ? ` (${body.error})` : "";
-    throw agentXError("CONFIG_INVALID", `the server refused to register AgentX as a client (HTTP ${response.status}${code}); create an OAuth app yourself and store its client in the secret`);
+    throw agentXError("CONFIG_INVALID", `the server refused to register Rovara as a client (HTTP ${response.status}${code}); create an OAuth app yourself and store its client in the secret`);
   }
   const secret = typeof body.client_secret === "string" && body.client_secret !== "" && body.client_secret.length <= 8_192 ? body.client_secret : undefined;
   return { clientId: body.client_id, ...(secret === undefined ? {} : { clientSecret: secret }) };

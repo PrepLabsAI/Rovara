@@ -68,11 +68,11 @@ async function destroyDeps(input: { caller?: string; account?: FakeAccount; leav
   return { destroy, account };
 }
 
-describe("agentx destroy", () => {
+describe("rovara destroy", () => {
   it("needs an explicit --env, so it never removes production by default", async () => {
     const io = capture();
     expect(await executeCli(["destroy"], io)).toBe(2);
-    expect(io.err.join("")).toContain("agentx destroy requires an explicit --env");
+    expect(io.err.join("")).toContain("rovara destroy requires an explicit --env");
   });
 
   it("removes the environment after the typed name, and prints the manual steps on stdout", async () => {
@@ -119,7 +119,7 @@ describe("agentx destroy", () => {
     const io = capture();
     const { destroy, account } = await destroyDeps({ caller: OPERATOR });
     expect(await executeCli(["--env", "staging", "destroy", "--region", "us-east-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain("agentx destroy needs admin credentials");
+    expect(io.err.join("")).toContain("rovara destroy needs admin credentials");
     expect(account.calls).toEqual([]);
   });
 
@@ -127,7 +127,7 @@ describe("agentx destroy", () => {
     const io = capture();
     const { destroy, account } = await destroyDeps();
     expect(await executeCli(["--env", "staging", "destroy", "--region", "eu-west-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain("environment staging is installed in us-east-1, not eu-west-1; run agentx --env staging destroy --region us-east-1");
+    expect(io.err.join("")).toContain("environment staging is installed in us-east-1, not eu-west-1; run rovara --env staging destroy --region us-east-1");
     expect(account.calls).toEqual([]);
   });
 });
@@ -152,7 +152,7 @@ describe("destroy's project files", () => {
     const lines: string[] = [];
     const found = await destroyProjectFiles({ configDir, env: "staging", write: (line) => lines.push(line) });
     expect(found).toEqual([{ path: written, launchTemplateId: "lt-0123456789abcdef0" }]);
-    expect(lines).toEqual([`Skipping ${broken}: it is not valid YAML, so agentx destroy leaves it; delete it by hand if it belongs to staging`]);
+    expect(lines).toEqual([`Skipping ${broken}: it is not valid YAML, so rovara destroy leaves it; delete it by hand if it belongs to staging`]);
   });
 
   it("removes the environment's readable project files through the command, and leaves the broken one", async () => {
@@ -165,7 +165,7 @@ describe("destroy's project files", () => {
   });
 });
 
-describe("agentx destroy in the wrong region", () => {
+describe("rovara destroy in the wrong region", () => {
   const nothing = (): FakeAccount => ({ stacks: new Map(), instances: [], volumes: [], tags: new Map(), secrets: [], aliases: [], calls: [] });
 
   it("refuses when this computer's record of the environment names another region", async () => {
@@ -175,7 +175,7 @@ describe("agentx destroy in the wrong region", () => {
     const { destroy, account } = await destroyDeps({ installed: false, account: nothing(), home });
     const io = capture();
     expect(await executeCli(["--env", "staging", "destroy", "--region", "eu-west-1"], { ...io, destroy })).toBe(2);
-    expect(io.err.join("")).toContain(`this computer's record of environment staging (${cache}) says it is in us-east-1, not eu-west-1; run agentx --env staging destroy --region us-east-1`);
+    expect(io.err.join("")).toContain(`this computer's record of environment staging (${cache}) says it is in us-east-1, not eu-west-1; run rovara --env staging destroy --region us-east-1`);
     expect(account.calls).toEqual([]);
     expect(await readFile(cache, "utf8")).toContain("staging");
   });
@@ -224,7 +224,7 @@ describe("agentx destroy in the wrong region", () => {
     const { destroy, account } = await destroyDeps({ home });
     const io = capture();
     expect(await executeCli(["--env", "staging", "--config-dir", home, "destroy"], { ...io, destroy, environments: { home } })).toBe(2);
-    expect(io.err.join("")).toContain("agentx destroy could not find an AWS region in your configuration; pass --region <the environment's region>");
+    expect(io.err.join("")).toContain("rovara destroy could not find an AWS region in your configuration; pass --region <the environment's region>");
     expect(account.calls).toEqual([]);
     expect(requests).toEqual([]);
   });

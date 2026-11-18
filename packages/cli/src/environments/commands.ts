@@ -1,4 +1,4 @@
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { adoptEnvironment, type CallerIdentity, type StackReader } from "./adopt.js";
 import { writeEnvironmentCache } from "./cache.js";
 import type { ParameterStore } from "./parameter-store.js";
@@ -15,7 +15,7 @@ export async function runEnvUse(input: { store: ParameterStore; home: string; en
   if (settings === undefined) {
     throw agentXError(
       "CONFIG_INVALID",
-      `environment ${input.env} is not installed in this account and region; check your AWS profile and region, or install it with agentx init --env ${input.env}`,
+      `environment ${input.env} is not installed in this account and region; check your AWS profile and region, or install it with ${CLI_COMMAND_NAME} init --env ${input.env}`,
     );
   }
   const path = await writeEnvironmentCache(input.home, settings);

@@ -1,6 +1,6 @@
 // FR-046's checks. 15e's `agentx doctor` calls checkDeveloperSignIn unchanged (R5). Never prints
 // a secret: the Slack test request carries only the client ID and the callback URL.
-import { AgentXConfigurationSchema } from "@agentx/contracts";
+import { AgentXConfigurationSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { EnvironmentSettings } from "../environments/settings.js";
 import type { InitSecrets } from "../init/context.js";
@@ -68,8 +68,8 @@ function redirectCheck(answer: RedirectAnswer, callback: string, base: string): 
   if (answer.state === "registered") return { name, ok: true, detail: `Slack sent a test sign-in request back to ${callback}, so it is a registered redirect URL` };
   if (answer.state === "not registered") return { name, ok: false, detail: `Slack does not list ${callback} as a redirect URL; add it on OAuth & Permissions` };
   return answer.why === undefined
-    ? { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${base} to check sign-in.` }
-    : { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${answer.why}. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${base} to check sign-in.` };
+    ? { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run ${CLI_COMMAND_NAME} login ${base} to check sign-in.` }
+    : { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${answer.why}. If signing in on the task page works, you can ignore this warning. Otherwise run ${CLI_COMMAND_NAME} login ${base} to check sign-in.` };
 }
 
 async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: typeof fetch }, stored: { slack: boolean; oidcOn: boolean }): Promise<SignInCheck> {
@@ -85,9 +85,9 @@ async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: 
   const issuer = `${apiBase(input.settings)}/v1/auth`;
   const liveOidc = live.methods.oidc !== null;
   const problems = [
-    ...(live.issuer === issuer ? [] : [`the control plane names issuer ${live.issuer}, not ${issuer}; check that this environment's settings name its own control plane (agentx env adopt or agentx init)`]),
-    ...(live.methods.slack === stored.slack ? [] : [`the control plane ${live.methods.slack ? "offers" : "does not offer"} Slack sign-in, but the settings say it is ${stored.slack ? "on" : "off"}; run agentx signin ${stored.slack ? "enable" : "disable"} slack again`]),
-    ...(liveOidc === stored.oidcOn ? [] : [`the control plane ${liveOidc ? "offers" : "does not offer"} company sign-in, but the settings say it is ${stored.oidcOn ? "on" : "off"}; run agentx signin ${stored.oidcOn ? "enable" : "disable"} oidc again`]),
+    ...(live.issuer === issuer ? [] : [`the control plane names issuer ${live.issuer}, not ${issuer}; check that this environment's settings name its own control plane (${CLI_COMMAND_NAME} env adopt or ${CLI_COMMAND_NAME} init)`]),
+    ...(live.methods.slack === stored.slack ? [] : [`the control plane ${live.methods.slack ? "offers" : "does not offer"} Slack sign-in, but the settings say it is ${stored.slack ? "on" : "off"}; run ${CLI_COMMAND_NAME} signin ${stored.slack ? "enable" : "disable"} slack again`]),
+    ...(liveOidc === stored.oidcOn ? [] : [`the control plane ${liveOidc ? "offers" : "does not offer"} company sign-in, but the settings say it is ${stored.oidcOn ? "on" : "off"}; run ${CLI_COMMAND_NAME} signin ${stored.oidcOn ? "enable" : "disable"} oidc again`]),
   ];
   return problems.length === 0 ? { name: "control plane", ok: true, detail: "offers exactly the enabled methods" } : { name: "control plane", ok: false, detail: problems.join("; ") };
 }
@@ -99,7 +99,7 @@ async function slackChecks(input: { env: string; store: ParameterStore; secrets:
   const clientSecretOk = typeof secret.clientSecret === "string" && /^[a-f0-9]{32}$/.test(secret.clientSecret);
   const checks: SignInCheck[] = [clientId !== undefined && clientSecretOk
     ? { name: "Slack app credentials", ok: true, detail: `client ID and client secret are stored in ${secretName}` }
-    : { name: "Slack app credentials", ok: false, detail: `the Slack app's client ID and client secret are not stored in ${secretName}; run agentx signin enable slack` }];
+    : { name: "Slack app credentials", ok: false, detail: `the Slack app's client ID and client secret are not stored in ${secretName}; run ${CLI_COMMAND_NAME} signin enable slack` }];
 
   const recorded = await readSlackTeamId(input.store, input.env);
   let live: { teamId: string; scopes?: string[] } | undefined;
@@ -111,9 +111,9 @@ async function slackChecks(input: { env: string; store: ParameterStore; secrets:
     liveProblem = error instanceof Error ? plainMessage(error) : undefined;
   }
   checks.push(recorded === undefined
-    ? { name: "Slack team ID", ok: false, detail: `no team ID is recorded at /agentx/${input.env}/slack/teamId; run agentx signin enable slack` }
+    ? { name: "Slack team ID", ok: false, detail: `no team ID is recorded at /agentx/${input.env}/slack/teamId; run ${CLI_COMMAND_NAME} signin enable slack` }
     : live !== undefined && live.teamId !== recorded
-      ? { name: "Slack team ID", ok: false, detail: `the recorded team ${recorded} is not the bot token's team ${live.teamId}; run agentx signin enable slack` }
+      ? { name: "Slack team ID", ok: false, detail: `the recorded team ${recorded} is not the bot token's team ${live.teamId}; run ${CLI_COMMAND_NAME} signin enable slack` }
       : { name: "Slack team ID", ok: true, detail: `team ${recorded}` });
   const missing = live?.scopes === undefined ? undefined : missingScopes(live.scopes, SIGN_IN_BOT_SCOPES);
   checks.push(missing === undefined
@@ -123,14 +123,14 @@ async function slackChecks(input: { env: string; store: ParameterStore; secrets:
 
   const callback = slackSignInCallbackUrl(input.settings.controlPlaneUrl);
   checks.push(clientId === undefined
-    ? { name: "Slack redirect URL", ok: false, detail: `no Slack client ID is stored in ${secretName}, so ${callback} cannot be checked; run agentx signin enable slack` }
+    ? { name: "Slack redirect URL", ok: false, detail: `no Slack client ID is stored in ${secretName}, so ${callback} cannot be checked; run ${CLI_COMMAND_NAME} signin enable slack` }
     : redirectCheck(await slackRedirectRegistered(input.fetch, clientId, callback), callback, apiBase(input.settings)));
   return checks;
 }
 
 export async function checkDeveloperSignIn(input: { env: string; store: ParameterStore; secrets: Pick<InitSecrets, "get">; settings: EnvironmentSettings; fetch: typeof fetch; slackApi: SlackApi }): Promise<SignInCheck[]> {
   const stored = await readSignInSettings(input.store, input.env);
-  if (stored === undefined) return [{ name: "settings", ok: false, detail: "developer sign-in is not set up; run agentx signin enable slack (or oidc)" }];
+  if (stored === undefined) return [{ name: "settings", ok: false, detail: `developer sign-in is not set up; run ${CLI_COMMAND_NAME} signin enable slack (or oidc)` }];
   const checks: SignInCheck[] = [
     { name: "settings", ok: true, detail: `Slack sign-in ${stored.slack ? "on" : "off"}, company sign-in ${stored.oidc === undefined ? "off" : "on"}` },
     await controlPlaneCheck(input, { slack: stored.slack, oidcOn: stored.oidc !== undefined }),
@@ -147,7 +147,7 @@ export async function checkDeveloperSignIn(input: { env: string; store: Paramete
     const secret = parse(await input.secrets.get(secretName));
     checks.push(typeof secret.clientSecret === "string" && secret.clientSecret !== ""
       ? { name: "company sign-in secret", ok: true, detail: `the client secret is stored in ${secretName}` }
-      : { name: "company sign-in secret", ok: false, detail: `no client secret is stored in ${secretName}; run agentx signin enable oidc` });
+      : { name: "company sign-in secret", ok: false, detail: `no client secret is stored in ${secretName}; run ${CLI_COMMAND_NAME} signin enable oidc` });
   }
   return checks;
 }

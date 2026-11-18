@@ -1,5 +1,5 @@
-// Plan 5 Task 23: the MCP tools for sessions. `agentx_list_sessions`, `agentx_get_session` (which returns the session link), `agentx_comment_on_session`,
-// `agentx_tell_session_agent` and `agentx_stop_session` reach the /v1/app/sessions routes. NO tool takes a session over, retries it or shares it with the
+// Plan 5 Task 23: the MCP tools for sessions. `rovara_list_sessions`, `rovara_get_session` (which returns the session link), `rovara_comment_on_session`,
+// `rovara_tell_session_agent` and `rovara_stop_session` reach the /v1/app/sessions routes. NO tool takes a session over, retries it or shares it with the
 // company (a person does those, in a browser or on the CLI); a caller who may only view is refused with the server's exact words; everything the server
 // wrote is made safe before it reaches the model.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -65,7 +65,7 @@ async function overHttp(answer: (url: URL, init: RequestInit | undefined) => Res
 describe("the session tools in the list", () => {
   it("adds exactly the five session tools", async () => {
     const names = (await (await connect({})).listTools()).tools.map((tool) => tool.name);
-    expect(names.filter((name) => /session/.test(name))).toEqual(["agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session"]);
+    expect(names.filter((name) => /session/.test(name))).toEqual(["rovara_list_sessions", "rovara_get_session", "rovara_comment_on_session", "rovara_tell_session_agent", "rovara_stop_session"]);
   });
 
   it("has no tool that takes a session over, retries it, shares it or hands it off", async () => {
@@ -92,25 +92,25 @@ describe("the session tools in the list", () => {
   });
 });
 
-describe("agentx_list_sessions", () => {
+describe("rovara_list_sessions", () => {
   it("lists the caller's own sessions by default, or a project's, or those shared with them", async () => {
     const listSessions = vi.fn(async () => listOf([tileOf(SES, "Fix the login bug"), tileOf(SES2, "Add a retry")]));
     const mcp = await connect({ listSessions });
-    const result = await mcp.callTool({ name: "agentx_list_sessions", arguments: {} });
+    const result = await mcp.callTool({ name: "rovara_list_sessions", arguments: {} });
     expect(listSessions).toHaveBeenLastCalledWith({ owner: "me" });
     expect(structured(result)).toMatchObject({ sessions: [{ id: SES, title: "Fix the login bug", project: "payments", owner: "Priya", status: "running", step: "Coding", cost_usd: 0.5, your_level: "use" }, { id: SES2 }] });
     expect(text(result)).toContain(SES);
-    await mcp.callTool({ name: "agentx_list_sessions", arguments: { project: "payments" } });
+    await mcp.callTool({ name: "rovara_list_sessions", arguments: { project: "payments" } });
     expect(listSessions).toHaveBeenLastCalledWith({ project: "payments" });
-    await mcp.callTool({ name: "agentx_list_sessions", arguments: { shared_with_me: true } });
+    await mcp.callTool({ name: "rovara_list_sessions", arguments: { shared_with_me: true } });
     expect(listSessions).toHaveBeenLastCalledWith({ shared: "me" });
-    await mcp.callTool({ name: "agentx_list_sessions", arguments: { status: "open", cursor: "abc.def" } });
+    await mcp.callTool({ name: "rovara_list_sessions", arguments: { status: "open", cursor: "abc.def" } });
     expect(listSessions).toHaveBeenLastCalledWith({ owner: "me", status: "open", cursor: "abc.def" });
   });
 
   it("refuses a project together with shared_with_me without asking", async () => {
     const listSessions = vi.fn();
-    const result = await (await connect({ listSessions })).callTool({ name: "agentx_list_sessions", arguments: { project: "payments", shared_with_me: true } });
+    const result = await (await connect({ listSessions })).callTool({ name: "rovara_list_sessions", arguments: { project: "payments", shared_with_me: true } });
     expect(isError(result)).toBe(true);
     expect(text(result)).toContain("INVALID_REQUEST");
     expect(listSessions).not.toHaveBeenCalled();
@@ -118,24 +118,24 @@ describe("agentx_list_sessions", () => {
 
   it("says when there is more, and when there is nothing", async () => {
     const mcp = await connect({ listSessions: vi.fn(async () => listOf([], "sealed.cursor")) });
-    const result = await mcp.callTool({ name: "agentx_list_sessions", arguments: {} });
+    const result = await mcp.callTool({ name: "rovara_list_sessions", arguments: {} });
     expect(structured(result)).toMatchObject({ sessions: [], next_cursor: "sealed.cursor" });
     expect(text(result)).toMatch(/no sessions/i);
   });
 
   it("reaches GET /v1/app/sessions with the one list asked for", async () => {
     const { mcp, calls } = await overHttp(() => Response.json({ sessions: [tileOf(SES, "Fix the login bug")] }));
-    await mcp.callTool({ name: "agentx_list_sessions", arguments: {} });
-    await mcp.callTool({ name: "agentx_list_sessions", arguments: { project: "payments", status: "ended" } });
+    await mcp.callTool({ name: "rovara_list_sessions", arguments: {} });
+    await mcp.callTool({ name: "rovara_list_sessions", arguments: { project: "payments", status: "ended" } });
     expect(calls.map((call) => `${call.method} ${call.path}${call.query}`)).toEqual(["GET /v1/app/sessions?owner=me", "GET /v1/app/sessions?project=payments&status=ended"]);
   });
 });
 
-describe("agentx_get_session", () => {
+describe("rovara_get_session", () => {
   it("returns the session with its link, owner, status, what the caller may do and what waits for them", async () => {
     const approval = { approvalId: "apr_cccccccccccccccccccc", title: "Approve the plan", confirmUrl: `${CELL}/v1/app/approve/apr_cccccccccccccccccccc` };
     const getSession = vi.fn(async () => sessionView({ approvals: [approval] }));
-    const result = await (await connect({ getSession })).callTool({ name: "agentx_get_session", arguments: { session_id: SES } });
+    const result = await (await connect({ getSession })).callTool({ name: "rovara_get_session", arguments: { session_id: SES } });
     expect(getSession).toHaveBeenCalledWith(SES);
     expect(structured(result)).toMatchObject({
       id: SES, title: "Fix the login bug", link: LINK, project: "payments", owner: "Priya", status: "running", step: "Writing the change", latest: "Reading auth.ts",
@@ -147,32 +147,32 @@ describe("agentx_get_session", () => {
 
   it("refuses something that is not a session ID", async () => {
     const getSession = vi.fn();
-    const result = await (await connect({ getSession })).callTool({ name: "agentx_get_session", arguments: { session_id: "../etc" } });
+    const result = await (await connect({ getSession })).callTool({ name: "rovara_get_session", arguments: { session_id: "../etc" } });
     expect(isError(result)).toBe(true);
     expect(getSession).not.toHaveBeenCalled();
   });
 
   it("reaches GET /v1/app/sessions/{id}, and a session that is not there has its own code", async () => {
     const found = await overHttp(() => Response.json({ session: sessionView() }));
-    const result = await found.mcp.callTool({ name: "agentx_get_session", arguments: { session_id: SES } });
+    const result = await found.mcp.callTool({ name: "rovara_get_session", arguments: { session_id: SES } });
     expect(found.calls).toEqual([{ method: "GET", path: `/v1/app/sessions/${SES}`, query: "", body: undefined }]);
     expect(structured(result)).toMatchObject({ link: LINK });
     const missing = await overHttp(() => Response.json({ error: { code: "NOT_FOUND", message: "session not found" } }, { status: 404 }));
-    const gone = await missing.mcp.callTool({ name: "agentx_get_session", arguments: { session_id: SES } });
+    const gone = await missing.mcp.callTool({ name: "rovara_get_session", arguments: { session_id: SES } });
     expect(isError(gone)).toBe(true);
     expect(text(gone)).toContain("SESSION_NOT_FOUND");
     expect(text(gone)).toContain("session not found");
   });
 });
 
-describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
+describe("rovara_comment_on_session and rovara_tell_session_agent", () => {
   it("comments with a fresh request id for each call, so a deliberate second comment is a second comment; a request_id the caller gives is kept", async () => {
     const commentOnSession = vi.fn(async () => message("comment"));
     const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
     const mcp = await connect({ commentOnSession }, () => ids.shift()!);
-    const first = await mcp.callTool({ name: "agentx_comment_on_session", arguments: { session_id: SES, text: "Looks good" } });
-    await mcp.callTool({ name: "agentx_comment_on_session", arguments: { session_id: SES, text: "Looks good" } });
-    await mcp.callTool({ name: "agentx_comment_on_session", arguments: { session_id: SES, text: "Looks good", request_id: REQ } });
+    const first = await mcp.callTool({ name: "rovara_comment_on_session", arguments: { session_id: SES, text: "Looks good" } });
+    await mcp.callTool({ name: "rovara_comment_on_session", arguments: { session_id: SES, text: "Looks good" } });
+    await mcp.callTool({ name: "rovara_comment_on_session", arguments: { session_id: SES, text: "Looks good", request_id: REQ } });
     expect(commentOnSession).toHaveBeenNthCalledWith(1, SES, { requestId: "11111111-1111-4111-8111-111111111111", text: "Looks good" });
     expect(commentOnSession).toHaveBeenNthCalledWith(2, SES, { requestId: "22222222-2222-4222-8222-222222222222", text: "Looks good" });
     expect(commentOnSession).toHaveBeenNthCalledWith(3, SES, { requestId: REQ, text: "Looks good" });
@@ -183,14 +183,14 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
     const tellSessionAgent = vi.fn<ControlPlaneClient["tellSessionAgent"]>(async () => message("steer", { state: "queued", at: "2026-10-24T09:06:00.000Z" }));
     const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
     const mcp = await connect({ tellSessionAgent }, () => ids.shift()!);
-    for (let n = 0; n < 2; n += 1) await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Keep it small" } });
+    for (let n = 0; n < 2; n += 1) await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Keep it small" } });
     expect(tellSessionAgent.mock.calls.map((call) => call[1].requestId)).toEqual(["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"]);
   });
 
   it("tells the agent, and says whether the message was queued or delivered", async () => {
     const tellSessionAgent = vi.fn(async () => message("steer", { state: "queued", at: "2026-10-24T09:06:00.000Z" }));
     const mcp = await connect({ tellSessionAgent });
-    const result = await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Keep the change under 50 lines", request_id: REQ } });
+    const result = await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Keep the change under 50 lines", request_id: REQ } });
     expect(tellSessionAgent).toHaveBeenCalledWith(SES, { requestId: REQ, text: "Keep the change under 50 lines" });
     expect(structured(result)).toMatchObject({ kind: "steer", delivery: "queued" });
     expect(text(result)).toMatch(/queued/i);
@@ -198,10 +198,10 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
 
   it("reaches the messages route with the kind in the body", async () => {
     const comment = await overHttp(() => Response.json(message("comment"), { status: 201 }));
-    await comment.mcp.callTool({ name: "agentx_comment_on_session", arguments: { session_id: SES, text: "Looks good", request_id: REQ } });
+    await comment.mcp.callTool({ name: "rovara_comment_on_session", arguments: { session_id: SES, text: "Looks good", request_id: REQ } });
     expect(comment.calls).toEqual([{ method: "POST", path: `/v1/app/sessions/${SES}/messages`, query: "", body: { requestId: REQ, kind: "comment", text: "Looks good" } }]);
     const steer = await overHttp(() => Response.json(message("steer", { state: "delivered", at: "2026-10-24T09:06:00.000Z" }), { status: 201 }));
-    await steer.mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Go on", request_id: REQ } });
+    await steer.mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Go on", request_id: REQ } });
     expect(steer.calls).toEqual([{ method: "POST", path: `/v1/app/sessions/${SES}/messages`, query: "", body: { requestId: REQ, kind: "steer", text: "Go on" } }]);
   });
 
@@ -209,7 +209,7 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
     const tellSessionAgent = vi.fn();
     const mcp = await connect({ tellSessionAgent });
     for (const bad of ["", "   ", "x".repeat(10_001)]) {
-      const result = await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: bad } });
+      const result = await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: bad } });
       expect(isError(result), bad.slice(0, 5)).toBe(true);
     }
     expect(tellSessionAgent).not.toHaveBeenCalled();
@@ -218,7 +218,7 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
   it("gives a caller who may only view the server's exact SESSION_LEVEL_REQUIRED words", async () => {
     const words = "You need \"can use\" on this session to send messages to the agent. Ask Priya to share it with you.";
     const { mcp } = await overHttp(() => Response.json({ error: { code: "SESSION_LEVEL_REQUIRED", message: words } }, { status: 403 }));
-    const result = await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Go faster" } });
+    const result = await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Go faster" } });
     expect(isError(result)).toBe(true);
     expect(text(result)).toContain(words.replace(/\.$/, ""));
     expect(text(result)).toContain("SESSION_REFUSED");
@@ -228,7 +228,7 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
   it("gives the server's words for a session on a Mac the company has not allowed (LOCAL_AGENT_NOT_ALLOWED, stubbed)", async () => {
     const words = "claude-code isn't allowed in your company. Ask an admin to allow it.";
     const { mcp, calls } = await overHttp(() => Response.json({ error: { code: "LOCAL_AGENT_NOT_ALLOWED", message: words } }, { status: 403 }));
-    const result = await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Go faster" } });
+    const result = await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Go faster" } });
     expect(isError(result)).toBe(true);
     expect(text(result)).toContain(words.replace(/\.$/, ""));
     expect(text(result)).toContain("SESSION_REFUSED");
@@ -236,17 +236,17 @@ describe("agentx_comment_on_session and agentx_tell_session_agent", () => {
   });
 });
 
-describe("agentx_stop_session", () => {
+describe("rovara_stop_session", () => {
   it("stops a session with a request id and answers the session that carries on", async () => {
     const stopSession = vi.fn(async () => sessionView({ status: "stopped" }));
-    const result = await (await connect({ stopSession })).callTool({ name: "agentx_stop_session", arguments: { session_id: SES } });
+    const result = await (await connect({ stopSession })).callTool({ name: "rovara_stop_session", arguments: { session_id: SES } });
     expect(stopSession).toHaveBeenCalledWith(SES, REQ);
     expect(structured(result)).toMatchObject({ id: SES, status: "stopped", link: LINK });
   });
 
   it("says nothing was running, with the server's words, and never Stop requested, when the stop found nothing to stop", async () => {
     const stopSession = vi.fn(async () => ({ ...sessionView({ status: "needs_person" }), nothingRunning: "This task is blocked, not running. To end it, use Close task (it checks for unpublished work first)." }));
-    const text = (await (await connect({ stopSession })).callTool({ name: "agentx_stop_session", arguments: { session_id: SES } })).content as Array<{ text: string }>;
+    const text = (await (await connect({ stopSession })).callTool({ name: "rovara_stop_session", arguments: { session_id: SES } })).content as Array<{ text: string }>;
     expect(text[0]!.text).toMatch(/^This task is blocked, not running\. To end it, use Close task/u);
     expect(text[0]!.text).not.toContain("Stop requested");
   });
@@ -256,14 +256,14 @@ describe("agentx_stop_session", () => {
     const made = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
     const queue = [...made];
     const mcp = await connect({ stopSession }, () => queue.shift()!);
-    await mcp.callTool({ name: "agentx_stop_session", arguments: { session_id: SES } });
-    await mcp.callTool({ name: "agentx_stop_session", arguments: { session_id: SES } });
+    await mcp.callTool({ name: "rovara_stop_session", arguments: { session_id: SES } });
+    await mcp.callTool({ name: "rovara_stop_session", arguments: { session_id: SES } });
     expect(stopSession.mock.calls.map((call) => call[1])).toEqual(made);
   });
 
   it("reaches POST /v1/app/sessions/{id}/stop with only a request id", async () => {
     const { mcp, calls } = await overHttp(() => Response.json({ session: sessionView({ status: "stopped" }) }));
-    await mcp.callTool({ name: "agentx_stop_session", arguments: { session_id: SES, request_id: REQ } });
+    await mcp.callTool({ name: "rovara_stop_session", arguments: { session_id: SES, request_id: REQ } });
     expect(calls).toEqual([{ method: "POST", path: `/v1/app/sessions/${SES}/stop`, query: "", body: { requestId: REQ } }]);
   });
 });
@@ -274,7 +274,7 @@ describe("links are the control plane's own: https, its origin, no userinfo, who
 
   it("keeps a link on the control plane's origin", async () => {
     const { mcp } = await overHttp(() => Response.json({ session: sessionView({ approvals: [approval(ok)] }) }));
-    const result = await mcp.callTool({ name: "agentx_get_session", arguments: { session_id: SES } });
+    const result = await mcp.callTool({ name: "rovara_get_session", arguments: { session_id: SES } });
     expect(structured(result)).toMatchObject({ link: LINK, approvals: [{ title: "Approve the plan", confirm_url: ok }] });
   });
 
@@ -292,7 +292,7 @@ describe("links are the control plane's own: https, its origin, no userinfo, who
     ["more than 1,000 characters", `${CELL}/s/${SES}?${"a".repeat(1_000)}`],
   ])("leaves the link and the decision links out for %s", async (_name, bad) => {
     const { mcp } = await overHttp(() => Response.json({ session: sessionView({ link: bad, approvals: [approval(bad), approval(ok)] }) }));
-    for (const call of [{ name: "agentx_get_session", arguments: { session_id: SES } }, { name: "agentx_stop_session", arguments: { session_id: SES } }]) {
+    for (const call of [{ name: "rovara_get_session", arguments: { session_id: SES } }, { name: "rovara_stop_session", arguments: { session_id: SES } }]) {
       const result = await mcp.callTool(call);
       expect(isError(result), call.name).toBe(false);
       const out = structured(result);
@@ -309,7 +309,7 @@ describe("an install on this computer links to its local pages over plain http",
   const LOCAL = "http://127.0.0.1:4410";
   const overLoopback = async (base: string, link: string) => {
     const client = httpControlPlaneClient({ session: async () => ({ baseUrl: base, accessToken: "tok", signInCommand: "npx x login" }), fetch: vi.fn<typeof fetch>(async () => Response.json({ session: sessionView({ link }) })), sleep: async () => undefined, tries: 1 });
-    return structured(await (await connect(client)).callTool({ name: "agentx_get_session", arguments: { session_id: SES } }));
+    return structured(await (await connect(client)).callTool({ name: "rovara_get_session", arguments: { session_id: SES } }));
   };
 
   it("keeps an http link on the same loopback origin", async () => {
@@ -342,7 +342,7 @@ describe("rate limits and kinds", () => {
   it("gives a rate limit its own code and a step that says wait, not ask an admin", async () => {
     const words = "You are sending messages too fast. Try again in a few minutes.";
     const { mcp, calls } = await overHttp(() => Response.json({ error: { code: "TOO_MANY_REQUESTS", message: words } }, { status: 429 }));
-    const result = await mcp.callTool({ name: "agentx_tell_session_agent", arguments: { session_id: SES, text: "Go on" } });
+    const result = await mcp.callTool({ name: "rovara_tell_session_agent", arguments: { session_id: SES, text: "Go on" } });
     expect(isError(result)).toBe(true);
     expect(text(result)).toContain("RATE_LIMITED");
     expect(text(result)).toContain(words.replace(/\.$/, ""));
@@ -357,7 +357,7 @@ describe("rate limits and kinds", () => {
       listSessions: vi.fn(async () => listOf([{ ...tileOf(SES, "x"), kind: bad }])),
       commentOnSession: vi.fn(async () => ({ ...message("comment"), kind: bad }) as unknown as SessionMessageRead),
     });
-    for (const call of [{ name: "agentx_get_session", arguments: { session_id: SES } }, { name: "agentx_list_sessions", arguments: {} }, { name: "agentx_comment_on_session", arguments: { session_id: SES, text: "hi" } }]) {
+    for (const call of [{ name: "rovara_get_session", arguments: { session_id: SES } }, { name: "rovara_list_sessions", arguments: {} }, { name: "rovara_comment_on_session", arguments: { session_id: SES, text: "hi" } }]) {
       const dump = JSON.stringify(structured(await mcp.callTool(call)));
       expect(dump, call.name).not.toContain("\\u001b");
       expect(dump, call.name).toContain("task");
@@ -374,7 +374,7 @@ describe("what the server wrote is made safe before it reaches the model", () =>
       getSession: vi.fn(async () => sessionView({ title: evil, step: evil, peek: evil, owner: { developerId: DEV, name: evil }, project: "payments" })),
       listSessions: vi.fn(async () => listOf([tileOf(SES, evil)])),
     });
-    for (const call of [{ name: "agentx_get_session", arguments: { session_id: SES } }, { name: "agentx_list_sessions", arguments: {} }]) {
+    for (const call of [{ name: "rovara_get_session", arguments: { session_id: SES } }, { name: "rovara_list_sessions", arguments: {} }]) {
       const result = await mcp.callTool(call);
       expect(dirty(JSON.stringify(structured(result))), call.name).toBe(false);
       expect(dirty(text(result)), call.name).toBe(false);
@@ -383,14 +383,14 @@ describe("what the server wrote is made safe before it reaches the model", () =>
 
   it("cleans the words of a refusal, and never lets an access token through", async () => {
     const { mcp } = await overHttp(() => Response.json({ error: { code: "SESSION_LEVEL_REQUIRED", message: `You need edit\u001b[2J tok agxr_${"c".repeat(43)}` } }, { status: 403 }));
-    const result = await mcp.callTool({ name: "agentx_stop_session", arguments: { session_id: SES } });
+    const result = await mcp.callTool({ name: "rovara_stop_session", arguments: { session_id: SES } });
     expect(isError(result)).toBe(true);
     expect(dirty(text(result))).toBe(false);
     expect(text(result)).not.toContain("tok agx");
   });
 
   it("marks a session's text as data, not instructions, in each tool's description", () => {
-    for (const name of ["agentx_get_session", "agentx_list_sessions"]) {
+    for (const name of ["rovara_get_session", "rovara_list_sessions"]) {
       expect(DEVELOPER_TOOLS.find((tool) => tool.name === name)!.description, name).toMatch(/data|not instructions/i);
     }
   });

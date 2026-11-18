@@ -1,5 +1,5 @@
 // Spec 055 phase 2: discovering a generic MCP server's sign-in (RFC 9728, RFC 8414), registering
-// AgentX as its client (RFC 7591), and `authorize --endpoint` registering a pinned credential.
+// Rovara as its client (RFC 7591), and `authorize --endpoint` registering a pinned credential.
 import { describe, expect, it, vi } from "vitest";
 import { CredentialRegistrationSchema } from "../../packages/contracts/src/index.js";
 import { authorizeCredential, GENERIC_REDIRECT_URI, type AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
@@ -93,11 +93,11 @@ describe("dynamic client registration", () => {
   it("registers for the localhost redirect, as a confidential or a public client", async () => {
     const confidential = vendor({ [`${ISSUER}/register`]: () => Response.json({ client_id: "c1", client_secret: "s1" }, { status: 201 }) });
     expect(await registerClient(`${ISSUER}/register`, GENERIC_REDIRECT_URI, confidential.fetchImplementation)).toEqual({ clientId: "c1", clientSecret: "s1" });
-    expect(JSON.parse(confidential.requests[0]!.init?.body as string)).toMatchObject({ client_name: "AgentX", redirect_uris: [GENERIC_REDIRECT_URI], grant_types: ["authorization_code", "refresh_token"] });
+    expect(JSON.parse(confidential.requests[0]!.init?.body as string)).toMatchObject({ client_name: "Rovara", redirect_uris: [GENERIC_REDIRECT_URI], grant_types: ["authorization_code", "refresh_token"] });
     const publicClient = vendor({ [`${ISSUER}/register`]: () => Response.json({ client_id: "c2", token_endpoint_auth_method: "none" }, { status: 201 }) });
     expect(await registerClient(`${ISSUER}/register`, GENERIC_REDIRECT_URI, publicClient.fetchImplementation)).toEqual({ clientId: "c2" });
     const refused = vendor({ [`${ISSUER}/register`]: () => Response.json({ error: "invalid_redirect_uri" }, { status: 400 }) });
-    await expect(registerClient(`${ISSUER}/register`, GENERIC_REDIRECT_URI, refused.fetchImplementation)).rejects.toThrow("refused to register AgentX as a client (HTTP 400 (invalid_redirect_uri))");
+    await expect(registerClient(`${ISSUER}/register`, GENERIC_REDIRECT_URI, refused.fetchImplementation)).rejects.toThrow("refused to register Rovara as a client (HTTP 400 (invalid_redirect_uri))");
   });
 });
 

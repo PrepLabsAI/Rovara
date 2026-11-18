@@ -51,16 +51,16 @@ describe("the e2e step (FR-018 step 11)", () => {
     expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 12 seconds" });
   });
 
-  it("tells the engineer to run agentx init again when the reply failed", async () => {
+  it("tells the engineer to run rovara init again when the reply failed", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: "T0123456789/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
     context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
-    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
+    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see rovara --env staging admin turns export --since 15m, fix it, then run rovara --env staging init again");
   });
 
   it("needs the channel from the first-project step", async () => {
     context = initContext();
-    await expect(e2eStep().run(context, progressHandle())).rejects.toThrow("install progress has no bound channel; the first-project step must finish first, so run agentx init again");
+    await expect(e2eStep().run(context, progressHandle())).rejects.toThrow("install progress has no bound channel; the first-project step must finish first, so run rovara init again");
   });
 });
 
@@ -102,7 +102,7 @@ describe("the admin user (spec 048 FR-020)", () => {
 });
 
 describe("the message init ends with", () => {
-  it("says where to talk to AgentX and what to do next", () => {
+  it("says where to talk to Rovara and what to do next", () => {
     const text = readyText({
       env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
       progress: {
@@ -113,7 +113,7 @@ describe("the message init ends with", () => {
       },
     });
     expect(text).toBe([
-      "AgentX environment staging is ready.",
+      "Rovara environment staging is ready.",
       "  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).",
       "  Developers sign in with: node /opt/agentx/dist/main.js login https://cp.example.test",
       "  Connected: Linear. Add more with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.",

@@ -7,13 +7,13 @@ export async function listCompanyInvites(session: { controlPlaneUrl: string; acc
   try {
     response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}/v1/admin/company-invites`, { headers: { authorization: `Bearer ${session.accessToken}` } });
   } catch {
-    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach AgentX to list company invite codes; try again");
+    throw agentXError("RUNTIME_UNAVAILABLE", "could not reach Rovara to list company invite codes; try again");
   }
   const body = await adminResponseBody(response);
   const { requestId: _requestId, ...rest } = (body ?? {}) as Record<string, unknown>;
   void _requestId;
   const list = CompanyInviteListSchema.safeParse(rest);
-  if (!list.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with invite codes this version of the CLI cannot read; upgrade the CLI");
+  if (!list.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered with invite codes this version of the CLI cannot read; upgrade the CLI");
   return list.data;
 }
 

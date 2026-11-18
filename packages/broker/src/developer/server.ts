@@ -69,7 +69,7 @@ import {
   type SetFactorEmailRequest,
   type SetFactorEmailResponse,
   type SignInLinkStartRequest, type SignInLinkFinishRequest, type SignInLinksListRequest, type SignInUnlinkRequest,
-  type SignInLinkStartResponse, type SignInLinkFinishResponse, type SignInLinksListResponse, type SignInUnlinkResponse,
+  type SignInLinkStartResponse, type SignInLinkFinishResponse, type SignInLinksListResponse, type SignInUnlinkResponse, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
@@ -222,10 +222,10 @@ function secretMatches(secret: string, secretHash: string): boolean {
   return kept.length === given.length && timingSafeEqual(given, kept);
 }
 
-const expired = () => page(400, "This sign-in link has expired", ["Run agentx login again."]);
+const expired = () => page(400, "This sign-in link has expired", [`Run ${CLI_COMMAND_NAME} login again.`]);
 /** One answer for every code failure (unknown, used, expired, wrong verifier, wrong redirect URI). */
-const INVALID_CODE = ["invalid_grant", "the sign-in code is invalid, used or expired; run agentx login again"] as const;
-const SIGN_IN_ENDED = ["invalid_grant", "your AgentX sign-in has ended; run agentx login again"] as const;
+const INVALID_CODE = ["invalid_grant", `the sign-in code is invalid, used or expired; run ${CLI_COMMAND_NAME} login again`] as const;
+const SIGN_IN_ENDED = ["invalid_grant", `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login again`] as const;
 /** DEC 254b (a): a member of a company with its own sign-in tried the install's. Fixed words, nothing echoed. */
 const COMPANY_OWN_SIGNIN = "your company signs in with its own sign-in method";
 
@@ -238,7 +238,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (found === undefined) throw new ProviderNotConfiguredError(`${methodLabel(method)} sign-in is not set up in this environment`);
     return found;
   };
-  const methodUnavailable = () => page(400, "Sign-in method not available", ["Run agentx login again."]);
+  const methodUnavailable = () => page(400, "Sign-in method not available", [`Run ${CLI_COMMAND_NAME} login again.`]);
   const companyNotFinished = (request: AuthRequestRecord) => request.browserReturnTo === undefined
     ? toClient(request.clientRedirectUri, { error: "access_denied", error_description: "sign-in is not finished", state: request.clientState })
     : browserReturn(request.browserReturnTo, false);
@@ -388,7 +388,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           methods = selected;
         } catch { return methodUnavailable(); }
       }
-      if ((method !== "slack" && method !== "oidc" && method !== "github") || !methods.includes(method)) return page(400, "Sign-in method not available", ["Run agentx login again."]);
+      if ((method !== "slack" && method !== "oidc" && method !== "github") || !methods.includes(method)) return page(400, "Sign-in method not available", [`Run ${CLI_COMMAND_NAME} login again.`]);
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
@@ -409,9 +409,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         return page(503, "Sign-in is unavailable", ["Try again in a moment."]);
       }
       const allowed = client !== undefined && (client.redirectUris.includes(redirectUri) || (client.loopback && isLoopbackRedirectUri(redirectUri)));
-      if (!allowed) return page(400, "This sign-in link is not from a service registered with Rovara", ["Start signing in again from the service. If it keeps happening, ask a Rovara administrator to check how the service is registered.", "Signing in to the AgentX CLI? Start from your terminal with agentx login <url>."]);
+      if (!allowed) return page(400, "This sign-in link is not from a service registered with Rovara", ["Start signing in again from the service. If it keeps happening, ask a Rovara administrator to check how the service is registered.", `Signing in to the Rovara CLI? Start from your terminal with ${CLI_COMMAND_NAME} login <url>.`]);
     } else if (!isLoopbackRedirectUri(redirectUri)) {
-      return page(400, "This sign-in link is not from the AgentX CLI", ["Start signing in from your terminal with agentx login <url>."]);
+      return page(400, "This sign-in link is not from the Rovara CLI", [`Start signing in from your terminal with ${CLI_COMMAND_NAME} login <url>.`]);
     }
     const clientState = query.get("state") ?? "";
     let selectedCompany = deps.company === undefined ? undefined : query.get("company") ?? undefined;
@@ -435,11 +435,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (invite !== null && (invite.length < 1 || invite.length > COMPANY_INVITE_LINK_MAX || selectedCompany === undefined || (client !== undefined && client.installLevel !== true))) return methodUnavailable();
     const challenge = query.get("code_challenge") ?? "";
     const invalid = (description: string) => toClient(redirectUri, { error: "invalid_request", error_description: description, ...(clientState === "" ? {} : { state: clientState }) });
-    if (query.get("response_type") !== "code") return invalid("response_type must be code; update the AgentX CLI and run agentx login again");
-    if (query.get("code_challenge_method") !== "S256" || !CHALLENGE.test(challenge)) return invalid("PKCE with S256 is required; update the AgentX CLI and run agentx login again");
-    if (clientState.length < 1 || clientState.length > 512) return invalid("state is required; update the AgentX CLI and run agentx login again");
+    if (query.get("response_type") !== "code") return invalid(`response_type must be code; update the Rovara CLI and run ${CLI_COMMAND_NAME} login again`);
+    if (query.get("code_challenge_method") !== "S256" || !CHALLENGE.test(challenge)) return invalid(`PKCE with S256 is required; update the Rovara CLI and run ${CLI_COMMAND_NAME} login again`);
+    if (clientState.length < 1 || clientState.length > 512) return invalid(`state is required; update the Rovara CLI and run ${CLI_COMMAND_NAME} login again`);
     if (methods.length === 0) {
-      return toClient(redirectUri, { error: "access_denied", state: clientState, error_description: "developer sign-in is not enabled in this AgentX environment; ask an admin to run agentx signin enable slack" });
+      return toClient(redirectUri, { error: "access_denied", state: clientState, error_description: `developer sign-in is not enabled in this Rovara environment; ask an admin to run ${CLI_COMMAND_NAME} signin enable slack` });
     }
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
@@ -507,7 +507,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
    * the legacy path retains its error-name log. */
   function serverError(error: unknown, path: string, clientRedirect: string, clientState: string): HttpResult {
     deps.log({ event: "signin.error", path, error: deps.company === undefined ? errorName(error) : "sign_in_failed" });
-    return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
+    return toClient(clientRedirect, { error: "server_error", error_description: `sign-in failed on the Rovara server; run ${CLI_COMMAND_NAME} login again`, state: clientState });
   }
 
   async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, stepUp = false, companyId?: string): Promise<HttpResult> {
@@ -527,7 +527,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   function providerFailure(error: unknown, method: DeveloperSignInMethod, clientRedirect: string, clientState: string): HttpResult {
     if (error instanceof ProviderUnavailableError) {
       deps.log({ event: "signin.provider_unavailable", method });
-      return toClient(clientRedirect, { error: "temporarily_unavailable", state: clientState, error_description: `${methodLabel(method)} could not be reached; run agentx login again in a minute` });
+      return toClient(clientRedirect, { error: "temporarily_unavailable", state: clientState, error_description: `${methodLabel(method)} could not be reached; run ${CLI_COMMAND_NAME} login again in a minute` });
     }
     if (error instanceof ProviderNotConfiguredError) {
       // These messages are written by the providers and the Lambda entry, never copied from a
@@ -559,7 +559,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (pending === undefined || pending.method !== method) return expired();
     // Single use: the state (and with it the nonce) is consumed before anything else happens.
     const request = await store.consumeAuthRequest(state, method);
-    if (request === undefined) return page(400, "This sign-in link was already used", ["Run agentx login again."]);
+    if (request === undefined) return page(400, "This sign-in link was already used", [`Run ${CLI_COMMAND_NAME} login again.`]);
     if (request.browserReturnTo !== undefined) {
       const verifier = (headers.cookie ?? "").split(";").map(part => part.trim()).find(part => part.startsWith(`${REVIEW_PKCE_COOKIE}=`))?.slice(REVIEW_PKCE_COOKIE.length + 1);
       if (!REVIEW_RETURN_TO.test(request.browserReturnTo) || verifier === undefined || !pkceChallengeMatches(verifier, request.codeChallenge)) {
@@ -586,7 +586,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
     if (request.browserReturnTo !== undefined && !REVIEW_RETURN_TO.test(request.browserReturnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
     if (code === null) return request.browserReturnTo === undefined
-      ? client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run agentx login again` })
+      ? client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run ${CLI_COMMAND_NAME} login again` })
       : browserReturn(request.browserReturnTo, false);
     let result: ProviderResult;
     // Whether the install's own provider completed this sign-in (DEC 254b (a): the shared method), as opposed to a company's own issuer.
@@ -785,7 +785,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (deps.company !== undefined && redeemed.companyId !== undefined && redeemed.companyId !== IMPLICIT_COMPANY_ID && redeemed.amr === "oidc") {
       try { methods = await methodsFor(redeemed.companyId) ?? []; } catch { return oauthError(400, ...SIGN_IN_ENDED); }
     }
-    if (!methods.includes(redeemed.amr)) return oauthError(400, "invalid_grant", `${methodLabel(redeemed.amr)} sign-in was turned off in this environment; run agentx login again`);
+    if (!methods.includes(redeemed.amr)) return oauthError(400, "invalid_grant", `${methodLabel(redeemed.amr)} sign-in was turned off in this environment; run ${CLI_COMMAND_NAME} login again`);
     const developer = await store.getDeveloper(redeemed.developerId);
     if (developer === undefined || developer.revoked) return oauthError(400, "invalid_grant", "your AgentX sign-in was turned off by an admin; contact an admin");
     const { session, refreshToken } = await store.createSession(redeemed);
@@ -826,11 +826,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     if (!methods.includes(session.amr)) {
       await revoke(session.sessionId, "method_disabled");
-      return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with agentx login`);
+      return oauthError(400, "invalid_grant", `${methodLabel(session.amr)} sign-in was turned off in this environment; sign in another way with ${CLI_COMMAND_NAME} login`);
     }
     if (startedBeforeMethodOn(session.startedAt, session.amr === "oidc" ? companySince ?? config.oidc?.since : methodSince(config, session.amr))) {
       await revoke(session.sessionId, "method_disabled");
-      return oauthError(400, "invalid_grant", `your sign-in ended when ${methodLabel(session.amr)} was turned off; sign in again with agentx login`);
+      return oauthError(400, "invalid_grant", `your sign-in ended when ${methodLabel(session.amr)} was turned off; sign in again with ${CLI_COMMAND_NAME} login`);
     }
     const developer = await store.getDeveloper(session.developerId);
     if (developer === undefined || developer.revoked) {
@@ -843,7 +843,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     }
     if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
       await revoke(session.sessionId, "ended_by_admin");
-      return oauthError(400, "invalid_grant", "an AgentX admin ended your sign-in; sign in again with agentx login");
+      return oauthError(400, "invalid_grant", `a Rovara admin ended your sign-in; sign in again with ${CLI_COMMAND_NAME} login`);
     }
     if (session.amr === "slack" && session.slackUserId !== undefined) {
       const status = await deps.directory.userStatus(session.slackUserId);
@@ -1140,7 +1140,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       // Only the error's name: a KMS or AWS message can carry a key ARN or other detail.
       deps.log({ event: "signin.error", path: url.pathname, error: errorName(error) });
       return isPage(url.pathname)
-        ? page(500, "Sign-in failed", ["Something went wrong on the AgentX server. Run agentx login again."])
+        ? page(500, "Sign-in failed", [`Something went wrong on the Rovara server. Run ${CLI_COMMAND_NAME} login again.`])
         : oauthError(500, "server_error", "sign-in failed on the server; try again");
     }
   };

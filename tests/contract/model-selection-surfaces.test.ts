@@ -94,8 +94,8 @@ describe("what a page may send", () => {
   });
 });
 
-describe("agentx_get_model_selection", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_get_model_selection")!;
+describe("rovara_get_model_selection", () => {
+  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "rovara_get_model_selection")!;
 
   it("is a read: it asks the control plane for the setting and says what each step uses, what it costs, and where the owner changes it", async () => {
     const client = { getModelSelection: vi.fn(async () => state) };

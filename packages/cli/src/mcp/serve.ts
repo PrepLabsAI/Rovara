@@ -117,7 +117,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
       throw error;
     }
     const fit = adminApiFits(read.adminApiVersion);
-    if (fit !== "fits") return { refusal: new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
+    if (fit !== "fits") return { refusal: new ToolError("UPGRADE_REQUIRED", "this Rovara has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
     return { refusal: undefined, compatibility: read };
   };
   let me: { at: number; value: Promise<AdminMeResponse | undefined> } | undefined;
@@ -132,14 +132,14 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
     return { elicitation: confirm.elicitation, slack: confirm.slack && (await adminMe())?.slack.linked === true };
   };
   const confirmation = async (): Promise<{ elicitation: boolean; slack: boolean }> => methodsOf(await compatibility());
-  // Spec 025 FR-028, FR-041, Q11: agentx_admin_changes needs admin API 1.1; the change tools also
+  // Spec 025 FR-028, FR-041, Q11: rovara_admin_changes needs admin API 1.1; the change tools also
   // need a confirmation method this session has.
   const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => {
     const reads = await readsOffer();
     if (reads.refusal !== undefined) return { admin: reads.refusal, audit: reads.refusal, changes: reads.refusal };
     // Review fix 3: the compatibility readsOffer already read, not a second, unguarded read.
     if (adminApiFits(reads.compatibility.adminApiVersion, REQUIRED_CHANGE_ADMIN_MINOR) !== "fits") {
-      const upgrade = new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin change tools yet", UPGRADE_AGENTX_STEP);
+      const upgrade = new ToolError("UPGRADE_REQUIRED", "this Rovara has no admin change tools yet", UPGRADE_AGENTX_STEP);
       return { admin: undefined, audit: upgrade, changes: upgrade };
     }
     const methods = await methodsOf(reads.compatibility);

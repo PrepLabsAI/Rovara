@@ -1,7 +1,7 @@
 // FR-018 step 11 and FR-041's check (owner decision 7): a person mentions the bot (the ingress
 // never answers a bot, so the CLI cannot post the test itself), and the CLI watches turn records
 // for an answered turn in that channel. No Slack history scope is needed.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { exportTurns } from "../admin/turns.js";
 import type { AdminSession } from "./services.js";
 
@@ -30,7 +30,7 @@ export async function waitForThreadedReply(input: {
   const since = new Date(started - EARLY_MS).toISOString();
   const prefix = `${input.teamId}/${input.channelId}/`;
   // Live check L2: a workspace that had an older AgentX app shows two bots with similar names.
-  input.write(`In #${input.channelName}, post a message that mentions the bot, for example "@<the bot> what can you do?". Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is ${input.botUserId}. Waiting up to ${minutes} for AgentX to reply in its thread.`);
+  input.write(`In #${input.channelName}, post a message that mentions the bot, for example "@<the bot> what can you do?". Type @ and pick the bot from Slack's mention list: a workspace that had an older Rovara app shows two bots with similar names, and this one's member ID is ${input.botUserId}. Waiting up to ${minutes} for Rovara to reply in its thread.`);
   for (;;) {
     const turns: WatchedTurn[] = [];
     await exportTurns({ ...input.session, since, write: (line) => { turns.push(JSON.parse(line) as WatchedTurn); } }, input.fetch);
@@ -38,17 +38,17 @@ export async function waitForThreadedReply(input: {
     const answered = mine.find((entry) => entry.disposition === "answered");
     if (answered !== undefined) {
       const seconds = Math.round(answered.durationMs / 1000);
-      input.write(`AgentX replied in #${input.channelName} in ${seconds} seconds.`);
+      input.write(`Rovara replied in #${input.channelName} in ${seconds} seconds.`);
       return { eventId: answered.eventId, seconds };
     }
     const other = mine[0];
     if (other !== undefined) {
       // Every turn seen here ended unanswered, so a second watch skips them all, not just the first.
       for (const entry of mine) input.reported?.add(entry.eventId);
-      throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx --env ${input.env} admin turns export --since 15m, fix it, then run ${input.rerun} again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `Rovara replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see ${CLI_COMMAND_NAME} --env ${input.env} admin turns export --since 15m, fix it, then run ${input.rerun} again`);
     }
     if (input.now() - started >= timeout) {
-      throw agentXError("RUNTIME_UNAVAILABLE", `no AgentX reply in #${input.channelName} within ${minutes}; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and agentx --env ${input.env} admin turns export --since 15m, then run ${input.rerun} again`);
+      throw agentXError("RUNTIME_UNAVAILABLE", `no Rovara reply in #${input.channelName} within ${minutes}; check that the message mentioned the bot, that Slack shows the Request URL as Verified, and ${CLI_COMMAND_NAME} --env ${input.env} admin turns export --since 15m, then run ${input.rerun} again`);
     }
     await input.sleep(POLL_MS);
   }

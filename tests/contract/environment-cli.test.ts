@@ -22,7 +22,7 @@ function capture() {
   return { out, err, stdout: { write: (t: string) => out.push(t) }, stderr: { write: (t: string) => err.push(t) } };
 }
 
-describe("agentx env", () => {
+describe("rovara env", () => {
   it("lists environments from SSM", async () => {
     const store = new MemoryParameterStore();
     await writeEnvironmentSettings(store, stagingSettings);
@@ -127,7 +127,7 @@ describe("agentx env", () => {
   });
 });
 
-describe("agentx env adopt", () => {
+describe("rovara env adopt", () => {
   const liveStacks: Record<string, { outputs: Record<string, string>; parameters: Record<string, string>; status: string }> = {
     AgentXProductionFoundation: { outputs: {}, parameters: {}, status: "UPDATE_COMPLETE" },
     AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" }, status: "UPDATE_COMPLETE" },
@@ -232,7 +232,7 @@ describe("deployment file resolution", () => {
     expect(await resolveDeploymentFile({ home: dir, env: "production" })).toBe(legacy);
     await writeFile(environmentCachePath(dir, "production"), "x");
     expect(await resolveDeploymentFile({ home: dir, env: "production" })).toBe(environmentCachePath(dir, "production"));
-    await expect(resolveDeploymentFile({ home: dir, env: "staging" })).rejects.toMatchObject({ message: expect.stringContaining("agentx --env staging env use") as unknown });
+    await expect(resolveDeploymentFile({ home: dir, env: "staging" })).rejects.toMatchObject({ message: expect.stringContaining("rovara --env staging env use") as unknown });
   });
 
   it("refuses a cache written for another environment", async () => {

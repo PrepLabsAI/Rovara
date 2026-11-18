@@ -94,7 +94,7 @@ describe("the control-plane client (FR-027)", () => {
     expect(url).toBe(`https://agentx.example.test/v1/dev/tasks/${view.taskId}/share`);
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual(request);
-    const busy = vi.fn(async () => reply(409, { error: { code: "WORKSPACE_BUSY", message: "the task changed while sharing; try agentx_share_task again" } }));
+    const busy = vi.fn(async () => reply(409, { error: { code: "WORKSPACE_BUSY", message: "the task changed while sharing; try rovara_share_task again" } }));
     await expect(client(busy).shareTask(view.taskId, request)).rejects.toMatchObject({ code: "TASK_BUSY", nextStep: SHARE_BUSY_STEP });
   });
 
@@ -174,7 +174,7 @@ describe("the control-plane client (FR-027)", () => {
 
   it.each([
     ["BUDGET_EXCEEDED", "The budget for this install is used up ($29 of $29).", /raise the budget/],
-    ["BUDGET_EXCEEDED", "This task has used its AI budget ($25 of $25). Choose Continue to resume this task with a fresh budget.", /agentx_continue_task/],
+    ["BUDGET_EXCEEDED", "This task has used its AI budget ($25 of $25). Choose Continue to resume this task with a fresh budget.", /rovara_continue_task/],
   ] as const)("maps %s (HTTP 402) to BUDGET_REACHED with the broker's words and its own next step", async (brokerCode, message, step) => {
     const error = await client(async () => reply(402, { error: { code: brokerCode, message } })).startTask(start).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ToolError);
@@ -183,7 +183,7 @@ describe("the control-plane client (FR-027)", () => {
     expect((error as ToolError).nextStep).not.toContain("try again later");
   });
 
-  it("stops trying at the deadline when AgentX never answers", async () => {
+  it("stops trying at the deadline when Rovara never answers", async () => {
     vi.useFakeTimers();
     const started = Date.now();
     const hanging = vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
@@ -254,13 +254,13 @@ describe("the control-plane client (FR-027)", () => {
 
   it("answers SIGN_IN_REQUIRED after one forced refresh, never looping", async () => {
     const hook = vi.fn(session);
-    const refused = vi.fn(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended" } }));
+    const refused = vi.fn(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your Rovara sign-in has ended" } }));
     const error = await client(refused, { session: hook }).startTask(start).catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
     expect(refused).toHaveBeenCalledTimes(2);
     expect(hook).toHaveBeenCalledTimes(2);
     const ended = vi.fn(async (options?: { force?: boolean }) => {
-      if (options?.force === true) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login https://agentx.example.test");
+      if (options?.force === true) throw agentXError("AUTH_REQUIRED", "your Rovara sign-in for staging has ended; run npx @preplabsai/rovara-code login https://agentx.example.test");
       return session();
     });
     const once = vi.fn(async () => reply(401, {}));
@@ -286,7 +286,7 @@ describe("the control-plane client (FR-027)", () => {
   ] as const)("gives an unknown HTTP %i (%s) a next step that is not about the connection", async (status, code) => {
     const error = await client(async () => reply(status, code === undefined ? {} : { error: { code, message: "no" } })).projects().catch((caught: unknown) => caught);
     expect(error).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: UNEXPECTED_ANSWER_STEP });
-    expect(UNEXPECTED_ANSWER_STEP).toBe("ask your AgentX admin, or try again later");
+    expect(UNEXPECTED_ANSWER_STEP).toBe("ask your Rovara admin, or try again later");
   });
 
   it("removes the access token before the 1,000-character cap", async () => {
@@ -299,16 +299,16 @@ describe("the control-plane client (FR-027)", () => {
   });
 
   it("gives a cancel that raced the task a next step that names the tools", async () => {
-    const error = await client(async () => reply(409, { error: { code: "STALE_FENCE", message: "the task changed while cancelling; try agentx_cancel_task again" } }))
+    const error = await client(async () => reply(409, { error: { code: "STALE_FENCE", message: "the task changed while cancelling; try rovara_cancel_task again" } }))
       .cancelTask(view.taskId, start.requestId).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ code: "TASK_BUSY", message: "the task changed while cancelling; try agentx_cancel_task again", nextStep: NEXT_STEPS.TASK_BUSY });
+    expect(error).toMatchObject({ code: "TASK_BUSY", message: "the task changed while cancelling; try rovara_cancel_task again", nextStep: NEXT_STEPS.TASK_BUSY });
   });
 
   it("gives SIGN_IN_REQUIRED the exact sign-in command, from a 401 or from the local session", async () => {
-    const refused = await client(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended" } })).projects().catch((caught: unknown) => caught);
+    const refused = await client(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your Rovara sign-in has ended" } })).projects().catch((caught: unknown) => caught);
     expect(refused).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
     const local = await client(vi.fn(), {
-      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX environment staging; run npx @preplabsai/rovara-code login https://agentx.example.test"); },
+      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to Rovara environment staging; run npx @preplabsai/rovara-code login https://agentx.example.test"); },
     }).projects().catch((caught: unknown) => caught);
     expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
   });
@@ -316,18 +316,18 @@ describe("the control-plane client (FR-027)", () => {
   it("keeps the whole placeholder when no environment is signed in (ruling F16)", async () => {
     const fetch = vi.fn();
     const local = await client(fetch, {
-      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX; run npx @preplabsai/rovara-code login <your AgentX URL>"); },
+      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to Rovara; run npx @preplabsai/rovara-code login <your Rovara URL>"); },
     }).projects().catch((caught: unknown) => caught);
-    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", message: "this computer is not signed in to AgentX; run npx @preplabsai/rovara-code login <your AgentX URL>", nextStep: "run npx @preplabsai/rovara-code login <your AgentX URL>" });
+    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", message: "this computer is not signed in to Rovara; run npx @preplabsai/rovara-code login <your Rovara URL>", nextStep: "run npx @preplabsai/rovara-code login <your Rovara URL>" });
     expect(fetch).not.toHaveBeenCalled();
-    expect(signInStep("no command here", "npx @preplabsai/rovara-code login <your AgentX URL>")).toBe("run npx @preplabsai/rovara-code login <your AgentX URL>");
+    expect(signInStep("no command here", "npx @preplabsai/rovara-code login <your Rovara URL>")).toBe("run npx @preplabsai/rovara-code login <your Rovara URL>");
   });
 
   it("answers CONTROL_PLANE_UNAVAILABLE when the local session cannot refresh", async () => {
     const error = await client(vi.fn(), {
-      session: async () => { throw agentXError("RUNTIME_UNAVAILABLE", "could not reach AgentX at https://agentx.example.test; check your connection and try again"); },
+      session: async () => { throw agentXError("RUNTIME_UNAVAILABLE", "could not reach Rovara at https://agentx.example.test; check your connection and try again"); },
     }).projects().catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", message: "could not reach AgentX at https://agentx.example.test; check your connection and try again" });
+    expect(error).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", message: "could not reach Rovara at https://agentx.example.test; check your connection and try again" });
     const odd = await client(vi.fn(), { session: async () => { throw new Error(`boom ${TOKEN}`); } }).projects().catch((caught: unknown) => caught);
     expect(odd).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
     expect((odd as Error).message).not.toContain("planted-access-token");
@@ -368,11 +368,11 @@ describe("the control-plane client (FR-027)", () => {
   it("has a next step for every code", () => {
     for (const code of TOOL_ERROR_CODES) expect(NEXT_STEPS[code].length, code).toBeGreaterThan(0);
     expect(TOOL_ERROR_CODES).toContain("INVALID_REQUEST");
-    expect(UPGRADE_AGENTX_STEP).toContain("ask your AgentX admin to upgrade AgentX");
+    expect(UPGRADE_AGENTX_STEP).toContain("ask your Rovara admin to upgrade Rovara");
   });
 
   it("gives CHANNEL_REQUIRED and CHANNEL_AMBIGUOUS next steps that fit what is left once sharing exists (C21, ruling F22)", () => {
-    expect(NEXT_STEPS.CHANNEL_REQUIRED).toBe("send channel with one of the bound channels the message names, or ask an AgentX admin to bind one");
+    expect(NEXT_STEPS.CHANNEL_REQUIRED).toBe("send channel with one of the bound channels the message names, or ask a Rovara admin to bind one");
     expect(NEXT_STEPS.CHANNEL_AMBIGUOUS).toBe("send channel with one of the channels the message names");
   });
 });

@@ -23,7 +23,7 @@ orchestrator stack again so it picks up the channel queues. Until then the chann
 ### Register an adapter
 
 ```
-agentx --env staging adapter add whatsapp \
+rovara --env staging adapter add whatsapp \
   --callback-url https://adapter.example.com/rovara \
   --projects web,billing \
   --buttons 3 --max-text 4096
@@ -40,7 +40,7 @@ agentx --env staging adapter add whatsapp \
 - `--step-up` (default `plan_approval,admin`) lists the decisions only a signed-in person can make on the task page.
   An adapter can't approve those, by button or by reply.
 - Run `adapter add` again to change the settings; the secret stays. Add `--rotate` to replace it.
-- `agentx adapter list` shows the adapters; `agentx adapter remove whatsapp` removes one, and its secret stops
+- `rovara adapter list` shows the adapters; `rovara adapter remove whatsapp` removes one, and its secret stops
   working at once.
 
 ### Bind a space
@@ -48,10 +48,10 @@ agentx --env staging adapter add whatsapp \
 A space is the surface's group or chat. Messages run only in a bound space:
 
 ```
-agentx --env staging adapter bind whatsapp --tenant +14155550100 --space group=AbC-12_x --project web
+rovara --env staging adapter bind whatsapp --tenant +14155550100 --space group=AbC-12_x --project web
 ```
 
-`agentx adapter unbind` removes the binding.
+`rovara adapter unbind` removes the binding.
 
 ### People link their accounts
 
@@ -63,14 +63,14 @@ People list and remove their own links through the developer API (`GET` and `DEL
 administrator removes one with:
 
 ```
-agentx --env staging adapter unlink whatsapp --tenant +14155550100 --user +919876544821
+rovara --env staging adapter unlink whatsapp --tenant +14155550100 --user +919876544821
 ```
 
 Workspaces from an adapter count against the linked person's workspace limit. If they also use Slack, it is the
 same limit.
 
 In an adapter conversation, `models` and `use <model>` work as in Slack. SWE-bench runs and eval batches start only
-from Slack, and ChatGPT connections are managed with `agentx chatgpt connect|status|disconnect`, since an adapter
+from Slack, and ChatGPT connections are managed with `rovara chatgpt connect|status|disconnect`, since an adapter
 conversation may be a group.
 
 ## For adapter authors

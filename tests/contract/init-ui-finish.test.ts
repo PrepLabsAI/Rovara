@@ -1,4 +1,4 @@
-// Spec 040 phase 3: each finishing step on the install page. The steps are the ones agentx init
+// Spec 040 phase 3: each finishing step on the install page. The steps are the ones rovara init
 // already runs (phase 15d2); these tests check what each shows on the page, and that a wait that
 // fails can be tried again there, while the terminal path stops exactly as it did.
 import { rm } from "node:fs/promises";
@@ -18,7 +18,7 @@ let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
 const page = () => { const cards: WizardCard[] = []; return { cards, card: (card: WizardCard) => { cards.push(card); } }; };
 const session = { controlPlaneUrl: CONTROL_PLANE, accessToken: "t" };
-const TIMED_OUT = agentXError("OPERATION_INTERRUPTED", "the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser");
+const TIMED_OUT = agentXError("OPERATION_INTERRUPTED", "the Rovara sign-in did not finish within 10 minutes; run rovara init again and finish signing in as the admin user in the browser");
 
 describe("the admin user on the page (FR-050)", () => {
   it("shows the new admin user and the sign-in wait, then who signed in", async () => {
@@ -31,7 +31,7 @@ describe("the admin user on the page (FR-050)", () => {
         `First, check your email at ${ADMIN_EMAIL} for your temporary password. It comes from no-reply@verificationemail.com with the subject "Your temporary password", can take a few minutes, and often lands in Spam. It works for 7 days.`,
         `Then press Sign in, enter ${ADMIN_EMAIL} and the temporary password, and choose your own password. This page moves on by itself when you have.`,
       ]],
-      ["admin", "ok", [`You are signed in to AgentX as ${ADMIN_EMAIL}.`]],
+      ["admin", "ok", [`You are signed in to Rovara as ${ADMIN_EMAIL}.`]],
     ]);
   });
 
@@ -49,7 +49,7 @@ describe("the admin user on the page (FR-050)", () => {
     context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ cognito: fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" }) }), adminSession: async () => session });
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     await adminUserStep().run(context, progressHandle({ ...emptyProgress("staging", T0), admin: { username: ADMIN_EMAIL, mode: "cognito" } }));
-    expect(surface.cards[0]?.lines).toEqual([`Sign in to AgentX as ${ADMIN_EMAIL} in the tab the Sign in button opens. This page moves on by itself when you have.`]);
+    expect(surface.cards[0]?.lines).toEqual([`Sign in to Rovara as ${ADMIN_EMAIL} in the tab the Sign in button opens. This page moves on by itself when you have.`]);
   });
 
   it("Review Focus 5: a sign-in that timed out can be tried again on the page", async () => {
@@ -62,8 +62,8 @@ describe("the admin user on the page (FR-050)", () => {
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     await adminUserStep().run(context, progressHandle());
     expect(sessions).toBe(2);
-    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
-    expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toBe("the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser");
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your Rovara admin user", "Sign in again?"]);
+    expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toBe("the Rovara sign-in did not finish within 10 minutes; run rovara init again and finish signing in as the admin user in the browser");
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"], ["admin", "waiting"], ["admin", "ok"]]);
   });
 
@@ -86,7 +86,7 @@ describe("the admin user on the page (FR-050)", () => {
       });
       await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
       await adminUserStep().run(context, progressHandle());
-      expect(prompter.asked).toEqual(["Your email address, for your AgentX admin user", "Sign in again?"]);
+      expect(prompter.asked).toEqual(["Your email address, for your Rovara admin user", "Sign in again?"]);
       expect(linkWhenAsked).toEqual([undefined]);
       expect(wizard.hub.state().link?.url).toBe("https://login.example.com/authorize?attempt=2");
     } finally {
@@ -105,8 +105,8 @@ describe("the admin user on the page (FR-050)", () => {
       await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
       expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: "admin bob@example.com signed in with your OIDC provider" });
       expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
-        ["admin", "waiting", ["Sign in to AgentX as an administrator of your company's sign-in in the tab the Sign in button opens. This page moves on by itself when you have."]],
-        ["admin", "ok", ["You are signed in to AgentX as bob@example.com."]],
+        ["admin", "waiting", ["Sign in to Rovara as an administrator of your company's sign-in in the tab the Sign in button opens. This page moves on by itself when you have."]],
+        ["admin", "ok", ["You are signed in to Rovara as bob@example.com."]],
       ]);
     });
 
@@ -145,7 +145,7 @@ describe("the admin user on the page (FR-050)", () => {
     context = initContext({ prompter: scriptedPrompter([ADMIN_EMAIL]), setup: setupServices({ cognito: fakeCognito() }), adminSession: async () => { throw TIMED_OUT; } });
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
     await expect(adminUserStep().run(context, progressHandle())).rejects.toBe(TIMED_OUT);
-    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your AgentX admin user"]);
+    expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Your email address, for your Rovara admin user"]);
   });
 });
 
@@ -186,7 +186,7 @@ describe("the first project's channel wait on the page", () => {
     expect((failure as Error).message).toContain("the bot cannot see a channel named #payments after 10 minutes");
     expect(surface.cards).toEqual([
       projectCard({ name: "payments-api", revision: 1 }),
-      channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }),
+      channelCard({ stage: "waiting", channelName: "payments", botName: "rovara-acme-staging" }),
       channelCard({ stage: "failed", channelName: "payments", problem: problemText(failure) }),
     ]);
     expect(surface.cards[2]?.details).toEqual(["the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again"]);
@@ -254,7 +254,7 @@ describe("the alerts on the page", () => {
     expect(surface.cards[1]?.details).toEqual([problemText(failure)]);
   });
 
-  it("the terminal path still stops and says to run agentx init again when nobody has confirmed", async () => {
+  it("the terminal path still stops and says to run rovara init again when nobody has confirmed", async () => {
     const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: 100 });
     context = initContext({ answers, prompter: scriptedPrompter([]), setup: setupFor(alerts) });
     await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
@@ -299,7 +299,7 @@ describe("the test reply on the page (FR-051)", () => {
       ["waiting", "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001"],
       ["ok", undefined],
     ]);
-    expect(surface.cards[0]?.lines[1]).toContain("pick agentx");
+    expect(surface.cards[0]?.lines[1]).toContain("pick rovara");
   });
 
   it("Review Focus 1: counts a mention made just before the watch started", async () => {
@@ -331,6 +331,6 @@ describe("the test reply on the page (FR-051)", () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: SUBJECT, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "error" })];
     context = initContext({ setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
-    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see agentx --env staging admin turns export --since 15m, fix it, then run agentx --env staging init again");
+    await expect(e2eStep().run(context, progress())).rejects.toThrow("but the turn ended as error; see rovara --env staging admin turns export --since 15m, fix it, then run rovara --env staging init again");
   });
 });

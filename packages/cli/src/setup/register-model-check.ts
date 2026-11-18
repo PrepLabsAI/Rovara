@@ -4,6 +4,7 @@ import type { ProjectDefinition } from "@agentx/contracts";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import { checkProjectModels, type ProjectModelChecker } from "./project-model-check.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 export async function checkModelsForRegistration(input: {
   definition: ProjectDefinition; env: string; store: ParameterStore;
@@ -16,7 +17,7 @@ export async function checkModelsForRegistration(input: {
   try { settings = await readEnvironmentSettings(input.store, input.env); } catch { settings = undefined; }
   if (settings === undefined) {
     const unchecked = await checkProjectModels({ definition: input.definition, check: undefined });
-    return { definition: unchecked.definition, warnings: [`The project's models were not checked: this computer cannot read the settings of environment ${input.env}. Run agentx --env ${input.env} doctor to check them.`] };
+    return { definition: unchecked.definition, warnings: [`The project's models were not checked: this computer cannot read the settings of environment ${input.env}. Run ${CLI_COMMAND_NAME} --env ${input.env} doctor to check them.`] };
   }
   return checkProjectModels({
     definition: input.definition, check: input.checker(settings),

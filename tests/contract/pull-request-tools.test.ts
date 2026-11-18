@@ -15,18 +15,18 @@ function managePullRequestApi() {
   };
 }
 
-describe("agentx_manage_pull_request replaces the seven lifecycle tools call for call", () => {
+describe("rovara_manage_pull_request replaces the seven lifecycle tools call for call", () => {
   it.each(LIFECYCLE_CASES)("action $action sends exactly what $tool sent", async ({ action, params }) => {
     const api = managePullRequestApi();
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
     const onUpdate = vi.fn();
-    const result = await tools.find((entry) => entry.name === "agentx_manage_pull_request")!.execute("call-1", { action, ...params }, undefined, onUpdate, {} as never);
+    const result = await tools.find((entry) => entry.name === "rovara_manage_pull_request")!.execute("call-1", { action, ...params }, undefined, onUpdate, {} as never);
     expect(api.managePullRequest).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, action, ...params });
     expect(api.pullRequestResult).toHaveBeenCalledOnce();
     expect(api.pullRequestResult.mock.calls[0]?.[0]).toEqual({ workspaceId: WORKSPACE_ID, operationId: OPERATION_ID });
     expect(typeof (api.pullRequestResult.mock.calls[0]?.[1] as { onProgress?: unknown } | undefined)?.onProgress).toBe("function");
     const accepted = JSON.parse((onUpdate.mock.calls[0]?.[0] as { content: Array<{ text: string }> }).content[0]!.text) as unknown;
-    expect(accepted).toEqual({ operationId: OPERATION_ID, status: "ACCEPTED", message: `AgentX accepted pull request ${action}.` });
+    expect(accepted).toEqual({ operationId: OPERATION_ID, status: "ACCEPTED", message: `Rovara accepted pull request ${action}.` });
     expect(JSON.parse((result.content[0] as { text: string }).text) as unknown).toEqual({ status: "SUCCEEDED", url: "https://github.com/example/web/pull/12" });
     expect(api.submitTask).not.toHaveBeenCalled();
     expect(api.createPullRequest).not.toHaveBeenCalled();
@@ -35,13 +35,13 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
   it.each(["append", "sync", "close", "reopen"] as const)("drops a title and body sent with %s, as the retired tool could not send them", async (action) => {
     const api = managePullRequestApi();
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
-    await tools.find((entry) => entry.name === "agentx_manage_pull_request")!
+    await tools.find((entry) => entry.name === "rovara_manage_pull_request")!
       .execute("call-1", { action, repository: "web", pullRequestNumber: 12, title: "Ignored", body: "Ignored" }, undefined, undefined, {} as never);
     expect(api.managePullRequest).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, action, repository: "web", pullRequestNumber: 12 });
   });
 
   it("rejects an action outside the enum before anything reaches the control plane", () => {
-    const tool = createOrchestrationTools(managePullRequestApi(), { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }).find((entry) => entry.name === "agentx_manage_pull_request")!;
+    const tool = createOrchestrationTools(managePullRequestApi(), { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }).find((entry) => entry.name === "rovara_manage_pull_request")!;
     const call = (action: string) => ({ type: "toolCall" as const, id: "call-1", name: tool.name, arguments: { action, repository: "web", pullRequestNumber: 12 } });
     expect(() => { validateToolArguments(tool as never, call("merge")); }).toThrow();
     expect(validateToolArguments(tool as never, call("close")) as unknown).toMatchObject({ action: "close" });
@@ -62,7 +62,7 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
     });
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
     const onUpdate = vi.fn();
-    await tools.find((entry) => entry.name === "agentx_manage_pull_request")!.execute("call-1", { action, ...params }, undefined, onUpdate, {} as never);
+    await tools.find((entry) => entry.name === "rovara_manage_pull_request")!.execute("call-1", { action, ...params }, undefined, onUpdate, {} as never);
     expect(onUpdate).toHaveBeenCalledTimes(2);
     expect(JSON.parse((onUpdate.mock.calls[1]?.[0] as { content: Array<{ text: string }> }).content[0]!.text) as unknown).toEqual(PROGRESS);
   });
@@ -71,14 +71,14 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
     const api = managePullRequestApi();
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
     const signal = new AbortController().signal;
-    await tools.find((entry) => entry.name === "agentx_manage_pull_request")!.execute("call-1", { action, ...params }, signal, undefined, {} as never);
+    await tools.find((entry) => entry.name === "rovara_manage_pull_request")!.execute("call-1", { action, ...params }, signal, undefined, {} as never);
     expect((api.pullRequestResult.mock.calls[0]?.[1] as { signal?: unknown } | undefined)?.signal).toBe(signal);
   });
 
   it.each(LIFECYCLE_CASES.filter(({ action }) => action === "edit" || action === "replace" || action === "revert"))("action $action sends a body without a title, as $tool did", async ({ action }) => {
     const api = managePullRequestApi();
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
-    await tools.find((entry) => entry.name === "agentx_manage_pull_request")!.execute("call-1", { action, repository: "web", pullRequestNumber: 12, body: "Only body" }, undefined, undefined, {} as never);
+    await tools.find((entry) => entry.name === "rovara_manage_pull_request")!.execute("call-1", { action, repository: "web", pullRequestNumber: 12, body: "Only body" }, undefined, undefined, {} as never);
     expect(api.managePullRequest).toHaveBeenCalledExactlyOnceWith({ workspaceId: WORKSPACE_ID, requestId: REQUEST_ID, action, repository: "web", pullRequestNumber: 12, body: "Only body" });
   });
 });

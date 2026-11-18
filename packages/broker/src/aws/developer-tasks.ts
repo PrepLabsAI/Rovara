@@ -1419,8 +1419,8 @@ async function openTasksText(deps: DeveloperTaskRouteDependencies, developerId: 
 async function limitError(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, full: "member" | "organization", limits: WorkspaceLimits): Promise<AgentXError> {
   const open = await openTasksText(deps, caller.developerId);
   return full === "member"
-    ? agentXError("WORKSPACE_LIMIT", `you have reached the limit of ${limits.member} open workspaces per person, counting Slack threads and AI-tool tasks; close a task with agentx_close_task.${open}`)
-    : agentXError("WORKSPACE_LIMIT", `this AgentX has reached its limit of ${limits.organization} open workspaces; close a task with agentx_close_task, or ask an admin.${open}`);
+    ? agentXError("WORKSPACE_LIMIT", `you have reached the limit of ${limits.member} open workspaces per person, counting Slack threads and AI-tool tasks; close a task with rovara_close_task.${open}`)
+    : agentXError("WORKSPACE_LIMIT", `this Rovara has reached its limit of ${limits.organization} open workspaces; close a task with rovara_close_task, or ask an admin.${open}`);
 }
 
 /**
@@ -1806,10 +1806,10 @@ async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: Develope
   return { events: (await taskView(deps, task, { events: whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit"), details: false, actor })).events };
 }
 
-const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
+const CLOSED_TASK = "this task is closed; start a new one with rovara_start_task";
 // #213: a failed setup gives its slot back at once; the close only tidies the task away.
-const NEVER_STARTED = "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task";
-const CLOSING_TASK = "this task is closing; check it with agentx_get_task, and if the close is refused for unpublished work you can continue it";
+const NEVER_STARTED = "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with rovara_start_task, and close this one with rovara_close_task";
+const CLOSING_TASK = "this task is closing; check it with rovara_get_task, and if the close is refused for unpublished work you can continue it";
 
 /**
  * What continue and a pull request need before they touch the workspace: an open task that got
@@ -1850,7 +1850,7 @@ async function channelDriver(deps: DeveloperTaskRouteDependencies, task: Develop
   const who = activity.driver.name === undefined ? `Slack user ${activity.driver.slackUserId}` : inertName(activity.driver.name);
   // F18: a floor. The running turn may or may not still count among the thread's pending messages.
   const waiting = activity.waiting === 0 ? "" : `, and at least ${activity.waiting} more channel message${activity.waiting === 1 ? " is" : "s are"} waiting`;
-  return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with agentx_wait_for_task, stop it with agentx_cancel_task, or make the thread view only with agentx_share_task`;
+  return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with rovara_wait_for_task, stop it with rovara_cancel_task, or make the thread view only with rovara_share_task`;
 }
 
 /** The reasons of the caller's own extra items when only they cancelled an acceptance (the workspace was free), else undefined. */
@@ -1861,7 +1861,7 @@ function extraItemsCancelled(error: unknown): string[] | undefined {
 /** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */
 function busy(error: unknown, taskId: string): never {
   if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) {
-    throw agentXError("TASK_BUSY", `task ${taskId} is still working; wait for it with agentx_wait_for_task, or stop it with agentx_cancel_task`);
+    throw agentXError("TASK_BUSY", `task ${taskId} is still working; wait for it with rovara_wait_for_task, or stop it with rovara_cancel_task`);
   }
   throw error;
 }
@@ -5514,7 +5514,7 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
       if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await repeated()) return current();
       // The task moved on while the cancel was written: the code stays, the words name the tool.
       if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "STALE_FENCE")) {
-        throw agentXError(error.code, "the task changed while cancelling; try agentx_cancel_task again");
+        throw agentXError(error.code, "the task changed while cancelling; try rovara_cancel_task again");
       }
       throw error;
     }
@@ -5998,14 +5998,14 @@ function safeClose({ workspace, operations }: WorkspaceReads): Operation | undef
     && (preflight.data.safeToClose || operation.discardUnpublished === true) ? operation : undefined;
 }
 
-const CLOSE_CHECKING = "AgentX is checking the task's workspace for unpublished work before closing it; check back with agentx_get_task";
-const CLOSE_REFUSED = "not closed: some work is not published; push it or open a pull request with agentx_open_pull_request, then close the task again";
-const CLOSE_COMPUTE_PENDING = "the workspace has no unpublished work, but its compute is not removed yet; try agentx_close_task again shortly";
-const CLOSE_DISCARD_PENDING = "AgentX recorded your request to discard unpublished work, but could not finish releasing the workspace; try agentx_close_task again shortly";
-const CLOSE_CHECK_FAILED = "the check for unpublished work did not finish; try agentx_close_task again with a new request_id";
-const CLOSE_STILL_OPEN = "the task is still open; try agentx_close_task again with a new request_id";
-const COMPUTE_STOPPING = "the task's compute is still stopping; try agentx_close_task again shortly";
-const CLOSE_FAILED = "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing";
+const CLOSE_CHECKING = "Rovara is checking the task's workspace for unpublished work before closing it; check back with rovara_get_task";
+const CLOSE_REFUSED = "not closed: some work is not published; push it or open a pull request with rovara_open_pull_request, then close the task again";
+const CLOSE_COMPUTE_PENDING = "the workspace has no unpublished work, but its compute is not removed yet; try rovara_close_task again shortly";
+const CLOSE_DISCARD_PENDING = "Rovara recorded your request to discard unpublished work, but could not finish releasing the workspace; try rovara_close_task again shortly";
+const CLOSE_CHECK_FAILED = "the check for unpublished work did not finish; try rovara_close_task again with a new request_id";
+const CLOSE_STILL_OPEN = "the task is still open; try rovara_close_task again with a new request_id";
+const COMPUTE_STOPPING = "the task's compute is still stopping; try rovara_close_task again shortly";
+const CLOSE_FAILED = "Rovara could not close this task just now; try rovara_close_task again, and ask an admin if it keeps failing";
 
 /** Why a close did not close the task (it always says, so the AI tool can tell the developer). */
 function notClosedMessage(reads: WorkspaceReads, operation: Operation | undefined, unpublished: DeveloperCloseResponse["unpublished"]): string {
@@ -6032,7 +6032,7 @@ async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: Dev
 
 /**
  * FR-016, R15, R22, owner decisions 5 and 6. Answers at once: usually `closing: true` while the
- * worker checks for unpublished work, which the AI tool then follows with agentx_get_task. There
+ * worker checks for unpublished work, which the AI tool then follows with rovara_get_task. There
  * is no force: unpublished work refuses the close, listing each repository and why.
  *
  * Idempotent: the same requestId reports its preflight's outcome and writes nothing. A fresh
@@ -6061,7 +6061,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
       // A task whose setup failed has nothing to check: it closes now and frees its slot.
       await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt, access);
     } else if (workspace.status === "PREPARING") {
-      throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
+      throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with rovara_cancel_task, then close it once it has stopped`);
     } else if (workspace.status !== "CLOSED") {
       // T7c: a plan held back for its check on the current app is not asked about again: the hold is marked abandoned (its one finish then clears it quietly) and the round is stopped,
       // so the workspace is free for the close.
@@ -6268,7 +6268,7 @@ async function shareTask(deps: DeveloperTaskRouteDependencies, caller: Developer
       task = access.task;
     }
   }
-  throw agentXError("WORKSPACE_BUSY", "the task changed while sharing; try agentx_share_task again");
+  throw agentXError("WORKSPACE_BUSY", "the task changed while sharing; try rovara_share_task again");
 }
 
 /**

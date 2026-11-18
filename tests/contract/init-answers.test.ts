@@ -20,8 +20,8 @@ const everyFlag: InitFlags = {
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
   budget: "0",
-  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme (staging)",
-  slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
+  githubAccount: "acme", githubAccountType: "organization", githubAppName: "Rovara acme (staging)",
+  slackAppName: "Rovara acme (staging)", slackAppPostedMessages: "accept",
 };
 
 /** These fixtures intentionally keep an own property whose value is undefined. */
@@ -32,12 +32,12 @@ function withExplicitUndefined<K extends keyof InitFlags>(flags: InitFlags, key:
 // Spec 048 FR-020: the settings form's questions in the terminal, in its own order: the four, the
 // Advanced question, then (on yes) every Advanced setting.
 const FORM_QUESTIONS = [
-  "Your email, for your AgentX admin user and alerts", "GitHub organization or user that will own the AgentX GitHub App", "Install name",
+  "Your email, for your Rovara admin user and alerts", "GitHub organization or user that will own the Rovara GitHub App", "Install name",
   "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
-  "Deploy engine", "Sign-in", "How will developers sign in to AgentX from their AI tools?", "Model provider", "Orchestrator model",
-  "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for AgentX's default boundary)",
-  "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",
-  "Which costs should the budget count?", "Answer mentions people post through other apps with their own Slack token?", "Where should AgentX send alerts?", "Alert email address",
+  "Deploy engine", "Sign-in", "How will developers sign in to Rovara from their AI tools?", "Model provider", "Orchestrator model",
+  "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for Rovara's default boundary)",
+  "IAM principal allowed to assume the Rovara operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",
+  "Which costs should the budget count?", "Answer mentions people post through other apps with their own Slack token?", "Where should Rovara send alerts?", "Alert email address",
 ];
 // Every default taken but alerts to the ops address, then "" for the owner's type (no GitHub lookup here).
 const FIRST_RUN = [...settingsScript({ owner: "acme", advanced: { alertEmail: "ops@example.com" } }), ""];
@@ -80,8 +80,8 @@ describe("init questions", () => {
       models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
       budget: { monthlyUsd: 260, scope: "account" },
-      github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
-      slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
+      github: { account: "acme", accountType: "organization", appName: "Rovara acme (staging)" },
+      slack: { appName: "Rovara acme (staging)", appPostedMessages: "accept" },
       // Spec 048 FR-020: your email and the developer sign-in are settings now.
       adminEmail: "ops@example.com", signinMethods: "slack",
       createdAt: "2026-09-27T00:00:00.000Z",
@@ -98,7 +98,7 @@ describe("init questions", () => {
       // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is
       // empty; the suggested amount is in the terminal's question and the page's hint.
       question: "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)", defaultValue: "",
-      why: "AgentX's estimate is about $213.44 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+      why: "Rovara's estimate is about $213.44 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
       hint: "Optional. Leave empty to use the estimate plus 20% ($260).",
     });
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
@@ -108,7 +108,7 @@ describe("init questions", () => {
     const prompter = scriptedPrompter(settingsScript({ flags: everyFlag }));
     const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter });
     expect(prompter.asked).toEqual(["Install name", "Change the advanced settings?"]);
-    expect(answers.github.appName).toBe("AgentX acme (staging)");
+    expect(answers.github.appName).toBe("Rovara acme (staging)");
   });
 
   it("states GLM 4.7's trade-off and Claude Haiku 4.5's model-access need when chosen", async () => {
@@ -168,7 +168,7 @@ describe("init questions", () => {
     const flags = withExplicitUndefined(everyFlag, "alertEmail");
     // Spec 048 FR-025 (Ruling 9): alerts go to your email, so with neither flag your email is what is missing.
     await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() }))
-      .rejects.toThrow("Your email, for your AgentX admin user and alerts needs an answer; with --yes, pass --admin-email");
+      .rejects.toThrow("Your email, for your Rovara admin user and alerts needs an answer; with --yes, pass --admin-email");
     const { answers } = await collectInitAnswers({ ...base, flags, prompter: unattendedPrompter(), adminEmail: "alice@example.com" });
     expect(answers.alert).toEqual({ kind: "email", address: "alice@example.com" });
   });
@@ -176,7 +176,7 @@ describe("init questions", () => {
   it("records no alerts for --no-alerts, with a note saying nobody will hear about failures", async () => {
     const { answers, notes } = await collectWithFlags({ ...base, flags: withExplicitUndefined({ ...everyFlag, alerts: false }, "alertEmail") });
     expect(answers.alert).toEqual({ kind: "none" });
-    expect(notes.join("\n")).toContain("nobody is told when AgentX fails");
+    expect(notes.join("\n")).toContain("nobody is told when Rovara fails");
   });
 
   it("refuses an --admin-email that is not an email address, naming the flag", async () => {
@@ -350,7 +350,7 @@ describe("resuming with flags", () => {
     const { answers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(answers, { orchestratorModel: "us.anthropic.claude-sonnet-4-6" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { orchestratorModel: "zai.glm-4.7" })).toThrow(
-      "--orchestrator-model zai.glm-4.7 differs from what this install started with (us.anthropic.claude-sonnet-4-6); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--orchestrator-model zai.glm-4.7 differs from what this install started with (us.anthropic.claude-sonnet-4-6); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
     expect(() => assertResumeFlagsMatch(answers, { engine: "cdk" })).toThrow("--engine cdk differs");
   });
@@ -360,14 +360,14 @@ describe("resuming with flags", () => {
     const { answers } = await collectWithFlags({ ...base, flags });
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://other.example.com" })).toThrow(
-      "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
     expect(() => assertResumeFlagsMatch(answers, { adminClaim: "role" })).toThrow("--admin-claim role differs");
     expect(() => assertResumeFlagsMatch(answers, { adminValues: "other-group, platform" })).toThrow("--admin-values other-group, platform differs");
 
     const { answers: cognitoAnswers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(cognitoAnswers, { oidcIssuer: "https://id.example.com" })).toThrow(
-      "--oidc-issuer https://id.example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--oidc-issuer https://id.example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
   });
 
@@ -379,7 +379,7 @@ describe("resuming with flags", () => {
     // different issuer must still be refused.
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://id.example.com/" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://other.example.com" })).toThrow(
-      "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
 
     // Admin values compare as a set: reordered or reformatted (no space after the comma) is the
@@ -404,10 +404,10 @@ describe("resuming with flags", () => {
   it("also checks --alert-webhook-* and --no-alerts (F10) against the stored alert kind", async () => {
     const { answers: emailAnswers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(emailAnswers, { alerts: false })).toThrow(
-      "--no-alerts differs from what this install started with (email); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--no-alerts differs from what this install started with (email); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
     expect(() => assertResumeFlagsMatch(emailAnswers, { alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } })).toThrow(
-      "--alert-webhook-env AGENTX_ALERT_WEBHOOK differs from what this install started with (email); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--alert-webhook-env AGENTX_ALERT_WEBHOOK differs from what this install started with (email); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
     expect(() => assertResumeFlagsMatch(emailAnswers, { alertWebhook: { file: "/tmp/webhook.txt" } })).toThrow("--alert-webhook-file /tmp/webhook.txt differs");
 
@@ -415,7 +415,7 @@ describe("resuming with flags", () => {
     const { answers: noneAnswers } = await collectWithFlags({ ...base, flags: noneFlags });
     expect(() => assertResumeFlagsMatch(noneAnswers, { alerts: false })).not.toThrow();
     expect(() => assertResumeFlagsMatch(noneAnswers, { alertEmail: "ops@example.com" })).toThrow(
-      "--alert-email ops@example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
+      "--alert-email ops@example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run rovara init without that flag to continue",
     );
 
     const webhookFlags = withExplicitUndefined({ ...everyFlag, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } }, "alertEmail");
@@ -449,8 +449,8 @@ describe("the questions an export bundle already answered (FR-026)", () => {
 });
 
 describe("spec 048 FR-026: app names", () => {
-  it("names both apps AgentX <owner> (<install name>)", () => {
-    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("AgentX acme (staging)");
+  it("names both apps Rovara <owner> (<install name>)", () => {
+    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("Rovara acme (staging)");
   });
 
   it("the longest owner and install name still fit, and both apps match", async () => {
@@ -458,7 +458,7 @@ describe("spec 048 FR-026: app names", () => {
     const env = "abcdefghij-klmnopqrs";
     expect(env.length).toBe(20);
     const name = defaultAppName({ owner, env });
-    expect(name).toBe("AgentX (abcdefghij-klmnopqrs)");
+    expect(name).toBe("Rovara (abcdefghij-klmnopqrs)");
     expect(name.length).toBeLessThanOrEqual(GITHUB_APP_NAME_LIMIT);
 
     const prompter = scriptedPrompter([...settingsScript({ env, owner, advanced: { alertEmail: "ops@example.com" } }), ""]);
@@ -469,8 +469,8 @@ describe("spec 048 FR-026: app names", () => {
 
   it("the Slack name follows a GitHub name the user typed", async () => {
     // Spec 048 FR-020: one name for both apps.
-    const prompter = scriptedPrompter([...settingsScript({ owner: "acme", appName: "Our AgentX", advanced: { alertEmail: "ops@example.com" } }), ""]);
+    const prompter = scriptedPrompter([...settingsScript({ owner: "acme", appName: "Our Rovara", advanced: { alertEmail: "ops@example.com" } }), ""]);
     const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
-    expect(collected.answers.slack.appName).toBe("Our AgentX");
+    expect(collected.answers.slack.appName).toBe("Our Rovara");
   });
 });

@@ -1,4 +1,4 @@
-// Everything agentx doctor reads, faked: a healthy templates-engine environment by default, with
+// Everything rovara doctor reads, faked: a healthy templates-engine environment by default, with
 // every secret well formed. Tests break one thing at a time.
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import type { DoctorContext, DoctorServices, DoctorStack } from "../../packages/cli/src/doctor/checks.js";

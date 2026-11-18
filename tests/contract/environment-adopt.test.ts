@@ -32,7 +32,7 @@ async function run(stacks = liveStacks, store = new MemoryParameterStore()) {
   return { store, home, result: adoptEnvironment({ env: "production", region: "us-east-1", stacks: reader(stacks), identity, store, home, now }) };
 }
 
-describe("agentx env adopt", () => {
+describe("rovara env adopt", () => {
   it("preserves deployed provider defaults and OpenRouter references in saved settings", async () => {
     const stacks = structuredClone(liveStacks);
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf";
@@ -188,7 +188,7 @@ describe("agentx env adopt", () => {
     expect(error.message).toContain("older than 2 hours");
     expect(error.message).not.toContain("confirm to take it over");
     expect(error.message).toContain(lockParameterName("production"));
-    expect(error.message).toMatch(/no AgentX command is running/);
+    expect(error.message).toMatch(/no Rovara command is running/);
     expect(store.values.has("/agentx/production/settings")).toBe(false);
   });
 
@@ -200,7 +200,7 @@ describe("agentx env adopt", () => {
   });
 });
 
-describe("agentx env adopt and the Slack team ID", () => {
+describe("rovara env adopt and the Slack team ID", () => {
   it("never records a Slack team ID: the adopted deployment keeps the legacy names, which sign-in refuses", async () => {
     const withSecret = { ...liveStacks, AgentXControlPlane: { ...liveStacks.AgentXControlPlane!, outputs: { ...liveStacks.AgentXControlPlane!.outputs, SlackSecretArn: "arn:aws:secretsmanager:us-east-1:944937319445:secret:SlackSecret-AbCdEf" } } };
     const store = new MemoryParameterStore();

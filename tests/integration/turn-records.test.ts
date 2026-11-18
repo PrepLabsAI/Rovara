@@ -233,7 +233,7 @@ describe("turn record size", () => {
   });
   it("fits an oversized record under the item limit", async () => {
     // "€" is one UTF-16 unit and three UTF-8 bytes, the most bytes per counted character.
-    const call = { name: "agentx_submit_task", arguments: "€".repeat(2_048), argumentsFingerprint: "b".repeat(32), validation: "ok" as const, outcome: "SUCCEEDED" as const, durationMs: 1 };
+    const call = { name: "rovara_submit_task", arguments: "€".repeat(2_048), argumentsFingerprint: "b".repeat(32), validation: "ok" as const, outcome: "SUCCEEDED" as const, durationMs: 1 };
     const record: TurnRecord = {
       offeredTools: [], calls: Array.from({ length: 50 }, () => call), emptyResponse: false, workerOperations: [],
       eventId: "EvTURN00003", subject: "T0123456789/C0123456789/1695500000.000001", receivedAt: "2026-09-24T10:00:00.000Z",
@@ -263,8 +263,8 @@ describe("turn metrics", () => {
         input.recorder?.offer({ manifest: "m", tools: [], connectorOf: new Map([["github__list_issues", "github"]]), model: { provider: "p", modelId: "m" } });
         input.recorder?.toolStarted({ toolCallId: "1", toolName: "github__list_issues", args: {} });
         input.recorder?.toolEnded({ toolCallId: "1", toolName: "github__list_issues", isError: true, result: { content: [{ type: "text", text: "Validation failed for tool \"github__list_issues\"" }] } });
-        input.recorder?.toolStarted({ toolCallId: "2", toolName: "agentx_submit_task", args: {} });
-        input.recorder?.toolEnded({ toolCallId: "2", toolName: "agentx_submit_task", isError: true, result: { content: [{ type: "text", text: "Validation failed for tool \"agentx_submit_task\"" }] } });
+        input.recorder?.toolStarted({ toolCallId: "2", toolName: "rovara_submit_task", args: {} });
+        input.recorder?.toolEnded({ toolCallId: "2", toolName: "rovara_submit_task", isError: true, result: { content: [{ type: "text", text: "Validation failed for tool \"rovara_submit_task\"" }] } });
         input.recorder?.toolStarted({ toolCallId: "3", toolName: "agentx_sync_pull_request", args: {} });
         input.recorder?.toolEnded({ toolCallId: "3", toolName: "agentx_sync_pull_request", isError: true, result: { content: [{ type: "text", text: "Tool agentx_sync_pull_request not found" }] } });
         input.recorder?.agentEnded([{ role: "assistant", content: [], stopReason: "stop" }]);
@@ -330,7 +330,7 @@ describe("turn metrics", () => {
 
 describe("turn record fitting flags", () => {
   it("marks omitted call arguments with argumentsOmitted and keeps callsTruncated for more than 50 calls only", () => {
-    const call = { name: "agentx_submit_task", arguments: "€".repeat(2_048), argumentsFingerprint: "b".repeat(32), validation: "ok" as const, outcome: "SUCCEEDED" as const, durationMs: 1 };
+    const call = { name: "rovara_submit_task", arguments: "€".repeat(2_048), argumentsFingerprint: "b".repeat(32), validation: "ok" as const, outcome: "SUCCEEDED" as const, durationMs: 1 };
     const record: TurnRecord = {
       offeredTools: [], calls: Array.from({ length: 50 }, () => call), emptyResponse: false, workerOperations: [],
       eventId: "EvTURN00004", subject: "T0123456789/C0123456789/1695500000.000001", receivedAt: "2026-09-24T10:00:00.000Z",

@@ -302,10 +302,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .name(CLI_COMMAND_NAME)
     .description("Rovara Code: sign in, deploy and administer your coding-agent workspace; hand off tasks from your coding tool or Slack")
     .version(CLI_VERSION)
-    .option("--project <project-name>", "select a locally configured AgentX project")
+    .option("--project <project-name>", "select a locally configured Rovara project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
-    .option("--deployment-file <path>", "AgentX deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
-    .option("--env <name>", "AgentX environment", DEFAULT_ENVIRONMENT)
+    .option("--deployment-file <path>", "Rovara deployment settings; defaults to this environment's local cache, or, for production, ~/.agentx/deployment.yaml")
+    .option("--env <name>", "Rovara environment", DEFAULT_ENVIRONMENT)
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
     .option("--accept-unchecked-model <reason>", "register a project whose default model failed its check anyway (project add, setup-approve, connector add, admin project register); the reason is recorded with the revision")
     .option("--json", "emit stable machine-readable output", false);
@@ -327,15 +327,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("login")
-    .description("sign in: agentx login <url> for developers; agentx login --admin (or no URL) for administrators")
-    .argument("[url]", "your AgentX URL, for developer sign-in")
+    .description(`sign in: ${CLI_COMMAND_NAME} login <url> for developers; ${CLI_COMMAND_NAME} login --admin (or no URL) for administrators`)
+    .argument("[url]", "your Rovara URL, for developer sign-in")
     .option("--admin", "sign in as an administrator with the admin identity provider (the default when no URL is given)", false)
     .option("--no-browser", "developer sign-in: print the sign-in link instead of opening a browser")
     .option("--callback-port <port>", "fixed loopback callback port registered with the OIDC client", parsePort, DEFAULT_CALLBACK_PORT)
     .action(async (url: string | undefined, options: { admin: boolean; browser: boolean; callbackPort: number }, command: Command) => {
       const globals = globalOptions(command);
       if (url !== undefined && options.admin) {
-        throw agentXError("CONFIG_INVALID", "use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+        throw agentXError("CONFIG_INVALID", `use either ${CLI_COMMAND_NAME} login <url> (developer sign-in) or ${CLI_COMMAND_NAME} login --admin, not both`);
       }
       if (url !== undefined) {
         const result = await developerLogin({
@@ -371,7 +371,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("logout")
-    .description("sign out of AgentX on this computer and end the sign-in at the server; --admin signs out of the admin sign-in")
+    .description("sign out of Rovara on this computer and end the sign-in at the server; --admin signs out of the admin sign-in")
     .option("--admin", "sign out of the administrator sign-in instead", false)
     .action(async (options: { admin: boolean }, command: Command) => {
       const globals = globalOptions(command);
@@ -387,7 +387,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("whoami")
-    .description("show who you are signed in as and which AgentX projects you can use")
+    .description("show who you are signed in as and which Rovara projects you can use")
     .action(async (_options: unknown, command: Command) => {
       const globals = globalOptions(command);
       const result = await fetchDeveloperProjects(developerSession(), developerEnv(command));
@@ -396,7 +396,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   program
     .command("workspaces")
-    .description("show your AgentX projects and the workspaces in them, on a page served from 127.0.0.1; --no-ui prints them instead")
+    .description("show your Rovara projects and the workspaces in them, on a page served from 127.0.0.1; --no-ui prints them instead")
     .option("--no-ui", "print the list in the terminal instead of opening a browser")
     .action(async (options: { ui: boolean }, command: Command) => {
       const globals = globalOptions(command);
@@ -597,7 +597,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { bindingFile: string; endpoint: string; generation: string; transportCorrelationId: string; profile: string; out: string }, command: Command) => {
       const globals = globalOptions(command);
       const session = await adminSessionFor(globals.env);
-      if (!session) throw agentXError("AUTH_REQUIRED", "an unexpired administrator session is required; sign in explicitly with `agentx login --admin`");
+      if (!session) throw agentXError("AUTH_REQUIRED", `an unexpired administrator session is required; sign in explicitly with \`${CLI_COMMAND_NAME} login --admin\``);
       const settings = await deploymentSettings(globals);
       const profileId = options.profile as "linux-arm64-docker-v1" | "darwin-arm64-colima-v1" | "linux-arm64-web-api-v1";
       const result = await requestRuntimeInstallChallenge({
@@ -613,7 +613,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { proposalFile: string }, command: Command) => {
       const globals = globalOptions(command);
       const session = await adminSessionFor(globals.env);
-      if (!session) throw agentXError("AUTH_REQUIRED", "an unexpired administrator session is required; sign in explicitly with `agentx login --admin`");
+      if (!session) throw agentXError("AUTH_REQUIRED", `an unexpired administrator session is required; sign in explicitly with \`${CLI_COMMAND_NAME} login --admin\``);
       const settings = await deploymentSettings(globals);
       const result = await submitRuntimeInstallProposal({ controlPlaneUrl: settings.controlPlaneUrl, accessToken: session.accessToken, proposalFile: options.proposalFile }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
@@ -646,13 +646,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         const globals = globalOptions(command);
         // The global --project takes the value when given (as for admin slack bind), so read both.
         const projectName = options.project ?? globals.project;
-        if (projectName === undefined) throw agentXError("CONFIG_INVALID", `--project is required: name the project, such as agentx admin project ${action} --project payments --developer U0123456789`);
+        if (projectName === undefined) throw agentXError("CONFIG_INVALID", `--project is required: name the project, such as ${CLI_COMMAND_NAME} admin project ${action} --project payments --developer U0123456789`);
         const project = AgentXNameSchema.safeParse(projectName);
         if (!project.success) throw agentXError("CONFIG_INVALID", "--project must be a project name: a lowercase letter, then up to 62 lowercase letters, digits or hyphens");
         // The developer reference is never echoed: it may be an email.
         const developer = options.developer?.trim();
         if (developer === undefined || developer === "") {
-          throw agentXError("CONFIG_INVALID", "--developer is required: a Slack user ID such as U0123456789, the email they signed in to AgentX with, or a developer ID");
+          throw agentXError("CONFIG_INVALID", "--developer is required: a Slack user ID such as U0123456789, the email they signed in to Rovara with, or a developer ID");
         }
         if (developer.length > 254) {
           throw agentXError("CONFIG_INVALID", "--developer must be at most 254 characters; name them by Slack user ID, the email they signed in with, or developer ID");
@@ -697,7 +697,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         write: (line) => { services.stderr.write(`${line}\n`); },
       }, services.fetchImplementation);
     } catch (error) {
-      if (options.secretFile !== undefined && secret !== undefined) services.stderr.write(`${options.secretFile} keeps the client secret in case the change applied; delete it if agentx admin changes says it did not.\n`);
+      if (options.secretFile !== undefined && secret !== undefined) services.stderr.write(`${options.secretFile} keeps the client secret in case the change applied; delete it if ${CLI_COMMAND_NAME} admin changes says it did not.\n`);
       throw error;
     }
     const applied = secret !== undefined && result.outcome === "applied";
@@ -717,7 +717,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--audience <audience>", "the audience its tokens carry, such as scheduler; never agentx-developer")
     .option("--name <name>", "the name people see; defaults to the client ID")
     .option("--redirect <url>", "an exact https URL its web page returns to (repeat for more, at most 10)", (value: string, previous: string[] = []) => [...previous, value])
-    .option("--loopback", "it may sign people in from a terminal with a loopback redirect, as agentx login does")
+    .option("--loopback", `it may sign people in from a terminal with a loopback redirect, as ${CLI_COMMAND_NAME} login does`)
     .option("--confidential", "it signs in with a secret of its own; a new one is made and shown once (each add makes a new one)")
     .option("--secret-file <path>", "with --confidential, write the secret to this new file (mode 600) instead of printing it")
     .option("--scope <scopes>", `what it may do as the signed-in person, comma-separated: ${CLIENT_SCOPES.join(", ")}; none by default`)
@@ -750,7 +750,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const secret = options.rotateSecret === true ? newClientSecret() : undefined;
       await applySignInClient(command, clientId, async (read) => {
         const current = await read();
-        if (current === undefined) throw agentXError("NOT_FOUND", `sign-in client ${clientId} is not registered; register it with agentx admin sign-in-client add`);
+        if (current === undefined) throw agentXError("NOT_FOUND", `sign-in client ${clientId} is not registered; register it with ${CLI_COMMAND_NAME} admin sign-in-client add`);
         return signInClientUpdate(current, options, secret?.secretHash);
       }, secret, options);
     });
@@ -823,7 +823,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .description("revoke a live invite code by the id list shows; shows the change and asks first")
     .option("--yes", "apply without asking; the change is still printed", false)
     .action(async (codeId: string, options: { yes: boolean }, command: Command) => {
-      if (!CompanyInviteCodeIdSchema.safeParse(codeId).success) throw agentXError("CONFIG_INVALID", "give the code id agentx admin company-invite list shows (16 characters, 0-9 and a-f)");
+      if (!CompanyInviteCodeIdSchema.safeParse(codeId).success) throw agentXError("CONFIG_INVALID", `give the code id ${CLI_COMMAND_NAME} admin company-invite list shows (16 characters, 0-9 and a-f)`);
       const { globals, result } = await runInviteChange(command, { kind: "revoke_company_invite", codeId }, options.yes);
       services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, codeId }, globals.json));
     });
@@ -861,7 +861,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId, companyId }, globals.json));
     });
 
-  const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
+  const adminWorkspace = admin.command("workspace").description("administer Rovara workspaces");
   adminWorkspace
     .command("list")
     .description("list workspaces with their Slack or developer owner identity and available name")
@@ -939,7 +939,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
-  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@agentx eval swebench <dataset> <instance>` in an enabled channel");
+  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@rovara eval swebench <dataset> <instance>` in an enabled channel");
   const evalChannel = (options: { team: string; channel: string }, settings: { controlPlaneUrl: string }, accessToken: string) => ({
     controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel,
   });
@@ -1060,7 +1060,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--authorize-url <url>", "with --endpoint: the authorization endpoint, when the server does not publish OAuth metadata")
     .option("--token-url <url>", "with --endpoint: the token endpoint, when the server does not publish OAuth metadata")
     .option("--scope <scopes>", "space-separated scopes to ask for; defaults to what the server asks for")
-    .option("--register-client", "with --endpoint: register AgentX as the server's OAuth client instead of reading one from the secret")
+    .option("--register-client", "with --endpoint: register Rovara as the server's OAuth client instead of reading one from the secret")
     .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
     .option("--no-browser", "do not open a browser; only print the sign-in URL, to open in a private window signed in as the bot user")
     .option("--expect-account <email>", "the bot user's email; refuse, storing nothing, when another account signs in")
@@ -1179,7 +1179,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .action(async (options: { task: string; mode: string }, command: Command) => {
       if (options.mode !== "view" && options.mode !== "continue") throw agentXError("CONFIG_INVALID", "--mode must be view or continue");
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(options.task)) {
-        throw agentXError("CONFIG_INVALID", "--task must be a task ID, such as 44444444-4444-4444-8444-444444444444; agentx admin turns export shows task IDs");
+        throw agentXError("CONFIG_INVALID", `--task must be a task ID, such as 44444444-4444-4444-8444-444444444444; ${CLI_COMMAND_NAME} admin turns export shows task IDs`);
       }
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
@@ -1237,7 +1237,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr, home,
   }));
 
-  const envCommand = program.command("env").description("AgentX environments in this AWS account and region");
+  const envCommand = program.command("env").description("Rovara environments in this AWS account and region");
   envCommand
     .command("list")
     .description("list the environments installed in this AWS account and region")
@@ -1299,7 +1299,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .description("deploy or upgrade an environment from a release; used by init and upgrade, and for automation")
     .addOption(new Option("--mode <mode>", "install a fresh environment or upgrade an existing one").choices(["install", "upgrade"]).makeOptionMandatory())
     .addOption(new Option("--engine <engine>", "deploy engine: pre-synthesized CloudFormation change sets, or a real cdk deploy").choices(["templates", "cdk"]).default("templates"))
-    .requiredOption("--release <dir>", "release directory (agentx release build output)")
+    .requiredOption("--release <dir>", `release directory (${CLI_COMMAND_NAME} release build output)`)
     .requiredOption("--answers <file>", "deploy answers JSON file (see DeployAnswers)")
     .option("--parts <parts>", "comma-separated subset of parts to deploy, in the mode's order; default: the whole order")
     .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
@@ -1325,7 +1325,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         status: "manual-required",
         reason: "deployment does not run a live installation qualification; use a dedicated Linux ARM64 verifier host",
         hostCommand: "docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --challenge-file /mnt/agentx-runtime/evidence/runtime-install-challenge.json --evidence-root /mnt/agentx-runtime/evidence --out /mnt/agentx-runtime/evidence/runtime-install-proposal.json",
-        registrationCommand: `agentx --env ${result.env} admin runtime-installation register --proposal-file ./runtime-install-proposal.json`,
+        registrationCommand: `${CLI_COMMAND_NAME} --env ${result.env} admin runtime-installation register --proposal-file ./runtime-install-proposal.json`,
         instructions: "docs/runtime-installation.md",
       } as const : undefined;
       if (globals.json) {
@@ -1355,13 +1355,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   addSignInOptions(
   program
     .command("init")
-    .description("install AgentX in this AWS account, step by step, resuming where it stopped; --export writes a bundle for a platform team instead")
+    .description("install Rovara in this AWS account, step by step, resuming where it stopped; --export writes a bundle for a platform team instead")
     .option("--export <dir>", "write a self-contained bundle a platform team deploys to create the access stack")
     .option("--region <region>", "AWS region to deploy into")
     .option("--account <account>", "AWS account id; defaults to the caller's own account (sts GetCallerIdentity, read-only)")
-    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx. An agentx built from source needs none with --engine cdk --source")
+    .option("--release <dir>", `release directory (${CLI_COMMAND_NAME} release build output); default: download the release matching this ${CLI_COMMAND_NAME}. A ${CLI_COMMAND_NAME} built from source needs none with --engine cdk --source`)
     .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
-    .option("--source <dir>", "clean git checkout of a release tag; required for --engine cdk. An agentx built from source takes the version from its tag")
+    .option("--source <dir>", `clean git checkout of a release tag; required for --engine cdk. A ${CLI_COMMAND_NAME} built from source takes the version from its tag`)
     .option("--resume", "only continue an install already under way; never start a new one", false)
     .option("--from-bundle <dir>", "with --resume: continue an install whose access stack a platform team deployed from this export bundle")
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
@@ -1373,11 +1373,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
     .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
-    .option("--oidc-client-id <id>", "your OIDC provider's client id, needed for agentx login")
-    .option("--admin-claim <claim>", "the OIDC claim that marks AgentX administrators")
+    .option("--oidc-client-id <id>", `your OIDC provider's client id, needed for ${CLI_COMMAND_NAME} login`)
+    .option("--admin-claim <claim>", "the OIDC claim that marks Rovara administrators")
     .option("--admin-values <values>", "comma-separated values of --admin-claim that mark an administrator")
-    .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role AgentX creates")
-    .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the AgentX operator role")
+    .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role Rovara creates")
+    .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the Rovara operator role")
     .addOption(new Option("--model-provider <provider>", "model provider for the orchestrator, classifier and worker; a per-component provider flag wins over it").choices([...MODEL_PROVIDERS]))
     .option("--orchestrator-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
     .option("--classifier-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
@@ -1395,13 +1395,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", DEFAULT_ORCHESTRATOR_MODEL)
     .option("--classifier-model <id>", "Provider model id for the gate classifier", DEFAULT_CLASSIFIER_MODEL)
     .option("--worker-model <id>", "Provider model id for the runtime worker", DEFAULT_WORKER_MODEL)
-    .option("--alert-email <address>", "email address AgentX sends alerts to")
+    .option("--alert-email <address>", "email address Rovara sends alerts to")
     .option("--alert-webhook-file <path>", "file holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--alert-webhook-env <NAME>", "environment variable holding a PagerDuty or Opsgenie integration address (kept secret)")
     .option("--no-alerts", "send alerts nowhere for now")
     .option("--budget <usd>", "monthly AWS budget in whole US dollars; 0 for none (default 100)")
     .addOption(new Option("--budget-scope <scope>", "tag: costs tagged agentx:env; account: the whole account").choices(["tag", "account"]))
-    .option("--github-account <login>", "GitHub organization or user that will own the AgentX GitHub App")
+    .option("--github-account <login>", "GitHub organization or user that will own the Rovara GitHub App")
     .addOption(new Option("--github-account-type <type>", "whether --github-account is an organization or a personal account").choices(["organization", "user"]))
     .option("--github-app-name <name>", "GitHub App name (unique on GitHub)")
     .option("--github-app-id <id>", "a GitHub App made beforehand: its app id")
@@ -1415,9 +1415,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-bot-token-env <NAME>", "environment variable holding the Slack Bot User OAuth Token")
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
-    .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
-    .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
-    .option("--admin-email <email>", "Cognito: your email, for the AgentX admin user")
+    .option("--worker-image <digest-ref>", `worker image by digest; a ${CLI_COMMAND_NAME} built from source needs it with --engine cdk when the tag has no published release.json`)
+    .option("--slack-image <digest-ref>", `Slack service image by digest; a ${CLI_COMMAND_NAME} built from source needs it with --engine cdk when the tag has no published release.json`)
+    .option("--admin-email <email>", "Cognito: your email, for the Rovara admin user")
     .option("--repository <owner/name>", "the first project's repository")
     .option("--project-name <name>", "the first project's name (default: the repository's)")
     .option("--setup-command <command>", "the first project's setup command, or \"\" for none")
@@ -1439,7 +1439,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   )
     .addOption(new Option(`${SIGNIN_FLAG_NAMES.methods} <method>`, "how developers sign in: Slack (default), your company's sign-in (oidc), or both").choices(["slack", "oidc", "both"]))
     // Checked in initOptions, not with .choices(): commander would exit the process on a bad value.
-    .option("--stop-after <step>", "run the steps up to and including this one, then stop; agentx init again finishes (for automated tests)")
+    .option("--stop-after <step>", `run the steps up to and including this one, then stop; ${CLI_COMMAND_NAME} init again finishes (for automated tests)`)
     .action(async (
       options: InitCommandOptions & { export?: string },
       command: Command,
@@ -1473,16 +1473,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           return;
         }
         if (result.stoppedAfter !== undefined) {
-          services.stdout.write(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked. Run agentx init --env ${result.env} --region ${options.region ?? "<region>"} again to finish.\n`);
+          services.stdout.write(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked. Run ${CLI_COMMAND_NAME} init --env ${result.env} --region ${options.region ?? "<region>"} again to finish.\n`);
           return;
         }
-        services.stdout.write(`${result.ready ?? `AgentX environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}`}\n`);
+        services.stdout.write(`${result.ready ?? `Rovara environment ${result.env} is deployed. Control plane: ${result.controlPlaneUrl ?? "unknown"}`}\n`);
         return;
       }
       // --env defaults to production (the live, legacy-adopted deployment): --export must never
       // silently write a bundle for it just because --env was left off.
       if (command.getOptionValueSourceWithGlobals("env") !== "cli") {
-        throw agentXError("CONFIG_INVALID", "agentx init --export requires an explicit --env (the default, production, is the live environment)");
+        throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} init --export requires an explicit --env (the default, production, is the live environment)`);
       }
       if (options.region === undefined) throw agentXError("CONFIG_INVALID", "--region is required with --export");
       if (options.release === undefined) throw agentXError("CONFIG_INVALID", "--release is required with --export");
@@ -1566,7 +1566,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   const mcp = program
     .command("mcp")
-    .description("run the AgentX MCP server for your AI tool (stdio); add it with agentx mcp install")
+    .description(`run the Rovara MCP server for your AI tool (stdio); add it with ${CLI_COMMAND_NAME} mcp install`)
     .action(async (_options: unknown, command: Command) => {
       // FR-026: stdout carries only MCP messages, so everything else this command says goes to stderr.
       const env = developerEnv(command);
@@ -1596,7 +1596,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   mcp
     .command("install")
-    .description("add the AgentX MCP server to Claude Code, Codex or Cursor")
+    .description("add the Rovara MCP server to Claude Code, Codex or Cursor")
     .addOption(new Option("--client <client>", "the AI tool").choices([...MCP_CLIENTS]).makeOptionMandatory())
     .option("--print", "only print the entry; change nothing", false)
     .action(async (options: { client: McpClientKind; print: boolean }, command: Command) => {
@@ -1649,7 +1649,7 @@ function registrationWarnings(result: unknown, definition: ProjectDefinition): s
   const record = result && typeof result === "object" ? result as Record<string, unknown> : {};
   const warnings = Array.isArray(record.warnings) ? record.warnings.filter((entry): entry is string => typeof entry === "string") : [];
   if (definition.integrations && record.preflight === undefined) {
-    warnings.push("this control plane did not check connectors at registration; deploy the latest AgentX release to get the preflight report.");
+    warnings.push("this control plane did not check connectors at registration; deploy the latest Rovara release to get the preflight report.");
   }
   return warnings;
 }

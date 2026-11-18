@@ -223,10 +223,10 @@ describe("workflow E2E harness", () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
     expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
     await e2e.settle();
-    const listed = await e2e.mcp("agentx_list_tasks", {});
+    const listed = await e2e.mcp("rovara_list_tasks", {});
     expect(listed.isError).toBe(false);
     expect(JSON.stringify(listed.value)).toContain(e2e.taskId());
-    expect(JSON.stringify((await e2e.mcp("agentx_list_tasks", {}, OMAR)).value)).not.toContain(e2e.taskId());
+    expect(JSON.stringify((await e2e.mcp("rovara_list_tasks", {}, OMAR)).value)).not.toContain(e2e.taskId());
   }, 120_000);
 
   it("webhook() builds each event kind; redelivery is a duplicate; a wrong signature is refused; recovery runs", async () => {

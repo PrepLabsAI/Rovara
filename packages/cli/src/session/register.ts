@@ -1,5 +1,5 @@
 // Lane L8: the `sessions` and `session *` commands. main.ts calls `registerSessionCommands` once; everything the commands need from it comes in as `context`.
-import { INTENT_QUESTIONS_MAX } from "@agentx/contracts";
+import { INTENT_QUESTIONS_MAX, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { Command } from "commander";
 import type { DeveloperSessionDeps } from "../developer/session.js";
 import { formatSuccess } from "../output.js";
@@ -46,7 +46,7 @@ export function registerSessionCommands(program: Command, context: SessionComman
   session
     .command("show")
     .description("show a session: its link, status, owner, cost and what waits for you")
-    .argument("<session-id>", "the session's ID, from agentx sessions")
+    .argument("<session-id>", `the session's ID, from ${CLI_COMMAND_NAME} sessions`)
     .action(async (id: string, _options: unknown, command: Command) => printResult(command, await sessionShow(developerSession(), developerEnv(command), id)));
   for (const follow of [true, false]) {
     session
@@ -70,7 +70,7 @@ export function registerSessionCommands(program: Command, context: SessionComman
   const answerCommand = session
     .command("answer")
     .description("answer the questions Rovara Code asked before it plans; with no --qN it shows the questions. It needs \"can use\" on the session")
-    .argument("<task-or-session>", "the session's ID (from agentx sessions) or the task's ID");
+    .argument("<task-or-session>", `the session's ID (from ${CLI_COMMAND_NAME} sessions) or the task's ID`);
   for (let number = 1; number <= INTENT_QUESTIONS_MAX; number += 1) answerCommand.option(`--q${number} <answer>`, `the answer to question ${number}: an option's letter or words, or your own words ("your call" leaves it to Rovara)`);
   answerCommand.action(async (ref: string, options: Record<string, string | undefined>, command: Command) =>
     printResult(command, await sessionAnswer(developerSession(), developerEnv(command), ref, { answers: Array.from({ length: INTENT_QUESTIONS_MAX }, (_unused, index) => options[`q${index + 1}`]) })));

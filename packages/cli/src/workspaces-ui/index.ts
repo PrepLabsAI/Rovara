@@ -80,7 +80,7 @@ export async function runWorkspacesCommand(options: WorkspacesCommandOptions): P
     ...(options.port === undefined ? {} : { port: options.port }),
   });
   try {
-    options.stderr.write(`Your AgentX workspaces: ${server.url}\nPress Ctrl-C to stop.\n`);
+    options.stderr.write(`Your Rovara workspaces: ${server.url}\nPress Ctrl-C to stop.\n`);
     if (options.openBrowser !== undefined) {
       // A browser that will not open is not a reason to fail: the address is already printed.
       await options.openBrowser(server.url).catch(() => undefined);

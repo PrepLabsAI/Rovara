@@ -43,7 +43,7 @@ async function run(input: { connectors: unknown[]; extra?: Record<string, unknow
 }
 
 describe("environmentProjectFiles", () => {
-  it("finds only this environment's project files, by the header agentx writes", async () => {
+  it("finds only this environment's project files, by the header rovara writes", async () => {
     const dir = await projectDir([{ env: "staging", definition: payments([]) }, { env: "staging-eu", definition: { name: "eu", revision: 1 } }, { env: "prod", definition: { name: "prod-app", revision: 1 } }]);
     const found = await environmentProjectFiles(dir, "staging");
     expect(found.map((file) => [file.name, file.launchTemplateId])).toEqual([["payments", "lt-0123456789abcdef0"]]);
@@ -70,7 +70,7 @@ describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () 
   it("fails a connector whose credentials are missing", async () => {
     const secrets: Record<string, string> = { ...connectorSecrets };
     delete secrets["agentx/staging/connectors/linear"];
-    expect((await run({ connectors: [linear], secrets }))[0]).toMatchObject({ status: "fail", detail: "credentials missing: no secret agentx/staging/connectors/linear", fix: "agentx --env staging connector add linear --project payments" });
+    expect((await run({ connectors: [linear], secrets }))[0]).toMatchObject({ status: "fail", detail: "credentials missing: no secret agentx/staging/connectors/linear", fix: "rovara --env staging connector add linear --project payments" });
   });
 
   it("fails an expired or revoked key, and never repeats what the vendor said", async () => {
@@ -110,7 +110,7 @@ describe("doctor: connectors (FR-050, the 15d2 decision on saved warnings)", () 
   it("names --env and --project in the fix for a saved Jira warning, as for every other connector (final review M9)", async () => {
     const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR" }] };
     const checks = await run({ connectors: [], progress });
-    expect(checks.find((entry) => entry.name === "Jira warning")?.fix).toBe("narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx --env staging connector add jira --project <name> again");
+    expect(checks.find((entry) => entry.name === "Jira warning")?.fix).toBe("narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run rovara --env staging connector add jira --project <name> again");
   });
 
   it("says so when there are no connectors", async () => {
@@ -129,7 +129,7 @@ describe("doctor: connectors (Task 7 fix round 1)", () => {
     const progress = { ...PROGRESS, connectors: [{ type: "jira" as const, ref: "jira", warning: "the Jira service account can also see issues in HR" }] };
     const services = doctorServices({ configDir, secrets: throwing, vendors: fakeVendors({ jiraInside: ["PAY-1"] }) });
     const checks = await connectorChecks(doctorContext({ services, progress }));
-    expect(checks).toContainEqual({ group: "connectors", name: "Linear (project payments)", status: "fail", detail: "could not read secret agentx/staging/connectors/linear (AccessDeniedException)", fix: "check that your AWS role can read it, then run agentx doctor again" });
+    expect(checks).toContainEqual({ group: "connectors", name: "Linear (project payments)", status: "fail", detail: "could not read secret agentx/staging/connectors/linear (AccessDeniedException)", fix: "check that your AWS role can read it, then run rovara doctor again" });
     expect(checks.find((entry) => entry.name === "Jira (project payments)")?.status).toBe("ok");
     expect(checks.find((entry) => entry.name === "project payments")?.detail).toBe("uses the older integrations.githubMcp setting");
     expect(checks.find((entry) => entry.name === "Jira warning")?.status).toBe("warn");
@@ -161,7 +161,7 @@ describe("doctor: connectors (Task 7 fix round 1)", () => {
 
   it("fails a refused and an unreachable Jira token without repeating the token", async () => {
     const refusedChecks = await run({ connectors: [jira], vendors: fakeVendors({ jiraRefuses: true }) });
-    expect(refusedChecks[0]).toMatchObject({ status: "fail", detail: "Atlassian refused the stored API token: it expired or was revoked", fix: "agentx --env staging connector add jira --project payments" });
+    expect(refusedChecks[0]).toMatchObject({ status: "fail", detail: "Atlassian refused the stored API token: it expired or was revoked", fix: "rovara --env staging connector add jira --project payments" });
     const echoing = { ...fakeVendors(), jiraSearch: async () => { throw new Error(`bad token ${JIRA_TOKEN}`); } };
     const unreachable = await run({ connectors: [jira], vendors: echoing });
     expect(unreachable[0]).toMatchObject({ status: "fail", detail: "could not reach Atlassian to test the API token" });
@@ -171,7 +171,7 @@ describe("doctor: connectors (Task 7 fix round 1)", () => {
   it("fails a secret with the wrong shape", async () => {
     const secrets = { ...connectorSecrets, "agentx/staging/connectors/linear": JSON.stringify({ token: "SECRETwrongKEY" }) };
     const checks = await run({ connectors: [linear], secrets });
-    expect(checks[0]).toMatchObject({ status: "fail", detail: "the secret agentx/staging/connectors/linear has the wrong shape", fix: "agentx --env staging connector add linear --project payments" });
+    expect(checks[0]).toMatchObject({ status: "fail", detail: "the secret agentx/staging/connectors/linear has the wrong shape", fix: "rovara --env staging connector add linear --project payments" });
     expect(JSON.stringify(checks)).not.toContain("SECRETwrongKEY");
   });
 
@@ -183,7 +183,7 @@ describe("doctor: connectors (Task 7 fix round 1)", () => {
   it("warns when init recorded connectors but no project file of the environment is found", async () => {
     const progress = { ...PROGRESS, connectors: [{ type: "linear" as const, ref: "linear" }] };
     const checks = await connectorChecks(doctorContext({ services: doctorServices({ configDir: "/nonexistent-agentx-projects" }), progress }));
-    expect(checks).toEqual([expect.objectContaining({ name: "project files", status: "warn", detail: "agentx init added Linear, but no project file of environment staging is in /nonexistent-agentx-projects" })]);
+    expect(checks).toEqual([expect.objectContaining({ name: "project files", status: "warn", detail: "rovara init added Linear, but no project file of environment staging is in /nonexistent-agentx-projects" })]);
   });
 });
 
@@ -197,7 +197,7 @@ describe("doctor: connectors (Task 7 re-review)", () => {
     const checks = await connectorChecks(doctorContext({ services: doctorServices({ configDir }), progress }));
     expect(checks.find((entry) => entry.name === `project file ${join(configDir, "payments.yaml")}`)?.status).toBe("warn");
     expect(JSON.stringify(checks)).not.toContain("no project file");
-    expect(checks.find((entry) => entry.name === "project files")).toMatchObject({ status: "warn", detail: "agentx init added Linear, but the only project files found for environment staging could not be used (see the warnings above)" });
+    expect(checks.find((entry) => entry.name === "project files")).toMatchObject({ status: "warn", detail: "rovara init added Linear, but the only project files found for environment staging could not be used (see the warnings above)" });
   });
 });
 
@@ -225,7 +225,7 @@ describe("doctor: generic mcp connectors (spec 055 phase 3)", () => {
     const missing = await run({ connectors: [sentry] });
     expect(missing).toContainEqual(expect.objectContaining({
       status: "fail", detail: "credentials missing: no secret agentx/staging/connectors/mcp-sentry",
-      fix: "agentx --env staging connector add mcp --project payments --endpoint https://mcp.sentry.dev/mcp --name sentry",
+      fix: "rovara --env staging connector add mcp --project payments --endpoint https://mcp.sentry.dev/mcp --name sentry",
     }));
   });
 

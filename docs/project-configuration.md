@@ -2,7 +2,7 @@
 
 A project file describes one product: the repositories a thread works on, how to prepare and check
 them, and what the orchestrator may use. It lives at `~/.agentx/projects/<project-name>.yaml` and
-is registered with `agentx admin project register`. It holds no workspace ID,
+is registered with `rovara admin project register`. It holds no workspace ID,
 session ID, token or repository secret.
 
 The deployment itself (control-plane URL and sign-in settings) is a separate file,
@@ -34,7 +34,7 @@ readiness:
     executable: npm
     args: [test]
     timeoutSeconds: 600
-orchestratorInstructions: Delegate every repository read, edit, build, and test to the remote AgentX worker.
+orchestratorInstructions: Delegate every repository read, edit, build, and test to the remote Rovara worker.
 ```
 
 ## Fields
@@ -69,7 +69,7 @@ worker image.
 | `credentialRef` | The GitHub App credential reference configured on the control plane. The file never holds a key or token. |
 | `codeBuildGates` | Optional. Up to 8 CodeBuild gates, each with a `name`, a `projectName` matching the deployment's allowed prefix, and `timeoutMinutes` from 5 to 420. The total timeout per repository is at most 420 minutes. See [Configure CodeBuild gates](pull-requests.md#configure-codebuild-gates). |
 
-When AgentX itself runs Git in a workspace repository (to read the agent's changes, publish them or
+When Rovara itself runs Git in a workspace repository (to read the agent's changes, publish them or
 update a pull request), it ignores what that repository's Git config asks Git to run:
 
 - **Filters.** Only Git LFS filters (`filter=lfs`) are honoured, and only with the standard
@@ -77,7 +77,7 @@ update a pull request), it ignores what that repository's Git config asks Git to
   on disk. An encryption filter such as git-crypt therefore stages **plaintext**: do not register
   a repository that relies on one.
 - **Git LFS.** Git LFS repositories are not supported yet. Publishing a pull request, or appending
-  to one, is refused when any file has `filter=lfs`, because AgentX runs no hooks and Git LFS's
+  to one, is refused when any file has `filter=lfs`, because Rovara runs no hooks and Git LFS's
   pre-push upload would not happen.
 - **Hooks, signing and helpers.** Hooks, fsmonitor, commit signing, credential helpers, custom
   merge drivers (Git's own text merge is used) and diff `textconv` commands do not run.
@@ -85,9 +85,9 @@ update a pull request), it ignores what that repository's Git config asks Git to
   proxy (including the worker's `HTTPS_PROXY`). A fetch or push is refused while the repository's
   config sets any `url.*`, `http.*` or `remote.*` key other than `remote.origin.url` and
   `remote.origin.fetch`, or `extensions.partialClone`. The refusal names the keys to unset.
-- **Submodules and nested repositories.** AgentX tasks do not yet support projects whose `setup`
+- **Submodules and nested repositories.** Rovara tasks do not yet support projects whose `setup`
   initialises Git submodules (for example `git submodule update --init`), or a nested repository
-  the agent creates and records. While a submodule is checked out, AgentX refuses to read the
+  the agent creates and records. While a submodule is checked out, Rovara refuses to read the
   agent's changes, publish or update a pull request, and the error names the submodule's path.
   An uninitialised submodule (an empty directory) is fine.
 
@@ -162,7 +162,7 @@ or a pull request update, Rovara starts the dev container (this does nothing whe
 running). If it does not start, nothing is pushed.
 
 The dev container runs on the worker host's Docker, and its config is a file in your repository that
-the agent can edit. So every time AgentX starts the container it checks the configuration first:
+the agent can edit. So every time Rovara starts the container it checks the configuration first:
 `devcontainer.json` itself, and the full configuration the devcontainer CLI would use, with the
 settings of every feature and of the image's own `devcontainer.metadata` label merged in. Anything
 below is refused, with a message naming the setting, before any container starts:
@@ -173,10 +173,10 @@ below is refused, with a message naming the setting, before any container starts
 | `dockerComposeFile` | The Compose services' settings cannot be checked. |
 | `privileged: true`, `securityOpt`, or any `capAdd` other than `SYS_PTRACE` | They grant powers over the host. |
 | `runArgs` with `--privileged`, `--pid`, `--ipc=host` or `container:…`, `--network=host` (or `--net`) or `container:…`, `--userns=host`, `--uts=host`, `--cgroupns=host`, `--cap-add` (other than `SYS_PTRACE`), `--security-opt`, `--device`, `--device-cgroup-rule`, `--gpus` or `--volumes-from` | They share the host's (or the worker's) processes, network, devices or files. |
-| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) whose source is not inside the repository folder (so not `/`, `/var/run/docker.sock`, the workspace root, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; AgentX hides them inside the container too), another folder of the workspace, or anything outside it), including through a link (whether or not its target exists), or a source AgentX cannot check | They expose host files or the Docker socket. |
-| A mount written in any form but the plain one: settings in quotes, a setting given twice or under two spellings (`source` and `src`, `target` and `dst`), a setting AgentX does not list, or a comma or quote in a field of a mount object | AgentX reads a mount only in the one form every tool reads the same way. |
+| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) whose source is not inside the repository folder (so not `/`, `/var/run/docker.sock`, the workspace root, the worker's own folders in it (`.docker`, `.agentx`, `agent-sessions`, `.agentx-runtime`; Rovara hides them inside the container too), another folder of the workspace, or anything outside it), including through a link (whether or not its target exists), or a source Rovara cannot check | They expose host files or the Docker socket. |
+| A mount written in any form but the plain one: settings in quotes, a setting given twice or under two spellings (`source` and `src`, `target` and `dst`), a setting Rovara does not list, or a comma or quote in a field of a mount object | Rovara reads a mount only in the one form every tool reads the same way. |
 | `${localEnv:…}` (or `${env:…}`) anywhere in the configuration | It would copy the worker's environment variables into the container. |
-| A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
+| A feature Rovara cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
 | A local feature whose folder is outside the dev container config's own folder, including through a link | It would read files of the workspace that are not the project's. |
 | A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
 | `build.dockerfile` or `build.context`, or the top-level `dockerFile` or `context`, outside the repository folder (every spelling present is checked), or a `BUILDKIT_*` build argument (`build.args`, or `--build-arg` in `build.options`) | The build shares the Dockerfile's folder and the context with its frontend, and the workspace holds more than the repository (the worker's own folders). |
@@ -191,22 +191,22 @@ mounts, and bind mounts of folders inside the workspace (for example
 
 Features may come from an OCI registry (such as `ghcr.io/devcontainers/features/node:1`), a
 tarball URL, or a folder in `.devcontainer`. The container is built from exactly the feature
-content AgentX checked: AgentX gives the devcontainer CLI a lockfile of that content's digests and
+content Rovara checked: Rovara gives the devcontainer CLI a lockfile of that content's digests and
 starts the container with `--frozen-lockfile`, so content that changed since the check stops the
-start before anything is built. While the container starts, AgentX's lockfile takes the place of
+start before anything is built. While the container starts, Rovara's lockfile takes the place of
 the repository's `devcontainer-lock.json`, which is put back afterwards; tag references resolve to
 the version available when the check runs, not to the repository's lockfile.
 
-After the container starts, AgentX checks it again as Docker ran it; a container that breaks the
-rules is removed and the step fails. AgentX mounts the whole workspace into the container at the
+After the container starts, Rovara checks it again as Docker ran it; a container that breaks the
+rules is removed and the step fails. Rovara mounts the whole workspace into the container at the
 same path, with the worker's own folders of it (`.docker`, which is Docker's own data, `.agentx`,
-`agent-sessions` and `.agentx-runtime`) hidden by empty volumes. A container created before AgentX
+`agent-sessions` and `.agentx-runtime`) hidden by empty volumes. A container created before Rovara
 hid those folders is created again once. The agent's file tools (read, write, edit, grep, find and
 ls) run inside the dev container, as its user, so they only reach the repository folders it mounts.
 If the dev container cannot run them, they run in a separate sandbox container instead, and the
 task says so. A review of pull request feedback does not start the dev container: its file tools run
 in the task sandbox. Before each publication
-AgentX removes the dev container (see the security notes below), so the next step creates it again;
+Rovara removes the dev container (see the security notes below), so the next step creates it again;
 creating it reruns its creation commands, such as `onCreateCommand` and `postCreateCommand`.
 
 ### Models
@@ -218,11 +218,11 @@ models:
     - { provider: amazon-bedrock, modelId: us.anthropic.claude-sonnet-4-6, label: Sonnet, thinkingLevel: medium }
 ```
 
-When a revision with `models` is registered (`agentx project add`, `project setup-approve`, `connector add`, or `agentx --env <env> admin project register --file`), Rovara checks the default and each approved model with one small call, using your environment's own keys. A default model that is not found, is not in Rovara's catalog, has a refused key, or has a Bedrock quota of 0 refuses the registration; register it anyway with `--accept-unchecked-model "<reason>"` (the reason is recorded with the revision). A throttle, an outage or a check this computer cannot make only warns, and the model is recorded as unchecked: its first use checks it again. The result is stored with each model, and `@agentx use` warns when the stored check failed. `agentx doctor` checks the projects registered from this computer; listing projects registered elsewhere is a follow-up.
+When a revision with `models` is registered (`rovara project add`, `project setup-approve`, `connector add`, or `rovara --env <env> admin project register --file`), Rovara checks the default and each approved model with one small call, using your environment's own keys. A default model that is not found, is not in Rovara's catalog, has a refused key, or has a Bedrock quota of 0 refuses the registration; register it anyway with `--accept-unchecked-model "<reason>"` (the reason is recorded with the revision). A throttle, an outage or a check this computer cannot make only warns, and the model is recorded as unchecked: its first use checks it again. The result is stored with each model, and `@rovara use` warns when the stored check failed. `rovara doctor` checks the projects registered from this computer; listing projects registered elsewhere is a follow-up.
 
 `approved` lists 1 to 16 models with unique provider and model ID pairs and optional, unique labels.
-The default must be one of them. In the bound channel, `@agentx models` lists the choices and
-`@agentx use <label>` selects one for every workspace in the project from its next coding turn. The model IDs shown here are examples;
+The default must be one of them. In the bound channel, `@rovara models` lists the choices and
+`@rovara use <label>` selects one for every workspace in the project from its next coding turn. The model IDs shown here are examples;
 use the IDs your deployment can reach, and see [OpenRouter model access](openrouter.md) for
 OpenRouter.
 
@@ -291,7 +291,7 @@ them.
 - `enabled`: whether developers may start tasks on this project from an AI tool or Slack workflow.
 - `channelMembersMayUse`: whether members of the project's bound Slack channels may use it from
   an AI tool. With `false`, only people an admin granted access to the project directly may.
-  Direct grants arrive with spec 025 phase 25e (the admin tool `agentx_admin_grant_project_access`);
+  Direct grants arrive with spec 025 phase 25e (the admin tool `rovara_admin_grant_project_access`);
   until then, channel membership is the only way in, so leave this `true`.
 - `share`: with `required`, every task is shared into a bound channel when it starts.
 - `shareMode.default`: the mode a shared task gets when none is asked for.
@@ -305,9 +305,9 @@ See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 
 #### Starting a task from Slack
 
-In every bound channel, a plain top-level `@AgentX <request>` (no prefix) is routed. Slack gets its
+In every bound channel, a plain top-level `@Rovara <request>` (no prefix) is routed. Slack gets its
 answer at once; the Slack service then asks the safety-check model, the same classifier model the
-action gate uses (`classifierModel` and `classifierProvider` from `agentx init`, the stack parameters
+action gate uses (`classifierModel` and `classifierProvider` from `rovara init`, the stack parameters
 GateClassifierModelId and GateClassifierProvider, read by the service as `AGENTX_GATE_CLASSIFIER_MODEL`
 and `AGENTX_GATE_CLASSIFIER_PROVIDER`), to sort the request. The model sees a fixed instruction and the
 message text only, never repository content, and waits at most the classifier's timeout
@@ -332,7 +332,7 @@ The paths:
 The model only suggests: nothing that changes code starts until the requester presses **Start** or a
 path's button. **Just answer** sends the original request to the chat agent. Once a choice is made,
 the card loses its buttons and says who chose what. Only the person who asked can choose: they press
-a button, or reply `quick`, `full` or `answer` in the thread (with or without mentioning AgentX;
+a button, or reply `quick`, `full` or `answer` in the thread (with or without mentioning Rovara;
 loose answers such as `Quick please`, `let's do full` or `just answer` count; `answer` works only on
 a suggestion card, not on the `workflow:` question). A teammate's answer is ignored. The card waits
 for a day. The Slack service logs one `route.classified` line per request (kind, outcome `ok` /
@@ -344,52 +344,52 @@ Prefixes skip routing and never call the model: a request that starts with `quic
 the older `workflow quick:` / `workflow full:`) starts on that path; `workflow:` asks Quick or Full
 with no suggestion; `chat:` goes to the chat agent. Replies inside existing threads are never
 routed. A thread holds one waiting question at a time. In a thread with no question waiting, a reply
-such as `@AgentX full please` goes to the chat agent like any other.
+such as `@Rovara full please` goes to the chat agent like any other.
 
 **Changed behavior:** a plain top-level mention used to go to the chat agent. A question still does,
 after routing; to always reach the chat agent, start the request with `chat:`, for example
-`@AgentX chat: what does retry.ts do?`. Mentions in
+`@Rovara chat: what does retry.ts do?`. Mentions in
 a thread the chat agent is already answering still go to it without `chat:`.
 
-When a task cannot start, AgentX says why in the thread: the open-task limit, a thread that already
+When a task cannot start, Rovara says why in the thread: the open-task limit, a thread that already
 has a task, or a channel not connected to a project the person can use. Anything else gets a
-reference to give an AgentX admin (the Slack event ID, or for a button press the choice's ID).
+reference to give a Rovara admin (the Slack event ID, or for a button press the choice's ID).
 Starting tasks from Slack needs shared tasks (`SHARED_TASKS`) on
-for the Slack ingress; without them AgentX answers every start with a message asking an admin to turn
+for the Slack ingress; without them Rovara answers every start with a message asking an admin to turn
 them on.
 
 #### Replies in a Slack task's thread
 
 Every reply in the thread of a task started in Slack is saved as input for the task's next step,
-whether or not it mentions AgentX and whoever posts it. The next plan or coding step sees the
+whether or not it mentions Rovara and whoever posts it. The next plan or coding step sees the
 replies no earlier step was given, marked as the owner's or a teammate's; each reply is given once.
-Replies never move the task on: only the task owner's buttons do. An `@AgentX` reply gets a private
-"Saved" acknowledgement; a plain reply gets no answer. AgentX keeps up to 200 replies per task, and
+Replies never move the task on: only the task owner's buttons do. An `@Rovara` reply gets a private
+"Saved" acknowledgement; a plain reply gets no answer. Rovara keeps up to 200 replies per task, and
 keeps the first 2,000 characters of a longer reply. When many replies arrive between two steps, only the
 newest, about 8 KB of them, are passed to the next step. Text in a reply posted with a file is saved; the
-file is not. To stop the task from its thread, its owner sends `@AgentX stop`: a plain `stop` without
+file is not. To stop the task from its thread, its owner sends `@Rovara stop`: a plain `stop` without
 the mention is saved as a reply like any other.
 
 To receive replies that do not mention it, the Slack app needs the `channels:history` and
 `groups:history` bot scopes and the `message.channels` and `message.groups` bot events. The app
-manifest `agentx init` generates includes them. **An existing install must reinstall the Slack app**
+manifest `rovara init` generates includes them. **An existing install must reinstall the Slack app**
 (update the app from the new manifest, then reinstall it to the workspace) to receive thread replies;
-until then only `@AgentX` replies are saved. AgentX reads channel messages only to find replies in
+until then only `@Rovara` replies are saved. Rovara reads channel messages only to find replies in
 task threads: it ignores, and does not store, any channel message outside a task's thread.
 
 #### From approval to a draft pull request
 
 A task started in Slack can finish in its thread, with no MCP client and no admin help. Each
 approval card is a short message: what is waiting, up to three summary lines and a link to the full
-document (a Slack Canvas, or the AgentX task page when the workspace cannot create Canvases). Once
+document (a Slack Canvas, or the Rovara task page when the workspace cannot create Canvases). Once
 the owner decides, the card loses its buttons and says who decided.
 
-After the coding plan is approved, AgentX codes it, runs the required checks and the selected
+After the coding plan is approved, Rovara codes it, runs the required checks and the selected
 optional checks on that exact code, and then starts the code and security reviews by itself. Only
 problems the change introduced block. An older problem outside the changed lines is noted but does
 not block. When a review finds a problem, the thread lists it with **Send back to coding**, **Retry
 reviews** and **Close task**. Send back gives the problems to the coding step, and the checks and
-reviews run again on the new code. When the checks and reviews pass, AgentX opens a draft pull request
+reviews run again on the new code. When the checks and reviews pass, Rovara opens a draft pull request
 of exactly the checked code and posts the link in the thread. People review and merge it on GitHub.
 
 #### Security notes: who can reach the push token
@@ -408,12 +408,12 @@ it keeps the token away from code the agent or the project controls:
   worker itself and its parent; one it is not allowed to stop also blocks the publication. Run
   elsewhere (a developer machine), it means every process of the worker's user whose working
   directory is in the workspace, and no container is touched.
-- The push runs from a temporary Git repository that AgentX makes for that push alone. It borrows
+- The push runs from a temporary Git repository that Rovara makes for that push alone. It borrows
   the workspace's Git objects and reads nothing else from the workspace: not its `.git/config`,
   hooks or attributes. The commit is pushed by its ID to the repository's registered URL. GitHub
   checks every object it receives, so the borrowed objects cannot change what the commit holds.
 - The token is never put in any process's environment, and is removed when the push ends.
-- The published commit's parent is the base commit AgentX pinned for the task, never one the
+- The published commit's parent is the base commit Rovara pinned for the task, never one the
   workspace reports. The broker checks the pull request's commit, its code and its parent on GitHub.
 
 On EC2 workers, task code never runs inside the worker's own process or user. With a dev container
@@ -423,11 +423,11 @@ from the worker's own image for the task, in which the task's commands run witho
 has no Docker socket and no extra group, all capabilities dropped, `no-new-privileges`, user 1000,
 tini as its init, and only the workspace mounted (the worker's own folders in the workspace are
 hidden). It joins the `agentx-task` bridge network, so outbound internet works. The agent's shell
-and file tools, AgentX's checks, and the project's `setup` and `readiness` commands all run there,
+and file tools, Rovara's checks, and the project's `setup` and `readiness` commands all run there,
 and the sandbox is removed when the task, the preparation or the publication step ends, on success
 or failure. The image carries `curl`, `git`, `python3`, `uv`, `bash` and a POSIX shell; a project
 that needs more tools should use a dev container. A sandbox that cannot start fails the task.
-AgentX never falls back to running the command in the worker. The sandbox is the default
+Rovara never falls back to running the command in the worker. The sandbox is the default
 everywhere; running commands as children of the worker is for tests and a developer's machine,
 needs `AGENTX_TASK_SHELL=local`, and is refused on EC2 (the boot script sets `AGENTX_RUNTIME=ec2`).
 The sandbox needs the worker's image (`AGENTX_SANDBOX_IMAGE`); on a developer's machine without it, the sandbox does not start unless `AGENTX_TASK_SHELL=local` is set.
@@ -438,7 +438,7 @@ Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
 
 1. Done for projects without a dev container: they run in the task sandbox (above). Further
    hardening of dev containers is tracked in the same issue.
-2. Dev-container-only Docker: only AgentX's own launcher reaches Docker; projects without a dev
+2. Dev-container-only Docker: only Rovara's own launcher reaches Docker; projects without a dev
    container run in the task sandbox, which has none.
 3. Apply the same process and container stop before the credential of a pull request update.
 
@@ -541,7 +541,7 @@ reads exactly as before.
    for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 4:
 
    ```text
-   AgentX checks your work after you finish. Work this way:
+   Rovara checks your work after you finish. Work this way:
    1. Reproduce the problem before changing code, and say how you reproduced it.
    2. Run the relevant tests before and after your change.
    3. A test that passed before your change and fails after it is your own regression. Fix your change, not the test; never call it unrelated.
@@ -665,6 +665,6 @@ a draft, because any failing check there does.
 Registration needs the deployment's worker settings as well as the file (deployment mode, launch
 template and subnets). The full command, and the channel binding that follows it, are in
 [Register a project and bind its Slack channel](administration.md#2-register-a-project-and-bind-its-slack-channel).
-For an environment installed with `agentx init`, add `--env <name>` to each command. The channel
+For an environment installed with `rovara init`, add `--env <name>` to each command. The channel
 binding names only the project, so a newly registered revision reaches every new thread without
 binding again.

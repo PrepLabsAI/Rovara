@@ -1,5 +1,5 @@
 // tests/support/config-services.ts
-// The agentx config command's services with every AWS client faked: a staging environment's
+// The rovara config command's services with every AWS client faked: a staging environment's
 // settings seeded in memory, its stacks' parameters, and a scripted prompter. Shared by the config
 // contract tests (moved here from config-commands.test.ts for spec 025 phase 25e's limits test).
 import type { ConfigServices } from "../../packages/cli/src/config/commands.js";

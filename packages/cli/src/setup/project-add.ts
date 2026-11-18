@@ -11,7 +11,7 @@ import YAML from "yaml";
 import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
   AdminProjectsResponseSchema, AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
-  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
+  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
@@ -26,7 +26,7 @@ import {
 import { checkProjectModels } from "./project-model-check.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
-export const DEFAULT_INSTRUCTIONS = "Delegate every repository read, edit, build, and test to the remote AgentX worker.";
+export const DEFAULT_INSTRUCTIONS = "Delegate every repository read, edit, build, and test to the remote Rovara worker.";
 const LAUNCH_TEMPLATE_OUTPUT = "Ec2WorkerLaunchTemplateId";
 const SUBNETS_OUTPUT = "Ec2WorkerSubnets";
 const VOLUME_SIZE_GIB = "20";
@@ -34,7 +34,7 @@ const VOLUME_TYPE = "gp3";
 
 export function ec2Binding(outputs: StackOutputs | undefined, stackName: string): Ec2RuntimeBinding {
   if (outputs === undefined) {
-    throw agentXError("CONFIG_INVALID", `stack ${stackName} does not exist in this account and region; check --env and --region, or finish agentx init first`);
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} does not exist in this account and region; check --env and --region, or finish ${CLI_COMMAND_NAME} init first`);
   }
   const launchTemplateId = outputs[LAUNCH_TEMPLATE_OUTPUT];
   const subnets = outputs[SUBNETS_OUTPUT];
@@ -63,10 +63,10 @@ function fileHeader(path: string, register?: { env: string; binding: Ec2RuntimeB
   const subnets = register?.binding.subnets.map((subnet) => `${subnet.availabilityZone}=${subnet.subnetId}`).join(",") ?? "<the foundation's Ec2WorkerSubnets>";
   const env = register === undefined ? "" : ` --env ${register.env}`;
   return [
-    "# Registered by agentx. It holds no secret, only credential references.",
-    "# To change the project, edit this file and raise revision, then either run agentx connector add",
+    `# Registered by ${CLI_COMMAND_NAME}. It holds no secret, only credential references.`,
+    `# To change the project, edit this file and raise revision, then either run ${CLI_COMMAND_NAME} connector add`,
     "# (which rebuilds it) or register it yourself:",
-    `#   agentx admin project register${env} --file ${path} --deployment-mode ec2-ebs --launch-template-id ${launchTemplate} --subnets ${subnets}`,
+    `#   ${CLI_COMMAND_NAME} admin project register${env} --file ${path} --deployment-mode ec2-ebs --launch-template-id ${launchTemplate} --subnets ${subnets}`,
     "",
   ].join("\n");
 }
@@ -79,7 +79,7 @@ function fileHeader(path: string, register?: { env: string; binding: Ec2RuntimeB
 export interface EnvironmentProjectFile { path: string; name: string; launchTemplateId: string; definition: Record<string, unknown>; error?: "unreadable" | "invalid-yaml"; errorCode?: string }
 
 /** fileHeader's register line; kept beside fileHeader so the reader and the writer change together (ruling F26). */
-const REGISTER_LINE = /^#\s+agentx admin project register --env (\S+) --file .+? --deployment-mode ec2-ebs --launch-template-id (\S+)/m;
+const REGISTER_LINE = /^#\s+(?:agentx|rovara) admin project register --env (\S+) --file .+? --deployment-mode ec2-ebs --launch-template-id (\S+)/m;
 
 /** The project files environment `env` wrote in configDir (doctor and destroy read them). A file
  * without fileHeader's register line (hand-written) belongs to no environment. A missing directory
@@ -208,7 +208,7 @@ async function existingProject(configDir: string, name: string): Promise<Project
   try {
     return await loadProjectConfig({ projectName: name, configDirectory: configDir });
   } catch {
-    throw agentXError("CONFIG_INVALID", `a file already exists at ${path} that is not an AgentX project file; move it or choose another --project-name`);
+    throw agentXError("CONFIG_INVALID", `a file already exists at ${path} that is not a Rovara project file; move it or choose another --project-name`);
   }
 }
 
@@ -367,7 +367,7 @@ async function confirmSetupPlan(input: { prompter: Prompter; write: (line: strin
   input.write(proposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
   // An untested route says which model to test and the exact command (Task 4.10C); with no route at all the older sentence stands.
   const untestedSummary = input.aiNavigationUntested === undefined || input.aiNavigationUntested === null ? undefined
-    : `${input.aiNavigationUntested.sentence}. Run \`agentx${input.env === undefined ? "" : ` --env ${input.env}`} project model-check test --model ${input.aiNavigationUntested.modelId}\``;
+    : `${input.aiNavigationUntested.sentence}. Run \`${CLI_COMMAND_NAME}${input.env === undefined ? "" : ` --env ${input.env}`} project model-check test --model ${input.aiNavigationUntested.modelId}\``;
   const aiNavigationSummary = input.aiNavigation ?? untestedSummary ?? "AI navigation steps will not run: this installation has no usable model route for them (it needs a configured model provider with its key), so only deterministic checks run";
   input.write(aiNavigationSummary);
   const commandSummary = "setup: " + input.setup.map(commandLine).join("; ") + "; readiness: " + input.readiness.map(commandLine).join("; ");
@@ -418,7 +418,7 @@ async function registeredHead(input: { session: AdminSession; fetch: typeof fetc
   }
   if (!listing.success) throw unreadable(" (the answer was not a project list)");
   const found = listing.data.projects.find((project) => project.name === input.name);
-  if (found === undefined) throw agentXError("CONFIG_INVALID", `${input.name} is not registered with this control plane (check --env), so there is no revision to build on; nothing was approved or registered. Register it with agentx project add first`);
+  if (found === undefined) throw agentXError("CONFIG_INVALID", `${input.name} is not registered with this control plane (check --env), so there is no revision to build on; nothing was approved or registered. Register it with ${CLI_COMMAND_NAME} project add first`);
   return { revision: found.latestRevision };
 }
 
@@ -438,7 +438,7 @@ export async function reapproveProjectSetup(input: {
   const configDir = input.services.configDir;
   const existing = await existingProject(configDir, name);
   const file = projectFilePath(configDir, name);
-  if (existing === undefined) throw agentXError("CONFIG_INVALID", `project ${name} is not registered from this machine (no ${file}); register it with agentx project add first`);
+  if (existing === undefined) throw agentXError("CONFIG_INVALID", `project ${name} is not registered from this machine (no ${file}); register it with ${CLI_COMMAND_NAME} project add first`);
   const repository = existing.repositories[0];
   if (repository === undefined) throw agentXError("CONFIG_INVALID", `project ${name} has no repository to propose its setup from`);
   // I-2: read the registry's head before anything is proposed or recorded.
@@ -466,7 +466,7 @@ export async function reapproveProjectSetup(input: {
     // The control plane needs the recorded decision before it accepts the revision, so a failure here leaves an approval that no revision carries. Say so, and what to run.
     const code = error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE";
     const cause = error instanceof AgentXError ? error.message : "an unexpected error";
-    throw agentXError(code, `your approval of the setup proposal is recorded, but revision ${definition.revision} of ${name} was NOT registered, so no revision carries it and tasks keep running on revision ${head.revision} (${cause}). Run agentx --env ${input.env} project setup-approve --project-name ${name} again; it proposes and asks again, and registers the revision`);
+    throw agentXError(code, `your approval of the setup proposal is recorded, but revision ${definition.revision} of ${name} was NOT registered, so no revision carries it and tasks keep running on revision ${head.revision} (${cause}). Run ${CLI_COMMAND_NAME} --env ${input.env} project setup-approve --project-name ${name} again; it proposes and asks again, and registers the revision`);
   }
   input.write(`Approved the setup of ${name} and registered revision ${definition.revision}${trusted.policy.modelRouteRevision === null ? "" : `, pinning AI navigation route revision ${trusted.policy.modelRouteRevision}`}. Its file is ${registered.file}.`);
   for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
@@ -592,12 +592,12 @@ export async function addProject(input: {
     if (!e2eAccepted) input.write(declinedPlanNotice(name, setup, readiness));
   } else {
     input.write(proposed.basis.length === 0
-      ? `No build file AgentX knows in ${repository.fullName}. AgentX will propose checks for each task; you can add project checks later.`
+      ? `No build file Rovara knows in ${repository.fullName}. Rovara will propose checks for each task; you can add project checks later.`
       : proposed.basis.map((line) => `Proposed from ${line}`).join("\n"));
     const summary = `setup: ${setup.map(commandLine).join("; ") || "none"}; test: ${readiness.map(commandLine).join("; ") || "none"}`;
     if (proposed.basis.length === 0 || !(await prompter.confirm(`Use these commands? (${summary})`, { defaultValue: true }))) {
       setup = typed(await prompter.ask("Setup command (empty for none)", { flag: "--setup-command", defaultValue: setup.map(commandLine)[0] ?? "" }), SETUP_TIMEOUT);
-      readiness = typed(await prompter.ask("Test command (empty to let AgentX propose checks per task)", { flag: "--test-command", defaultValue: readiness.map(commandLine)[0] ?? "" }), TEST_TIMEOUT);
+      readiness = typed(await prompter.ask("Test command (empty to let Rovara propose checks per task)", { flag: "--test-command", defaultValue: readiness.map(commandLine)[0] ?? "" }), TEST_TIMEOUT);
     }
   }
   const definition = ProjectDefinitionSchema.parse({

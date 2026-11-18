@@ -4,7 +4,7 @@
 // only the value itself, to hold in memory for the length of one deploy.
 import { randomBytes } from "node:crypto";
 import { CreateSecretCommand, GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** The number of random bytes in a freshly created callback signing key (before base64url encoding).
  * Exported so callers that must bound a buffer against "the longest secret we ever redact"
@@ -31,7 +31,7 @@ export function secretTags(name: string): Array<{ Key: string; Value: string }> 
   if (name.startsWith("agentx/connectors/")) return [];
   const match = /^agentx\/([a-z0-9-]{1,20})\//.exec(name);
   if (match === null) {
-    throw agentXError("CONFIG_INVALID", `secret name "${name}" is not a valid agentx secret name; it must start with agentx/<env>/ or be the legacy agentx/connectors/...`);
+    throw agentXError("CONFIG_INVALID", `secret name "${name}" is not a valid ${CLI_COMMAND_NAME} secret name; it must start with agentx/<env>/ or be the legacy agentx/connectors/...`);
   }
   return [{ Key: "agentx:env", Value: match[1]! }];
 }

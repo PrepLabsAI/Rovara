@@ -5,6 +5,7 @@
 // cdk diff line it does not understand) is treated as needing that same review, never as safe.
 import type { Ask, ConfirmFn } from "../deploy/commands.js";
 import type { ChangeSetChange, DeployRequest, StackDeployer } from "../deploy/deployer.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 const LOG_GROUP = "AWS::Logs::LogGroup";
 export const DATA_RESOURCE_TYPES: ReadonlySet<string> = new Set(["AWS::DynamoDB::Table", "AWS::Cognito::UserPool", "AWS::S3::Bucket", "AWS::KMS::Key", "AWS::SecretsManager::Secret", "AWS::SQS::Queue", LOG_GROUP]);
@@ -65,7 +66,7 @@ function refusalFor(stackName: string, refused: DataChange[], accepted: DataChan
   const unclear = refused.filter((entry) => entry.verb === "unclear");
   const clauses = [
     ...(known.length === 0 ? [] : [`${stackName} would ${listed(known.map(consequence))}`]),
-    ...(unclear.length === 0 ? [] : [`agentx could not read cdk diff's output for ${stackName}, so it cannot tell whether it replaces or deletes data (${unclear.map((entry) => entry.line ?? "").join("; ")})`]),
+    ...(unclear.length === 0 ? [] : [`${CLI_COMMAND_NAME} could not read cdk diff's output for ${stackName}, so it cannot tell whether it replaces or deletes data (${unclear.map((entry) => entry.line ?? "").join("; ")})`]),
   ];
   // The rerun's --allow-replace list names the changes already accepted too (by the flag, or typed
   // here), so a rerun with --yes accepts every one of them.
@@ -73,8 +74,8 @@ function refusalFor(stackName: string, refused: DataChange[], accepted: DataChan
   const acceptedIds = accepted.map((entry) => entry.logicalId).filter((id) => id !== "" && !ids.includes(id));
   const also = acceptedIds.length === 0 ? "" : ` (${listedAnd(acceptedIds)} ${acceptedIds.length === 1 ? "is a change" : "are changes"} you already accepted; --yes needs ${acceptedIds.length === 1 ? "it" : "them"} named too)`;
   const steps = [
-    ...(unclear.length === 0 ? [] : ["Check the diff above, and run agentx upgrade again without --yes to review it"]),
-    ...(ids.length === 0 ? [] : [`If you accept that, run agentx upgrade again with ${[...ids, ...acceptedIds].map((id) => `--allow-replace ${id}`).join(" ")}${also}`]),
+    ...(unclear.length === 0 ? [] : [`Check the diff above, and run ${CLI_COMMAND_NAME} upgrade again without --yes to review it`]),
+    ...(ids.length === 0 ? [] : [`If you accept that, run ${CLI_COMMAND_NAME} upgrade again with ${[...ids, ...acceptedIds].map((id) => `--allow-replace ${id}`).join(" ")}${also}`]),
   ];
   return `upgrade stopped: ${clauses.join("; ")}; nothing in ${stackName} changed. ${steps.join(". ")}`;
 }
@@ -90,7 +91,7 @@ export async function guardData(input: { stackName: string; data: DataChange[]; 
   for (const [index, entry] of pending.entries()) {
     const token = entry.logicalId === "" ? "accept" : entry.logicalId;
     const prompt = entry.verb === "unclear"
-      ? `agentx could not read cdk diff's output for ${input.stackName}, so it may replace or delete data (${entry.line ?? ""}). Check the diff above. Type ${token} to accept, or anything else to stop: `
+      ? `${CLI_COMMAND_NAME} could not read cdk diff's output for ${input.stackName}, so it may replace or delete data (${entry.line ?? ""}). Check the diff above. Type ${token} to accept, or anything else to stop: `
       : `${input.stackName} would ${consequence(entry)}. Type ${token} to accept, or anything else to stop: `;
     if ((await input.ask(prompt)).trim() !== token) return refusalFor(input.stackName, pending.slice(index), [...pending.slice(0, index), ...allowed]);
   }
@@ -110,7 +111,7 @@ export function upgradeConfirm(input: { write: (line: string) => void; ask: Ask;
       if (refusal !== undefined) return false;
       if (input.yes) return true;
       if (/^y(es)?$/i.test((await input.ask(`Apply these changes to ${stackName}? [y/N] `)).trim())) return true;
-      refusal = `upgrade stopped before ${stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run agentx upgrade again to continue`;
+      refusal = `upgrade stopped before ${stackName}: nothing in it changed. Stacks upgraded before it keep the new release; run ${CLI_COMMAND_NAME} upgrade again to continue`;
       return false;
     },
   };

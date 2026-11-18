@@ -118,7 +118,7 @@ describe("Pi 1.0's MCP client, codemode and tool_search stay off", () => {
       expect(allTools.filter((name) => name === "codemode" || name === "tool_search" || name.startsWith("mcp__"))).toEqual([]);
     } finally { await runtime.dispose(); }
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.tools.every((name) => name.startsWith("agentx_"))).toBe(true);
+    expect(seen[0]!.tools.every((name) => name.startsWith("rovara_"))).toBe(true);
     expectNoBuiltins(seen[0]!);
     expect(existsSync(sentinel)).toBe(false);
   });

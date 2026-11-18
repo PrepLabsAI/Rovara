@@ -160,7 +160,7 @@ describe("discovery refresh edge cases", () => {
           connectorOf: new Map([["linear__list_issues", "linear"], ["github__list_issues", "github"], ["jira__search", "jira"]]) });
         const drifted = JSON.stringify({ status: "FAILED", reason: "schema_changed" });
         for (const [id, name, text] of [["1", "linear__list_issues", drifted], ["2", "github__list_issues", drifted], ["3", "linear__list_issues", drifted],
-          ["4", "jira__search", JSON.stringify({ status: "FAILED", reason: "vendor_error" })], ["5", "agentx_submit_task", drifted]] as const) {
+          ["4", "jira__search", JSON.stringify({ status: "FAILED", reason: "vendor_error" })], ["5", "rovara_submit_task", drifted]] as const) {
           input.recorder?.toolStarted({ toolCallId: id, toolName: name, args: {} });
           input.recorder?.toolEnded({ toolCallId: id, toolName: name, isError: false, result: { content: [{ type: "text", text }] } });
         }

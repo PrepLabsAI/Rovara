@@ -19,7 +19,7 @@ export const isRetryableStep = (id: InitStepId): id is DeployStepId => Object.ha
 
 /** Words that belong in technical details only (FR-060, FR-081). */
 const TECHNICAL = /arn:aws|\b[A-Z]{2,}_[A-Z_]{2,}\b|AWS::|(?:^|\s)--[a-z]|<[@#!]|\b[A-Z][a-z]+(?:[A-Z][a-z]+)*[0-9A-F]{8}\b/;
-const RESUME_TAIL = /\.? Run agentx init --env \S+ --region \S+ again to continue from this step\..*$/s;
+const RESUME_TAIL = /\.? Run (?:agentx|rovara) init --env \S+ --region \S+ again to continue from this step\..*$/s;
 
 /** An address is kept as it is written: "Https://" is not an address. */
 const capitalize = (text: string): string => (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `${text.charAt(0).toUpperCase()}${text.slice(1)}`);

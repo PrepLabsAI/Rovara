@@ -1593,7 +1593,7 @@ export async function createWorkflowE2E(options: {
     },
 
     /**
-     * An MCP tool call through `agentx mcp`'s real server and packages/mcp tools, signed in as `who` (Maya's Slack sign-in
+     * An MCP tool call through `rovara mcp`'s real server and packages/mcp tools, signed in as `who` (Maya's Slack sign-in
      * by default), against this broker.
      */
     async mcp(tool: string, args: Record<string, unknown> = {}, who: Developer = SLACK_MAYA): Promise<ToolAnswer> {

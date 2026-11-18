@@ -1,4 +1,4 @@
-import { itemPathHolders, itemPathValues, toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@agentx/contracts";
+import { inHouseToolPattern, itemPathHolders, itemPathValues, toolPatternMatches, type ActionPolicy, type ActionPolicyRule, type ToolHints } from "@agentx/contracts";
 
 /**
  * AgentX's own, vendor-neutral classes (spec 014 D1). A read and a create run; a change runs only
@@ -65,7 +65,7 @@ function isLifecycleKey(key: string): boolean {
 const LIFECYCLE_SEARCH_DEPTH = 4;
 
 // tool_search only loads tool descriptions into the model's next step; it reads nothing and changes nothing. Every tool it loads is gated on its own call.
-const IN_HOUSE_READS: ReadonlySet<string> = new Set(["agentx_follow_up", "agentx_task_status", "agentx_task_result", "tool_search"]);
+const IN_HOUSE_READS: ReadonlySet<string> = new Set(["rovara_follow_up", "rovara_task_status", "rovara_task_result", "tool_search"]);
 const DESTRUCTIVE_PULL_REQUEST_ACTIONS: ReadonlySet<string> = new Set(["close", "replace", "revert"]);
 
 /**
@@ -207,22 +207,22 @@ export function itemReference(facts: ToolFacts | undefined, args: Record<string,
  * - It is a change when any of its item argument paths names a present item (a name, `a.b` or
  *   `a[].b`, R19), and a create when none does. When the connector declares no item arguments, it
  *   is a change.
- * - In-house tools are classified here in code: agentx_submit_task is a change only while the
+ * - In-house tools are classified here in code: rovara_submit_task is a change only while the
  *   thread has no prepared compute (D5); the other task tools read; publishing is a change; closing,
  *   replacing or reverting a pull request is destructive. Any other unknown tool is a change unless
  *   its name says it destroys. Without a worker (the gate passes a prepared one when the host says
- *   the thread's compute is prepared), agentx_submit_task and agentx_follow_up fail closed as a change.
+ *   the thread's compute is prepared), rovara_submit_task and rovara_follow_up fail closed as a change.
  * - Arguments that are not a plain object make any call but a read-approved tool a change, so the
  *   classifier decides (fail closed).
  */
 export function baseClass(name: string, facts: ToolFacts | undefined, args: Record<string, unknown>, worker?: { prepared(): boolean }): ActionClass {
   if (facts === undefined) {
-    if (name === "agentx_submit_task") return worker !== undefined && worker.prepared() ? "read" : "change";
-    if (name === "agentx_follow_up") return worker === undefined ? "change" : "read";
+    if (name === "rovara_submit_task") return worker !== undefined && worker.prepared() ? "read" : "change";
+    if (name === "rovara_follow_up") return worker === undefined ? "change" : "read";
     if (IN_HOUSE_READS.has(name)) return "read";
     if (!isPlainObject(args)) return "change";
-    if (name === "agentx_create_pull_request") return "change";
-    if (name === "agentx_manage_pull_request") return DESTRUCTIVE_PULL_REQUEST_ACTIONS.has(String(args.action)) ? "destructive" : "change";
+    if (name === "rovara_create_pull_request") return "change";
+    if (name === "rovara_manage_pull_request") return DESTRUCTIVE_PULL_REQUEST_ACTIONS.has(String(args.action)) ? "destructive" : "change";
     return destructiveSignal(name, args) === undefined ? "change" : "destructive";
   }
   if (facts.access === "read" && facts.hints?.readOnlyHint !== false && facts.hints?.destructiveHint !== true) return "read";
@@ -250,7 +250,7 @@ function namesExactTool(rule: ActionPolicyRule): boolean {
 function ruleMatches(rule: ActionPolicyRule, name: string, facts: ToolFacts | undefined, args: Record<string, unknown>): boolean {
   if (rule.connector !== undefined) {
     if (facts?.connector !== rule.connector || !toolPatternMatches(rule.tool, facts.upstreamName)) return false;
-  } else if (!toolPatternMatches(rule.tool, name)) {
+  } else if (!toolPatternMatches(inHouseToolPattern(rule.tool), name)) {
     return false;
   }
   // whenArguments matches the call's own top-level argument names only, never nested or inherited keys.
@@ -305,7 +305,7 @@ export function evaluatePolicy(input: {
   // ordinary writes destructive (an edit that overwrites a field), so where AgentX can see the item
   // a call names, its own classes decide; the hint speaks only where AgentX cannot tell (spec 014 D1).
   if (input.facts !== undefined && input.facts.itemArguments === undefined && input.facts.hints?.destructiveHint === true) {
-    return { ...evaluation, settled: { outcome: "ask", source: "default", kind: "hint", reason: "the vendor marks this tool destructive and AgentX cannot tell what it changes" } };
+    return { ...evaluation, settled: { outcome: "ask", source: "default", kind: "hint", reason: "the vendor marks this tool destructive and Rovara cannot tell what it changes" } };
   }
   return evaluation;
 }

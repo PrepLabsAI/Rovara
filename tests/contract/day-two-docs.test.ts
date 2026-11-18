@@ -18,12 +18,12 @@ describe("the guides (FR-054)", () => {
     }
   });
 
-  it("gives the teardown order, the three worker tags, and agentx destroy", () => {
+  it("gives the teardown order, the three worker tags, and rovara destroy", () => {
     const guide = read("docs/teardown.md");
-    expect(guide).toContain("agentx --env <env> destroy --region <region>");
+    expect(guide).toContain("rovara --env <env> destroy --region <region>");
     expect(guide).toContain("Name=tag:agentx:env,Values=<env>");
     const order = ["agentx-<env>-slack", "agentx-<env>-runtime", "agentx-<env>-control-plane", "aws ec2 terminate-instances", "agentx-<env>-identity", "agentx-<env>-foundation", "agentx-<env>-access"];
-    // The order is checked in the by-hand steps, so the agentx destroy section may name every stack.
+    // The order is checked in the by-hand steps, so the rovara destroy section may name every stack.
     const byHand = guide.slice(guide.indexOf("## By hand"));
     expect(guide.indexOf("## By hand")).toBeGreaterThan(0);
     const positions = order.map((text) => byHand.indexOf(text));
@@ -54,7 +54,7 @@ describe("the guides (FR-054)", () => {
     const start = guide.indexOf("## Replace the Slack bot token");
     expect(start).toBeGreaterThan(0);
     const section = guide.slice(start, guide.indexOf("\n## ", start + 1));
-    for (const step of ["**Secrets Manager**", "`agentx/<env>/slack`", "**Retrieve secret value**", "**Edit**", "Change only the value of the `botToken` key", "**Save**", "agentx --env <env> doctor"]) expect(section, step).toContain(step);
+    for (const step of ["**Secrets Manager**", "`agentx/<env>/slack`", "**Retrieve secret value**", "**Edit**", "Change only the value of the `botToken` key", "**Save**", "rovara --env <env> doctor"]) expect(section, step).toContain(step);
     expect(section).toContain("within 5 minutes of the\nsave");
   });
 

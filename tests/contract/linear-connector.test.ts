@@ -125,7 +125,7 @@ describe("registering a project with a linear connector", () => {
       githubApp: { ref: "github-app", secretName: "agentx/github-app" },
     } });
     expect((await adminCall(handler, { method: "POST", path: "/v1/admin/credentials", body: { ref: "linear-oauth", type: "oauth-client-credentials", secretName: "agentx/connectors/linear-oauth" } })).status).toBe(201);
-    expect((await register(handler, [linear()])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential linear-charterarc is not registered; run agentx admin credential register first" });
+    expect((await register(handler, [linear()])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential linear-charterarc is not registered; run rovara admin credential register first" });
     expect((await register(handler, [linear({ credentialRef: "linear-oauth" })])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential linear-oauth is oauth-client-credentials; a Linear connector needs static-secret" });
     expect((await register(handler, [linear({ credentialRef: "github-app" })])).body.error).toEqual({ code: "CONFIG_INVALID", message: "connector linear: credential github-app is github-app; a Linear connector needs static-secret" });
   });

@@ -2,7 +2,7 @@
 
 A release is a tagged, versioned bundle: the CloudFormation templates the installer deploys, the
 code packages those templates reference, two container images, and the Rovara Code CLI on npm
-(`@preplabsai/rovara-code`, command `rovara`, compatibility alias `agentx`). All of
+(`@preplabsai/rovara-code`, command `rovara`, compatibility alias `rovara`). All of
 it is built from the same tagged commit, so a release is always self-consistent.
 
 ## What a release contains
@@ -25,7 +25,7 @@ A release directory looks like this:
   They are built for `arm64` machines only, the same chip the installer's runtime uses.
 - The worker image carries Node 22, Git, the Docker CLI and Compose, Python 3 with pip and venv,
   and uv. A change to `environments/base/Dockerfile` reaches installs only through a new release's
-  worker image: tag a release, and upgrade each environment with `agentx upgrade`. Bookworm's
+  worker image: tag a release, and upgrade each environment with `rovara upgrade`. Bookworm's
   system Python is externally managed (PEP 668), so a repository should use `python3 -m venv` or
   uv, not a bare `pip install`. `uv python install` needs network access.
 - The CLI, published to npm as a single self-contained package with no separate dependencies to
@@ -90,7 +90,7 @@ The first release, v0.1.0, shipped on 2026-10-06 from commit `87d28a2d`. Everyth
 place; this records what it is, so a change to any piece can be made deliberately.
 
 - **ECR Public repositories.** `agentx-worker` and `agentx-slack` in account `944937319445`
-  (`us-east-1`), under the registry alias `i7z2k3a8`. A shorter alias, `agentx`, is requested and
+  (`us-east-1`), under the registry alias `i7z2k3a8`. A shorter alias, `rovara`, is requested and
   waiting on AWS's approval; switching to it means changing `AGENTX_ECR_PUBLIC_ALIAS`.
 - **The publish role.** `arn:aws:iam::944937319445:role/agentx-github-release` can push images
   only to those two repositories, plus the two sign-in permissions ECR Public requires
@@ -240,8 +240,8 @@ operator role, `doctor`, and `destroy`. A last job destroys anything a failed ru
 
 Some steps need a person, so do these by hand before tagging, in a throwaway account:
 
-1. One full `agentx init`, all the way to a Slack reply in the thread (docs/install.md).
-2. `agentx --env <env> alerts test`, and check the alarm arrives.
+1. One full `rovara init`, all the way to a Slack reply in the thread (docs/install.md).
+2. `rovara --env <env> alerts test`, and check the alarm arrives.
 3. Remove that environment by hand, following docs/teardown.md's "By hand" section, and check
    nothing is left.
 4. Once, SC-001: a person who has never seen Rovara installs it from docs/install.md, on a clean

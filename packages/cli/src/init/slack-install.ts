@@ -110,7 +110,7 @@ export async function addToSlack(input: {
   const access = await api.oauthAccess({ clientId: app.clientId, clientSecret: app.clientSecret, code, redirectUri: input.redirectUri });
   const botToken = access.access_token;
   if (!access.ok || access.token_type !== "bot" || botToken === undefined || !botToken.startsWith("xoxb-") || access.bot_user_id === undefined || access.team?.id === undefined) {
-    throw agentXError("CONFIG_INVALID", `Slack did not give AgentX the app's bot token (${access.error ?? "no bot token in its reply"}); press Add to Slack again`);
+    throw agentXError("CONFIG_INVALID", `Slack did not give Rovara the app's bot token (${access.error ?? "no bot token in its reply"}); press Add to Slack again`);
   }
   if (access.app_id !== undefined && access.app_id !== pending.appId) {
     throw agentXError("CONFIG_INVALID", `Slack installed app ${access.app_id}, not ${pending.appId}; press Add to Slack again`);

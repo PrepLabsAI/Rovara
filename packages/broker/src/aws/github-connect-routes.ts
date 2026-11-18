@@ -25,7 +25,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, companyLog, OrgIdSchema } from "@agentx/contracts";
+import { agentXError, companyLog, OrgIdSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import { githubUninstallUrl, projectsUsingInstallation } from "./github-lifecycle.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
@@ -47,7 +47,7 @@ export const CONNECTION_NOT_FOUND = "That GitHub connection was not found.";
 export const DISCONNECT_UNAVAILABLE = "GitHub could not be disconnected just now; try again.";
 /** The 409 when projects still use the installation: their names (this company's only; project names are lowercase letters, digits and hyphens). */
 export const githubInUseMessage = (projects: readonly string[]) => `Projects still use this GitHub connection: ${projects.join(", ")}. Remove its repositories from them first.`;
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 /** How long a state or a ticket lives. */
 export const GITHUB_CONNECT_TTL_SECONDS = 600;

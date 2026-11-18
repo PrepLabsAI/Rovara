@@ -63,7 +63,7 @@ describe("authorize (FR-001, FR-002)", () => {
       expect(response.statusCode).toBe(400);
       expect(response.headers.location).toBeUndefined();
       expect(response.headers["content-type"]).toBe("text/html; charset=utf-8");
-      expect(response.body).toContain("agentx login");
+      expect(response.body).toContain("rovara login");
     }
   });
 
@@ -118,7 +118,7 @@ describe("authorize (FR-001, FR-002)", () => {
     const h = identityHarness({ slack: false });
     const location = new URL((await h.http(httpEvent("GET", authorizeQuery()))).headers.location!);
     expect(location.searchParams.get("error")).toBe("access_denied");
-    expect(location.searchParams.get("error_description")).toContain("agentx signin enable");
+    expect(location.searchParams.get("error_description")).toContain("rovara signin enable");
   });
 
   it("says Slack sign-in is not finished when the Slack secret has no bot token (F25)", async () => {

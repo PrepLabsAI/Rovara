@@ -6,7 +6,7 @@ import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { passingChecks, scriptedPrompter } from "../support/init-fakes.js";
 import { seeded, services, stacks } from "../support/config-services.js";
 
-// M1.4 Task 4.10D, test 41 (MODEL3): the fallback is a choice, made with `agentx config set models.fallback`, held to the pinned Bedrock catalog, tested before it is set, and applied to the
+// M1.4 Task 4.10D, test 41 (MODEL3): the fallback is a choice, made with `rovara config set models.fallback`, held to the pinned Bedrock catalog, tested before it is set, and applied to the
 // worker's runtime stack and the Slack stack together.
 
 const ENV = "staging";
@@ -28,7 +28,7 @@ function perStack(initial: Record<string, string>) {
 const BOTH_NONE = { "agentx-staging-runtime": "none", "agentx-staging-slack": "none" };
 const BOTH_CHOSEN = { "agentx-staging-runtime": CHOSEN, "agentx-staging-slack": CHOSEN };
 
-describe("agentx config set models.fallback", () => {
+describe("rovara config set models.fallback", () => {
   it("is a documented key whose default is none, and that an upgrade keeps (it is an operator parameter of both stacks)", async () => {
     const row = await runConfigGet(services({ store: await seeded() }), ENV, "models.fallback");
     expect(row).toMatchObject({ key: "models.fallback", value: "none", where: "stack parameter ModelFallback on agentx-staging-runtime and agentx-staging-slack" });
@@ -84,7 +84,7 @@ describe("agentx config set models.fallback", () => {
     } };
     const second = services({ store: await seeded(), cloudFormation: broken });
     await expect(runConfigSet(second, ENV, { key: "models.fallback", value: CHOSEN, yes: true })).rejects.toThrow("Rate exceeded");
-    expect(second.lines.join("\n")).toContain("models.fallback is now us.anthropic.claude-sonnet-4-6 on agentx-staging-runtime, but not on agentx-staging-slack; run the same agentx config set again to finish it");
+    expect(second.lines.join("\n")).toContain("models.fallback is now us.anthropic.claude-sonnet-4-6 on agentx-staging-runtime, but not on agentx-staging-slack; run the same rovara config set again to finish it");
   });
 
   it("refuses a model outside the pinned Bedrock catalog, and one that fails its test call, changing nothing", async () => {

@@ -16,6 +16,7 @@ import { plainMessage } from "../output.js";
 import type { SignInCheck } from "../signin/check.js";
 import type { ChatGptHealthRead } from "./chatgpt.js";
 import type { RuntimeStatusRead } from "./runtime.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** Re-exported so every doctor check reads it from here (ruling F11: one copy, in output.ts). */
 export { plainMessage };
@@ -63,17 +64,17 @@ export function check(group: DoctorGroup, name: string, status: CheckStatus, det
  * service that group talks to: Slack and GitHub over the network, the AWS-only groups at AWS, and the
  * groups that mix several (connectors, sign-in) at the problem named. */
 const GUARDED_FIX: Record<DoctorGroup, string> = {
-  stacks: "check this computer's network access and AWS credentials, then run agentx doctor again",
-  secrets: "check this computer's network access and AWS credentials, then run agentx doctor again",
-  models: "check this computer's network access and AWS credentials, then run agentx doctor again",
-  alerts: "check this computer's network access and AWS credentials, then run agentx doctor again",
-  capacity: "check this computer's network access and AWS credentials, then run agentx doctor again",
-  slack: "check this computer's network access to slack.com, then run agentx doctor again",
-  github: "check this computer's network access to github.com, then run agentx doctor again",
-  connectors: "fix the problem named above, then run agentx doctor again",
-  "sign-in": "fix the problem named above, then run agentx doctor again",
-  chatgpt: "check this computer's network access to the control plane and its admin sign-in, then run agentx doctor again",
-  runtime: "check this computer's network access to the control plane and its admin sign-in, then run agentx doctor again",
+  stacks: `check this computer's network access and AWS credentials, then run ${CLI_COMMAND_NAME} doctor again`,
+  secrets: `check this computer's network access and AWS credentials, then run ${CLI_COMMAND_NAME} doctor again`,
+  models: `check this computer's network access and AWS credentials, then run ${CLI_COMMAND_NAME} doctor again`,
+  alerts: `check this computer's network access and AWS credentials, then run ${CLI_COMMAND_NAME} doctor again`,
+  capacity: `check this computer's network access and AWS credentials, then run ${CLI_COMMAND_NAME} doctor again`,
+  slack: `check this computer's network access to slack.com, then run ${CLI_COMMAND_NAME} doctor again`,
+  github: `check this computer's network access to github.com, then run ${CLI_COMMAND_NAME} doctor again`,
+  connectors: `fix the problem named above, then run ${CLI_COMMAND_NAME} doctor again`,
+  "sign-in": `fix the problem named above, then run ${CLI_COMMAND_NAME} doctor again`,
+  chatgpt: `check this computer's network access to the control plane and its admin sign-in, then run ${CLI_COMMAND_NAME} doctor again`,
+  runtime: `check this computer's network access to the control plane and its admin sign-in, then run ${CLI_COMMAND_NAME} doctor again`,
 };
 
 /** A group that throws becomes one failed check, so one broken dependency never hides the others. */
@@ -93,7 +94,7 @@ export function doctorReport(settings: EnvironmentSettings, checks: DoctorCheck[
 const LABEL: Record<CheckStatus, string> = { ok: "ok  ", warn: "warn", fail: "FAIL", skip: "skip" };
 
 export function reportText(report: DoctorReport): string {
-  const lines = [`agentx doctor: environment ${report.env} (release ${report.version}, ${report.engine} engine, ${report.region})`];
+  const lines = [`${CLI_COMMAND_NAME} doctor: environment ${report.env} (release ${report.version}, ${report.engine} engine, ${report.region})`];
   for (const entry of report.checks) {
     lines.push(`${LABEL[entry.status]}  ${entry.group.padEnd(10)}  ${entry.name}: ${entry.detail}`);
     if (entry.fix !== undefined && entry.status !== "ok") lines.push(`      fix: ${entry.fix}`);

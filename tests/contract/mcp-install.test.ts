@@ -6,7 +6,7 @@ import { createCliProgram, executeCli } from "../../packages/cli/src/main.js";
 import { codexToml, cursorJson, installMcp, mcpEntry, runCommand } from "../../packages/cli/src/mcp/install.js";
 
 const entry = mcpEntry("0.4.0", undefined);
-const tomlBlock = '[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n';
+const tomlBlock = '[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n';
 const home = () => mkdtemp(join(tmpdir(), "agentx-install-"));
 const codexFile = (dir: string) => join(dir, ".codex", "config.toml");
 const cursorFile = (dir: string) => join(dir, ".cursor", "mcp.json");
@@ -28,41 +28,41 @@ describe("the server entry (FR-043, R26)", () => {
 
 describe("Codex's config.toml", () => {
   it("adds the table to an empty or missing file", () => {
-    expect(codexToml(undefined, entry)).toEqual({ action: "added", text: '[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n' });
+    expect(codexToml(undefined, entry)).toEqual({ action: "added", text: '[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n' });
   });
 
   it("appends after other entries, leaving them as they are", () => {
     const existing = 'model = "o4"\n\n[mcp_servers.linear]\ncommand = "linear-mcp"\n';
-    expect(codexToml(existing, entry).text).toBe(`${existing}\n[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n`);
+    expect(codexToml(existing, entry).text).toBe(`${existing}\n[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n`);
   });
 
-  it("replaces the agentx table and its sub-tables and keeps every other byte (Review Focus 5)", () => {
+  it("replaces the rovara table and its sub-tables and keeps every other byte (Review Focus 5)", () => {
     const before = [
       "# servers", "[mcp_servers.linear]", 'command = "linear"', "",
-      "[mcp_servers.agentx]", 'command = "npx"', 'args = ["-y", "@preplabsai/rovara-code@0.1.0", "mcp"]', "",
-      "[mcp_servers.agentx.env]", 'FOO = "bar"', "",
+      "[mcp_servers.rovara]", 'command = "npx"', 'args = ["-y", "@preplabsai/rovara-code@0.1.0", "mcp"]', "",
+      "[mcp_servers.rovara.env]", 'FOO = "bar"', "",
       "# keep this comment", "[mcp_servers.github]", 'command = "gh"', "",
     ].join("\n");
     const after = [
       "# servers", "[mcp_servers.linear]", 'command = "linear"', "",
-      "[mcp_servers.agentx]", 'command = "npx"', 'args = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]', "",
+      "[mcp_servers.rovara]", 'command = "npx"', 'args = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]', "",
       "# keep this comment", "[mcp_servers.github]", 'command = "gh"', "",
     ].join("\n");
     expect(codexToml(before, entry)).toEqual({ action: "replaced", text: after });
   });
 
   it.each([
-    '[mcp_servers."agentx"]\ncommand = "x"\n',
-    'mcp_servers.agentx = { command = "x" }\n',
-    '[mcp_servers]\nagentx = { command = "x" }\n',
-    '[[mcp_servers.agentx]]\ncommand = "x"\n',
-    '[mcp_servers.agentx]\ncommand = "x"\n\n[mcp_servers."agentx".env]\nFOO = "bar"\n',
-  ])("refuses a file that defines agentx another way, and shows the entry to add by hand: %j", (existing) => {
-    expect(() => codexToml(existing, entry)).toThrow(/by hand[\s\S]*\[mcp_servers\.agentx\]/);
+    '[mcp_servers."rovara"]\ncommand = "x"\n',
+    'mcp_servers.rovara = { command = "x" }\n',
+    '[mcp_servers]\nrovara = { command = "x" }\n',
+    '[[mcp_servers.rovara]]\ncommand = "x"\n',
+    '[mcp_servers.rovara]\ncommand = "x"\n\n[mcp_servers."rovara".env]\nFOO = "bar"\n',
+  ])("refuses a file that defines rovara another way, and shows the entry to add by hand: %j", (existing) => {
+    expect(() => codexToml(existing, entry)).toThrow(/by hand[\s\S]*\[mcp_servers\.rovara\]/);
   });
 
   it("refuses a file that is not valid TOML, and shows the entry to add by hand", () => {
-    expect(() => codexToml('[mcp_servers.linear\ncommand = "linear-mcp"\n', entry)).toThrow(/not valid TOML[\s\S]*by hand[\s\S]*\[mcp_servers\.agentx\]/);
+    expect(() => codexToml('[mcp_servers.linear\ncommand = "linear-mcp"\n', entry)).toThrow(/not valid TOML[\s\S]*by hand[\s\S]*\[mcp_servers\.rovara\]/);
     expect(() => codexToml('model = "o4"\nmodel = "o5"\n', entry)).toThrow(/not valid TOML/);
   });
 
@@ -71,13 +71,13 @@ describe("Codex's config.toml", () => {
     expect(codexToml(existing, entry)).toEqual({ action: "added", text: `${existing}\n${tomlBlock}` });
   });
 
-  it("says a file that defines agentx another way cannot be edited safely", () => {
-    expect(() => codexToml('[[mcp_servers.agentx]]\ncommand = "x"\n', entry)).toThrow("~/.codex/config.toml defines agentx in a form this command cannot edit safely");
+  it("says a file that defines rovara another way cannot be edited safely", () => {
+    expect(() => codexToml('[[mcp_servers.rovara]]\ncommand = "x"\n', entry)).toThrow("~/.codex/config.toml defines rovara in a form this command cannot edit safely");
   });
 
   it("keeps Windows line endings", () => {
     const existing = '[mcp_servers.linear]\r\ncommand = "linear-mcp"\r\n';
-    expect(codexToml(existing, entry).text).toBe(`${existing}\r\n[mcp_servers.agentx]\r\ncommand = "npx"\r\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\r\n`);
+    expect(codexToml(existing, entry).text).toBe(`${existing}\r\n[mcp_servers.rovara]\r\ncommand = "npx"\r\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\r\n`);
   });
 
   it("gives back the same text when the entry is already current", () => {
@@ -87,11 +87,11 @@ describe("Codex's config.toml", () => {
 });
 
 describe("Cursor's mcp.json", () => {
-  it("adds or replaces mcpServers.agentx and keeps every other server and key", () => {
-    const existing = JSON.stringify({ mcpServers: { linear: { command: "linear-mcp" }, agentx: { command: "old" } }, other: true });
+  it("adds or replaces mcpServers.rovara and keeps every other server and key", () => {
+    const existing = JSON.stringify({ mcpServers: { linear: { command: "linear-mcp" }, rovara: { command: "old" } }, other: true });
     const result = cursorJson(existing, entry);
     expect(result.action).toBe("replaced");
-    expect(JSON.parse(result.text)).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, agentx: entry }, other: true });
+    expect(JSON.parse(result.text)).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, rovara: entry }, other: true });
     expect(cursorJson(undefined, entry)).toMatchObject({ action: "added" });
   });
 
@@ -103,9 +103,9 @@ describe("Cursor's mcp.json", () => {
 
   it("keeps the file's own indentation", () => {
     const tabs = '{\n\t"mcpServers": {\n\t\t"linear": { "command": "linear-mcp" }\n\t}\n}\n';
-    expect(cursorJson(tabs, entry).text).toBe(`${JSON.stringify({ mcpServers: { linear: { command: "linear-mcp" }, agentx: entry } }, null, "\t")}\n`);
+    expect(cursorJson(tabs, entry).text).toBe(`${JSON.stringify({ mcpServers: { linear: { command: "linear-mcp" }, rovara: entry } }, null, "\t")}\n`);
     const four = '{\n    "mcpServers": {}\n}';
-    expect(cursorJson(four, entry).text).toBe(`${JSON.stringify({ mcpServers: { agentx: entry } }, null, 4)}\n`);
+    expect(cursorJson(four, entry).text).toBe(`${JSON.stringify({ mcpServers: { rovara: entry } }, null, 4)}\n`);
   });
 });
 
@@ -113,16 +113,16 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
   it("writes Codex's file, keeps a copy of the old one, and says what changed", async () => {
     const dir = await withCodexConfig('[mcp_servers.linear]\ncommand = "linear-mcp"\n');
     const text = await installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" });
-    expect(await readFile(codexFile(dir), "utf8")).toContain('[mcp_servers.agentx]\ncommand = "npx"');
+    expect(await readFile(codexFile(dir), "utf8")).toContain('[mcp_servers.rovara]\ncommand = "npx"');
     expect(await readFile(`${codexFile(dir)}.agentx-backup`, "utf8")).toBe('[mcp_servers.linear]\ncommand = "linear-mcp"\n');
     expect(text).toContain(codexFile(dir));
-    expect(text).toContain("Added the agentx entry");
+    expect(text).toContain("Added the rovara entry");
   });
 
   it("writes Cursor's file when it does not exist yet", async () => {
     const dir = await home();
     await installMcp("cursor", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" });
-    expect(JSON.parse(await readFile(cursorFile(dir), "utf8"))).toEqual({ mcpServers: { agentx: entry } });
+    expect(JSON.parse(await readFile(cursorFile(dir), "utf8"))).toEqual({ mcpServers: { rovara: entry } });
   });
 
   it("names --env in the entry when given", async () => {
@@ -142,9 +142,9 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     expect(await readFile(`${codexFile(dir)}.agentx-backup`, "utf8")).toBe(original);
 
     const upgraded = await installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.5.0" });
-    expect(upgraded).toContain("Replaced the agentx entry");
+    expect(upgraded).toContain("Replaced the rovara entry");
     const text = await readFile(codexFile(dir), "utf8");
-    expect(text.match(/\[mcp_servers\.agentx\]/g)).toHaveLength(1);
+    expect(text.match(/\[mcp_servers\.rovara\]/g)).toHaveLength(1);
     expect(text).toContain("@preplabsai/rovara-code@0.5.0");
     expect(text).toContain('[mcp_servers.linear]\ncommand = "linear-mcp"\n');
   });
@@ -167,7 +167,7 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     await symlink(target, cursorFile(dir));
     await installMcp("cursor", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" });
     expect((await lstat(cursorFile(dir))).isSymbolicLink()).toBe(true);
-    expect(JSON.parse(await readFile(target, "utf8"))).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, agentx: entry } });
+    expect(JSON.parse(await readFile(target, "utf8"))).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, rovara: entry } });
     // The backup goes beside the link, never into the folder the link points at (a dotfiles checkout, say).
     expect(await readFile(`${cursorFile(dir)}.agentx-backup`, "utf8")).toBe('{ "mcpServers": { "linear": { "command": "linear-mcp" } } }\n');
     expect(await readdir(join(dir, "dotfiles"))).toEqual(["mcp.json"]);
@@ -177,7 +177,7 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     const dir = await home();
     await mkdir(join(dir, ".codex"));
     await symlink(join(dir, "dotfiles", "config.toml"), codexFile(dir));
-    await expect(installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" })).rejects.toThrow(/the link points at a missing file;[\s\S]*by hand[\s\S]*\[mcp_servers\.agentx\]/);
+    await expect(installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" })).rejects.toThrow(/the link points at a missing file;[\s\S]*by hand[\s\S]*\[mcp_servers\.rovara\]/);
     expect(await readdir(join(dir, ".codex"))).toEqual(["config.toml"]);
     expect((await lstat(codexFile(dir))).isSymbolicLink()).toBe(true);
   });
@@ -186,7 +186,7 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     const dir = await home();
     const codexHome = join(dir, "elsewhere");
     const text = await installMcp("codex", { print: false }, { home: dir, codexHome, run: vi.fn(), version: "0.4.0" });
-    expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.agentx]");
+    expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.rovara]");
     expect(text).toContain(join(codexHome, "config.toml"));
     await expect(readFile(codexFile(dir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await writeFile(join(codexHome, "config.toml"), "[mcp_servers.linear\n");
@@ -195,7 +195,7 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
 
   it.each([
     ["not valid TOML", 'TOKEN = "fake-secret-123"\n[mcp_servers.linear\n'],
-    ["refused", 'TOKEN = "fake-secret-123"\n[[mcp_servers.agentx]]\ncommand = "x"\n'],
+    ["refused", 'TOKEN = "fake-secret-123"\n[[mcp_servers.rovara]]\ncommand = "x"\n'],
   ])("never repeats the file's contents in its error (%s)", async (_name, text) => {
     const dir = await withCodexConfig(text);
     const error: unknown = await installMcp("codex", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" }).catch((caught: unknown) => caught);
@@ -217,26 +217,27 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
     expect(await readdir(join(dir, folder))).toEqual([name]);
   });
 
-  it("runs claude mcp remove, then add, at user scope", async () => {
+  it("runs claude mcp remove (the new name), reads an agentx entry, then add, at user scope", async () => {
     const run = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     const text = await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" });
     expect(run.mock.calls).toEqual([
-      ["claude", ["mcp", "remove", "--scope", "user", "agentx"]],
-      ["claude", ["mcp", "add", "--scope", "user", "agentx", "--", "npx", "-y", "@preplabsai/rovara-code@0.4.0", "mcp"]],
+      ["claude", ["mcp", "remove", "--scope", "user", "rovara"]],
+      ["claude", ["mcp", "get", "agentx"]],
+      ["claude", ["mcp", "add", "--scope", "user", "rovara", "--", "npx", "-y", "@preplabsai/rovara-code@0.4.0", "mcp"]],
     ]);
-    expect(text).toContain("claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code@0.4.0 mcp");
+    expect(text).toContain("claude mcp add --scope user rovara -- npx -y @preplabsai/rovara-code@0.4.0 mcp");
   });
 
   it("says what failed when claude mcp add fails, and the command to run by hand", async () => {
     const run = vi.fn(async (_command: string, args: readonly string[]) => (args[1] === "add" ? { code: 1, stdout: "", stderr: "something broke\n" } : { code: 1, stdout: "", stderr: "not found" }));
-    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add failed \(something broke\)[\s\S]*claude mcp add --scope user agentx -- npx/);
+    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add failed \(something broke\)[\s\S]*claude mcp add --scope user rovara -- npx/);
   });
 
   it("says the previous entry was removed, and the exact command to add it back, when add fails after remove (final review M4)", async () => {
     const run = vi.fn(async (_command: string, args: readonly string[]) => (args[1] === "add" ? { code: 1, stdout: "", stderr: "something broke\n" } : { code: 0, stdout: "Removed agentx", stderr: "" }));
     const error: unknown = await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" }).catch((caught: unknown) => caught);
     expect((error as Error).message).toContain("claude mcp add failed (something broke)");
-    expect((error as Error).message).toContain("the previous agentx entry was removed; add it back with:\n  claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code@0.4.0 mcp");
+    expect((error as Error).message).toContain("the previous rovara entry was removed; add it back with:\n  claude mcp add --scope user rovara -- npx -y @preplabsai/rovara-code@0.4.0 mcp");
   });
 
   it("does not say an entry was removed when there was none to remove", async () => {
@@ -247,18 +248,97 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
 
   it("prints the command to run when Claude Code is not installed", async () => {
     const run = vi.fn(async () => { throw Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" }); });
-    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add --scope user agentx -- npx -y @preplabsai\/rovara-code@0\.4\.0 mcp/);
+    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add --scope user rovara -- npx -y @preplabsai\/rovara-code@0\.4\.0 mcp/);
   });
 
   it("with --print, only prints the entry and changes nothing", async () => {
     const dir = await home();
     const run = vi.fn();
     const text = await installMcp("codex", { print: true }, { home: dir, run, version: "0.4.0" });
-    expect(text).toContain("[mcp_servers.agentx]");
+    expect(text).toContain("[mcp_servers.rovara]");
     await expect(readFile(codexFile(dir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(run).not.toHaveBeenCalled();
-    expect(await installMcp("claude-code", { print: true }, { home: dir, run, version: "0.4.0" })).toBe("claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code@0.4.0 mcp\n");
+    expect(await installMcp("claude-code", { print: true }, { home: dir, run, version: "0.4.0" })).toBe("claude mcp add --scope user rovara -- npx -y @preplabsai/rovara-code@0.4.0 mcp\n");
     expect(run).not.toHaveBeenCalled();
+  });
+});
+
+describe("an entry written under the old name (agentx) is upgraded", () => {
+  const legacyToml = (args: string) => `[mcp_servers.linear]\ncommand = "linear"\n\n[mcp_servers.agentx]\ncommand = "npx"\nargs = ${args}\n\n[mcp_servers.github]\ncommand = "gh"\n`;
+
+  it("Codex: our old agentx table (npx and the published CLI) becomes the rovara table, in place, with every other byte kept", () => {
+    const before = legacyToml('["-y", "@preplabsai/rovara-code@0.1.0", "mcp"]');
+    const result = codexToml(before, entry);
+    expect(result.action).toBe("replaced");
+    expect(result.text).toBe('[mcp_servers.linear]\ncommand = "linear"\n\n[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n\n[mcp_servers.github]\ncommand = "gh"\n');
+    expect(result.text).not.toContain("agentx");
+  });
+
+  it("Codex: the very old package name is recognised too, and a sub-table of the old entry goes with it", () => {
+    const before = '[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@charterarc/agentx@0.1.0", "mcp"]\n\n[mcp_servers.agentx.env]\nFOO = "bar"\n';
+    expect(codexToml(before, entry).text).toBe('[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n');
+  });
+
+  it("Codex: a hand-made table named agentx (not our command) is left alone, and the rovara table is added beside it", () => {
+    const before = '[mcp_servers.agentx]\ncommand = "my-own-server"\nargs = ["--port", "9"]\n';
+    const result = codexToml(before, entry);
+    expect(result.action).toBe("added");
+    expect(result.text).toBe(`${before}\n[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@0.4.0", "mcp"]\n`);
+  });
+
+  it("Codex: running again after the upgrade changes nothing", () => {
+    const once = codexToml(legacyToml('["-y", "@preplabsai/rovara-code@0.1.0", "mcp"]'), entry).text;
+    expect(codexToml(once, entry)).toEqual({ action: "replaced", text: once });
+  });
+
+  it("Cursor: our old agentx entry is replaced by rovara, other servers and keys stay, and a hand-made agentx entry stays", () => {
+    const ours = JSON.stringify({ mcpServers: { linear: { command: "linear-mcp" }, agentx: { command: "npx", args: ["-y", "@preplabsai/rovara-code@0.1.0", "mcp"] } }, other: true });
+    const upgraded = cursorJson(ours, entry);
+    expect(upgraded.action).toBe("replaced");
+    expect(JSON.parse(upgraded.text)).toEqual({ mcpServers: { linear: { command: "linear-mcp" }, rovara: entry }, other: true });
+    const handMade = JSON.stringify({ mcpServers: { agentx: { command: "my-own-server" } } });
+    expect(JSON.parse(cursorJson(handMade, entry).text)).toEqual({ mcpServers: { agentx: { command: "my-own-server" }, rovara: entry } });
+    expect(cursorJson(cursorJson(ours, entry).text, entry).action).toBe("replaced");
+  });
+
+  it("installMcp on a Cursor file with the old entry writes the rovara entry, keeps a backup of the old file, and the file no longer names agentx", async () => {
+    const dir = await home();
+    await mkdir(join(dir, ".cursor"));
+    const old = JSON.stringify({ mcpServers: { agentx: { command: "npx", args: ["-y", "@preplabsai/rovara-code", "mcp"] } } });
+    await writeFile(cursorFile(dir), old);
+    const text = await installMcp("cursor", { print: false }, { home: dir, run: vi.fn(), version: "0.4.0" });
+    expect(text).toContain("Replaced the rovara entry");
+    expect(JSON.parse(await readFile(cursorFile(dir), "utf8"))).toEqual({ mcpServers: { rovara: entry } });
+    expect(await readFile(`${cursorFile(dir)}.agentx-backup`, "utf8")).toBe(old);
+  });
+
+  const claudeRun = (legacy: { code: number; stdout: string }, addCode = 0) => vi.fn(async (_command: string, args: readonly string[]) => {
+    if (args[1] === "add") return { code: addCode, stdout: "", stderr: addCode === 0 ? "" : "boom" };
+    if (args[1] === "get") return { ...legacy, stderr: "" };
+    return { code: args.at(-1) === "rovara" ? 1 : 0, stdout: "", stderr: "" };
+  });
+  const OURS = { code: 0, stdout: "agentx:\n  Scope: User config\n  Type: stdio\n  Command: npx\n  Args: -y @preplabsai/rovara-code@0.1.0 mcp\n" };
+  const calls = (run: ReturnType<typeof claudeRun>) => run.mock.calls.map(([, args]) => args.slice(0, 5).join(" "));
+
+  it("Claude Code: our old agentx entry (npx and our package) is removed before rovara is added, and a failed add says an entry was removed", async () => {
+    const run = claudeRun(OURS);
+    await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" });
+    expect(calls(run)).toEqual(["mcp remove --scope user rovara", "mcp get agentx", "mcp remove --scope user agentx", "mcp add --scope user rovara"]);
+    const failing = claudeRun(OURS, 1);
+    await expect(installMcp("claude-code", { print: false }, { home: await home(), run: failing, version: "0.4.0" })).rejects.toThrow(/previous rovara entry was removed/);
+  });
+
+  it("Claude Code: a hand-made agentx entry, one that cannot be read, or none is never removed", async () => {
+    for (const legacy of [
+      { code: 0, stdout: "agentx:\n  Type: stdio\n  Command: my-own-server\n  Args: --port 9\n" },
+      { code: 0, stdout: "agentx:\n  Type: stdio\n  Command: npx\n  Args: -y some-other-package\n" },
+      { code: 0, stdout: "something this version of claude prints differently" },
+      { code: 1, stdout: "" },
+    ]) {
+      const run = claudeRun(legacy);
+      await installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" });
+      expect(calls(run), JSON.stringify(legacy)).toEqual(["mcp remove --scope user rovara", "mcp get agentx", "mcp add --scope user rovara"]);
+    }
   });
 });
 
@@ -269,7 +349,7 @@ describe("runCommand", () => {
   });
 });
 
-describe("agentx mcp install", () => {
+describe("rovara mcp install", () => {
   const cli = async (argv: string[], dir: string, runCommand = vi.fn()) => {
     let stdout = "";
     let stderr = "";
@@ -286,17 +366,17 @@ describe("agentx mcp install", () => {
     const dir = await home();
     const printed = await cli(["--env", "staging", "mcp", "install", "--client", "codex", "--print"], dir);
     expect(printed).toMatchObject({ code: 0, stderr: "" });
-    expect(printed.stdout).toBe('[mcp_servers.agentx]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@latest", "--env", "staging", "mcp"]\n');
+    expect(printed.stdout).toBe('[mcp_servers.rovara]\ncommand = "npx"\nargs = ["-y", "@preplabsai/rovara-code@latest", "--env", "staging", "mcp"]\n');
     await expect(readFile(codexFile(dir), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("writes Cursor's file and passes Claude Code's commands to the runner", async () => {
     const dir = await home();
     expect((await cli(["mcp", "install", "--client", "cursor"], dir)).code).toBe(0);
-    expect(JSON.parse(await readFile(cursorFile(dir), "utf8"))).toEqual({ mcpServers: { agentx: mcpEntry(undefined, undefined) } });
+    expect(JSON.parse(await readFile(cursorFile(dir), "utf8"))).toEqual({ mcpServers: { rovara: mcpEntry(undefined, undefined) } });
     const run = vi.fn(async () => ({ code: 0, stdout: "", stderr: "" }));
     expect((await cli(["mcp", "install", "--client", "claude-code"], dir, run)).code).toBe(0);
-    expect(run).toHaveBeenCalledWith("claude", ["mcp", "add", "--scope", "user", "agentx", "--", "npx", "-y", "@preplabsai/rovara-code@latest", "mcp"]);
+    expect(run).toHaveBeenCalledWith("claude", ["mcp", "add", "--scope", "user", "rovara", "--", "npx", "-y", "@preplabsai/rovara-code@latest", "mcp"]);
   });
 
   it("writes Codex's file under CODEX_HOME when it is set, and under ~/.codex when it is empty", async () => {
@@ -305,10 +385,10 @@ describe("agentx mcp install", () => {
     vi.stubEnv("CODEX_HOME", codexHome);
     try {
       expect((await cli(["mcp", "install", "--client", "codex"], dir)).code).toBe(0);
-      expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.agentx]");
+      expect(await readFile(join(codexHome, "config.toml"), "utf8")).toContain("[mcp_servers.rovara]");
       vi.stubEnv("CODEX_HOME", "");
       expect((await cli(["mcp", "install", "--client", "codex"], dir)).code).toBe(0);
-      expect(await readFile(codexFile(dir), "utf8")).toContain("[mcp_servers.agentx]");
+      expect(await readFile(codexFile(dir), "utf8")).toContain("[mcp_servers.rovara]");
     } finally {
       vi.unstubAllEnvs();
     }
@@ -327,14 +407,14 @@ describe("the install guide (FR-047)", () => {
     const guide = await readFile("docs/mcp-install.md", "utf8");
     for (const client of ["Claude Code", "Codex", "Cursor"]) expect(guide).toContain(`## ${client}`);
     for (const text of [
-      "claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code mcp",
+      "claude mcp add --scope user rovara -- npx -y @preplabsai/rovara-code mcp",
       "npx @preplabsai/rovara-code mcp install --client codex",
       "npx @preplabsai/rovara-code mcp install --client cursor",
-      "[mcp_servers.agentx]",
+      "[mcp_servers.rovara]",
       "\"mcpServers\"",
       "npx @preplabsai/rovara-code login",
-      "claude mcp remove --scope user agentx",
-      "agentx_start_task",
+      "claude mcp remove --scope user rovara",
+      "rovara_start_task",
     ]) expect(guide).toContain(text);
     expect(guide).not.toContain("—");
   });

@@ -1,7 +1,7 @@
 // The `agentx signin` command group (spec 025 FR-045, FR-046) and the developer sign-in flags that
 // agentx init shares (F14), kept out of main.ts. Builds real AWS and Slack clients only when a test
 // has not overridden them.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { STSClient } from "@aws-sdk/client-sts";
@@ -46,8 +46,8 @@ export function addSignInOptions(command: Command): Command {
     .option(`${names.oidcClientId} <id>`, "client ID of the company sign-in app")
     .option(`${names.oidcClientSecret}-file <path>`, "file holding the company sign-in app's client secret")
     .option(`${names.oidcClientSecret}-env <NAME>`, "environment variable holding the company sign-in app's client secret")
-    .option(`${names.oidcRequiredClaim} <claim>`, "claim a person must carry to use AgentX, for example groups; empty for none")
-    .option(`${names.oidcRequiredValues} <values>`, "comma-separated values of the required claim that may use AgentX")
+    .option(`${names.oidcRequiredClaim} <claim>`, "claim a person must carry to use Rovara, for example groups; empty for none")
+    .option(`${names.oidcRequiredValues} <values>`, "comma-separated values of the required claim that may use Rovara")
     .option(`${names.oidcDisplayName} <name>`, "name on the sign-in button, for example Okta");
 }
 
@@ -148,6 +148,6 @@ export function registerSigninCommands(program: Command, context: SigninCommandC
       const checks = await runSigninCheck(signinServices(options.region, false), globals.env);
       context.stdout.write(globals.json ? formatSuccess(checks, true) : `${checkLines(checks).join("\n")}\n`);
       const failed = checks.filter((check) => !check.ok).length;
-      if (failed > 0) throw agentXError("CONFIG_INVALID", `${failed} developer sign-in check${failed === 1 ? "" : "s"} failed; fix what each one names, then run agentx signin check again`);
+      if (failed > 0) throw agentXError("CONFIG_INVALID", `${failed} developer sign-in check${failed === 1 ? "" : "s"} failed; fix what each one names, then run ${CLI_COMMAND_NAME} signin check again`);
     });
 }

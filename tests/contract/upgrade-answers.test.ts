@@ -39,7 +39,7 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
   });
 
   it("refuses when the control-plane stack is gone or lacks the GitHub App", async () => {
-    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({}) })).rejects.toThrow("stack agentx-staging-control-plane does not exist; agentx doctor says what else is missing");
+    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({}) })).rejects.toThrow("stack agentx-staging-control-plane does not exist; rovara doctor says what else is missing");
     await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": {} }) })).rejects.toThrow("stack agentx-staging-control-plane has no GitHubAppId parameter");
   });
 
@@ -49,24 +49,24 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
   });
 
   it("refuses a GitHub App id that is not a number, or a private key that is not an ARN", async () => {
-    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppId: "12a" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppId parameter is not a GitHub App id (a number); run agentx doctor, and agentx init --resume if the install never finished");
-    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppPrivateKeySecretArn: "agentx/staging/github-app" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppPrivateKeySecretArn parameter is not an ARN; run agentx doctor, and agentx init --resume if the install never finished");
+    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppId: "12a" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppId parameter is not a GitHub App id (a number); run rovara doctor, and rovara init --resume if the install never finished");
+    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppPrivateKeySecretArn: "agentx/staging/github-app" } }) })).rejects.toThrow("stack agentx-staging-control-plane's GitHubAppPrivateKeySecretArn parameter is not an ARN; run rovara doctor, and rovara init --resume if the install never finished");
   });
 
   it("refuses when the access stack the settings name is gone, instead of dropping the operator principal", async () => {
-    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": controlPlane }) })).rejects.toThrow("stack agentx-staging-access does not exist; agentx doctor says what else is missing");
+    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": controlPlane }) })).rejects.toThrow("stack agentx-staging-access does not exist; rovara doctor says what else is missing");
     const answers = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }) });
     expect(answers).not.toHaveProperty("operatorPrincipalArn");
   });
 
   it("refuses your own OIDC provider's AdminValues when it is not JSON or an empty list, and a missing AdminClaim", async () => {
     const oidc = { ...SETTINGS, identity: { mode: "oidc" as const, issuer: "https://idp.example.com", audience: "agentx", clientId: "cli" } };
-    const refusal = "stack agentx-staging-control-plane's AdminValues parameter is not a list of admin values; fix it in the CloudFormation console, then run agentx upgrade again";
+    const refusal = "stack agentx-staging-control-plane's AdminValues parameter is not a list of admin values; fix it in the CloudFormation console, then run rovara upgrade again";
     await expect(upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, AdminValues: "eng-admins" } }) })).rejects.toThrow(refusal);
     await expect(upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, AdminValues: "[]" } }) })).rejects.toThrow(refusal);
     const noClaim: Record<string, string> = { ...controlPlane };
     delete noClaim.AdminClaim;
-    await expect(upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": noClaim }) })).rejects.toThrow("stack agentx-staging-control-plane has no AdminClaim parameter; run agentx doctor, and agentx init --resume if the install never finished");
+    await expect(upgradeAnswers({ settings: oidc, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": noClaim }) })).rejects.toThrow("stack agentx-staging-control-plane has no AdminClaim parameter; run rovara doctor, and rovara init --resume if the install never finished");
   });
 
   it("passes the slack image override alone, and no images at all without overrides", async () => {
@@ -93,13 +93,13 @@ describe("the target release", () => {
       expect(() => compareVersions(version, "1.2.3")).toThrow(`"${version}" is not a release version (x.y.z); use a published release version such as 1.4.0`);
       expect(() => compareVersions("1.2.3", version)).toThrow(`"${version}" is not a release version`);
     }
-    expect(() => upgradeDirection("staging", "unversioned", "1.3.0")).toThrow("environment staging's settings record version \"unversioned\", not a release, so agentx upgrade cannot tell whether 1.3.0 is older; agentx upgrade works only on environments agentx init installed");
+    expect(() => upgradeDirection("staging", "unversioned", "1.3.0")).toThrow("environment staging's settings record version \"unversioned\", not a release, so rovara upgrade cannot tell whether 1.3.0 is older; rovara upgrade works only on environments rovara init installed");
   });
 
   it("allows the same release (a re-run) and a newer one, and refuses an older one (question 3)", () => {
     expect(upgradeDirection("staging", "1.2.3", "1.2.3")).toBe("same");
     expect(upgradeDirection("staging", "1.2.3", "1.3.0")).toBe("newer");
-    expect(() => upgradeDirection("staging", "1.3.0", "1.2.3")).toThrow("release 1.2.3 is older than 1.3.0, which environment staging runs; agentx upgrade never moves an environment back");
+    expect(() => upgradeDirection("staging", "1.3.0", "1.2.3")).toThrow("release 1.2.3 is older than 1.3.0, which environment staging runs; rovara upgrade never moves an environment back");
   });
 
   it("reads the release's notes from GitHub, and says where to look when it cannot", async () => {
@@ -123,7 +123,7 @@ describe("the target release", () => {
   });
 
   it("refuses every prerelease target, even one from --release <dir>, as init does (ruling F31, amended)", () => {
-    expect(() => refusePrereleaseTarget("1.3.0-rc.1")).toThrow("release 1.3.0-rc.1 is a prerelease; agentx upgrade moves an environment only to published releases (x.y.z), because the environment settings record only x.y.z and a prerelease would fail after every stack deployed. Pass --release <dir> with a published release, or upgrade to a published version");
+    expect(() => refusePrereleaseTarget("1.3.0-rc.1")).toThrow("release 1.3.0-rc.1 is a prerelease; rovara upgrade moves an environment only to published releases (x.y.z), because the environment settings record only x.y.z and a prerelease would fail after every stack deployed. Pass --release <dir> with a published release, or upgrade to a published version");
     expect(() => refusePrereleaseTarget("1.3.0")).not.toThrow();
   });
 });

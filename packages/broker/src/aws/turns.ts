@@ -103,7 +103,7 @@ export class TurnRecordExport {
     if (until !== undefined && until < since) throw agentXError("CONFIG_INVALID", "until must not be before since; send an until at or after since");
     const filter = turnFilter(query);
     const wantedProject = query.get("project");
-    if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name such as payments; list them with agentx_admin_list_projects");
+    if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be a Rovara project name such as payments; list them with rovara_admin_list_projects");
     const limit = listLimitParam(query.get("limit"), TURN_EXPORT_PAGE);
     const filtered = filter !== undefined || wantedProject !== null;
     const cursor = query.get("cursor");

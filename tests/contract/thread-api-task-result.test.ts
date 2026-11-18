@@ -1,4 +1,4 @@
-// Issue 157: a resumed turn reads the remembered task's final response the way agentx_task_result does.
+// Issue 157: a resumed turn reads the remembered task's final response the way rovara_task_result does.
 import { describe, expect, it } from "vitest";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
 

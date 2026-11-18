@@ -15,7 +15,7 @@ import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
 const URL = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const CHANGE = "55555555-5555-4555-8555-555555555555";
-const view = (status: string) => ({ changeId: CHANGE, kind: "grant_project_access", status, effect: "Grant Slack user U0NEW00001 (not signed in to AgentX yet; the grant applies when they sign in with Slack) access to project payments.", methodsOffered: ["cli"], createdAt: "2026-10-02T09:00:00.000Z", expiresAt: "2026-10-02T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
+const view = (status: string) => ({ changeId: CHANGE, kind: "grant_project_access", status, effect: "Grant Slack user U0NEW00001 (not signed in to Rovara yet; the grant applies when they sign in with Slack) access to project payments.", methodsOffered: ["cli"], createdAt: "2026-10-02T09:00:00.000Z", expiresAt: "2026-10-02T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
 
 function control(answers: Record<string, unknown>) {
   const calls: Array<{ method: string; path: string; body?: unknown; headers?: Record<string, string> }> = [];
@@ -53,8 +53,8 @@ describe("runCliChange (E17, Q6)", () => {
     expect(calls[1]?.body).toEqual({ method: "cli", reason: "declined", requestedAt: expect.any(String) as unknown, answeredAt: expect.any(String) as unknown });
   });
 
-  it("keeps AgentX's own refusal code", async () => {
-    const fetch = vi.fn(async () => Response.json({ error: { code: "NOT_FOUND", message: "nobody has signed in to AgentX with new@example.com yet; name them by Slack user ID, or ask them to sign in first" } }, { status: 404 })) as unknown as typeof globalThis.fetch;
+  it("keeps Rovara's own refusal code", async () => {
+    const fetch = vi.fn(async () => Response.json({ error: { code: "NOT_FOUND", message: "nobody has signed in to Rovara with new@example.com yet; name them by Slack user ID, or ask them to sign in first" } }, { status: 404 })) as unknown as typeof globalThis.fetch;
     await expect(runCliChange({ controlPlaneUrl: URL, accessToken: "t", change: { kind: "grant_project_access", project: "payments", developer: "new@example.com" }, cliVersion: "0.0.7", confirm: async () => true, write: () => undefined }, fetch)).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -76,7 +76,7 @@ describe("runCliChange (E17, Q6)", () => {
     });
     const lines: string[] = [];
     await expect(runCliChange({ controlPlaneUrl: URL, accessToken: "admin-token", change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async () => true, write: (line) => lines.push(line) }, fetch))
-      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("agentx admin changes") as unknown });
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("rovara admin changes") as unknown });
     expect(calls).toHaveLength(2);
     expect(lines.join("\n")).not.toContain("Applied.");
   });
@@ -121,7 +121,7 @@ describe("runCliChange (E17, Q6)", () => {
     }
   });
 
-  it("says nothing was applied when AgentX cannot be reached to apply", async () => {
+  it("says nothing was applied when Rovara cannot be reached to apply", async () => {
     let call = 0;
     const fetch = vi.fn(async () => {
       call += 1;
@@ -129,7 +129,7 @@ describe("runCliChange (E17, Q6)", () => {
       throw new TypeError(`fetch failed for ${URL}`);
     }) as unknown as typeof globalThis.fetch;
     await expect(runCliChange({ controlPlaneUrl: URL, accessToken: "t", change: { kind: "grant_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async () => true, write: () => undefined }, fetch))
-      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("agentx admin changes") as unknown });
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("rovara admin changes") as unknown });
   });
 
   it("still ends declined when the decline cannot be recorded: nothing applies without a yes", async () => {
@@ -249,7 +249,7 @@ describe("askToApply (Q6): the terminal prompt", () => {
 });
 
 describe("the commands (E17)", () => {
-  it("need --project and --developer, and a valid --since, before calling AgentX", async () => {
+  it("need --project and --developer, and a valid --since, before calling Rovara", async () => {
     const fetch = vi.fn();
     let stderr = "";
     const io = { fetchImplementation: fetch as unknown as typeof globalThis.fetch, stdout: { write: () => true }, stderr: { write: (text: string) => { stderr += text; return true; } } };
@@ -279,7 +279,7 @@ describe("the commands (E17)", () => {
     };
   }
 
-  it("refuses a project name AgentX cannot hold, without echoing the developer", async () => {
+  it("refuses a project name Rovara cannot hold, without echoing the developer", async () => {
     const session = await signedIn();
     const fetch = vi.fn() as unknown as typeof globalThis.fetch;
     expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "Not A Name", "--developer", "someone@example.com"], session.io(fetch))).toBe(2);

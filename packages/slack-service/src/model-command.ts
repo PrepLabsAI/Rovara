@@ -1,4 +1,4 @@
-import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions } from "@agentx/contracts";
+import { modelCheckClassSentence, type ModelRef, type ProjectModelOptions, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { ConversationFormat } from "./conversation-format.js";
 
 export type ModelCommand = { kind: "list" } | { kind: "use"; selector: string };
@@ -29,7 +29,7 @@ export function modelOptionsMessage(options: ProjectModelOptions, introduction: 
       const thinking = model.thinkingLevel === undefined ? "" : ` (thinking: ${model.thinkingLevel})`;
       return `• ${escapeText(modelName(model))}${thinking} — \`${escapeText(model.provider)}/${escapeText(model.modelId)}\`${selected}`;
     }),
-    format.kind === "slack" ? "Choose one with `@agentx use <name>`." : "Choose one with `use <name>`.",
+    format.kind === "slack" ? "Choose one with `@rovara use <name>`." : "Choose one with `use <name>`.",
   ].join("\n");
 }
 
@@ -41,10 +41,10 @@ function modelNames(model: ModelRef): string[] {
   return [model.label, model.modelId, `${model.provider}/${model.modelId}`].filter((value): value is string => value !== undefined);
 }
 
-/** MODEL1: what `@agentx use` adds when the last stored check of the chosen pair failed: the class sentence, never provider text. Empty when the check passed or never ran. */
+/** MODEL1: what `@rovara use` adds when the last stored check of the chosen pair failed: the class sentence, never provider text. Empty when the check passed or never ran. */
 export function modelCheckWarning(model: ModelRef, format: ConversationFormat): string {
   const escapeText = format.escape;
   const check = model.lastCheck;
   if (check === undefined || check.status !== "failed" || check.class === undefined) return "";
-  return ` The last check of this model failed: ${escapeText(modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: check.class }))} Its next turn may fail; ask a project admin to run agentx doctor.`;
+  return ` The last check of this model failed: ${escapeText(modelCheckClassSentence({ provider: model.provider, modelId: model.modelId, class: check.class }))} Its next turn may fail; ask a project admin to run ${CLI_COMMAND_NAME} doctor.`;
 }

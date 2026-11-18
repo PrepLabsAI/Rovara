@@ -5,13 +5,13 @@ with Rovara rather than with an identity system of its own. An administrator reg
 Its tokens carry its own audience, so Rovara's API refuses them, except on the routes its
 [scopes](#named-scopes-on-the-developer-api) open, or everywhere with [full access](#full-access).
 
-Developer sign-in must be set up (`agentx signin enable`). Every change is an admin change: the CLI shows what it will
-do and asks before applying it, and `agentx admin changes` records it.
+Developer sign-in must be set up (`rovara signin enable`). Every change is an admin change: the CLI shows what it will
+do and asks before applying it, and `rovara admin changes` records it.
 
 ## Register a service
 
 ```sh
-agentx admin sign-in-client add scheduler \
+rovara admin sign-in-client add scheduler \
   --name Scheduler \
   --audience scheduler \
   --redirect https://scheduler.example.com/callback \
@@ -21,7 +21,7 @@ agentx admin sign-in-client add scheduler \
 - `--audience`: the audience its tokens carry. It can't be `agentx-developer` or another client's audience.
 - `--redirect`: an exact `https` URL on a public host that its web page returns to, with no query or fragment.
   Repeat it for more URLs, up to 10.
-- `--loopback`: the service may sign people in from a terminal with a loopback redirect, as `agentx login` does.
+- `--loopback`: the service may sign people in from a terminal with a loopback redirect, as `rovara login` does.
 - `--confidential`: for a server-side service. The CLI makes a secret and shows it once, after the change applies.
   Only the secret's SHA-256 hash leaves your computer. Add `--secret-file <path>` to write the secret to a new file
   (mode 600) instead of printing it. Each `add --confidential` makes a new secret, so running it again rotates the
@@ -38,7 +38,7 @@ registered client, use `update`.
 ## Change a service
 
 ```sh
-agentx admin sign-in-client update web-app --scope projects:members
+rovara admin sign-in-client update web-app --scope projects:members
 ```
 
 `update` changes only the settings you give and keeps everything else, its secret included:
@@ -53,8 +53,8 @@ The person who runs it never sees the stored secret: Rovara carries it over.
 ## List and remove
 
 ```sh
-agentx admin sign-in-client list
-agentx admin sign-in-client remove scheduler
+rovara admin sign-in-client list
+rovara admin sign-in-client remove scheduler
 ```
 
 After a client is removed, nobody can sign in to it.
@@ -160,7 +160,7 @@ With such a token, the `/v1/dev/client/*` routes act as the signed-in person, wi
 | --- | --- | --- |
 | (none) | `GET /v1/dev/client/projects/{project}` | A project the person may use: its latest revision, their access, and its repositories |
 | `projects:members` | `GET /v1/dev/client/projects/{project}/members` | Lists the people granted the project |
-| `projects:members` | `PUT /v1/dev/client/projects/{project}/members/{who}` | Grants the project, as `agentx admin project grant` does; `who` is an email address or a developer ID |
+| `projects:members` | `PUT /v1/dev/client/projects/{project}/members/{who}` | Grants the project, as `rovara admin project grant` does; `who` is an email address or a developer ID |
 | `projects:members` | `DELETE /v1/dev/client/projects/{project}/members/{who}` | Revokes a grant |
 
 Only the project's administrators, or a Rovara administrator (company sign-in with the administrator claim), may use
@@ -201,7 +201,7 @@ developer API (`/v1/dev/*`): their projects, workspaces, links and, where the de
 then use Rovara through it with exactly their own rights.
 
 ```sh
-agentx admin sign-in-client update web-app --full-access
+rovara admin sign-in-client update web-app --full-access
 ```
 
 - Only a confidential client can have it, so its tokens are only ever issued to the service itself.

@@ -49,7 +49,7 @@ async function allFiles(dir: string): Promise<string[]> {
   return Promise.all(entries.filter((entry) => entry.isFile()).map((entry) => readFile(join(entry.parentPath, entry.name), "utf8")));
 }
 
-describe("agentx upgrade --export (FR-026)", () => {
+describe("rovara upgrade --export (FR-026)", () => {
   it("writes templates, parameter files, packages and a README, with no secret, keeping what must not change", async () => {
     const out = await freshDir();
     const result = await writeUpgradeBundle({
@@ -69,7 +69,7 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(readme).toContain("--role-arn arn:aws:iam::123456789012:role/agentx-staging-cloudformation");
     expect(readme).toContain(`aws s3 cp packages/${ASSET}.zip s3://agentx-staging-access-artifactbucket-abc/packages/${ASSET}.zip --metadata sha256=${"f".repeat(64)} --region us-east-1`);
     expect(readme.indexOf("agentx-staging-runtime")).toBeLessThan(readme.indexOf("agentx-staging-control-plane --change-set-name"));
-    expect(readme).toContain("agentx --env staging upgrade --to 1.3.0");
+    expect(readme).toContain("rovara --env staging upgrade --to 1.3.0");
     expect(readme).not.toContain("agentx-staging-access --change-set-name");
   });
 
@@ -87,7 +87,7 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(parameters.filter((entry) => entry.ParameterKey === "CallbackSigningKey")).toEqual([{ ParameterKey: "CallbackSigningKey", UsePreviousValue: true }]);
   });
 
-  it("keeps exactly what agentx upgrade keeps: operator settings and secrets, never a console-set parameter (ruling F29)", async () => {
+  it("keeps exactly what rovara upgrade keeps: operator settings and secrets, never a console-set parameter (ruling F29)", async () => {
     const out = await freshDir();
     await writeUpgradeBundle({
       dir: out, settings, answers, release: await releaseWithPackage(CONTROL_PLANE_DECLARED), parts: ["control-plane"], outputs,
@@ -96,7 +96,7 @@ describe("agentx upgrade --export (FR-026)", () => {
     const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
     expect(parameters).toContainEqual({ ParameterKey: "BudgetMonthlyUsd", UsePreviousValue: true });
     expect(parameters.find((entry) => entry.ParameterKey === "ConsoleSetting")).toBeUndefined();
-    // No stored sign-in: agentx upgrade sends none, so the bundle sends none either (not the deployed value).
+    // No stored sign-in: rovara upgrade sends none, so the bundle sends none either (not the deployed value).
     expect(parameters.find((entry) => entry.ParameterKey === "DeveloperSignInSlack")).toBeUndefined();
     expect([...upgradeKeptParameterNames("control-plane")].sort()).toEqual([...OPERATOR_PARAMETERS["control-plane"], ...SECRET_PARAMETERS].sort());
     expect([...upgradeKeptParameterNames("slack")].sort()).toEqual([...OPERATOR_PARAMETERS.slack, ...SECRET_PARAMETERS].sort());
@@ -127,7 +127,7 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(parameters).toContainEqual({ ParameterKey: "WorkflowDependenciesEnabled", UsePreviousValue: true });
   });
 
-  it("sends the stored sign-in, as agentx upgrade does, only for names the target declares (ruling F29)", async () => {
+  it("sends the stored sign-in, as rovara upgrade does, only for names the target declares (ruling F29)", async () => {
     const out = await freshDir();
     await writeUpgradeBundle({
       dir: out, settings, answers: { ...answers, developerSignIn: { slackTeamId: "T0NEW" } }, release: await releaseWithPackage({ ...CONTROL_PLANE_DECLARED, SlackTeamId: {} }), parts: ["control-plane"], outputs,
@@ -142,7 +142,7 @@ describe("agentx upgrade --export (FR-026)", () => {
   it("refuses a release that adds a secret parameter, which a bundle cannot carry", async () => {
     const out = await freshDir();
     await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs, deployed: { "control-plane": { GitHubAppId: "123" } } }))
-      .rejects.toThrow("release 1.3.0 adds secret CallbackSigningKey, which a bundle cannot carry; run agentx upgrade with admin credentials");
+      .rejects.toThrow("release 1.3.0 adds secret CallbackSigningKey, which a bundle cannot carry; run rovara upgrade with admin credentials");
     expect(await readdir(join(out, ".."))).toEqual([]);
   });
 
@@ -154,7 +154,7 @@ describe("agentx upgrade --export (FR-026)", () => {
     await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs: { ...outputs, foundation }, deployed: { "control-plane": { CallbackSigningKey: "****" } } }))
       .rejects.toMatchObject({
         code: "CONFIG_INVALID",
-        message: `CONFIG_INVALID: release 1.3.0 needs output ${missing} of stack agentx-staging-foundation, which the deployed stack does not have yet, so one bundle cannot upgrade agentx-staging-control-plane. Run agentx --env staging upgrade --to 1.3.0 with admin credentials instead: it deploys agentx-staging-foundation first, then reads its new output`,
+        message: `CONFIG_INVALID: release 1.3.0 needs output ${missing} of stack agentx-staging-foundation, which the deployed stack does not have yet, so one bundle cannot upgrade agentx-staging-control-plane. Run rovara --env staging upgrade --to 1.3.0 with admin credentials instead: it deploys agentx-staging-foundation first, then reads its new output`,
       });
     expect(await readdir(join(out, ".."))).toEqual([]);
   });

@@ -179,7 +179,7 @@ export class TurnRecorder {
   }
 
   private keepPullRequest(pending: PendingCall, event: { result: unknown; isError: boolean }): void {
-    if (event.isError || !pending.name.startsWith("agentx_") || !pending.name.endsWith("_pull_request")) return;
+    if (event.isError || !pending.name.startsWith("rovara_") || !pending.name.endsWith("_pull_request")) return;
     const fact = pullRequestOf(parseObject(resultText(event.result)), pending.rawArguments);
     if (fact !== undefined) this.changedPullRequests.push(fact);
   }
@@ -198,7 +198,7 @@ export class TurnRecorder {
   }
 
   private keepDraft(pending: PendingCall, event: { result: unknown; isError: boolean }): void {
-    if (event.isError || pending.name !== "agentx_create_pull_request") return;
+    if (event.isError || pending.name !== "rovara_create_pull_request") return;
     const parsed = parseObject(resultText(event.result));
     const result = parsed.result;
     if (parsed.status === "SUCCEEDED" && result !== null && typeof result === "object" && (result as { draft?: unknown }).draft === true) this.openedDraft = true;

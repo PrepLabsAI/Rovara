@@ -1,3 +1,5 @@
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
+
 // FR-001 (Q1, Q2, Q12): which way agentx init asks its questions when neither --ui nor --no-ui is
 // given. The page needs a person at an interactive terminal on a machine whose own screen can show
 // a browser; anywhere else (--yes, CI, CloudShell, SSH, no terminal) the terminal path runs exactly
@@ -7,7 +9,7 @@ export type InitUiMode = { mode: "page" } | { mode: "terminal"; noBrowser?: true
 
 /** Printed before the terminal's first question when only the missing browser kept the page away. */
 export const NO_BROWSER_LINE =
-  "No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).";
+  `No browser here, so ${CLI_COMMAND_NAME} init asks in this terminal. To use the install page instead, run ${CLI_COMMAND_NAME} init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).`;
 
 export function resolveUiMode(input: { ui: boolean | undefined; yes: boolean; injectedPrompter: boolean; interactive: boolean; browser: boolean }): InitUiMode {
   if (input.ui === true) return { mode: "page" };

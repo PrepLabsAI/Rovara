@@ -56,12 +56,12 @@ const offered = async (client: Client, name: string) => {
 };
 
 describe("the change tools (FR-030)", () => {
-  it("are FR-030's nine, in order, plus agentx_admin_changes", () => {
+  it("are FR-030's nine, in order, plus rovara_admin_changes", () => {
     expect(ADMIN_CHANGE_TOOLS.map((tool) => tool.name)).toEqual([
-      "agentx_admin_register_project_revision", "agentx_admin_bind_channel", "agentx_admin_unbind_channel", "agentx_admin_register_credential", "agentx_admin_stop_workspace",
-      "agentx_admin_grant_project_access", "agentx_admin_revoke_project_access", "agentx_admin_revoke_signin", "agentx_admin_set_workspace_limits",
+      "rovara_admin_register_project_revision", "rovara_admin_bind_channel", "rovara_admin_unbind_channel", "rovara_admin_register_credential", "rovara_admin_stop_workspace",
+      "rovara_admin_grant_project_access", "rovara_admin_revoke_project_access", "rovara_admin_revoke_signin", "rovara_admin_set_workspace_limits",
     ]);
-    expect(ADMIN_AUDIT_TOOLS.map((tool) => tool.name)).toEqual(["agentx_admin_changes"]);
+    expect(ADMIN_AUDIT_TOOLS.map((tool) => tool.name)).toEqual(["rovara_admin_changes"]);
     expect(JSON.stringify([...ADMIN_CHANGE_TOOLS, ...ADMIN_AUDIT_TOOLS].map((tool) => [tool.title, tool.description, Object.values(tool.inputSchema).map((field) => (field as { description?: string }).description)]))).not.toContain(String.fromCharCode(0x2014));
   });
 
@@ -69,8 +69,8 @@ describe("the change tools (FR-030)", () => {
     const proposeChange = vi.fn(async () => pending);
     const applyChange = vi.fn(async () => ({ ...pending, status: "applied" as const, methodUsed: "elicitation" as const, result: { binding: { channelId: "C0LEDGER01" } } }));
     const { client, asked } = await connect({ admin: { proposeChange, applyChange } });
-    await offered(client, "agentx_admin_bind_channel");
-    const result = await client.callTool({ name: "agentx_admin_bind_channel", arguments: { channel: "#ledger-dev", project: "ledger" } });
+    await offered(client, "rovara_admin_bind_channel");
+    const result = await client.callTool({ name: "rovara_admin_bind_channel", arguments: { channel: "#ledger-dev", project: "ledger" } });
     expect(proposeChange).toHaveBeenCalledWith({ requestId: expect.any(String) as unknown, change: { kind: "bind_channel", channel: "#ledger-dev", project: "ledger" }, client: { cliVersion: "0.0.7", mcpClient: { name: "claude-code", version: "2.1.0" } }, methods: ["elicitation"] }, "88888888-8888-4888-8888-888888888888");
     expect(asked[0]).toContain("Bind channel #ledger-dev (C0LEDGER01) to project ledger.");
     expect(result.structuredContent).toMatchObject({ change_id: CHANGE, outcome: "applied", method: "elicitation", effect: pending.effect });
@@ -78,36 +78,36 @@ describe("the change tools (FR-030)", () => {
 
   it("answers CONFIRMATION_DECLINED naming the change when the admin says no", async () => {
     const { client } = await connect({ admin: { proposeChange: async () => pending, declineChange: async () => ({ ...pending, status: "declined" as const }) }, answer: "decline" });
-    await offered(client, "agentx_admin_unbind_channel");
-    expect(toolError(await client.callTool({ name: "agentx_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } }))).toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining(CHANGE) as unknown });
+    await offered(client, "rovara_admin_unbind_channel");
+    expect(toolError(await client.callTool({ name: "rovara_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } }))).toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining(CHANGE) as unknown });
   });
 
   it("offers no change tool, and answers CONFIRMATION_UNAVAILABLE, in a client with neither method (FR-041)", async () => {
     const { client } = await connect({ admin: {}, elicitation: false });
-    await offered(client, "agentx_admin_changes");
+    await offered(client, "rovara_admin_changes");
     const names = (await client.listTools()).tools.map((tool) => tool.name);
     expect(names.filter((name) => ADMIN_CHANGE_TOOLS.some((tool) => tool.name === name))).toEqual([]);
-    expect(toolError(await client.callTool({ name: "agentx_admin_set_workspace_limits", arguments: { per_person: 5 } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE", next_step: "use a client that supports elicitation, link a Slack user, or use the agentx CLI" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_set_workspace_limits", arguments: { per_person: 5 } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE", next_step: "use a client that supports elicitation, link a Slack user, or use the Rovara CLI" });
   });
 
   it("maps the limits tool's snake_case input, and refuses an empty one before planning", async () => {
     const proposeChange = vi.fn(async () => pending);
     const { client } = await connect({ admin: { proposeChange, applyChange: async () => ({ ...pending, status: "applied" as const }) } });
-    await offered(client, "agentx_admin_set_workspace_limits");
-    await client.callTool({ name: "agentx_admin_set_workspace_limits", arguments: { per_person: 5 } });
+    await offered(client, "rovara_admin_set_workspace_limits");
+    await client.callTool({ name: "rovara_admin_set_workspace_limits", arguments: { per_person: 5 } });
     expect(proposeChange).toHaveBeenCalledWith(expect.objectContaining({ change: { kind: "set_workspace_limits", perPerson: 5 } }), expect.any(String));
-    expect(toolError(await client.callTool({ name: "agentx_admin_set_workspace_limits", arguments: {} }))).toMatchObject({ code: "INVALID_REQUEST" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_set_workspace_limits", arguments: {} }))).toMatchObject({ code: "INVALID_REQUEST" });
     expect(proposeChange).toHaveBeenCalledTimes(1);
   });
 
-  it("lists the audit records with agentx_admin_changes, newest first, with the next cursor", async () => {
+  it("lists the audit records with rovara_admin_changes, newest first, with the next cursor", async () => {
     const changes = vi.fn(async () => ({ cursor: "more", changes: [{
       changeId: CHANGE, kind: "bind_channel" as const, traceId: "t", status: "applied" as const, outcome: "confirmed" as const, admin: { issuer: "i", subject: "s", displayName: "Ada" }, client: { cliVersion: "0.0.7", mcpClientName: "claude-code" },
       change: {}, effect: pending.effect, methodsOffered: ["elicitation" as const], methodUsed: "elicitation" as const, proposedAt: "2026-10-02T09:00:00.000Z", appliedAt: "2026-10-02T09:01:00.000Z",
     }] }));
     const { client } = await connect({ admin: { changes } });
-    await offered(client, "agentx_admin_changes");
-    const result = await client.callTool({ name: "agentx_admin_changes", arguments: { outcome: "confirmed", limit: 10 } });
+    await offered(client, "rovara_admin_changes");
+    const result = await client.callTool({ name: "rovara_admin_changes", arguments: { outcome: "confirmed", limit: 10 } });
     expect(changes).toHaveBeenCalledWith(expect.objectContaining({ outcome: "confirmed", limit: 10, since: expect.any(String) as unknown }));
     expect(result.structuredContent).toMatchObject({ next_cursor: "more", changes: [{ change_id: CHANGE, outcome: "confirmed", admin: "Ada", method_used: "elicitation", applied_at: "2026-10-02T09:01:00.000Z", trace_id: "t" }] });
   });
@@ -119,8 +119,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const newRequestId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`;
     const proposeChange = vi.fn(async () => pending);
     const { client } = await connect({ admin: { proposeChange, declineChange: async () => ({ ...pending, status: "declined" as const }) }, answer: "decline", newRequestId });
-    await offered(client, "agentx_admin_bind_channel");
-    const call = { name: "agentx_admin_bind_channel", arguments: { channel: "C0LEDGER01", project: "ledger" } };
+    await offered(client, "rovara_admin_bind_channel");
+    const call = { name: "rovara_admin_bind_channel", arguments: { channel: "C0LEDGER01", project: "ledger" } };
     expect(toolError(await client.callTool(call))).toMatchObject({ code: "CONFIRMATION_DECLINED" });
     expect(toolError(await client.callTool(call))).toMatchObject({ code: "CONFIRMATION_DECLINED" });
     const [first, second] = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
@@ -136,8 +136,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
       .mockResolvedValue(pending);
     const applyChange = vi.fn(async () => ({ ...pending, status: "applied" as const, methodUsed: "elicitation" as const }));
     const { client } = await connect({ admin: { proposeChange, applyChange }, newRequestId });
-    await offered(client, "agentx_admin_revoke_signin");
-    const call = { name: "agentx_admin_revoke_signin", arguments: { developer: "U0123456789" } };
+    await offered(client, "rovara_admin_revoke_signin");
+    const call = { name: "rovara_admin_revoke_signin", arguments: { developer: "U0123456789" } };
     expect(toolError(await client.callTool(call))).toMatchObject({ code: "INVALID_REQUEST" });
     await client.callTool(call);
     await client.callTool(call);
@@ -150,19 +150,19 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const newRequestId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`;
     const proposeChange = vi.fn(async () => pending);
     const applyChange = vi.fn()
-      .mockRejectedValueOnce(new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX at its URL", APPLY_UNKNOWN_STEP))
+      .mockRejectedValueOnce(new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach Rovara at its URL", APPLY_UNKNOWN_STEP))
       .mockResolvedValue({ ...pending, status: "applied" as const, methodUsed: "elicitation" as const });
     const { client } = await connect({ admin: { proposeChange, applyChange }, newRequestId });
-    await offered(client, "agentx_admin_set_workspace_limits");
-    const call = { name: "agentx_admin_set_workspace_limits", arguments: { per_person: 4 } };
-    expect(toolError(await client.callTool(call))).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", next_step: "it may or may not have applied; check it with agentx_admin_changes before asking again" });
+    await offered(client, "rovara_admin_set_workspace_limits");
+    const call = { name: "rovara_admin_set_workspace_limits", arguments: { per_person: 4 } };
+    expect(toolError(await client.callTool(call))).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", next_step: "it may or may not have applied; check it with rovara_admin_changes before asking again" });
     await client.callTool(call);
     const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
     expect(ids[1]).toBe(ids[0]);
   });
 
   it("names the connector secret prefix, not one deployment's, in the credential tool (final review M10)", () => {
-    const credential = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_register_credential")!;
+    const credential = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "rovara_admin_register_credential")!;
     const words = JSON.stringify([credential.description, Object.values(credential.inputSchema).map((field) => (field as { description?: string }).description)]);
     expect(words).not.toContain("agentx/connectors/");
     expect(words).toContain("the connector secret prefix");
@@ -179,8 +179,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const startSlackConfirmation = vi.fn(async () => slackPending);
     const getChange = vi.fn(async () => slackPending);
     const { client } = await connect({ admin: { proposeChange, startSlackConfirmation, getChange }, elicitation: false, confirmation: { elicitation: true, slack: true }, newRequestId, clock, offer: async () => ({ admin: undefined, audit: undefined, changes: undefined }) });
-    await offered(client, "agentx_admin_grant_project_access");
-    const call = { name: "agentx_admin_grant_project_access", arguments: { project: "ledger", developer: "ada@example.com" } };
+    await offered(client, "rovara_admin_grant_project_access");
+    const call = { name: "rovara_admin_grant_project_access", arguments: { project: "ledger", developer: "ada@example.com" } };
     const result = await client.callTool(call);
     expect(result.structuredContent).toMatchObject({ change_id: CHANGE, outcome: "awaiting_confirmation" });
     // No pop-up in this client: Slack only, whatever the environment allows for elicitation.
@@ -205,9 +205,9 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const getChange = vi.fn(async () => slackPending);
     const applyChange = vi.fn(async () => ({ ...slackPending, status: "applied" as const }));
     const { client } = await connect({ admin: { proposeChange: async () => slackPending, startSlackConfirmation: async () => slackPending, getChange, applyChange }, elicitation: false, confirmation: { elicitation: false, slack: true }, clock, offer: async () => ({ admin: undefined, audit: undefined, changes: undefined }) });
-    await offered(client, "agentx_admin_revoke_signin");
+    await offered(client, "rovara_admin_revoke_signin");
     const cancel = new AbortController();
-    const running = client.callTool({ name: "agentx_admin_revoke_signin", arguments: { developer: "U0123456789" } }, undefined, { signal: cancel.signal });
+    const running = client.callTool({ name: "rovara_admin_revoke_signin", arguments: { developer: "U0123456789" } }, undefined, { signal: cancel.signal });
     await expect.poll(() => sleeping.length).toBe(1);
     expect(sleeping[0]!.aborted).toBe(false);
     cancel.abort();
@@ -224,8 +224,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const proposeChange = vi.fn(async () => ({ ...pending, methodsOffered: ["slack" as const] }));
     const startSlackConfirmation = vi.fn(async () => ({ ...pending, status: "applied" as const, methodUsed: "slack" as const }));
     const { client, asked } = await connect({ admin: { proposeChange, startSlackConfirmation }, confirmation: { elicitation: false, slack: true }, offer: async () => ({ admin: undefined, audit: undefined, changes: undefined }) });
-    await offered(client, "agentx_admin_stop_workspace");
-    const result = await client.callTool({ name: "agentx_admin_stop_workspace", arguments: { workspace_id: "66666666-6666-4666-8666-666666666666" } });
+    await offered(client, "rovara_admin_stop_workspace");
+    const result = await client.callTool({ name: "rovara_admin_stop_workspace", arguments: { workspace_id: "66666666-6666-4666-8666-666666666666" } });
     expect(proposeChange).toHaveBeenCalledWith(expect.objectContaining({ methods: ["slack"] }), expect.any(String));
     expect(asked).toEqual([]);
     expect(result.structuredContent).toMatchObject({ outcome: "applied", method: "slack" });
@@ -234,8 +234,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
   it("answers CONFIRMATION_UNAVAILABLE without planning when no method is left for this call", async () => {
     const proposeChange = vi.fn(async () => pending);
     const { client } = await connect({ admin: { proposeChange }, confirmation: { elicitation: false, slack: false }, offer: async () => ({ admin: undefined, audit: undefined, changes: undefined }) });
-    await offered(client, "agentx_admin_revoke_signin");
-    expect(toolError(await client.callTool({ name: "agentx_admin_revoke_signin", arguments: { developer: "U0123456789", confirm: true, method: "cli" } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
+    await offered(client, "rovara_admin_revoke_signin");
+    expect(toolError(await client.callTool({ name: "rovara_admin_revoke_signin", arguments: { developer: "U0123456789", confirm: true, method: "cli" } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
     expect(proposeChange).not.toHaveBeenCalled();
   });
 
@@ -244,14 +244,14 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     const applyChange = vi.fn(async () => ({ ...pending, status: "applied" as const }));
     const declineChange = vi.fn(async () => ({ ...pending, status: "declined" as const }));
     const { client } = await connect({ admin: { proposeChange, applyChange, declineChange }, answer: "decline" });
-    await offered(client, "agentx_admin_bind_channel");
+    await offered(client, "rovara_admin_bind_channel");
     const listed = (await client.listTools()).tools;
     // No tool applies, declines or confirms a change directly, and no change tool takes such input.
     expect(listed.filter((tool) => /apply|decline|confirm/.test(tool.name))).toEqual([]);
     for (const tool of listed.filter((entry) => ADMIN_CHANGE_TOOLS.some((change) => change.name === entry.name))) {
       expect(Object.keys(tool.inputSchema.properties ?? {}).filter((key) => /confirm|method|apply|decline|answer|approved/.test(key))).toEqual([]);
     }
-    const refused = toolError(await client.callTool({ name: "agentx_admin_bind_channel", arguments: { channel: "C0LEDGER01", project: "ledger", confirm: true, confirmed: true, method: "cli", methods: ["cli"], answer: "accept" } }));
+    const refused = toolError(await client.callTool({ name: "rovara_admin_bind_channel", arguments: { channel: "C0LEDGER01", project: "ledger", confirm: true, confirmed: true, method: "cli", methods: ["cli"], answer: "accept" } }));
     expect(refused.code).toBe("CONFIRMATION_DECLINED");
     expect(applyChange).not.toHaveBeenCalled();
     expect(declineChange).toHaveBeenCalledTimes(1);
@@ -259,16 +259,16 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     expect(proposeChange).toHaveBeenCalledWith(expect.objectContaining({ change: { kind: "bind_channel", channel: "C0LEDGER01", project: "ledger" }, methods: ["elicitation"] }), expect.any(String));
   });
 
-  it("names the change and says it is still waiting when AgentX is applying it already, and a retry asks about that same change", async () => {
+  it("names the change and says it is still waiting when Rovara is applying it already, and a retry asks about that same change", async () => {
     let next = 0;
     const newRequestId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`;
     const proposeChange = vi.fn(async () => ({ ...pending, status: "applying" as const }));
     const { client } = await connect({ admin: { proposeChange }, newRequestId });
-    await offered(client, "agentx_admin_unbind_channel");
-    const call = { name: "agentx_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } };
+    await offered(client, "rovara_admin_unbind_channel");
+    const call = { name: "rovara_admin_unbind_channel", arguments: { channel: "C0LEDGER01" } };
     const refused = toolError(await client.callTool(call));
     expect(refused.message).toContain(CHANGE);
-    expect(refused.next_step).toContain("agentx_admin_changes");
+    expect(refused.next_step).toContain("rovara_admin_changes");
     // Review fix 1: an applying change has not ended, so the retry learns its outcome, not a new change.
     await client.callTool(call);
     const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
@@ -277,8 +277,8 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
   });
 
   it("says channel names work with or without #", () => {
-    const bind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_bind_channel")!;
-    const unbind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_unbind_channel")!;
+    const bind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "rovara_admin_bind_channel")!;
+    const unbind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "rovara_admin_unbind_channel")!;
     for (const tool of [bind, unbind]) expect(z.globalRegistry.get(tool.inputSchema.channel!)?.description).toContain("with or without #");
   });
 });
@@ -292,16 +292,16 @@ describe("the change tools' admin API (C17, E18, Q11)", () => {
     expect(adminApiFits("2.1", REQUIRED_CHANGE_ADMIN_MINOR)).toBe("incompatible");
   });
 
-  it("offers neither agentx_admin_changes nor the change tools to an offer that names only admin (25d's)", async () => {
+  it("offers neither rovara_admin_changes nor the change tools to an offer that names only admin (25d's)", async () => {
     const { client } = await connect({ admin: {}, offer: async () => ({ admin: undefined }) });
-    await offered(client, "agentx_admin_health");
+    await offered(client, "rovara_admin_health");
     const names = (await client.listTools()).tools.map((tool) => tool.name);
     expect(names).toEqual([...DEVELOPER_TOOLS, ...ADMIN_READ_TOOLS].map((tool) => tool.name));
-    expect(toolError(await client.callTool({ name: "agentx_admin_changes", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_changes", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
   });
 });
 
-// `agentx mcp` itself: the offer reads the environment's methods and the admin's Slack link.
+// `rovara mcp` itself: the offer reads the environment's methods and the admin's Slack link.
 const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-9c1e";
@@ -338,13 +338,13 @@ async function served(options: { adminApiVersion: string; confirm?: { elicitatio
   return { client, fetch, stderr };
 }
 
-describe("agentx mcp's change tool offer (FR-028, FR-041)", () => {
+describe("rovara mcp's change tool offer (FR-028, FR-041)", () => {
   const all = DEVELOPER_TOOLS.length + ADMIN_READ_TOOLS.length + ADMIN_AUDIT_TOOLS.length + ADMIN_CHANGE_TOOLS.length;
 
   it("offers every change tool to a pop-up client where the environment allows the pop-up", async () => {
     const { client, stderr } = await served({ adminApiVersion: "1.1", confirm: { elicitation: true, slack: false }, elicitation: true });
     await expect.poll(async () => (await client.listTools()).tools.length).toBe(all);
-    const result = await client.callTool({ name: "agentx_admin_changes", arguments: {} });
+    const result = await client.callTool({ name: "rovara_admin_changes", arguments: {} });
     expect(result.structuredContent).toEqual({ changes: [] });
     expect(JSON.stringify(result)).not.toContain(ADMIN_TOKEN);
     expect(stderr.join("")).not.toContain(ADMIN_TOKEN);
@@ -353,7 +353,7 @@ describe("agentx mcp's change tool offer (FR-028, FR-041)", () => {
   it("offers them to a client without the pop-up only when the admin's Slack user is linked and the environment allows Slack", async () => {
     const unlinked = await served({ adminApiVersion: "1.1", confirm: { elicitation: true, slack: true }, slackLinked: false, elicitation: false });
     await expect.poll(async () => (await unlinked.client.listTools()).tools.length).toBe(all - ADMIN_CHANGE_TOOLS.length);
-    expect(toolError(await unlinked.client.callTool({ name: "agentx_admin_grant_project_access", arguments: { project: "ledger", developer: "U0123456789" } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
+    expect(toolError(await unlinked.client.callTool({ name: "rovara_admin_grant_project_access", arguments: { project: "ledger", developer: "U0123456789" } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
     expect(unlinked.fetch.mock.calls.some((entry) => new URL(fetchRequestUrl(entry[0])).pathname === "/v1/admin/changes" && (entry as unknown as [string, RequestInit])[1].method === "POST")).toBe(false);
     const linked = await served({ adminApiVersion: "1.1", confirm: { elicitation: false, slack: true }, slackLinked: true, elicitation: false });
     await expect.poll(async () => (await linked.client.listTools()).tools.length).toBe(all);
@@ -364,10 +364,10 @@ describe("agentx mcp's change tool offer (FR-028, FR-041)", () => {
     await expect.poll(async () => (await client.listTools()).tools.length).toBe(all - ADMIN_CHANGE_TOOLS.length);
   });
 
-  it("against a 1.0 control plane offers the admin read tools but neither agentx_admin_changes nor a change tool (E18, Q11)", async () => {
+  it("against a 1.0 control plane offers the admin read tools but neither rovara_admin_changes nor a change tool (E18, Q11)", async () => {
     const { client } = await served({ adminApiVersion: "1.0", elicitation: true });
     await expect.poll(async () => (await client.listTools()).tools.length).toBe(DEVELOPER_TOOLS.length + ADMIN_READ_TOOLS.length);
-    expect(toolError(await client.callTool({ name: "agentx_admin_changes", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: "ask your AgentX admin to upgrade AgentX, or use an older CLI" });
-    expect(toolError(await client.callTool({ name: "agentx_admin_grant_project_access", arguments: { project: "ledger", developer: "U0123456789" } }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_changes", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: "ask your Rovara admin to upgrade Rovara, or use an older CLI" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_grant_project_access", arguments: { project: "ledger", developer: "U0123456789" } }))).toMatchObject({ code: "UPGRADE_REQUIRED" });
   });
 });

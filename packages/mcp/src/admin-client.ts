@@ -53,7 +53,7 @@ const ChangeView = AdminChangeResponseWireSchema.transform((value) => value.chan
 const CHANGE_CODES = new Set(["CONFIRMATION_UNAVAILABLE", "CONFIRMATION_DECLINED", "CONFIRMATION_EXPIRED", "CHANGE_STALE"] as const);
 /** Input the control plane refuses on a change: the broker's words say which. */
 const CHANGE_INVALID = new Set(["NOT_FOUND", "PROJECT_REVISION_MISMATCH", "WORKSPACE_BUSY", "IDEMPOTENCY_CONFLICT"]);
-export const PROJECT_ADMIN_STEP = "ask an AgentX admin who administers that project to make this change";
+export const PROJECT_ADMIN_STEP = "ask a Rovara admin who administers that project to make this change";
 /** A transient failure of a step on a planned change: nothing applied, and the change is still pending. */
 export const CHANGE_PENDING_STEP = "nothing was applied and the change is still pending until it expires; ask for the change again to confirm it";
 /** A decline that failed transiently: nothing to do, since an unconfirmed change never applies. */
@@ -63,9 +63,9 @@ export const CHANGE_DECLINE_PENDING_STEP = "nothing to do: nothing was applied, 
  * without AgentX's own refusal) may have committed, so asking again could apply a second change.
  * runChange keeps the request ID on this step, so an unchanged retry answers that same change.
  */
-export const APPLY_UNKNOWN_STEP = "it may or may not have applied; check it with agentx_admin_changes before asking again";
+export const APPLY_UNKNOWN_STEP = "it may or may not have applied; check it with rovara_admin_changes before asking again";
 /** 25e re-review: a change whose handler failed ended failed; it is not pending, so asking to confirm it again is wrong. */
-export const CHANGE_FAILED_STEP = "the change failed and is no longer pending; check it with agentx_admin_changes, fix what the message names, then ask for the change again";
+export const CHANGE_FAILED_STEP = "the change failed and is no longer pending; check it with rovara_admin_changes, fix what the message names, then ask for the change again";
 /** I2: the request ID was used for another change. */
 export const NEW_REQUEST_ID_STEP = "use a new request_id or leave it out";
 /** M4: a proposal the control plane refused with these was already audited as failed; a retry would audit it again. */
@@ -86,9 +86,9 @@ const codeOf = (value: unknown): string | undefined => {
 function refusal(status: number, value: unknown, secret: string, pending?: Pending): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
-  const message = plainText(error?.message, `AgentX answered HTTP ${status}`, [secret]);
-  if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", ADMIN_SIGN_IN_STEP);
-  if (code === "FORBIDDEN" && message.includes(NOT_AN_ADMIN_ROUTE)) return new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin read routes yet", UPGRADE_AGENTX_STEP);
+  const message = plainText(error?.message, `Rovara answered HTTP ${status}`, [secret]);
+  if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("ADMIN_REQUIRED", "Rovara refused this computer's admin sign-in, or it has expired", ADMIN_SIGN_IN_STEP);
+  if (code === "FORBIDDEN" && message.includes(NOT_AN_ADMIN_ROUTE)) return new ToolError("UPGRADE_REQUIRED", "this Rovara has no admin read routes yet", UPGRADE_AGENTX_STEP);
   if (code !== undefined && (CHANGE_CODES as Set<string>).has(code)) return new ToolError(code as ToolErrorCode, message);
   if (code === "SLACK_UNAVAILABLE") return new ToolError("SLACK_UNAVAILABLE", message);
   // FR-015: the admin may change only projects they administer.
@@ -96,7 +96,7 @@ function refusal(status: number, value: unknown, secret: string, pending?: Pendi
   // A NOT_FOUND from requireMembership reads "project not found" for a project the admin does not administer.
   if (code === "IDEMPOTENCY_CONFLICT") return new ToolError("INVALID_REQUEST", message, NEW_REQUEST_ID_STEP);
   if (code !== undefined && CHANGE_INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
-  if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `AgentX refused: ${message}`, ADMIN_SIGN_IN_STEP);
+  if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `Rovara refused: ${message}`, ADMIN_SIGN_IN_STEP);
   if (code === "CONFIG_INVALID") return new ToolError("INVALID_REQUEST", message);
   if (pending === "apply" && code === "RUNTIME_UNAVAILABLE") {
     // 25e re-review: an unexpected error may have let the apply commit, and a failed handler ended the change.
@@ -106,7 +106,7 @@ function refusal(status: number, value: unknown, secret: string, pending?: Pendi
   // Otherwise the broker answers RUNTIME_UNAVAILABLE only when nothing applied and the change is still pending.
   if (pending !== undefined && code === "RUNTIME_UNAVAILABLE") return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, pending === "decline" ? CHANGE_DECLINE_PENDING_STEP : CHANGE_PENDING_STEP);
   // I1: a 5xx that is not AgentX's own refusal (API Gateway's 30-second timeout, say) says nothing about the apply.
-  if (pending === "apply" && code === undefined && status >= 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", `AgentX answered HTTP ${status} while applying the change`, APPLY_UNKNOWN_STEP);
+  if (pending === "apply" && code === undefined && status >= 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", `Rovara answered HTTP ${status} while applying the change`, APPLY_UNKNOWN_STEP);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, status >= 500 ? NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE : UNEXPECTED_ANSWER_STEP);
 }
 
@@ -157,7 +157,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
         // The fetch error's own words are never shown: they can quote the request.
         if (await again(attempt)) continue;
         // I1: an apply that was sent may have committed though no answer came back.
-        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${where}${attempt > 1 ? ` after ${attempt} tries` : ""}`, extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE);
+        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach Rovara at ${where}${attempt > 1 ? ` after ${attempt} tries` : ""}`, extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE);
       }
       let value: unknown;
       try { value = JSON.parse(text) as unknown; } catch { value = undefined; }
@@ -166,7 +166,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
       if (response.status >= 500 && !audited && await again(attempt)) continue;
       if (!response.ok) throw refusal(response.status, value, session.accessToken, extra.pending);
       const parsed = schema.safeParse(value);
-      if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "AgentX answered with something this version of the CLI cannot read; upgrade it", extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.UPGRADE_REQUIRED);
+      if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "Rovara answered with something this version of the CLI cannot read; upgrade it", extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.UPGRADE_REQUIRED);
       return parsed.data;
     }
   }

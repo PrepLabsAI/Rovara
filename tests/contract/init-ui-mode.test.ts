@@ -1,12 +1,12 @@
 // tests/contract/init-ui-mode.test.ts
-// FR-001 (Q1, Q2, Q12): with neither --ui nor --no-ui, agentx init uses the install page in an
+// FR-001 (Q1, Q2, Q12): with neither --ui nor --no-ui, rovara init uses the install page in an
 // interactive terminal on a machine that can open a browser, and the terminal everywhere else.
 import { describe, expect, it } from "vitest";
 import { browserAvailable, resolveUiMode } from "../../packages/cli/src/init/ui-mode.js";
 
 const base = { ui: undefined, yes: false, injectedPrompter: false, interactive: true, browser: true };
 
-describe("which way agentx init asks", () => {
+describe("which way rovara init asks", () => {
   it("the page by default in an interactive terminal that can open a browser", () => {
     expect(resolveUiMode(base)).toEqual({ mode: "page" });
   });

@@ -23,7 +23,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dyn
 import { z } from "zod";
 import {
   AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyScoped, projectMetaKey,
-  type OrgId, type OrgRole, type ReviewedProjectArchiveOutcome, type ReviewedProjectArchivePreview, type ReviewedProjectRestoreOutcome, type ReviewedProjectRestorePreview,
+  type OrgId, type OrgRole, type ReviewedProjectArchiveOutcome, type ReviewedProjectArchivePreview, type ReviewedProjectRestoreOutcome, type ReviewedProjectRestorePreview, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { recordInCompany } from "./company-check.js";
 import { projectKey } from "./project-records.js";
@@ -90,7 +90,7 @@ const conditionFailed = (error: unknown): boolean => {
 async function readCurrent(ctx: ProjectLifecycleContext, personId: string, rawProject: string): Promise<Current> {
   const membership = await ctx.membershipOf(personId);
   const company = OrgIdSchema.safeParse(membership?.companyId);
-  if (membership === undefined || !company.success) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in has ended; run agentx login <url> again");
+  if (membership === undefined || !company.success) throw agentXError("AUTH_REQUIRED", `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`);
   let project: string;
   try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND); }
   if (!ProjectName.safeParse(project).success) throw agentXError("NOT_FOUND", LIFECYCLE_NOT_FOUND);

@@ -965,7 +965,7 @@ describe("P0 setup proposal broker authority", () => {
     const definition = {
       name: "ordinary-orders", revision: 1,
       repositories: [{ name: "ordinary-orders", url: "https://github.com/acme/ordinary-orders.git", path: "repo/ordinary-orders", defaultBranch: "main", credentialRef: "github-app" }],
-      setup: [], readiness: [], orchestratorInstructions: "Delegate work to the remote AgentX worker.", e2e: response.body.policy,
+      setup: [], readiness: [], orchestratorInstructions: "Delegate work to the remote Rovara worker.", e2e: response.body.policy,
     };
     const runtimeBinding = ec2Binding(FOUNDATION_OUTPUTS, "agentx-staging-foundation");
     const missingDecision = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition, runtimeBinding } });

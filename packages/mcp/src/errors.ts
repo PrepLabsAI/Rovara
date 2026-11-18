@@ -20,20 +20,20 @@ export const TOOL_ERROR_CODES = [
 export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
 
 export const NEXT_STEPS: Record<ToolErrorCode, string> = {
-  SIGN_IN_REQUIRED: `run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`,
-  SIGN_IN_REJECTED: "contact an AgentX admin; the message says why the sign-in was refused",
+  SIGN_IN_REQUIRED: `run npx ${CLI_PACKAGE_NAME} login <your Rovara URL>`,
+  SIGN_IN_REJECTED: "contact a Rovara admin; the message says why the sign-in was refused",
   ADMIN_REQUIRED: `run npx ${CLI_PACKAGE_NAME} login --admin`,
-  PROJECT_NOT_FOUND: "run agentx_list_projects to see the projects you can use",
+  PROJECT_NOT_FOUND: "run rovara_list_projects to see the projects you can use",
   PROJECT_ACCESS_DENIED: "join one of the project's Slack channels, or ask an admin for access",
   PROJECT_TASKS_DISABLED: "use the project's Slack channel, or ask an admin",
-  TASK_NOT_FOUND: "run agentx_list_tasks to see your tasks",
+  TASK_NOT_FOUND: "run rovara_list_tasks to see your tasks",
   // Ruling F22: fits a project with no bound channel, and a named channel that is not bound (C3).
-  CHANNEL_REQUIRED: "send channel with one of the bound channels the message names, or ask an AgentX admin to bind one",
+  CHANNEL_REQUIRED: "send channel with one of the bound channels the message names, or ask a Rovara admin to bind one",
   CHANNEL_AMBIGUOUS: "send channel with one of the channels the message names",
-  WORKSPACE_LIMIT: "close a task you no longer need with agentx_close_task",
-  TASK_BUSY: "wait with agentx_wait_for_task, or stop the task with agentx_cancel_task",
+  WORKSPACE_LIMIT: "close a task you no longer need with rovara_close_task",
+  TASK_BUSY: "wait with rovara_wait_for_task, or stop the task with rovara_cancel_task",
   SLACK_UNAVAILABLE: "try again in a few minutes; projects an admin granted you still work",
-  CONFIRMATION_UNAVAILABLE: "use a client that supports elicitation, link a Slack user, or use the agentx CLI",
+  CONFIRMATION_UNAVAILABLE: "use a client that supports elicitation, link a Slack user, or use the Rovara CLI",
   CONFIRMATION_DECLINED: "ask for the change again",
   CONFIRMATION_EXPIRED: "ask for the change again",
   CHANGE_STALE: "ask for the change again",
@@ -41,34 +41,34 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
   CONTROL_PLANE_UNAVAILABLE: "check your connection and try again",
   INVALID_REQUEST: "fix the input the message names and try again",
   // The step needs the session's own sign-in command, so toolErrorFromResponse builds it; this is the generic one.
-  BUDGET_REACHED: "ask whoever runs this AgentX to raise the budget",
+  BUDGET_REACHED: "ask whoever runs this Rovara to raise the budget",
   OWNER_APPROVAL_NEEDED: "give the person the link in the message to pass to the agent's owner; the run starts once the owner approves it on that page. You cannot approve it",
-  SESSION_NOT_FOUND: "run agentx_list_sessions to see the sessions you can see",
+  SESSION_NOT_FOUND: "run rovara_list_sessions to see the sessions you can see",
   RATE_LIMITED: "wait a few minutes before sending again; do not retry in a loop",
   SESSION_REFUSED: "nothing was changed; tell the person what the message says, and do not try to get around it",
   NOT_ON_THIS_INSTALL: "this is not on this install; tell the person, and do not retry",
 };
 /** BUDGET_REACHED's next steps: the task's own budget is raised by continuing the task; any other budget by whoever runs the install. */
-const OTHER_BUDGET_STEP = "ask whoever runs this AgentX to raise the budget";
-const TASK_BUDGET_STEP = "continue the task with agentx_continue_task to give it a fresh budget";
+const OTHER_BUDGET_STEP = "ask whoever runs this Rovara to raise the budget";
+const TASK_BUDGET_STEP = "continue the task with rovara_continue_task to give it a fresh budget";
 
 /**
  * Ruling S1: UPGRADE_REQUIRED's next step when the control plane, not this CLI, is too old
  * (older than DEVELOPER_API_VERSION's minor, so it has no task routes).
  */
-export const UPGRADE_AGENTX_STEP = "ask your AgentX admin to upgrade AgentX, or use an older CLI";
+export const UPGRADE_AGENTX_STEP = "ask your Rovara admin to upgrade Rovara, or use an older CLI";
 
 /** CONTROL_PLANE_UNAVAILABLE's next step for a 4xx this CLI does not know: not a connection problem. */
-export const UNEXPECTED_ANSWER_STEP = "ask your AgentX admin, or try again later";
+export const UNEXPECTED_ANSWER_STEP = "ask your Rovara admin, or try again later";
 
 /**
  * Final review M1: TASK_BUSY's next step when a start or a close, not a running task, met a busy
  * answer (the start's or close's own transaction failed): the action is tried again, not waited on.
  */
 export const START_BUSY_STEP = "try again with the same request_id";
-export const CLOSE_BUSY_STEP = "try agentx_close_task again in a moment, and ask an admin if it keeps failing";
+export const CLOSE_BUSY_STEP = "try rovara_close_task again in a moment, and ask an admin if it keeps failing";
 /** Spec 025 C21: a share that met a task changing under it is tried again, not waited on. */
-export const SHARE_BUSY_STEP = "try agentx_share_task again with the same request_id";
+export const SHARE_BUSY_STEP = "try rovara_share_task again with the same request_id";
 
 export class ToolError extends Error {
   constructor(readonly code: ToolErrorCode, message: string, readonly nextStep: string = NEXT_STEPS[code]) {
@@ -114,7 +114,7 @@ const SESSION_REFUSALS = new Set<string>(["SESSION_LEVEL_REQUIRED", "LOCAL_AGENT
 const SESSION_NOT_FOUND_TEXT = "session not found";
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-// Ruling F16: the placeholder "<your AgentX URL>" is kept whole. Built from CLI_PACKAGE_NAME so it
+// Ruling F16: the placeholder "<your Rovara URL>" is kept whole. Built from CLI_PACKAGE_NAME so it
 // matches the sign-in command the CLI writes.
 const SIGN_IN = new RegExp(String.raw`\brun (npx (?:${[CLI_PACKAGE_NAME, "@charterarc/agentx"].map(escapeRegExp).join("|")}) login (?:<[^>]+>|\S+))`);
 
@@ -133,7 +133,7 @@ const OWN_STEPS = new Map<string, string>([
 export function toolErrorFromResponse(status: number, value: unknown, signInCommand: string, secrets: readonly string[] = [], busyStep: string = NEXT_STEPS.TASK_BUSY): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
-  const message = plainText(error?.message, `AgentX answered HTTP ${status}`, secrets);
+  const message = plainText(error?.message, `Rovara answered HTTP ${status}`, secrets);
   if (status === 401 || code === "AUTH_REQUIRED") return new ToolError("SIGN_IN_REQUIRED", message, `run ${signInCommand}`);
   // Refused before any work started: the broker's own words are the answer, and so is its next step.
   if (code === "BUDGET_EXCEEDED") return new ToolError("BUDGET_REACHED", message, message.startsWith(TASK_BUDGET_EXCEEDED_PREFIX) ? TASK_BUDGET_STEP : OTHER_BUDGET_STEP);
@@ -144,7 +144,7 @@ export function toolErrorFromResponse(status: number, value: unknown, signInComm
   if (status === 404 && code === "NOT_FOUND" && error?.message === SESSION_NOT_FOUND_TEXT) return new ToolError("SESSION_NOT_FOUND", message);
   if (code !== undefined && PASSED_THROUGH.has(code)) return new ToolError(code as ToolErrorCode, message, OWN_STEPS.get(`${code}:${message}`));
   // A Rovara Code task that waits for answers is not busy running: the only way on is the answer tool, so waiting is not the next step.
-  if (code !== undefined && BUSY.has(code) && message.includes("agentx_answer_task_questions")) return new ToolError("TASK_BUSY", message, "answer the questions with agentx_answer_task_questions");
+  if (code !== undefined && BUSY.has(code) && message.includes("rovara_answer_task_questions")) return new ToolError("TASK_BUSY", message, "answer the questions with rovara_answer_task_questions");
   if (code !== undefined && BUSY.has(code)) return new ToolError("TASK_BUSY", message, busyStep);
   if (code !== undefined && INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (status >= 400 && status < 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, UNEXPECTED_ANSWER_STEP);

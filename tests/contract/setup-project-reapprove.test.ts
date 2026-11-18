@@ -47,7 +47,7 @@ async function registered(context: ReturnType<typeof setup>) {
   expect(context.plane.registered).toHaveLength(1);
 }
 
-describe("agentx project setup-approve (re-approval of an already registered project)", () => {
+describe("rovara project setup-approve (re-approval of an already registered project)", () => {
   it("project add alone never proposes again for a registered project (why the re-approval path exists)", async () => {
     const context = setup();
     await registered(context);
@@ -112,7 +112,7 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     const prompter = scriptedPrompter([true]);
     const result = await reapproveProjectSetup({ env: "staging", session, prompter, write: (line) => lines.push(line), services: context.services, projectName: "payments-api" });
     expect(result.modelRouteRevision).toBeNull();
-    const expected = "AI navigation steps will not run: the driving test with Amazon Bedrock `us.anthropic.claude-haiku-5-5` has not passed (not run). Run `agentx --env staging project model-check test --model us.anthropic.claude-haiku-5-5`";
+    const expected = "AI navigation steps will not run: the driving test with Amazon Bedrock `us.anthropic.claude-haiku-5-5` has not passed (not run). Run `rovara --env staging project model-check test --model us.anthropic.claude-haiku-5-5`";
     expect(lines.join("\n")).toContain(expected);
     expect(prompter.asked.find((question) => question.startsWith("Use this project setup plan?"))).toContain(expected);
   });
@@ -256,7 +256,7 @@ describe("agentx project setup-approve (re-approval of an already registered pro
     }) as typeof globalThis.fetch };
     const failure = await reapproveProjectSetup({ env: "staging", session, prompter: scriptedPrompter([true]), write: () => undefined, services: flaky, projectName: "payments-api" }).then(() => undefined, (error: unknown) => error as Error);
     expect(failure?.message).toContain("approval of the setup proposal is recorded, but revision 2 of payments-api was NOT registered");
-    expect(failure?.message).toContain("agentx --env staging project setup-approve --project-name payments-api");
+    expect(failure?.message).toContain("rovara --env staging project setup-approve --project-name payments-api");
     expect(failure?.message).toContain("proposes and asks again");
     expect(approvals(context)).toHaveLength(1);
     expect(context.plane.registered).toHaveLength(1);

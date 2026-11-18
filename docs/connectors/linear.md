@@ -3,7 +3,7 @@
 This guide connects one Rovara project to Linear. It is written for the administrator of your own
 Rovara deployment. You create the Linear credential in your own Linear workspace.
 
-`agentx connector add linear --project <name>` walks you through this guide, reads the credential
+`rovara connector add linear --project <name>` walks you through this guide, reads the credential
 from a hidden prompt, tests it, and registers the project's next revision. The steps below are what
 it does, for doing it by hand or understanding it.
 
@@ -41,7 +41,7 @@ cannot be limited to one.
   **Settings > Administration > API > Member API keys** allows it.
 - Consider a dedicated Linear user for Rovara, so writes are not shown as a person's. It uses a
   seat.
-- You need the Rovara administration client (`agentx`) logged in, and AWS credentials that can
+- You need the Rovara administration client (`rovara`) logged in, and AWS credentials that can
   create secrets in the deployment's account and region.
 - `jq` must be installed.
 
@@ -114,9 +114,9 @@ then register the credential again (step 4) so Rovara drops the old one at once.
 ## 4. Register the credential
 
 ```sh
-agentx admin credential register --ref linear-payments \
+rovara admin credential register --ref linear-payments \
   --type static-secret --secret agentx/<env>/connectors/linear-payments
-agentx admin credential list
+rovara admin credential list
 ```
 
 `list` shows `linear-payments` with type `static-secret`. It never prints the key.
@@ -186,7 +186,7 @@ actionPolicy:
 Raise `revision`, then run:
 
 ```sh
-agentx admin project register --file payments.yaml \
+rovara admin project register --file payments.yaml \
   --deployment-mode ec2-ebs --launch-template-id <Ec2WorkerLaunchTemplateId> --subnets <Ec2WorkerSubnets>
 ```
 
@@ -202,7 +202,7 @@ What the other results mean:
 
 | Output | Meaning and fix |
 |---|---|
-| Refused: `connector linear: credential linear-payments is not registered; run agentx admin credential register first` | Run step 4 first. |
+| Refused: `connector linear: credential linear-payments is not registered; run rovara admin credential register first` | Run step 4 first. |
 | Refused: `connector linear: credential linear-payments is oauth-client-credentials; a Linear connector needs static-secret` | Register a `static-secret` API key instead. |
 | Refused: `connector linear: connector credentials are not configured in this deployment` | The control plane was deployed without connector credentials. Redeploy with them. |
 | `Warning: connector linear: Linear is not connected: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |

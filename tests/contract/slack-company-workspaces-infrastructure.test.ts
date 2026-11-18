@@ -148,7 +148,7 @@ describe("Slack company mode's switch (18a)", () => {
     for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toStrictEqual({ "Fn::If": [on, "staging", ""] });
     // DEC 254zk: the channel API's factory needs the environment's name too.
     expect(variablesOf(named, "ChannelApiIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
-    // 18d, DEC 254zk: the Slack service's table and team are always output (its switch is the slack stack's own, set by agentx config set slack.companyWorkspaces).
+    // 18d, DEC 254zk: the Slack service's table and team are always output (its switch is the slack stack's own, set by rovara config set slack.companyWorkspaces).
     const outputs = (named as unknown as { Outputs: Record<string, { Value: unknown; Condition?: string }> }).Outputs;
     expect(outputs).not.toHaveProperty("SlackCompanyWorkspacesState");
     expect(outputs.SlackCompanyStateTableName).toStrictEqual({ Value: { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] } });

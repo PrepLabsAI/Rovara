@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { claimValues } from "../aws/lambda.js";
 import { GITHUB_ISSUER_URL, githubDisplayName } from "./github-profile.js";
-import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
 /** `authTime` (lane ID part 2, company sign-in only): the ID token's `auth_time`, epoch seconds, when it carried a whole number. Slack's is never read: a Slack round trip never counts as a step-up. */
@@ -56,7 +56,7 @@ const errorCode = (error: unknown): string => (typeof error === "string" ? error
  */
 const formEncode = (value: string): string => new URLSearchParams([["v", value]]).toString().slice(2);
 
-const NOT_VERIFIED = "the identity token could not be verified; run agentx login again";
+const NOT_VERIFIED = `the identity token could not be verified; run ${CLI_COMMAND_NAME} login again`;
 
 async function verifyIdToken(idToken: string, jwks: JWTVerifyGetKey, options: { issuer: string; audience: string; nonce: string; now: number }): Promise<{ ok: true; payload: JWTPayload } | { ok: false; reason: string }> {
   let payload: JWTPayload;
@@ -71,7 +71,7 @@ async function verifyIdToken(idToken: string, jwks: JWTVerifyGetKey, options: { 
   // OIDC Core 3.1.3.7: with several audiences azp is required, and when present it must be us.
   if (Array.isArray(payload.aud) && payload.aud.length > 1 && payload.azp === undefined) return { ok: false, reason: NOT_VERIFIED };
   if (payload.azp !== undefined && payload.azp !== options.audience) return { ok: false, reason: NOT_VERIFIED };
-  if (payload.nonce !== options.nonce) return { ok: false, reason: "the identity token's nonce does not match this sign-in; run agentx login again" };
+  if (payload.nonce !== options.nonce) return { ok: false, reason: `the identity token's nonce does not match this sign-in; run ${CLI_COMMAND_NAME} login again` };
   return { ok: true, payload };
 }
 
@@ -87,9 +87,9 @@ export function slackSignInProvider(input: {
   anyWorkspace?: boolean; teamId: string | undefined; credentials: () => Promise<{ clientId?: string; clientSecret?: string }>; fetch: typeof fetch; jwks: JWTVerifyGetKey; now: () => number;
 }): SignInProvider {
   const configured = async () => {
-    if (input.teamId === undefined) throw new ProviderNotConfiguredError("this AgentX environment has no Slack team ID yet; ask an admin to run agentx signin enable slack");
+    if (input.teamId === undefined) throw new ProviderNotConfiguredError(`this Rovara environment has no Slack team ID yet; ask an admin to run ${CLI_COMMAND_NAME} signin enable slack`);
     const { clientId, clientSecret } = await input.credentials();
-    if (clientId === undefined || clientSecret === undefined) throw new ProviderNotConfiguredError("the Slack app's client ID and client secret are not stored yet; ask an admin to run agentx signin enable slack");
+    if (clientId === undefined || clientSecret === undefined) throw new ProviderNotConfiguredError(`the Slack app's client ID and client secret are not stored yet; ask an admin to run ${CLI_COMMAND_NAME} signin enable slack`);
     return { teamId: input.teamId, clientId, clientSecret };
   };
   return {
@@ -109,7 +109,7 @@ export function slackSignInProvider(input: {
       }, "Slack") as { ok?: boolean; error?: unknown; id_token?: unknown };
       if (body.error === "ratelimited") throw new ProviderUnavailableError("Slack is rate limiting sign-ins; try again in a minute");
       if (body.ok !== true || typeof body.id_token !== "string") {
-        return { ok: false, reason: `Slack refused the sign-in (${errorCode(body.error)}); run agentx login again` };
+        return { ok: false, reason: `Slack refused the sign-in (${errorCode(body.error)}); run ${CLI_COMMAND_NAME} login again` };
       }
       const verified = await verifyIdToken(body.id_token, input.jwks, { issuer: SLACK_OIDC_ISSUER, audience: clientId, nonce, now: input.now() });
       if (!verified.ok) return verified;
@@ -117,7 +117,7 @@ export function slackSignInProvider(input: {
       if (input.anyWorkspace === true) return slackAnyWorkspaceIdentity(verified.payload, teamId);
       if (team !== teamId) return { ok: false, wrongAccount: true, reason: `you signed in to Slack workspace ${SlackTeamIdSchema.safeParse(team).data ?? "unknown"}, but this AgentX serves ${teamId}` };
       const userId = SlackUserIdSchema.safeParse(verified.payload["https://slack.com/user_id"]);
-      if (!userId.success) return { ok: false, reason: "Slack's identity token names no Slack user; run agentx login again" };
+      if (!userId.success) return { ok: false, reason: `Slack's identity token names no Slack user; run ${CLI_COMMAND_NAME} login again` };
       const email = verifiedEmail(verified.payload);
       return {
         ok: true,
@@ -136,7 +136,7 @@ export function slackSignInProvider(input: {
 function slackAnyWorkspaceIdentity(payload: JWTPayload, installTeam: string): ProviderResult {
   const team = SlackTeamIdSchema.safeParse(payload["https://slack.com/team_id"]);
   const userId = SlackUserIdSchema.safeParse(payload["https://slack.com/user_id"]);
-  if (!team.success || !userId.success) return { ok: false, reason: "Slack's identity token names no Slack workspace or user; run agentx login again" };
+  if (!team.success || !userId.success) return { ok: false, reason: `Slack's identity token names no Slack workspace or user; run ${CLI_COMMAND_NAME} login again` };
   const own = team.data === installTeam;
   const email = verifiedEmail(payload);
   const rawName = payload["https://slack.com/team_name"];
@@ -214,7 +214,7 @@ export function oidcSignInProvider(input: {
         body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri }).toString(),
       }, "the company sign-in provider") as { id_token?: unknown; error?: unknown };
       if (typeof body.id_token !== "string") {
-        return { ok: false, reason: `the company sign-in provider refused the sign-in (${errorCode(body.error)}); run agentx login again` };
+        return { ok: false, reason: `the company sign-in provider refused the sign-in (${errorCode(body.error)}); run ${CLI_COMMAND_NAME} login again` };
       }
       const verified = await verifyIdToken(body.id_token, input.jwksFor(doc.jwks_uri), { issuer: doc.issuer, audience: input.clientId, nonce, now: input.now() });
       if (!verified.ok) return verified;
@@ -277,7 +277,7 @@ async function githubCall(fetchFn: typeof fetch, url: string, init: RequestInit)
  */
 export function githubSignInProvider(input: { clientId: string; clientSecret: () => Promise<string>; fetch: typeof fetch; now: () => number }): SignInProvider {
   const challenge = (verifier: string) => createHash("sha256").update(verifier).digest("base64url");
-  const refused = (reason: string): ProviderResult => ({ ok: false, reason: `GitHub refused the sign-in (${reason}); run agentx login again` });
+  const refused = (reason: string): ProviderResult => ({ ok: false, reason: `GitHub refused the sign-in (${reason}); run ${CLI_COMMAND_NAME} login again` });
   return {
     method: "github",
     async authorizeUrl({ state, nonce, redirectUri }) {
@@ -302,7 +302,7 @@ export function githubSignInProvider(input: { clientId: string; clientSecret: ()
       const profile = user.body as { id?: unknown; login?: unknown; name?: unknown } | null;
       if (user.status !== 200 || profile === null || typeof profile !== "object" || typeof profile.id !== "number" || !Number.isSafeInteger(profile.id) || profile.id <= 0 || profile.id > GITHUB_ID_MAX
         || typeof profile.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(profile.login)) {
-        return { ok: false, reason: "GitHub's answer names no GitHub user; run agentx login again" };
+        return { ok: false, reason: `GitHub's answer names no GitHub user; run ${CLI_COMMAND_NAME} login again` };
       }
       // A failed or unreadable email list is no email (never a guess): the person can still sign in, and join only with an invite secret.
       const emails = await githubCall(input.fetch, `${GITHUB_API}/user/emails?per_page=${GITHUB_EMAILS_MAX}`, { headers });

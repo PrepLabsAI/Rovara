@@ -1,4 +1,4 @@
-// DEC 254g: `agentx config set coreEngine.agentModel` checks a model other than Claude against the model gateway's LIVE offered-models answer. Only the broker may sign the gateway's
+// DEC 254g: `rovara config set coreEngine.agentModel` checks a model other than Claude against the model gateway's LIVE offered-models answer. Only the broker may sign the gateway's
 // service token (the task key's policy permits only its role), so the CLI asks the broker's admin read GET /v1/admin/core/offered-models, for the administrator's own company. The
 // read needs only the gateway's origin and the task-token signer (not the agent model, which is what is being chosen, nor the choice switch). Every failure is fixed words.
 import { createHash, generateKeyPairSync, sign } from "node:crypto";

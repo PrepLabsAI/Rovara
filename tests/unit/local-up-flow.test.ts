@@ -1170,7 +1170,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     const payload = publish.payload as Record<string, unknown>;
     // The publication names its tree and its branch, carries the digest of its own context and a push grant for the one repository, and nothing else is pushed.
     expect(publish).toMatchObject({ kind: "publish", payload: { mode: "create", repository: "demo", candidateTreeSha: tree, publicationMode: "CHECKED_TREE", workflowBaseCommit: h.base } });
-    expect(payload["headBranch"]).toMatch(/^agentx\/[0-9a-f-]{36}$/u);
+    expect(payload["headBranch"]).toMatch(/^rovara\/[0-9a-f-]{36}$/u);
     expect(payload["publicationContextDigest"]).toMatch(/^[a-f0-9]{64}$/u);
     expect(typeof payload["repositoryGrant"]).toBe("string");
     expect(payload["title"]).toMatch(/^Rovara: /u);
@@ -4405,7 +4405,7 @@ describe("rovara up: structured plans, owner answers and an unreadable plan", ()
     await answerAndCheck(h, workspaceId, seen, plan, DECIDED_PLAN());
     const link = await h.browse(`/plan/${taskId}`);
     const page = (await raw_(h, link)).body;
-    // The page offers each decision, AgentX's recommendation chosen.
+    // The page offers each decision, Rovara's recommendation chosen.
     expect(page).toContain("Should the endpoint need a login?");
     expect(page).toMatch(/name="answer-d1" value="open" checked/);
     // A form answers once, so each press is on a page of its own.

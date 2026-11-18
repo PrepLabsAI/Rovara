@@ -54,10 +54,10 @@ async function questionWhenAsked(hub: WizardHub, text: string) {
 }
 
 describe("Slack app manifest", () => {
-  it("carries AgentX's bot scopes, the app_mention event and this environment's URLs", () => {
-    expect(slackAppManifest({ appName: "AgentX", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN })).toEqual({
-      display_information: { name: "AgentX", description: "AgentX: ask in Slack, and AgentX works in your repositories and trackers." },
-      features: { bot_user: { display_name: "agentx", always_online: true } },
+  it("carries Rovara's bot scopes, the app_mention event and this environment's URLs", () => {
+    expect(slackAppManifest({ appName: "Rovara", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN })).toEqual({
+      display_information: { name: "Rovara", description: "Rovara: ask in Slack, and Rovara works in your repositories and trackers." },
+      features: { bot_user: { display_name: "rovara", always_online: true } },
       oauth_config: {
         redirect_urls: [SIGNIN],
         scopes: {
@@ -80,17 +80,17 @@ describe("Slack app manifest", () => {
     expect(slackBotScopes({ publicInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "channels:write.invites"]);
     expect(slackBotScopes({ privateInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "groups:write.invites"]);
     expect(slackBotScopes({ publicInvitations: true, privateInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "channels:write.invites", "groups:write.invites"]);
-    expect(slackAppManifest({ appName: "AgentX", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN }).oauth_config.scopes.bot).toEqual(SLACK_BOT_SCOPES);
+    expect(slackAppManifest({ appName: "Rovara", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN }).oauth_config.scopes.bot).toEqual(SLACK_BOT_SCOPES);
     expect(SIGN_IN_BOT_SCOPES).toEqual(["channels:read", "groups:read", "im:write", "users:read", "users:read.email"]);
   });
 
   it("derives a valid bot display name from any app name", () => {
-    expect(slackBotDisplayName("AgentX Staging!")).toBe("agentx-staging");
-    expect(slackBotDisplayName("***")).toBe("agentx");
+    expect(slackBotDisplayName("Rovara Staging!")).toBe("rovara-staging");
+    expect(slackBotDisplayName("***")).toBe("rovara");
   });
 
   it("opens Slack's create-from-manifest page with the manifest", () => {
-    const manifest = slackAppManifest({ appName: "AgentX", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN });
+    const manifest = slackAppManifest({ appName: "Rovara", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN });
     const url = new URL(slackCreateAppUrl(manifest));
     expect(`${url.origin}${url.pathname}`).toBe("https://api.slack.com/apps");
     expect(url.searchParams.get("new_app")).toBe("1");
@@ -109,16 +109,16 @@ describe("Slack app manifest", () => {
 describe("the bot's display handle (FR-026, FR-027)", () => {
   it("uses the handle Slack reported, else derives one from the app name", () => {
     const withHandle = { ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" } };
-    expect(botNameOf(withHandle, "AgentX acme (staging)")).toBe("agentx-acme-staging");
+    expect(botNameOf(withHandle, "Rovara acme (staging)")).toBe("agentx-acme-staging");
     const withoutHandle = { ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" } };
-    expect(botNameOf(withoutHandle, "AgentX acme (staging)")).toBe(slackBotDisplayName("AgentX acme (staging)"));
-    expect(botNameOf(emptyProgress("staging", T0), "AgentX")).toBe("agentx");
+    expect(botNameOf(withoutHandle, "Rovara acme (staging)")).toBe(slackBotDisplayName("Rovara acme (staging)"));
+    expect(botNameOf(emptyProgress("staging", T0), "Rovara")).toBe("rovara");
   });
 
   it("spec 048 FR-026: uses the bot handle Slack assigned from then on", () => {
     const progress = { ...emptyProgress("staging", 0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging2" } };
-    expect(botNameOf(progress, "AgentX acme (staging)")).toBe("agentx-acme-staging2");
-    expect(botNameOf(emptyProgress("staging", 0), "AgentX acme (staging)")).toBe("agentx-acme-staging");
+    expect(botNameOf(progress, "Rovara acme (staging)")).toBe("agentx-acme-staging2");
+    expect(botNameOf(emptyProgress("staging", 0), "Rovara acme (staging)")).toBe("rovara-acme-staging");
   });
 });
 
@@ -138,7 +138,7 @@ describe("probing the Slack URLs", () => {
 
   it("gives up after 7 minutes, suggesting the likeliest mistake", async () => {
     await expect(probe(slackIngressFetch({ signingSecret: "ffffffffffffffffffffffffffffffff" })))
-      .rejects.toThrow(`${EVENTS} still refuses requests signed with the new signing secret after 7 minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run agentx init again`);
+      .rejects.toThrow(`${EVENTS} still refuses requests signed with the new signing secret after 7 minutes; check that you pasted the Signing Secret, not the Client Secret, and that this computer's clock is correct (Slack refuses signatures older than 5 minutes), then run rovara init again`);
   });
 
   it("passes the control plane's real ingress and interactivity handlers", async () => {
@@ -166,7 +166,7 @@ describe("probing the Slack URLs", () => {
       const wrongRoute = Object.assign(async (url: Parameters<typeof fetch>[0], init?: RequestInit) => (
         requestUrl(url) === INTERACTIONS ? new Response("Not Found", { status }) : passing(url, init)
       ), { calls: [] });
-      await expect(probe(wrongRoute)).rejects.toThrow(`${INTERACTIONS} answered HTTP ${status}, so the route or stage is wrong; check that the Slack URLs come from this environment's control-plane stack outputs, then run agentx init again`);
+      await expect(probe(wrongRoute)).rejects.toThrow(`${INTERACTIONS} answered HTTP ${status}, so the route or stage is wrong; check that the Slack URLs come from this environment's control-plane stack outputs, then run rovara init again`);
     }
   });
 });
@@ -211,7 +211,7 @@ describe("Slack app step", () => {
     expect(JSON.stringify(progress.value())).not.toContain(TEST_SIGNING_SECRET);
     expect(context.opened[0]).toMatch(/^https:\/\/api\.slack\.com\/apps\?new_app=1&manifest_json=/);
     expect(context.lines).toContain("Bot @agentx in workspace Acme (https://acme.slack.com/)");
-    expect(confirmations).toEqual([{ question: "Is this the AgentX bot in the right workspace?", defaultValue: true }]);
+    expect(confirmations).toEqual([{ question: "Is this the Rovara bot in the right workspace?", defaultValue: true }]);
   });
 
   it("records a workspace name Slack sends only within 1 to 100 characters, and a handle only in the stored pattern", async () => {
@@ -223,13 +223,13 @@ describe("Slack app step", () => {
       return progress.value().slack;
     };
     expect(await run({ team: "A".repeat(150), user: "agentx" })).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx", teamName: "A".repeat(100) });
-    expect(await run({ team: "", user: "AgentX Bot" })).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" });
+    expect(await run({ team: "", user: "Rovara Bot" })).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" });
   });
 
   it("stores nothing when the engineer says the token is for the wrong bot or workspace", async () => {
     const context = slackContext(["installed", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, false]);
     await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle()))
-      .rejects.toThrow("nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
+      .rejects.toThrow("nothing was saved; copy the Bot User OAuth Token from the Rovara app in the right workspace, then run rovara init again");
     expect(storedSlack(context).botToken).toBe("unset");
     expect(context.lines.join("\n")).not.toContain(TEST_BOT_TOKEN);
   });
@@ -237,7 +237,7 @@ describe("Slack app step", () => {
   it("waits when a workspace admin must approve the app, and continues on the next run", async () => {
     const waiting = slackContext(["approval"]);
     const outcome = await slackAppStep(fakeSlackApi()).run(waiting, progressHandle());
-    expect(outcome).toEqual({ status: "waiting", message: 'Slack is waiting for a workspace admin to approve "AgentX acme (staging)". Once it is installed, run agentx init --env staging --region us-east-1 again; it continues here.' });
+    expect(outcome).toEqual({ status: "waiting", message: 'Slack is waiting for a workspace admin to approve "Rovara acme (staging)". Once it is installed, run rovara init --env staging --region us-east-1 again; it continues here.' });
     expect(storedSlack(waiting).botToken).toBe("unset");
 
     const resumed = slackContext(["installed", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true]);
@@ -307,13 +307,13 @@ describe("Slack app step", () => {
       expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed", lines: ["Slack did not accept those values.", "Nothing was saved."] });
       expect(surface.cards.at(-1)?.details?.[0]).toContain("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
     }
-    // With no retry on the page, the card keeps the terminal's advice to run agentx init again in its details.
+    // With no retry on the page, the card keeps the terminal's advice to run rovara init again in its details.
     const context = slackContext(["installed", TEST_SIGNING_SECRET], { surface, secretFlags: { slackBotToken: { envName: "BOT" } }, processEnv: { BOT: TEST_BOT_TOKEN } });
     await expect(slackAppStep(fakeSlackApi({ botsInfo: async () => ({ ok: false, error: "missing_scope" }) })).run(context, progressHandle()))
-      .rejects.toThrow("Slack bots.info did not return the app id (missing_scope); run agentx init again");
+      .rejects.toThrow("Slack bots.info did not return the app id (missing_scope); run rovara init again");
     expect(surface.cards.at(-1)).toMatchObject({
       id: "slack", status: "failed", lines: ["Slack did not accept those values.", "Nothing was saved."],
-      details: ["Slack bots.info did not return the app id (missing_scope); run agentx init again"],
+      details: ["Slack bots.info did not return the app id (missing_scope); run rovara init again"],
     });
   });
 
@@ -391,7 +391,7 @@ describe("spec 048 FR-033: the Slack values on one form", () => {
     context.answers = { ...context.answers, signinMethods: "slack" };
     await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle())).resolves.toMatchObject({ status: "done" });
     expect(cards.find((card) => card.status === "waiting" && card.lines[0]?.startsWith("Slack is waiting for a workspace admin"))?.lines).toEqual([
-      "Slack is waiting for a workspace admin to approve \"AgentX acme (staging)\".",
+      "Slack is waiting for a workspace admin to approve \"Rovara acme (staging)\".",
       "Your progress is saved. You can leave the installer running, or stop and continue later.",
       "When the app is installed in Slack, choose Installed, continue.",
     ]);
@@ -427,7 +427,7 @@ describe("Slack sign-in support in the app (FR-044, R10, R11)", () => {
     };
     const step = withoutEndpoint(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true]);
     await expect(slackAppStep(fakeSlackApi()).run(step, progressHandle()))
-      .rejects.toThrow("stack agentx-staging-control-plane reports no ApiEndpoint; the control-plane step must finish first, so run agentx init again");
+      .rejects.toThrow("stack agentx-staging-control-plane reports no ApiEndpoint; the control-plane step must finish first, so run rovara init again");
     expect(storedSlack(step).botToken).toBe("unset");
 
     const fetch = slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET });
@@ -468,7 +468,7 @@ describe("Slack sign-in support in the app (FR-044, R10, R11)", () => {
     const api = fakeSlackApi({ authTest: async (token) => ({ ok: token === TEST_BOT_TOKEN, team_id: "T0TEAM", user_id: "U0BOT", bot_id: "B0BOT", scopes: ["users:read"] }) });
     expect(await readSlackTeamIdFromSecret({ secrets, api, secretId: SLACK_SECRET })).toEqual({ teamId: "T0TEAM", scopes: ["users:read"] });
     const unset = memoryInitSecrets({ [SLACK_SECRET]: JSON.stringify({ botToken: "unset", signingSecret: PLACEHOLDER }) });
-    await expect(readSlackTeamIdFromSecret({ secrets: unset, api, secretId: SLACK_SECRET })).rejects.toThrow(`secret ${SLACK_SECRET} has no Slack bot token yet; finish the Slack app step of agentx init first`);
+    await expect(readSlackTeamIdFromSecret({ secrets: unset, api, secretId: SLACK_SECRET })).rejects.toThrow(`secret ${SLACK_SECRET} has no Slack bot token yet; finish the Slack app step of rovara init first`);
     const refused = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
     let message = "";
     try { await readSlackTeamIdFromSecret({ secrets, api: refused, secretId: SLACK_SECRET }); } catch (error) { message = (error as Error).message; }
@@ -515,7 +515,7 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
   it("refuses at once while the secret still holds the control plane's placeholder", async () => {
     const fetch = slackIngressFetch({ signingSecret: PLACEHOLDER });
     const context = slackContext([], { fetch });
-    await expect(verifySlackUrls(context, progressHandle())).rejects.toThrow("secret agentx/staging/slack holds no Slack signing secret; run agentx init again to repeat the Slack app step");
+    await expect(verifySlackUrls(context, progressHandle())).rejects.toThrow("secret agentx/staging/slack holds no Slack signing secret; run rovara init again to repeat the Slack app step");
     expect(fetch.calls).toEqual([]);
   });
 
@@ -542,7 +542,7 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
       ["slack-urls", "running"], ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "failed"],
       ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "ok"],
     ]);
-    expect(surface.cards[1]?.lines).toContain("AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds.");
+    expect(surface.cards[1]?.lines).toContain("Rovara can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds.");
     expect(surface.cards[3]?.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
     expect(JSON.stringify(surface.cards)).not.toContain(TEST_SIGNING_SECRET);
   });

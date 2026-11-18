@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import {
   AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AgentXErrorCodeSchema, RecordedChangeResponseWireSchema, agentXError,
-  type AdminChangeAuditRecordWire, type AdminChangeInput, type AdminChangeViewWire, type ConfigChange, type ConfigChangeOutcomeRequest,
+  type AdminChangeAuditRecordWire, type AdminChangeInput, type AdminChangeViewWire, type ConfigChange, type ConfigChangeOutcomeRequest, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { adminResponseBody, readJsonResponse, serverError } from "./http.js";
 
@@ -16,7 +16,7 @@ import { adminResponseBody, readJsonResponse, serverError } from "./http.js";
 const PAGE_LIMIT = "100";
 /** Guards against an endless export if the control plane ever hands back a growing cursor chain. */
 const MAX_PAGES = 10_000;
-const CHECK_STEP = "run agentx admin changes --since 1h to see how it ended";
+const CHECK_STEP = `run ${CLI_COMMAND_NAME} admin changes --since 1h to see how it ended`;
 
 /** Text from the control plane, without terminal control characters (a newline and a tab stay). */
 function plain(text: string): string {
@@ -30,12 +30,12 @@ function plain(text: string): string {
 
 type Step = "plan" | "apply" | "decline" | "list" | "record" | "outcome";
 const UNREACHABLE: Record<Step, (changeId?: string) => string> = {
-  plan: () => "could not reach AgentX to plan the change; nothing was applied, try again",
-  apply: (changeId) => `could not reach AgentX to apply change ${changeId}, so it may or may not have applied; ${CHECK_STEP}`,
-  decline: (changeId) => `could not reach AgentX to decline change ${changeId}; nothing was applied, and it expires on its own`,
-  list: () => "could not reach AgentX to read change records; try again",
-  record: () => "could not reach AgentX",
-  outcome: () => "could not reach AgentX",
+  plan: () => "could not reach Rovara to plan the change; nothing was applied, try again",
+  apply: (changeId) => `could not reach Rovara to apply change ${changeId}, so it may or may not have applied; ${CHECK_STEP}`,
+  decline: (changeId) => `could not reach Rovara to decline change ${changeId}; nothing was applied, and it expires on its own`,
+  list: () => "could not reach Rovara to read change records; try again",
+  record: () => "could not reach Rovara",
+  outcome: () => "could not reach Rovara",
 };
 
 interface Session { controlPlaneUrl: string; accessToken: string }
@@ -54,7 +54,7 @@ async function send(session: Session, traceId: string, method: "GET" | "POST", p
   }
   // An apply refused without AgentX's own error (a gateway timeout, say) may still have applied.
   if (step === "apply" && !response.ok && serverError((await readJsonResponse(response.clone())).body).code === undefined) {
-    throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status} while applying change ${changeId}, so it may or may not have applied; ${CHECK_STEP}`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered HTTP ${response.status} while applying change ${changeId}, so it may or may not have applied; ${CHECK_STEP}`);
   }
   return adminResponseBody(response);
 }
@@ -86,15 +86,15 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
   const traceId = randomUUID();
   const planned = viewOf(
     await send(input, traceId, "POST", "/v1/admin/changes", { requestId: (input.newId ?? randomUUID)(), change: input.change, client: { cliVersion: input.cliVersion }, methods: ["cli"] }, fetchImplementation, "plan"),
-    "AgentX answered with a change this version of the CLI cannot read; nothing was applied. Upgrade the CLI, then ask again",
+    "Rovara answered with a change this version of the CLI cannot read; nothing was applied. Upgrade the CLI, then ask again",
   );
   const changeId = planned.changeId;
   const path = `/v1/admin/changes/${encodeURIComponent(changeId)}`;
   if (planned.status !== "pending") {
-    throw agentXError("RUNTIME_UNAVAILABLE", `AgentX planned change ${changeId} as ${plain(planned.status)}, not waiting for a yes, so nothing was asked and nothing was applied; ask for the change again`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `Rovara planned change ${changeId} as ${plain(planned.status)}, not waiting for a yes, so nothing was asked and nothing was applied; ask for the change again`);
   }
   if (!planned.methodsOffered.includes("cli")) {
-    throw agentXError("CONFIRMATION_UNAVAILABLE", `AgentX did not offer the CLI prompt for change ${changeId}, so it cannot be confirmed here; nothing was applied, and it expires on its own`);
+    throw agentXError("CONFIRMATION_UNAVAILABLE", `Rovara did not offer the CLI prompt for change ${changeId}, so it cannot be confirmed here; nothing was applied, and it expires on its own`);
   }
   const effect = plain(planned.effect);
   input.write(effect);
@@ -103,12 +103,12 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
   const decline = async (reason: "declined" | "cancelled"): Promise<AdminChangeViewWire> => {
     try {
       // Final review M3: a no records when the prompt was shown, as a yes does.
-      const declined = viewOf(await send(input, traceId, "POST", `${path}/decline`, { method: "cli", reason, requestedAt, answeredAt: new Date().toISOString() }, fetchImplementation, "decline", changeId), `AgentX's answer to declining change ${changeId} could not be read`);
+      const declined = viewOf(await send(input, traceId, "POST", `${path}/decline`, { method: "cli", reason, requestedAt, answeredAt: new Date().toISOString() }, fetchImplementation, "decline", changeId), `Rovara's answer to declining change ${changeId} could not be read`);
       input.write(declined.status === "declined" ? "Nothing changed." : `Nothing was applied by this command; ${CHECK_STEP}.`);
       return declined;
     } catch {
       // Nothing applies without a yes: the change was offered only to this CLI, and it expires.
-      input.write(`Nothing was applied; AgentX did not record the decline, so change ${changeId} expires on its own.`);
+      input.write(`Nothing was applied; Rovara did not record the decline, so change ${changeId} expires on its own.`);
       return planned;
     }
   };
@@ -125,7 +125,7 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
 
   const applied = viewOf(
     await send(input, traceId, "POST", `${path}/apply`, { method: "cli", requestedAt, answeredAt }, fetchImplementation, "apply", changeId),
-    `AgentX's answer to applying change ${changeId} could not be read, so it may or may not have applied; ${CHECK_STEP}`,
+    `Rovara's answer to applying change ${changeId} could not be read, so it may or may not have applied; ${CHECK_STEP}`,
   );
   if (applied.status === "applied") {
     input.write("Applied.");
@@ -136,7 +136,7 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
     throw agentXError(code.success ? code.data : "RUNTIME_UNAVAILABLE", `change ${changeId} failed: ${plain(applied.error?.message ?? "it was not applied")}`);
   }
   // R1: a status this CLI does not know is never taken as applied.
-  throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered change ${changeId} as ${plain(applied.status)}, which this CLI does not read as applied; ${CHECK_STEP}`);
+  throw agentXError("RUNTIME_UNAVAILABLE", `Rovara answered change ${changeId} as ${plain(applied.status)}, which this CLI does not read as applied; ${CHECK_STEP}`);
 }
 
 /**
@@ -149,7 +149,7 @@ export async function recordConfigChange(input: { controlPlaneUrl: string; acces
   const body = await send(input, traceId, "POST", "/v1/admin/changes/config", request, fetchImplementation, "record");
   const parsed = RecordedChangeResponseWireSchema.safeParse(body);
   // A repeated request answers the record it made, whatever its status since.
-  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with a change record this version of the CLI cannot read");
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered with a change record this version of the CLI cannot read");
   return { changeId: parsed.data.change.changeId, traceId };
 }
 
@@ -157,7 +157,7 @@ export async function recordConfigChange(input: { controlPlaneUrl: string; acces
 export async function recordConfigOutcome(input: { controlPlaneUrl: string; accessToken: string; changeId: string; traceId: string; outcome: ConfigChangeOutcomeRequest }, fetchImplementation: typeof fetch = fetch): Promise<AdminChangeAuditRecordWire> {
   const body = await send(input, input.traceId, "POST", `/v1/admin/changes/${encodeURIComponent(input.changeId)}/outcome`, input.outcome, fetchImplementation, "outcome", input.changeId);
   const parsed = RecordedChangeResponseWireSchema.safeParse(body);
-  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with a change record this version of the CLI cannot read");
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "Rovara answered with a change record this version of the CLI cannot read");
   return parsed.data.change;
 }
 

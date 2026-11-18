@@ -72,7 +72,7 @@ describe("the GitHub provider adapter", () => {
     const url = await p.authorizeUrl({ state: "s1", nonce: "right-nonce", redirectUri: REDIRECT });
     const code = new URL(gh.approve(url, "octo-verified")).searchParams.get("code")!;
     const result = await p.complete({ code, nonce: "wrong-nonce", redirectUri: REDIRECT });
-    expect(result).toEqual({ ok: false, reason: "GitHub refused the sign-in (bad_verification_code); run agentx login again" });
+    expect(result).toEqual({ ok: false, reason: "GitHub refused the sign-in (bad_verification_code); run rovara login again" });
     expect(gh.state.tokenRequests[0]).toMatchObject({ code_verifier: "wrong-nonce", client_secret: GITHUB_CLIENT_SECRET, redirect_uri: REDIRECT });
   });
 
@@ -91,7 +91,7 @@ describe("the GitHub provider adapter", () => {
     const p = githubSignInProvider({ clientId: GITHUB_CLIENT_ID, clientSecret: async () => GITHUB_CLIENT_SECRET, fetch: fetchUser, now: () => 0 });
     const url = await p.authorizeUrl({ state: "s", nonce: "n", redirectUri: REDIRECT });
     const result = await p.complete({ code: new URL(gh.approve(url, "octo-verified")).searchParams.get("code")!, nonce: "n", redirectUri: REDIRECT });
-    expect(result).toEqual({ ok: false, reason: "GitHub's answer names no GitHub user; run agentx login again" });
+    expect(result).toEqual({ ok: false, reason: "GitHub's answer names no GitHub user; run rovara login again" });
   });
 
   it("an error from GitHub is told by its short code only; a 5xx is try-again", async () => {
@@ -108,7 +108,7 @@ describe("the GitHub provider adapter", () => {
   it.each([["a token that is not a bearer token", { access_token: "t", token_type: "mac" }], ["no token type", { access_token: "t" }], ["an empty token", { access_token: "", token_type: "bearer" }]])("refuses %s", async (_case, grant) => {
     const odd: typeof fetch = async () => new Response(JSON.stringify(grant), { status: 200 });
     const p = githubSignInProvider({ clientId: GITHUB_CLIENT_ID, clientSecret: async () => GITHUB_CLIENT_SECRET, fetch: odd, now: () => 0 });
-    expect(await p.complete({ code: "c", nonce: "n", redirectUri: REDIRECT })).toEqual({ ok: false, reason: "GitHub refused the sign-in (no reason given); run agentx login again" });
+    expect(await p.complete({ code: "c", nonce: "n", redirectUri: REDIRECT })).toEqual({ ok: false, reason: "GitHub refused the sign-in (no reason given); run rovara login again" });
   });
 
   it("GitHub's access token never leaves the adapter", async () => {
@@ -332,7 +332,7 @@ describe("GitHub sign-in settings (DEC 254h)", () => {
       const config = developerIdentityConfigFromEnvironment({ ...base, DEVELOPER_SIGNIN_GITHUB: "enabled", ...env });
       expect(config).toHaveProperty("github");
       expect(config).not.toHaveProperty("githubSettings");
-      expect(config.githubProblem).toMatch(/^DEVELOPER_GITHUB_(CLIENT|SECRET)_ID is not set; ask an admin to run agentx signin enable github$/);
+      expect(config.githubProblem).toMatch(/^DEVELOPER_GITHUB_(CLIENT|SECRET)_ID is not set; ask an admin to run rovara signin enable github$/);
     }
   });
   it("the broker counts GitHub on only with the company layer on too", () => {

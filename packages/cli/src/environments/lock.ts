@@ -1,4 +1,4 @@
-import { AgentXError, agentXError, environmentSettingsPrefix } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentSettingsPrefix, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { ParameterExistsError, type ParameterStore } from "./parameter-store.js";
 
 export interface LockRecord { holder: string; command: string; acquiredAt: string }
@@ -28,17 +28,17 @@ export async function currentLockHolder(store: ParameterStore, env: string): Pro
 }
 
 const unreadableLockMessage = (env: string, name: string) =>
-  `environment ${env} is locked by an unreadable lock at ${name}; remove it only if no AgentX command is running`;
+  `environment ${env} is locked by an unreadable lock at ${name}; remove it only if no Rovara command is running`;
 
 const heldMessage = (env: string, held: LockRecord) => `environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}`;
 
 /** What to do about a lock another command holds right now. */
-const WAIT_AND_RETRY = "wait for it to finish, then run the same agentx command again";
+const WAIT_AND_RETRY = `wait for it to finish, then run the same ${CLI_COMMAND_NAME} command again`;
 
 /** For a fresh lock whose command may have been killed: any caller of any command gets it, including
  * one (config set, env adopt) that never offers a takeover itself. */
 const notRunningNote = (name: string) =>
-  `If it is no longer running, agentx init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name ${name} --region <region>)`;
+  `If it is no longer running, ${CLI_COMMAND_NAME} init, upgrade and destroy offer a takeover once the lock is 2 hours old, or delete it now (aws ssm delete-parameter --name ${name} --region <region>)`;
 
 /**
  * Another command already took the stale lock before we could (racedHeld is what it now holds), or
@@ -79,7 +79,7 @@ const releaseTakeoverMessage = (env: string, held: LockRecord | undefined) =>
  * raw `aws ssm delete-parameter` command as an immediate escape hatch.
  */
 const lockMayRemainNote = (env: string, name: string) =>
-  `environment ${env}'s lock may remain at ${name}; run \`agentx init\` or \`agentx deploy\` again once it is stale to take over your own lock, or clear it now with \`aws ssm delete-parameter --name ${name} --region <region>\``;
+  `environment ${env}'s lock may remain at ${name}; run \`${CLI_COMMAND_NAME} init\` or \`${CLI_COMMAND_NAME} deploy\` again once it is stale to take over your own lock, or clear it now with \`aws ssm delete-parameter --name ${name} --region <region>\``;
 
 /** Adds a release-failure note to an error's message and, when it is not itself an AgentXError we already raised for a detected takeover, attaches the release failure as its cause. */
 function withLockMayRemainNote<E>(error: E, env: string, name: string, cause?: unknown): E {
@@ -119,7 +119,7 @@ export async function withEnvironmentLock<T>(input: {
       ? "older than 2 hours"
       : `your own earlier "${held.command}"; confirm the takeover only if that run is no longer going`;
     if (!input.confirmTakeover) {
-      throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (${why}; to clear it, delete ${name} once you are sure no AgentX command is running)`);
+      throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (${why}; to clear it, delete ${name} once you are sure no Rovara command is running)`);
     }
     if (!(await input.confirmTakeover(held))) {
       throw agentXError("CONFIG_INVALID", `${heldMessage(input.env, held)} (${why})`);

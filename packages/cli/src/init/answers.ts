@@ -2,7 +2,7 @@ import { DEFAULT_BEDROCK_MODELS, DEFAULT_DIRECT_MODELS, PROVIDER_KEY_MIN_LENGTH,
 // FR-016's questions, each with a flag (FR-020). Only flags the engineer typed arrive here, so a
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
-import { agentXError, ImageDigest, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, keyedProviderSecretName, type KeyedModelProvider, type ModelProvider } from "@agentx/contracts";
+import { agentXError, ImageDigest, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, keyedProviderSecretName, type KeyedModelProvider, type ModelProvider, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { DIRECT_PROVIDERS, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema, providerSecretArn, type DirectProvider } from "../deploy/answer-schemas.js";
 import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
@@ -20,11 +20,11 @@ export { CLASSIFIER_MODEL_CHOICES, GITHUB_APP_NAME_LIMIT, ORCHESTRATOR_MODEL_CHO
 
 /** Spec 048 FR-026: one default name for the GitHub app and the Slack app, with the install name in
  * it. GitHub app names are unique across GitHub, so the owner is in it too; when that is longer
- * than GitHub's 34 characters, the owner is dropped at its word boundary. "AgentX (<install name>)"
+ * than GitHub's 34 characters, the owner is dropped at its word boundary. "Rovara (<install name>)"
  * always fits: install names are at most 20 characters. */
 export function defaultAppName(input: { owner: string; env: string }): string {
-  const full = `AgentX ${input.owner} (${input.env})`;
-  return full.length <= GITHUB_APP_NAME_LIMIT ? full : `AgentX (${input.env})`;
+  const full = `Rovara ${input.owner} (${input.env})`;
+  return full.length <= GITHUB_APP_NAME_LIMIT ? full : `Rovara (${input.env})`;
 }
 
 export const DEFAULT_ORCHESTRATOR_MODEL = DEFAULT_BEDROCK_MODELS.orchestrator;
@@ -37,13 +37,13 @@ export const GLM_NOTE =
   "GLM 4.7 costs about $0.007 a turn against Claude Sonnet 4.6's $0.025, and passed as many evaluation cases (58 of 65), but it refused correctly in only 6 of 7 cases that needed a refusal (Sonnet 4.6: 7 of 7).";
 export const HAIKU_NOTE =
   "Claude Haiku 4.5 needs Anthropic model access in this account: a one-time use-case form in the Bedrock console. The prerequisite check below tests it.";
-const NO_ALERTS_NOTE = "No alert address: nobody is told when AgentX fails until you add one (agentx config set alerts.address, phase 15e).";
+const NO_ALERTS_NOTE = `No alert address: nobody is told when Rovara fails until you add one (${CLI_COMMAND_NAME} config set alerts.address, phase 15e).`;
 
 /** FR-047: shown in the plan and repeated by the `alerts` step (Task 12) whenever the budget scope
  * is "tag", since AWS Budgets reads $0 against a cost allocation tag until someone with billing
  * rights activates it. */
 export const BUDGET_TAG_NOTE =
-  "The budget counts costs tagged agentx:env. Someone with billing rights must activate that tag once in Billing, Cost allocation tags; it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads $0. For an account used only by AgentX, --budget-scope account needs no tag.";
+  "The budget counts costs tagged agentx:env. Someone with billing rights must activate that tag once in Billing, Cost allocation tags; it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads $0. For an account used only by Rovara, --budget-scope account needs no tag.";
 
 export interface InitFlags {
   engine?: "templates" | "cdk";
@@ -288,8 +288,8 @@ async function platformFromSettings(
     const https = (value: string) => (/^https:\/\/\S+$/.test(value) ? undefined : "must be an https:// URL");
     const issuer = flags.oidcIssuer ?? (await prompter.ask("OIDC issuer URL", { flag: "--oidc-issuer", validate: https }));
     const audience = flags.oidcAudience ?? (await prompter.ask("OIDC audience", { flag: "--oidc-audience" }));
-    const clientId = flags.oidcClientId ?? (await prompter.ask("OIDC client id for agentx login", { flag: "--oidc-client-id" }));
-    const adminClaim = flags.adminClaim ?? (await prompter.ask("Claim that marks AgentX administrators", { flag: "--admin-claim", defaultValue: "groups" }));
+    const clientId = flags.oidcClientId ?? (await prompter.ask(`OIDC client id for ${CLI_COMMAND_NAME} login`, { flag: "--oidc-client-id" }));
+    const adminClaim = flags.adminClaim ?? (await prompter.ask("Claim that marks Rovara administrators", { flag: "--admin-claim", defaultValue: "groups" }));
     const rawValues = flags.adminValues ?? (await prompter.ask("Values of that claim that mark an administrator, comma-separated", { flag: "--admin-values" }));
     const adminValues = rawValues.split(",").map((value) => value.trim()).filter((value) => value !== "");
     if (adminValues.length === 0) throw agentXError("CONFIG_INVALID", "--admin-values must name at least one value");
@@ -476,7 +476,7 @@ function normalizeResumeValue(value: string, kind: ResumeCheckKind | undefined):
 function resumeMismatch(flagDisplay: string, was: string | undefined): never {
   throw agentXError(
     "CONFIG_INVALID",
-    `${flagDisplay} differs from what this install started with (${was ?? "not set"}); an install's answers cannot change halfway. Run agentx init without that flag to continue`,
+    `${flagDisplay} differs from what this install started with (${was ?? "not set"}); an install's answers cannot change halfway. Run ${CLI_COMMAND_NAME} init without that flag to continue`,
   );
 }
 
@@ -600,7 +600,7 @@ export async function storeProviderKey(secrets: InitSecretWriter, env: string, p
   const name = keyedProviderSecretName(env, provider);
   await createOrReplaceSecret(secrets, name, key);
   const arn = await secrets.arn?.(name);
-  if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run agentx init again`);
+  if (arn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `secret ${name} was just stored but cannot be described; run ${CLI_COMMAND_NAME} init again`);
   return arn;
 }
 

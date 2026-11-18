@@ -2,7 +2,7 @@
 // connector in this environment's project files, the credential exists with the right shape and,
 // for Linear and Jira, still works. Asana is not refreshed here: a refresh rotates the token the
 // control plane holds (question 10). A vendor's own words never reach a check: they may repeat the key.
-import { environmentConnectorSecretPrefix, OAuthRefreshTokenSecretSchema, StaticSecretSchema, type McpAuth } from "@agentx/contracts";
+import { environmentConnectorSecretPrefix, OAuthRefreshTokenSecretSchema, StaticSecretSchema, type McpAuth, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { mcpCredentialRef } from "../setup/connectors/mcp.js";
 import { connectorSecretName } from "../setup/connectors/revision.js";
 import { environmentProjectFiles } from "../setup/project-add.js";
@@ -20,7 +20,7 @@ function parseJson(raw: string): unknown {
 async function connectorCheck(context: DoctorContext, project: string, connector: KnownConnector): Promise<DoctorCheck> {
   const { env, services } = context;
   const name = `${LABEL[connector.type]} (project ${project})`;
-  const again = `agentx --env ${env} connector add ${connector.type} --project ${project}`;
+  const again = `${CLI_COMMAND_NAME} --env ${env} connector add ${connector.type} --project ${project}`;
   if (connector.credentialRef !== connector.type) return check("connectors", name, "skip", `credential ${connector.credentialRef} was registered by hand, so its secret is not known here`);
   const secretName = connectorSecretName(env, connector.type);
   let raw: string | undefined;
@@ -28,7 +28,7 @@ async function connectorCheck(context: DoctorContext, project: string, connector
     raw = await services.secrets.get(secretName);
   } catch (error) {
     // Only the error's name: AccessDenied, a KMS refusal, or a secret scheduled for deletion. Its message is not kept.
-    return check("connectors", name, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, "check that your AWS role can read it, then run agentx doctor again");
+    return check("connectors", name, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, `check that your AWS role can read it, then run ${CLI_COMMAND_NAME} doctor again`);
   }
   if (raw === undefined) return check("connectors", name, "fail", `credentials missing: no secret ${secretName}`, again);
   const value = parseJson(raw);
@@ -43,7 +43,7 @@ async function connectorCheck(context: DoctorContext, project: string, connector
   if (connector.type === "linear") {
     let teams;
     try { teams = await services.vendors.linearTeams(key); } catch (error) {
-      return refused(error) ? check("connectors", name, "fail", "Linear refused the stored key: it expired or was revoked", again) : check("connectors", name, "fail", "could not reach Linear to test the key", "check this computer's network access to linear.app, then run agentx doctor again");
+      return refused(error) ? check("connectors", name, "fail", "Linear refused the stored key: it expired or was revoked", again) : check("connectors", name, "fail", "could not reach Linear to test the key", `check this computer's network access to linear.app, then run ${CLI_COMMAND_NAME} doctor again`);
     }
     const missing = connector.scopes.filter((scope) => !teams.some((team) => team.id.toLowerCase() === (scope.teamId ?? "").toLowerCase())).map((scope) => scope.alias);
     return missing.length > 0 ? check("connectors", name, "fail", `the key no longer sees team ${missing.join(", ")}`, again) : check("connectors", name, "ok", `the key sees ${teams.length} ${teams.length === 1 ? "team" : "teams"}`);
@@ -55,7 +55,7 @@ async function connectorCheck(context: DoctorContext, project: string, connector
     try {
       keys = await services.vendors.jiraSearch({ token: key, cloudId: scope.cloudId, jql: scope.projectKey === undefined ? "order by created DESC" : `project = ${scope.projectKey}`, maxResults: 1 });
     } catch (error) {
-      return refused(error) ? check("connectors", name, "fail", "Atlassian refused the stored API token: it expired or was revoked", again) : check("connectors", name, "fail", "could not reach Atlassian to test the API token", "check this computer's network access to atlassian.com, then run agentx doctor again");
+      return refused(error) ? check("connectors", name, "fail", "Atlassian refused the stored API token: it expired or was revoked", again) : check("connectors", name, "fail", "could not reach Atlassian to test the API token", `check this computer's network access to atlassian.com, then run ${CLI_COMMAND_NAME} doctor again`);
     }
     if (keys.length === 0) empty.push(scope.projectKey ?? scope.alias);
   }
@@ -77,13 +77,13 @@ async function mcpConnectorCheck(context: DoctorContext, project: string, entry:
   const ref = mcpCredentialRef(entry.name);
   if (entry.credentialRef !== ref) return check("connectors", label, "skip", `credential ${String(entry.credentialRef)} was registered by hand, so its secret is not known here`);
   if (typeof entry.endpoint !== "string") return check("connectors", label, "skip", "the connector entry has no endpoint");
-  const again = `agentx --env ${env} connector add mcp --project ${project} --endpoint ${entry.endpoint} --name ${entry.name}`;
+  const again = `${CLI_COMMAND_NAME} --env ${env} connector add mcp --project ${project} --endpoint ${entry.endpoint} --name ${entry.name}`;
   const secretName = `${environmentConnectorSecretPrefix(env)}${ref}`;
   let raw: string | undefined;
   try {
     raw = await services.secrets.get(secretName);
   } catch (error) {
-    return check("connectors", label, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, "check that your AWS role can read it, then run agentx doctor again");
+    return check("connectors", label, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, `check that your AWS role can read it, then run ${CLI_COMMAND_NAME} doctor again`);
   }
   if (raw === undefined) return check("connectors", label, "fail", `credentials missing: no secret ${secretName}`, again);
   const value = parseJson(raw);
@@ -99,7 +99,7 @@ async function mcpConnectorCheck(context: DoctorContext, project: string, entry:
   } catch (error) {
     return refused(error)
       ? check("connectors", label, "fail", `${host} refused the stored key: it expired or was revoked`, again)
-      : check("connectors", label, "fail", `could not reach ${host} to test the key`, `check this computer's network access to ${host}, then run agentx doctor again`);
+      : check("connectors", label, "fail", `could not reach ${host} to test the key`, `check this computer's network access to ${host}, then run ${CLI_COMMAND_NAME} doctor again`);
   }
   const approved = (entry.tools ?? []).flatMap((tool) => (typeof tool.name === "string" ? [tool.name] : []));
   const missing = approved.filter((name) => !offered.includes(name));
@@ -112,7 +112,7 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
   const { env, progress, services } = context;
   const found = await environmentProjectFiles(services.configDir, env);
   const checks: DoctorCheck[] = [];
-  const fixFile = "fix the file or move it out of the project directory, then run agentx doctor again";
+  const fixFile = `fix the file or move it out of the project directory, then run ${CLI_COMMAND_NAME} doctor again`;
   for (const file of found) {
     if (file.error === "unreadable") checks.push(check("connectors", `project file ${file.path}`, "warn", `could not be read (${file.errorCode ?? "unknown"}), so its connectors were not checked`, fixFile));
     if (file.error === "invalid-yaml") checks.push(check("connectors", `project file ${file.path}`, "warn", `has agentx's register line for environment ${env}, but is not valid YAML`, fixFile));
@@ -140,16 +140,16 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
   for (const saved of progress?.connectors ?? []) {
     if (saved.warning === undefined) continue;
     checks.push(check("connectors", `${LABEL[saved.type]} warning`, "warn", saved.warning, saved.type === "jira"
-      ? `narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run agentx --env ${env} connector add jira --project <name> again`
-      : `agentx --env ${env} connector add ${saved.type} --project <name>`));
+      ? `narrow the Jira service account to the connected project (docs/connectors/jira.md, Step 4), then run ${CLI_COMMAND_NAME} --env ${env} connector add jira --project <name> again`
+      : `${CLI_COMMAND_NAME} --env ${env} connector add ${saved.type} --project <name>`));
   }
   const recorded = progress?.connectors ?? [];
   if (files.length === 0 && recorded.length > 0) {
     const added = recorded.map((entry) => LABEL[entry.type]).join(", ");
     // A file marked unusable above may be this environment's: never also claim there is none.
     checks.push(found.length > 0
-      ? check("connectors", "project files", "warn", `agentx init added ${added}, but the only project files found for environment ${env} could not be used (see the warnings above)`, fixFile)
-      : check("connectors", "project files", "warn", `agentx init added ${added}, but no project file of environment ${env} is in ${services.configDir}`, "run agentx doctor with --config-dir <the directory holding the project files>"));
+      ? check("connectors", "project files", "warn", `${CLI_COMMAND_NAME} init added ${added}, but the only project files found for environment ${env} could not be used (see the warnings above)`, fixFile)
+      : check("connectors", "project files", "warn", `${CLI_COMMAND_NAME} init added ${added}, but no project file of environment ${env} is in ${services.configDir}`, `run ${CLI_COMMAND_NAME} doctor with --config-dir <the directory holding the project files>`));
   }
   return checks.length > 0 ? checks : [check("connectors", "connectors", "ok", "no connectors are set up")];
 }

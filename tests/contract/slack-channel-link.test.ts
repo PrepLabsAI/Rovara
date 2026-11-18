@@ -181,7 +181,7 @@ describe("web: link a project's channel", () => {
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({ status: "linked", workspace: { teamId: ACME }, channel: { id: "C0GENERAL", name: "general", isPrivate: false }, alreadyLinked: false, replaced: [] });
     expect(w.slack.calls).toEqual(["conversations.info acme C0GENERAL", "conversations.join acme"]);
-    // Golden: the row the CLI's `agentx admin slack bind` writes (broker.ts putSlackBinding), with the person as updatedBy.
+    // Golden: the row the CLI's `rovara admin slack bind` writes (broker.ts putSlackBinding), with the person as updatedBy.
     expect(w.linkRow(ACME, "C0GENERAL")).toEqual({ pk: `SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "web", updatedAt: TIME, updatedBy: w.adminA.personId });
     expect(w.audits(A)).toEqual([expect.objectContaining({ entityType: "SLACK_CHANNEL_AUDIT", action: "link", actor: w.adminA.personId, via: "web", projectName: "web", channelId: "C0GENERAL", teamId: ACME, companyId: A })]);
     expect(w.audits(B)).toEqual([]);

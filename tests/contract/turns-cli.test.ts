@@ -58,7 +58,7 @@ describe("turn export client", () => {
   });
 });
 
-describe("agentx admin turns export", () => {
+describe("rovara admin turns export", () => {
   const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
 
   async function context() {

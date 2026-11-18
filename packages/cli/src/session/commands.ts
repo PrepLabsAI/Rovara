@@ -10,7 +10,7 @@
 import { randomUUID } from "node:crypto";
 import {
   AGENTX_NAME_PATTERN, CLI_PACKAGE_NAME, INTENT_NOT_WAITING_MESSAGE, LEVEL_WORDS, YOUR_CALL_WORDS, NeedsConfirmationReaderSchema, SESSION_LEVELS, SessionIdSchema, sessionTaskStatus, taskStatusText, TASK_VIEW_HEADER, TASK_VIEW_VERSION, agentXError, sessionLink,
-  type SessionLevel,
+  type SessionLevel, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import type { DeveloperSessionDeps } from "../developer/session.js";
 import { appRequest, clean, developerRef, list, result, seg, str, type AppResult } from "./app-request.js";
@@ -28,7 +28,7 @@ const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "
 const URL_MAX = 2048;
 /** A task's ID (a UUID), which a session ID (`ses_...`) is never. */
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
-const UNEXPECTED = `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`;
+const UNEXPECTED = `Rovara answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`;
 
 /**
  * A server's web address, only when it is plainly an https address (or, when the install itself is on this computer's loopback, an http one) on the
@@ -48,7 +48,7 @@ export function safeUrl(value: unknown, origin: string): string | undefined {
 
 /** A session ID the person typed; one that cannot be a session is refused before anything is sent. */
 function sessionIdOf(id: string): string {
-  if (!SessionIdSchema.safeParse(id).success) throw agentXError("CONFIG_INVALID", "that is not a session ID; run agentx sessions to see yours");
+  if (!SessionIdSchema.safeParse(id).success) throw agentXError("CONFIG_INVALID", `that is not a session ID; run ${CLI_COMMAND_NAME} sessions to see yours`);
   return id;
 }
 
@@ -95,7 +95,7 @@ export async function sessionsList(
   const next = typeof answer.body.next === "string" ? answer.body.next : undefined;
   const flag = input.shared === true ? " --shared" : input.project !== undefined ? ` --project ${str(input.project)}` : "";
   const lines = sessions.length === 0 ? [`No sessions here on ${answer.env}.`] : [`Sessions on ${answer.env} (${answer.url}):`, ...sessions.map(tileLine)];
-  return result(answer, { sessions, ...(next === undefined ? {} : { next }) }, `${[...lines, ...(next === undefined ? [] : [`More: agentx sessions${flag} --cursor ${str(next)}`])].join("\n")}\n`);
+  return result(answer, { sessions, ...(next === undefined ? {} : { next }) }, `${[...lines, ...(next === undefined ? [] : [`More: ${CLI_COMMAND_NAME} sessions${flag} --cursor ${str(next)}`])].join("\n")}\n`);
 }
 
 // ---- one session
@@ -235,7 +235,7 @@ export async function sessionStart(deps: DeveloperSessionDeps, env: string | und
   const sessionId = typeof task.sessionId === "string" && SessionIdSchema.safeParse(task.sessionId).success ? task.sessionId : undefined;
   const link = sessionId === undefined ? undefined : linkOf(answer.url, sessionId, task.sessionUrl);
   return result(answer, { taskId: task.taskId, ...(sessionId === undefined ? {} : { sessionId }), ...(link === undefined ? {} : { link }) },
-    `Started task ${str(task.taskId)} on ${clean(project)}.\n${link === undefined ? "Follow it with agentx sessions." : `Follow it here: ${link}`}\n`);
+    `Started task ${str(task.taskId)} on ${clean(project)}.\n${link === undefined ? `Follow it with ${CLI_COMMAND_NAME} sessions.` : `Follow it here: ${link}`}\n`);
 }
 
 // ---- naming a session by its task
@@ -243,10 +243,10 @@ export async function sessionStart(deps: DeveloperSessionDeps, env: string | und
 /** The session a person named: a session ID, or a task ID, whose session is asked for. */
 async function sessionOfRef(deps: DeveloperSessionDeps, env: string | undefined, ref: string): Promise<string> {
   if (SessionIdSchema.safeParse(ref).success) return ref;
-  if (!TASK_ID.test(ref)) throw agentXError("CONFIG_INVALID", "give a session ID (ses_...) from agentx sessions, or a task ID");
+  if (!TASK_ID.test(ref)) throw agentXError("CONFIG_INVALID", `give a session ID (ses_...) from ${CLI_COMMAND_NAME} sessions, or a task ID`);
   const answer = await appRequest(deps, env, `/v1/dev/tasks/${seg(ref)}`);
   const sessionId = (answer.body.task as Body | undefined)?.sessionId;
-  if (typeof sessionId !== "string" || !SessionIdSchema.safeParse(sessionId).success) throw agentXError("CONFIG_INVALID", "that task has no session, so there is nothing to link; start the work from the app or with agentx session start to get a session");
+  if (typeof sessionId !== "string" || !SessionIdSchema.safeParse(sessionId).success) throw agentXError("CONFIG_INVALID", `that task has no session, so there is nothing to link; start the work from the app or with ${CLI_COMMAND_NAME} session start to get a session`);
   return sessionId;
 }
 
@@ -298,7 +298,7 @@ export async function sessionAnswer(
         `  ${index + 1}. ${clean(question.text)}`,
         ...question.options.map((option) => `     ${clean(option.id)}) ${clean(option.label)}${question.recommended === option.id ? " (recommended)" : ""}`),
       ]),
-      `Answer them all: agentx session answer ${id} ${flags}`,
+      `Answer them all: ${CLI_COMMAND_NAME} session answer ${id} ${flags}`,
       `Say "${YOUR_CALL_WORDS}" for any you don't mind.`,
       linkOf(read.url, id, view.link),
     ];

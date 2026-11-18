@@ -3,6 +3,7 @@ import type { OAuthRefreshTokenSecret } from "@agentx/contracts";
 import { CredentialUnavailable, parseConnectorSecret, readLimitedText, type CachedToken, type SecretSource, type TokenCache } from "./credentials.js";
 import type { CredentialProvider } from "./types.js";
 import { isObject } from "./util.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** A secret source that can also replace a secret's value, for a rotated refresh token. */
 export interface SecretStore extends SecretSource {
@@ -135,7 +136,7 @@ export function oauthRefreshTokenProvider(options: {
     try { body = JSON.parse(text); } catch { body = undefined; }
     if (response.status === 400 || response.status === 401 || response.status === 403) {
       const code = isObject(body) && typeof body.error === "string" && /^[a-z_]{1,64}$/.test(body.error) ? ` (${body.error})` : "";
-      throw new CredentialUnavailable(`credential ${options.ref}: the token endpoint refused the refresh token with HTTP ${response.status}${code}; the bot user must sign in again with agentx admin credential authorize --ref ${options.ref}`);
+      throw new CredentialUnavailable(`credential ${options.ref}: the token endpoint refused the refresh token with HTTP ${response.status}${code}; the bot user must sign in again with ${CLI_COMMAND_NAME} admin credential authorize --ref ${options.ref}`);
     }
     if (!response.ok) throw new Error(`token endpoint returned HTTP ${response.status}`);
     if (!isObject(body) || typeof body.access_token !== "string" || body.access_token.length === 0) throw new Error("token endpoint returned no access token");

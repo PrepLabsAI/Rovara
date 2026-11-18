@@ -63,7 +63,7 @@ describe("mcp connector type", () => {
     expect(await connector.configured()).toBe(false);
     expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot is not registered" });
     put({ ref: "sentry-bot", type: "oauth-refresh-token", host: "mcp.sentry.dev" });
-    expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot has no token URL; sign in with agentx admin credential authorize --ref sentry-bot --endpoint https://mcp.sentry.dev/mcp, or register it with --token-url" });
+    expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot has no token URL; sign in with rovara admin credential authorize --ref sentry-bot --endpoint https://mcp.sentry.dev/mcp, or register it with --token-url" });
     put({ ref: "sentry-bot", type: "static-secret" });
     expect(await connector.configured()).toBe(false);
     expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot is not pinned to a host; register it again with --host mcp.sentry.dev" });

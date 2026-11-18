@@ -1,4 +1,4 @@
-// SC-003: a full `agentx init --ui` install driven entirely from the page, with nothing typed in
+// SC-003: a full `rovara init --ui` install driven entirely from the page, with nothing typed in
 // the terminal after the command. The wizard server and the GitHub manifest listener are both
 // real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing here
 // reaches AWS, GitHub or Slack.
@@ -42,7 +42,7 @@ const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
 // default, the key's only team), then no to Jira and Asana.
 const FINISH_WITH_LINEAR = ["acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
 
-describe("agentx init --ui", () => {
+describe("rovara init --ui", () => {
   it("FR-009: the page is open before the release is fetched, so a failed download is a failure screen", async () => {
     const h = await harness();
     const operator = fakeWizardOperator([]);
@@ -54,7 +54,7 @@ describe("agentx init --ui", () => {
     await operator.settled();
     expect(code).not.toBe(0);
     expect(operator.states.some((state) => state.failure?.what.toLowerCase().includes("release 9.9.9 was not found"))).toBe(true);
-    expect(h.err.join("")).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:/m);
+    expect(h.err.join("")).toMatch(/^The Rovara installer is open in your browser: http:\/\/127\.0\.0\.1:/m);
   });
 
   it("runs the whole install from the page, with nothing typed in the terminal", async () => {
@@ -102,7 +102,7 @@ describe("agentx init --ui", () => {
     const { code } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     const lines = h.err.join("").trimEnd().split("\n");
-    expect(lines[0]).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(lines[0]).toMatch(/^The Rovara installer is open in your browser: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
     expect(lines.slice(1)).toEqual([
       "Keep this terminal open and your computer awake (about 45 minutes).",
       `Full log: ${initLogPath(h.home, "staging")}`,
@@ -115,8 +115,8 @@ describe("agentx init --ui", () => {
     // FR-070 and FR-071: the plan, the progress lines and the ready summary are in the log file, the token is not.
     const log = await readFile(initLogPath(h.home, "staging"), "utf8");
     expect(log).toContain("Estimated monthly total");
-    expect(log).toContain("done: Start the AgentX service");
-    expect(log).toContain("AgentX environment staging is ready.");
+    expect(log).toContain("done: Start the Rovara service");
+    expect(log).toContain("Rovara environment staging is ready.");
     const token = new URL(lines[0]?.split(": ").at(-1) ?? "http://x").searchParams.get("t") ?? "missing";
     expect(token.length).toBeGreaterThan(20);
     expect(log).not.toContain(token);
@@ -127,7 +127,7 @@ describe("agentx init --ui", () => {
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     const { code } = await h.runUi([...FIRST_RUN, "stop"]);
     expect(code).not.toBe(0);
-    expect(h.err.join("")).toContain(`[3/5] Stopped: Start the AgentX service did not finish. Resource limit exceeded. Details in the browser and in ${initLogPath(h.home, "staging")}.`);
+    expect(h.err.join("")).toContain(`[3/5] Stopped: Start the Rovara service did not finish. Resource limit exceeded. Details in the browser and in ${initLogPath(h.home, "staging")}.`);
     expect(h.err.join("")).not.toContain("==> ");
   });
 
@@ -151,10 +151,10 @@ describe("agentx init --ui", () => {
     expect(h.plane.credentials).toContainEqual({ ref: "linear", type: "static-secret", secretName: "agentx/staging/connectors/linear" });
   });
 
-  // Spec 048 FR-029 and FR-030: on the page, the plan's review screen offers Create AgentX and
+  // Spec 048 FR-029 and FR-030: on the page, the plan's review screen offers Create Rovara and
   // Change answers only; declining outright is a terminal-only behavior now (init-plan.test.ts's
   // "creates nothing when the engineer says no" covers that, through confirmInstallPlan directly).
-  it("FR-005: the priced plan is a review screen, and nothing is created before Create AgentX is pressed", async () => {
+  it("FR-005: the priced plan is a review screen, and nothing is created before Create Rovara is pressed", async () => {
     const h = await harness();
     let deployedBeforeCreate: string[] | undefined;
     let savedBeforeCreate: boolean | undefined;
@@ -169,15 +169,15 @@ describe("agentx init --ui", () => {
     await operator.settled();
     // The plan and its confirm are on screen together: the confirm is the review screen's buttons.
     const review = operator.states.find((state) => state.plan !== undefined && state.question !== undefined);
-    expect(review?.plan?.sections[0]?.lines[0]).toBe("The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).");
+    expect(review?.plan?.sections[0]?.lines[0]).toBe("The network and sign-in, the Rovara service and the Slack connection, in AWS account 123456789012 (us-east-1).");
     expect(review?.plan?.cost.total).toMatch(/^About \$\d+\.\d{2} a month\.$/);
     expect(review?.question).toMatchObject({ kind: "actions", text: "Create all of this?" });
-    expect(review?.question?.buttons?.map((button) => button.label)).toEqual(["Create AgentX", "Change answers"]);
+    expect(review?.question?.buttons?.map((button) => button.label)).toEqual(["Create Rovara", "Change answers"]);
     // Nothing was created before it: no step had even started, and nothing was deployed or saved.
     expect(review?.steps.every((step) => step.status === "pending")).toBe(true);
     expect(deployedBeforeCreate).toEqual([]);
     expect(savedBeforeCreate).toBe(false);
-    // Once Create AgentX is pressed, the install actually begins.
+    // Once Create Rovara is pressed, the install actually begins.
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
   });
 
@@ -222,7 +222,7 @@ describe("agentx init --ui", () => {
       "Set up AWS permissions",
       "Build the network and sign-in",
     ]);
-    expect(resume?.continueFrom).toBe("Start the AgentX service");
+    expect(resume?.continueFrom).toBe("Start the Rovara service");
     // The first run stopped before the GitHub app step, so the app is made once, by the resumed run.
     expect(h.github.conversions).toHaveLength(1);
   });
@@ -244,7 +244,7 @@ describe("agentx init --ui", () => {
   it("--ui and --yes are refused together, and --no-ui is the terminal path", async () => {
     const h = await harness();
     expect(await h.run(["--ui", "--yes"])).not.toBe(0);
-    expect(h.printed()).toContain("agentx init --ui asks its questions on a page; --yes answers them without asking");
+    expect(h.printed()).toContain("rovara init --ui asks its questions on a page; --yes answers them without asking");
     expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...TERMINAL_SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
   });
 
@@ -258,10 +258,10 @@ describe("agentx init --ui", () => {
     expect(finishing).toHaveLength(FINISH.length);
     // Spec 048 FR-020: your email comes from the settings, so the first finishing question is the repository.
     expect(finishing[0]).toBe("Which repository is the first project's?");
-    expect(finishing).toContain("Connect Linear to payments-api now? (You can add it later with agentx connector add linear)");
+    expect(finishing).toContain("Connect Linear to payments-api now? (You can add it later with rovara connector add linear)");
     // Nothing was asked in the terminal: no scripted terminal prompter exists in this run, and the
     // terminal output carries no question text.
-    expect(h.printed()).not.toContain("Your email address, for your AgentX admin user");
+    expect(h.printed()).not.toContain("Your email address, for your Rovara admin user");
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
     // The finishing steps' progress lines reached the page's log pane.
     const last = operator.states.at(-1);
@@ -273,7 +273,7 @@ describe("agentx init --ui", () => {
     // FR-070: with the page open, nothing more reaches stdout; the full ready summary is in the log file.
     expect(h.out.join("")).toBe("");
     const log = await readFile(initLogPath(h.home, "staging"), "utf8");
-    expect(log).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).\n");
+    expect(log).toContain("Rovara environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).\n");
     expect(log).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
@@ -367,7 +367,7 @@ describe("agentx init --ui", () => {
     });
     expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
     await operator.settled();
-    expect(reconnected?.failure?.what).toBe("Start the AgentX service did not finish. Resource limit exceeded.");
+    expect(reconnected?.failure?.what).toBe("Start the Rovara service did not finish. Resource limit exceeded.");
     expect(reconnected?.question?.buttons?.map((button) => button.label)).toEqual(["Try this step again", "Stop for now"]);
     expect(reconnected?.steps.find((step) => step.id === "control-plane")?.status).toBe("failed");
     expect(reconnected?.journey.phases[2]).toMatchObject({ statusWord: "Stopped" });
@@ -442,7 +442,7 @@ describe("agentx init --ui", () => {
     // The account is on the page by the time the review screen asks to create anything.
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
     // Spec 048 FR-015: the account is shown before the region is known, so its card never names one.
-    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into AWS account 123456789012.");
+    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("Rovara installs into AWS account 123456789012.");
   });
 
   it("FR-022: the region picker offers only the release's regions", async () => {
@@ -522,19 +522,19 @@ describe("agentx init --ui", () => {
     const h = await harness();
     const github = { ...fakeGitHubApi({ owner: "acme-labs" }), owner: async (login: string) => ({ login, type: "Organization" as const }) };
     const moved = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme-labs", alertEmail: "ops@example.com" });
-    const operator = fakeWizardOperator([SETTINGS, "change", moved, "create"], { beforeAnswer: async (question) => { if (question.text === "Create all of this?" && h.store.values.size > 0) throw new Error("test setup: something was saved before Create AgentX"); } });
+    const operator = fakeWizardOperator([SETTINGS, "change", moved, "create"], { beforeAnswer: async (question) => { if (question.text === "Create all of this?" && h.store.values.size > 0) throw new Error("test setup: something was saved before Create Rovara"); } });
     // --stop-after prerequisites: the run ends before the GitHub step, which is all this test needs.
     expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open, github })).toBe(0);
     await operator.settled();
     const plans = operator.states.map((state) => state.plan).filter((plan): plan is WizardPlan => plan !== undefined);
-    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"AgentX acme (staging)\" owned by acme.");
-    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"AgentX acme-labs (staging)\" owned by acme-labs.");
+    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"Rovara acme (staging)\" owned by acme.");
+    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"Rovara acme-labs (staging)\" owned by acme-labs.");
     const second = operator.states.map((state) => state.question).filter((question) => question?.text === "Your settings")[1];
     expect(second?.fields?.find((field) => field.name === "email")?.value).toBe(ADMIN_EMAIL);
     expect(second?.fields?.find((field) => field.name === "alertEmail")?.value).toBe("ops@example.com");
     expect(second?.fields?.find((field) => field.name === "appName")?.value).toBe("");
     const answers = JSON.parse(h.store.values.get(installAnswersParameterName("staging")) ?? "{}") as InitAnswers;
-    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "AgentX acme-labs (staging)" });
+    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "Rovara acme-labs (staging)" });
   });
 
   it("FR-020: a new install name is the install's name from then on, and a used one is refused", async () => {
@@ -553,7 +553,7 @@ describe("agentx init --ui", () => {
     expect(await again.run(["--ui"], { openBrowser: refused.open })).not.toBe(0);
     await refused.settled();
     const card = refused.states.flatMap((state) => state.cards ?? []).find((each) => each.id === "prerequisites" && each.status === "failed");
-    expect(card?.checks?.find((check) => check.label === "Install name")?.detail).toBe("This AWS account and region already have an AgentX install named trial. Choose another install name.");
+    expect(card?.checks?.find((check) => check.label === "Install name")?.detail).toBe("This AWS account and region already have a Rovara install named trial. Choose another install name.");
   });
 
   // Fix round 1 (review Minor): a renamed install that fails in a later step must still resume
@@ -599,11 +599,11 @@ describe("agentx init --ui", () => {
     expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
-    // The app's name is the first run's default ("AgentX <account> (<env>)"); its slug is GitHub's,
+    // The app's name is the first run's default ("Rovara <account> (<env>)"); its slug is GitHub's,
     // kept in the card's details rather than its words.
-    expect(stages).toContain('Create the GitHub app "AgentX acme (staging)" for acme.');
-    expect(stages).toContain('Install "AgentX acme (staging)" on acme. Choose only the repositories AgentX should work on.');
-    expect(stages.at(-1)).toBe('"AgentX acme (staging)" is installed on acme.');
+    expect(stages).toContain('Create the GitHub app "Rovara acme (staging)" for acme.');
+    expect(stages).toContain('Install "Rovara acme (staging)" on acme. Choose only the repositories Rovara should work on.');
+    expect(stages.at(-1)).toBe('"Rovara acme (staging)" is installed on acme.');
   });
 
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
@@ -620,7 +620,7 @@ describe("agentx init --ui", () => {
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
-    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX acme (staging)" is installed in the Acme workspace.'] });
+    expect(slack).toMatchObject({ status: "ok", lines: ['"Rovara acme (staging)" is installed in the Acme workspace.'] });
   });
 
   it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
@@ -733,7 +733,7 @@ describe("agentx init --ui", () => {
     await operator.settled();
     const channel = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "channel") ?? []);
     expect(channel.map((card) => card.status)).toContain("waiting");
-    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["AgentX answers in #payments for payments-api."] });
+    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["Rovara answers in #payments for payments-api."] });
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["The project payments-api is set up for acme/payments-api."]);
   });
 
@@ -783,8 +783,8 @@ describe("agentx init --ui", () => {
     const ready = last?.cards?.find((card) => card.id === "ready");
     expect(ready?.lines).toEqual([
       "Try it: in #payments, mention @agentx and ask it something.",
-      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
-      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "Send your developers the sign-in command below. They run it once, then use Rovara from Claude Code, Codex or Cursor.",
+      "The Rovara CLI is not published yet, so this command works on this computer. Other computers need their own copy of the Rovara CLI first.",
       "No issue trackers connected yet.",
       `Everything here is also in ${initLogPath(h.home, "staging")}.`,
     ]);
@@ -794,7 +794,7 @@ describe("agentx init --ui", () => {
       { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
       { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
       { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
-      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
+      { label: "Remove Rovara", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
     ]);
     expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
     // FR-058: the outcome is the fixed line, never the ready card's own words repeated.
@@ -919,7 +919,7 @@ describe("agentx init --ui", () => {
     // No TTY in the test process: the terminal path refuses, as before, but only after the line.
     expect(await h.run([], { openBrowser: refused.open, isInteractive: () => true, browserAvailable: () => false })).not.toBe(0);
     expect(refused.opened).toEqual([]);
-    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).");
+    expect(h.printed()).toContain("No browser here, so rovara init asks in this terminal. To use the install page instead, run rovara init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).");
   });
 
   it.skipIf(process.stdin.isTTY === true)("--no-browser with neither flag is the terminal, with the same line", async () => {
@@ -927,7 +927,7 @@ describe("agentx init --ui", () => {
     const none = fakeWizardOperator([]);
     expect(await h.run(["--no-browser"], { openBrowser: none.open, isInteractive: () => true, browserAvailable: () => true })).not.toBe(0);
     expect(none.opened).toEqual([]);
-    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal.");
+    expect(h.printed()).toContain("No browser here, so rovara init asks in this terminal.");
   });
 
   it.skipIf(process.stdin.isTTY === true)("over SSH (the run's own environment) the default is the terminal, with the same line", async () => {

@@ -1,4 +1,4 @@
-// DEC 254zg (a): `agentx config set company.signIn` flips the CompanySignIn switch on the control plane and the Slack service's stack with one yes; `company.selfServe`
+// DEC 254zg (a): `rovara config set company.signIn` flips the CompanySignIn switch on the control plane and the Slack service's stack with one yes; `company.selfServe`
 // flips CompanySelfServe alone. Both are off by default and kept across upgrades (OPERATOR_PARAMETERS).
 import { describe, expect, it } from "vitest";
 import { CONFIG_KEYS, configKey } from "../../packages/cli/src/config/keys.js";
@@ -28,7 +28,7 @@ function perStack(initial: Record<string, Record<string, string>>) {
 }
 const OFF = { [CONTROL]: { CompanySignIn: "disabled", CompanySelfServe: "disabled", SlackCompanyWorkspaces: "disabled" }, [SLACK]: { CompanySignIn: "disabled", SlackCompanyWorkspacesState: "disabled" } };
 
-describe("agentx config set company.signIn / company.selfServe", () => {
+describe("rovara config set company.signIn / company.selfServe", () => {
   it("are documented keys, disabled by default, that an upgrade keeps", async () => {
     expect(configKey("company.signIn")).toMatchObject({ defaultValue: "disabled", target: { kind: "stack-parameter", part: "control-plane", parameter: "CompanySignIn", also: [{ part: "slack", parameter: "CompanySignIn" }] } });
     expect(configKey("company.selfServe")).toMatchObject({ defaultValue: "disabled", target: { kind: "stack-parameter", part: "control-plane", parameter: "CompanySelfServe" } });

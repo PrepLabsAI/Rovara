@@ -45,7 +45,7 @@ describe.each([["named (staging)", named, "agentx/staging/callback-key", READERS
     expect(JSON.stringify(template.Resources).match(/"Ref":"CallbackSigningKey"/g)).toHaveLength(1);
     expect(secret.Properties.SecretString).toEqual({ Ref: "CallbackSigningKey" });
     expect(template.Parameters.CallbackSigningKey).toMatchObject({ NoEcho: true, MinLength: 32 });
-    // Retained, like the Slack secret: a stack delete leaves it, and `agentx destroy` removes retained secrets under agentx/<env>/.
+    // Retained, like the Slack secret: a stack delete leaves it, and `rovara destroy` removes retained secrets under agentx/<env>/.
     expect(secret.DeletionPolicy).toBe("Retain");
   });
 

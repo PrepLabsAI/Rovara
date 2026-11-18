@@ -129,12 +129,12 @@ describe("limitMessage (C16)", () => {
   it("names the AI-tool tasks beside the threads, and says how to close one", () => {
     const text = limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [thread], openTaskCount: 2 }, SLACK_FORMAT);
     expect(text.split("\n")[0]).toBe(TODAY);
-    expect(text.split("\n").at(-1)).toBe("You also have 2 tasks started from an AI tool; closing one there with agentx_close_task frees a workspace.");
+    expect(text.split("\n").at(-1)).toBe("You also have 2 tasks started from an AI tool; closing one there with rovara_close_task frees a workspace.");
   });
 
   it("says so plainly when the tasks are all there is", () => {
     expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 3 }, SLACK_FORMAT)).toBe(
-      "You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. 3 of them are tasks started from an AI tool; close one there with agentx_close_task to free a workspace.",
+      "You already have 3 AgentX workspaces, the most one person can have, so I can't start a new one. 3 of them are tasks started from an AI tool; close one there with rovara_close_task to free a workspace.",
     );
     expect(limitMessage({ limit: "MEMBER", maximum: 3, starterThreads: [], openTaskCount: 1 }, SLACK_FORMAT)).toContain("One of them is a task started from an AI tool");
   });

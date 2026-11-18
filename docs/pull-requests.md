@@ -9,10 +9,10 @@ Rovara rejects an empty diff, merge conflicts, or any failed/timed-out check bef
 
 Ask for it in the thread, naming the repository by its project YAML `name`, for example:
 `Create a pull request for the personal-website repository titled "Improve homepage navigation".`
-The orchestrator then calls `agentx_create_pull_request`; ordinary coding requests expose no
+The orchestrator then calls `rovara_create_pull_request`; ordinary coding requests expose no
 implicit publish step.
 
-Rovara creates `agentx/<operation-id>`, makes a Rovara-authored commit, pushes without force, and
+Rovara creates `rovara/<operation-id>` (branches named `agentx/<operation-id>` by earlier versions are still recognised), makes a Rovara-authored commit, pushes without force, and
 creates a ready-for-review PR against the repository's configured `defaultBranch`. The terminal
 result includes the PR URL and number, commit, head/base branches, and check evidence. Repeating the
 same accepted request reconciles the existing branch and PR rather than creating a duplicate. When
@@ -26,7 +26,7 @@ workspace are not inherited by the new PR. A conflict or effective empty diff st
 Maintain a Rovara-owned PR from the same thread by naming the repository and PR number: append
 the workspace's new commits, sync the base branch into it, update its title or body, or close and
 reopen it. The orchestrator makes all of these changes (append, sync, edit title/body, close,
-reopen, replace, and revert) through one tool, `agentx_manage_pull_request`, choosing the action
+reopen, replace, and revert) through one tool, `rovara_manage_pull_request`, choosing the action
 that matches the request.
 
 `append` runs readiness checks and accepts only workspace commits that descend from the recorded
@@ -40,7 +40,7 @@ For an already merged Rovara PR, ask for a reviewable revert PR instead of chang
 branch directly.
 
 Only PRs with durable Rovara ownership evidence are eligible. PRs created by an earlier Rovara
-version are adopted only when their `agentx/<operation-id>` branch matches a successful publication
+version are adopted only when their `rovara/<operation-id>` (or earlier `agentx/<operation-id>`) branch matches a successful publication
 operation in the same thread workspace.
 
 The installed GitHub App must have these repository permissions:
@@ -49,7 +49,7 @@ The installed GitHub App must have these repository permissions:
 - **Pull requests: Read and write** for finding or creating the PR.
 
 Change them under **GitHub Settings → Developer settings → GitHub Apps → your Rovara app (the
-maintainers' is AgentX SDLC; `init` names yours with `--github-app-name`) → Permissions & events →
+maintainers' own app is named like that; `init` names yours with `--github-app-name`) → Permissions & events →
 Repository permissions**. After saving, the installation owner must approve the updated
 permissions for the installation. The App private key stays in Secrets Manager; it is never sent to
 the worker. Rovara mints short-lived, single-repository tokens separately for clone,

@@ -1,4 +1,4 @@
-// Spec 062 FR-051: `agentx adapter …` registers adapters, binds their spaces and removes links, as an administrator.
+// Spec 062 FR-051: `rovara adapter …` registers adapters, binds their spaces and removes links, as an administrator.
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,7 +44,7 @@ function harness(answer: (method: string, path: string) => { status: number; bod
   return { cli, requests, lines };
 }
 
-describe("agentx adapter add", () => {
+describe("rovara adapter add", () => {
   it("registers the adapter with its capabilities, projects and step-up, and prints the new secret once", async () => {
     const { cli, requests, lines } = harness();
     const result = await cli("adapter", "add", "whatsapp", "--callback-url", "https://adapter.example.com/rovara", "--projects", "web,billing", "--buttons", "3", "--step-up", "admin");

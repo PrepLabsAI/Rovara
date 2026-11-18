@@ -18,6 +18,7 @@ import { formatSuccess } from "../output.js";
 import { RELEASE_VERSION } from "../version.js";
 import { runUpgrade, type UpgradeDependencies } from "./run.js";
 import { releaseNotes } from "./target.js";
+import { CLI_COMMAND_NAME } from "@agentx/contracts";
 
 export interface UpgradeCommandContext {
   overrides?: Partial<UpgradeDependencies>;
@@ -35,14 +36,14 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
   program
     .command("upgrade")
     .description("upgrade an environment to a newer release: shows the release notes and every change, stops on a data replacement unless you name it, then runs doctor (operator role; the cdk engine needs admin credentials)")
-    .option("--to <version>", "the release to upgrade to; default: this agentx's own release, or for an agentx built from source upgrading a cdk environment, the --source tag")
-    .option("--release <dir>", "a release directory (agentx release build output) instead of downloading one")
+    .option("--to <version>", `the release to upgrade to; default: this ${CLI_COMMAND_NAME}'s own release, or for a ${CLI_COMMAND_NAME} built from source upgrading a cdk environment, the --source tag`)
+    .option("--release <dir>", `a release directory (${CLI_COMMAND_NAME} release build output) instead of downloading one`)
     .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag; --to or --release, when given, must match it")
     .option("--allow-replace <logical-id>", "accept replacing or deleting this table, user pool, bucket, key or secret; repeat for each", collect, [])
     .option("--export <dir>", "write the upgrade for a platform team's pipeline instead of deploying it")
-    .option("--answers-from-deployed <file>", "write the deploy answers (for agentx deploy --mode upgrade --answers) read from the deployed environment and its settings, and deploy nothing; either engine")
-    .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
-    .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
+    .option("--answers-from-deployed <file>", `write the deploy answers (for ${CLI_COMMAND_NAME} deploy --mode upgrade --answers) read from the deployed environment and its settings, and deploy nothing; either engine`)
+    .option("--worker-image <digest-ref>", `worker image by digest; a ${CLI_COMMAND_NAME} built from source needs it with --engine cdk when the tag has no published release.json`)
+    .option("--slack-image <digest-ref>", `Slack service image by digest; a ${CLI_COMMAND_NAME} built from source needs it with --engine cdk when the tag has no published release.json`)
     .option("--yes", "apply without asking; every change and the release notes are still printed", false)
     .option("--region <region>", "AWS region of the environment; defaults to your AWS configuration")
     .action(async (options: { to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; answersFromDeployed?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {

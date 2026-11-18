@@ -77,7 +77,7 @@ describe("developer access tokens on this machine", () => {
     await mkdir(join(home, ".agentx", "locks"), { recursive: true });
     await writeFile(join(home, ".agentx", "locks", "developer-staging.lock"), "12345");
     const fetchImpl = vi.fn<typeof fetch>();
-    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0, lockWaitMs: 100 }, "staging")).rejects.toThrow("RUNTIME_UNAVAILABLE: another agentx process is refreshing your sign-in to staging; try again in a moment");
+    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0, lockWaitMs: 100 }, "staging")).rejects.toThrow("RUNTIME_UNAVAILABLE: another rovara process is refreshing your sign-in to staging; try again in a moment");
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -111,8 +111,8 @@ describe("developer access tokens on this machine", () => {
 
   it("deletes the tokens and names the exact login command when the sign-in has ended (US4 scenario 5)", async () => {
     const { home, tokenStore } = await setup({ accessToken: "old", refreshToken: r("a"), expiresAt: T0 - 1 });
-    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ error: "invalid_grant", error_description: "your AgentX sign-in has ended; run agentx login again" }, { status: 400 }));
-    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(`AUTH_REQUIRED: your AgentX sign-in for staging has ended (your AgentX sign-in has ended; run agentx login again); run npx @preplabsai/rovara-code login ${URL_}`);
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ error: "invalid_grant", error_description: "your Rovara sign-in has ended; run rovara login again" }, { status: 400 }));
+    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(`AUTH_REQUIRED: your Rovara sign-in for staging has ended (your Rovara sign-in has ended; run rovara login again); run npx @preplabsai/rovara-code login ${URL_}`);
     expect(await tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
   });
 
@@ -126,7 +126,7 @@ describe("developer access tokens on this machine", () => {
   it("keeps the tokens when the control plane cannot be reached", async () => {
     const { home, tokenStore } = await setup({ accessToken: "old", refreshToken: r("a"), expiresAt: T0 - 1 });
     const fetchImpl = vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); });
-    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(/^RUNTIME_UNAVAILABLE: could not reach AgentX at https:\/\/abc123/);
+    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(/^RUNTIME_UNAVAILABLE: could not reach Rovara at https:\/\/abc123/);
     expect(await tokenStore.get(developerTokenKey(ISSUER))).toMatchObject({ refreshToken: r("a") });
   });
 
@@ -141,10 +141,10 @@ describe("developer access tokens on this machine", () => {
   it("says how to sign in when this machine never signed in to the environment", async () => {
     const home = await mkdtemp(join(tmpdir(), "agentx-dev-session-"));
     dirs.push(home);
-    await expect(developerAccessToken({ home, tokenStore: new InMemoryTokenStore(), fetch: vi.fn<typeof fetch>(), now: () => T0 }, "staging")).rejects.toThrow("AUTH_REQUIRED: this computer is not signed in to AgentX environment staging; run npx @preplabsai/rovara-code login <your AgentX URL>");
+    await expect(developerAccessToken({ home, tokenStore: new InMemoryTokenStore(), fetch: vi.fn<typeof fetch>(), now: () => T0 }, "staging")).rejects.toThrow("AUTH_REQUIRED: this computer is not signed in to Rovara environment staging; run npx @preplabsai/rovara-code login <your Rovara URL>");
     expect(await readDeveloperConfig(home)).toEqual({ environments: {} });
   });
-  it("refreshes a still-valid token when asked to force it (an access token AgentX refused)", async () => {
+  it("refreshes a still-valid token when asked to force it (an access token Rovara refused)", async () => {
     const { home, tokenStore } = await setup({ accessToken: "refused", refreshToken: r("a"), expiresAt: T0 + 120_000 });
     const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ access_token: "new", token_type: "Bearer", expires_in: 3600, refresh_token: r("b") }));
     expect((await developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging", { force: true })).accessToken).toBe("new");

@@ -44,7 +44,7 @@ describe("the settings form", () => {
 
   it("explains the settings email in the context of the form", () => {
     const email = settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).find((field) => field.name === "email");
-    expect(email?.help?.why).toBe("AgentX uses it for your admin sign-in and, by default, for alerts.");
+    expect(email?.help?.why).toBe("Rovara uses it for your admin sign-in and, by default, for alerts.");
   });
 
   it("FR-023: the budget field says the suggested amount, on the page and in the terminal", () => {
@@ -64,7 +64,7 @@ describe("the settings form", () => {
   it("FR-020: says the recommended settings in plain words", () => {
     expect(recommendedSummary({ estimateUsd: 211.4, suggestedBudgetUsd: 260 })).toEqual([
       "Models: Claude Sonnet 4.6 on Amazon Bedrock for the main and coding models, Claude Haiku 4.5 for the safety check.",
-      "Sign-in: AgentX's own sign-in for you, Sign in with Slack for developers.",
+      "Sign-in: Rovara's own sign-in for you, Sign in with Slack for developers.",
       "Budget alert: $260 a month for the whole account (the estimate is about $211.40).",
       "Alerts go to: your email.",
     ]);
@@ -88,7 +88,7 @@ describe("answers from the settings", () => {
       slack: { appName: defaultAppName({ owner: "acme", env: "staging" }), appPostedMessages: "accept" },
     });
     expect(prompter.asked).toEqual([
-      "Your email, for your AgentX admin user and alerts", "GitHub organization or user that will own the AgentX GitHub App", "Install name",
+      "Your email, for your Rovara admin user and alerts", "GitHub organization or user that will own the Rovara GitHub App", "Install name",
       "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
     ]);
     expect(settings).toMatchObject({ email: "alice@example.com", githubAccount: "acme" });
@@ -112,15 +112,15 @@ describe("answers from the settings", () => {
     const prompter = scriptedPrompter(settingsScript({ owner: "acme", advanced: { alertKind: "none" } }));
     const { answers, notes } = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter, ownerType: async () => "organization" });
     expect(answers.alert).toEqual({ kind: "none" });
-    expect(notes.some((note) => /nobody is told when AgentX fails/.test(note))).toBe(true);
+    expect(notes.some((note) => /nobody is told when Rovara fails/.test(note))).toBe(true);
   });
 
   it("a typed app name names both apps; another install name moves the default", async () => {
-    const typed = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter: scriptedPrompter(settingsScript({ owner: "acme", appName: "Our AgentX" })), ownerType: async () => "organization" });
-    expect([typed.answers.github.appName, typed.answers.slack.appName]).toEqual(["Our AgentX", "Our AgentX"]);
+    const typed = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter: scriptedPrompter(settingsScript({ owner: "acme", appName: "Our Rovara" })), ownerType: async () => "organization" });
+    expect([typed.answers.github.appName, typed.answers.slack.appName]).toEqual(["Our Rovara", "Our Rovara"]);
     const moved = await collectInitAnswers({ ...base, env: "staging", flags: {}, prompter: scriptedPrompter(settingsScript({ owner: "acme", installName: "prod" })), ownerType: async () => "organization" });
     expect(moved.answers.env).toBe("prod");
-    expect(moved.answers.github.appName).toBe("AgentX acme (prod)");
+    expect(moved.answers.github.appName).toBe("Rovara acme (prod)");
   });
 });
 
@@ -141,12 +141,12 @@ describe("the settings form's own checks", () => {
   });
 
   it("--signin answers the developer sign-in setting, and the Slack app name flag still names the Slack app", async () => {
-    const prompter = scriptedPrompter(settingsScript({ owner: "acme", flags: { slackAppName: "Our Slack AgentX" } }));
-    const { answers } = await collectInitAnswers({ ...base, env: "staging", flags: { slackAppName: "Our Slack AgentX" }, prompter, signinMethods: "both", ownerType: async () => "organization" });
+    const prompter = scriptedPrompter(settingsScript({ owner: "acme", flags: { slackAppName: "Our Slack Rovara" } }));
+    const { answers } = await collectInitAnswers({ ...base, env: "staging", flags: { slackAppName: "Our Slack Rovara" }, prompter, signinMethods: "both", ownerType: async () => "organization" });
     expect(answers.signinMethods).toBe("both");
-    expect(answers.slack.appName).toBe("Our Slack AgentX");
-    expect(answers.github.appName).toBe("AgentX acme (staging)");
-    expect(prompter.asked).not.toContain("How will developers sign in to AgentX from their AI tools?");
+    expect(answers.slack.appName).toBe("Our Slack Rovara");
+    expect(answers.github.appName).toBe("Rovara acme (staging)");
+    expect(prompter.asked).not.toContain("How will developers sign in to Rovara from their AI tools?");
   });
 
   it("Change answers starts the form from the kept settings", async () => {

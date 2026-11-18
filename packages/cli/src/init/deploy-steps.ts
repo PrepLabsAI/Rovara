@@ -1,7 +1,7 @@
 // The init steps that deploy stacks: each drives 15c2's deployEnvironment for its parts, under the
 // lock the step runner already holds. Before deploying, a step waits for any of its stacks still
 // busy from an interrupted run (CloudFormation keeps going after a terminal closes).
-import { agentXError, environmentStackName } from "@agentx/contracts";
+import { agentXError, environmentStackName, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { deployIdentityAnswers, deployImagesAnswers, progressLine } from "../deploy/commands.js";
 import { deployEnvironment, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
@@ -36,7 +36,7 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     } else if (githubSecretArn !== undefined) {
       github = { account: "", appId: "", installationId: "", privateKeySecretArn: githubSecretArn };
     } else {
-      throw agentXError("CONFIG_INVALID", "the control plane needs the GitHub App's secret; run agentx init again");
+      throw agentXError("CONFIG_INVALID", `the control plane needs the GitHub App's secret; run ${CLI_COMMAND_NAME} init again`);
     }
   }
   const images = deployImagesAnswers(answers.images);
@@ -76,7 +76,7 @@ export async function waitForIdleStacks(input: {
     if (busy !== undefined) input.write(`Waiting for ${stackName}: it is ${busy} from an earlier run`);
     while (busy !== undefined) {
       if (input.now() - started >= timeout) {
-        throw agentXError("CONFIG_INVALID", `stack ${stackName} is still ${busy} after ${Math.round(timeout / 60_000)} minutes; check it in the CloudFormation console, then run agentx init again`);
+        throw agentXError("CONFIG_INVALID", `stack ${stackName} is still ${busy} after ${Math.round(timeout / 60_000)} minutes; check it in the CloudFormation console, then run ${CLI_COMMAND_NAME} init again`);
       }
       await input.sleep(input.pollMs ?? IDLE_POLL_MS);
       busy = busyStatus(await input.reader.status(stackName));
@@ -119,7 +119,7 @@ export function deployStep(input: { id: DeployStepId; title: string; after?: (co
       if (input.id === "slack-service") {
         const settings = result.settingsWritten ? await readEnvironmentSettings(deployment.store, env) : undefined;
         if (settings === undefined) {
-          throw agentXError("CONFIG_INVALID", `the Slack service deployed but environment ${env}'s settings were not written because not every stack reports its outputs; check the agentx-${env}-* stacks in CloudFormation, then run agentx init again`);
+          throw agentXError("CONFIG_INVALID", `the Slack service deployed but environment ${env}'s settings were not written because not every stack reports its outputs; check the agentx-${env}-* stacks in CloudFormation, then run ${CLI_COMMAND_NAME} init again`);
         }
         const path = await writeEnvironmentCache(context.home, settings);
         context.write(`Environment settings written to /agentx/${env}/settings; this machine's copy is ${path}`);

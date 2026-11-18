@@ -30,7 +30,7 @@ const FAST = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4
 const definition = (models: unknown = { default: DEFAULT, approved: [DEFAULT, OPUS, FAST] }): ProjectDefinition => ProjectDefinitionSchema.parse({
   name: "payments", revision: 1,
   repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
-  setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.",
+  setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote Rovara worker.",
   ...(models === null ? {} : { models }),
 });
 
@@ -131,7 +131,7 @@ describe("project models are checked when a revision is registered", () => {
     expect(() => ModelRefSchema.parse({ ...DEFAULT, lastCheck: { status: "failed", class: "unknown", checkedAt: NOW, message: "x" } })).toThrow();
   });
 
-  it("leaves a model whose provider this agentx cannot check as it was, not as passed", async () => {
+  it("leaves a model whose provider this rovara cannot check as it was, not as passed", async () => {
     const run = checker({});
     const other = { provider: "some-gateway", modelId: "alpha", label: "Alpha" };
     const result = await checkProjectModels({ definition: definition({ default: DEFAULT, approved: [DEFAULT, other] }), check: run.check, now: () => Date.parse(NOW) });
@@ -270,7 +270,7 @@ describe("@agentx use warns for a pair whose last check failed", () => {
   it("switches, and adds the class sentence when the stored check failed", async () => {
     const [post] = await use({ status: "failed", class: "model-not-found", checkedAt: NOW });
     expect(post).toContain("now uses Opus");
-    expect(post).toContain("The last check of this model failed: Anthropic does not have claude-opus-5 for this account; check the model id, or choose another model. Its next turn may fail; ask a project admin to run agentx doctor.");
+    expect(post).toContain("The last check of this model failed: Anthropic does not have claude-opus-5 for this account; check the model id, or choose another model. Its next turn may fail; ask a project admin to run rovara doctor.");
   });
 
   it("says nothing extra when the check passed or never ran", async () => {

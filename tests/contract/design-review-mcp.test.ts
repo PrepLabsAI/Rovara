@@ -11,8 +11,8 @@ const state = {
   parked: true, blockerReasonNeeded: true,
 };
 
-describe("agentx_get_design_review", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_get_design_review")!;
+describe("rovara_get_design_review", () => {
+  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "rovara_get_design_review")!;
 
   it("is a read: it asks for the task's review and says what waits for the owner, and that the owner acts on the page", async () => {
     const client = { getDesignReview: vi.fn(async () => state) };

@@ -78,7 +78,7 @@ describe("merge-up membership-resolved reads", () => {
     for (const [path, method] of [[projectPath, "GET"], ["/v1/dev/access", "POST"], ...taskPaths.map((path) => [path, "GET"])] as const) {
       const response = await h.call(path, method);
       expect(response.statusCode, path).toBe(401);
-      const message = path.startsWith("/v1/dev/tasks/") ? "your AgentX sign-in has ended; run agentx login <url> again"
+      const message = path.startsWith("/v1/dev/tasks/") ? "your Rovara sign-in has ended; run rovara login <url> again"
         : "this access check needs a signed-in person's token for this service, or a confidential service's own credentials";
       expect(response.body).toBe(JSON.stringify({ error: { code: "AUTH_REQUIRED", message }, requestId: "company-test" }));
     }

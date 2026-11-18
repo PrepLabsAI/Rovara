@@ -54,7 +54,7 @@ describe("membership checked developer reads", () => {
     for (const path of paths) {
       const response = await h.read(path);
       expect(response.statusCode).toBe(401);
-      expect(bodyOf(response.body).error).toEqual({ code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended; run agentx login <url> again" });
+      expect(bodyOf(response.body).error).toEqual({ code: "AUTH_REQUIRED", message: "your Rovara sign-in has ended; run rovara login <url> again" });
       expect(JSON.stringify(response)).not.toContain("leak-canary");
     }
   });
@@ -195,7 +195,7 @@ it("keeps both companies' records present while B reads its own and cannot read 
 it("membership adapters sanitize read failures before exposing them to a caller", async () => {
   const fail = async (): Promise<never> => { throw new Error(COMPANY_A.canary); };
   for (const reader of [companyMembershipFromStore({ get: fail }), companyMembershipFromDynamo({ send: fail }, "State")]) {
-    await expect(reader.companyOf(PERSON)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: "AUTH_REQUIRED: your AgentX sign-in has ended; run agentx login <url> again" });
+    await expect(reader.companyOf(PERSON)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: "AUTH_REQUIRED: your Rovara sign-in has ended; run rovara login <url> again" });
   }
 });
 

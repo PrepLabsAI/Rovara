@@ -80,7 +80,7 @@ describe("terminal task Slack authorization", () => {
             new URL(`/v1/dev/tasks/${taskId}/${route}`, "https://agentx.invalid"));
         } catch (error) { refusal = error; }
         expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
-        expect((refusal as Error).message).toContain("this task is closed; start a new one with agentx_start_task");
+        expect((refusal as Error).message).toContain("this task is closed; start a new one with rovara_start_task");
       }
     }
     expect(h.db.get(`DEVTASK#${taskId}`, "META")).toEqual(beforeTask);

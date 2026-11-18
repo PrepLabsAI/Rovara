@@ -1,7 +1,7 @@
 // tests/contract/action-gate-characterization.test.ts
 // Pins what the action gate wires into (spec 014 phase 14c part 2), on the code before the gate
 // exists (mainline plus 14a, 14b and 14c part 1): the tools a turn offers, how a connector call
-// reaches the control plane, and what agentx_create_pull_request answers in a thread with no compute.
+// reaches the control plane, and what rovara_create_pull_request answers in a thread with no compute.
 import { describe, expect, it, vi } from "vitest";
 import type { ConnectorCatalog, SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createOrchestratorRuntime } from "../../packages/orchestrator/src/orchestrator.js";
@@ -38,7 +38,7 @@ describe("orchestrator wiring before the action gate (characterization)", () => 
     });
     try {
       expect(runtime.session.getActiveToolNames()).toEqual([
-        "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request",
+        "rovara_submit_task", "rovara_create_pull_request", "rovara_follow_up", "rovara_manage_pull_request",
         "tracker__list_items", "tracker__close_item",
       ]);
     } finally { await runtime.dispose(); }
@@ -70,7 +70,7 @@ describe("orchestrator wiring before the action gate (characterization)", () => 
     }, { stateDirectory: await createFixtureDirectory("agentx-gate-char-"), api: api(), model });
     try {
       expect(runtime.session.getActiveToolNames()).toEqual([
-        "agentx_submit_task", "agentx_create_pull_request", "agentx_follow_up", "agentx_manage_pull_request",
+        "rovara_submit_task", "rovara_create_pull_request", "rovara_follow_up", "rovara_manage_pull_request",
         "tracker__list_items", "tracker__close_item",
       ]);
     } finally { await runtime.dispose(); }
@@ -83,7 +83,7 @@ describe("orchestrator wiring before the action gate (characterization)", () => 
       api: calls, context, model, connectors, worker: { prepared: () => false, ensureReady: async () => undefined },
     });
     try {
-      const result = await runtime.session.getToolDefinition("agentx_create_pull_request")!.execute("call-1", { repository: "demo", title: "Fix" }, undefined, undefined, {} as never);
+      const result = await runtime.session.getToolDefinition("rovara_create_pull_request")!.execute("call-1", { repository: "demo", title: "Fix" }, undefined, undefined, {} as never);
       expect(result.content).toEqual([{ type: "text", text: JSON.stringify(NO_WORKSPACE_TO_PUBLISH) }]);
       expect(calls.createPullRequest).not.toHaveBeenCalled();
     } finally { await runtime.dispose(); }

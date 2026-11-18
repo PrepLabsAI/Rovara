@@ -34,7 +34,7 @@ describe("the installer stack", () => {
     });
   });
 
-  it("runs agentx init in CodeBuild as an administrator role that is deleted with the stack", () => {
+  it("runs rovara init in CodeBuild as an administrator role that is deleted with the stack", () => {
     const stack = template();
     stack.hasResourceProperties("AWS::IAM::Role", {
       AssumeRolePolicyDocument: Match.objectLike({ Statement: [Match.objectLike({ Principal: { Service: "codebuild.amazonaws.com" } })] }),

@@ -101,7 +101,7 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
         options.onProgress?.({
           operationId: input.operationId,
           status: "RUNNING",
-          message: `Remote AgentX worker is running (${events.length} progress events received).`,
+          message: `Remote Rovara worker is running (${events.length} progress events received).`,
         });
       },
     });
@@ -172,7 +172,7 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
       onEvents: (events) => options.onProgress?.({
         operationId: input.operationId,
         status: "RUNNING",
-        message: `Remote AgentX publication is running (${events.length} new events).`,
+        message: `Remote Rovara publication is running (${events.length} new events).`,
       }),
     });
     return {

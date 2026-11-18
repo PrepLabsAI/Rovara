@@ -29,7 +29,7 @@ import {
   type ModelSelection,
   type SlackRequester,
   type SlackThread,
-  type SwebenchRun,
+  type SwebenchRun, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import {
   batchSlotLimit,
@@ -233,7 +233,7 @@ export async function createBatch(
   const deployment = await dependencies.deployment();
   if (deployment === undefined) throw agentXError("CONFIG_INVALID", "Eval runs are not installed in this deployment. Ask an administrator to deploy the eval stack and runner image.");
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
-  if (channel === undefined) throw agentXError("CONFIG_INVALID", "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`.");
+  if (channel === undefined) throw agentXError("CONFIG_INVALID", `Eval runs are not enabled in this channel. An administrator can enable them with \`${CLI_COMMAND_NAME} admin eval enable\`.`);
   const ceiling = channel.maxCostUsd;
   const reservation = runReservationUsd(ceiling);
   if (file.costCapUsd < reservation) {

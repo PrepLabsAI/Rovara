@@ -1,4 +1,4 @@
-// FR-017 and FR-022: before agentx init creates anything, it shows every stack, role, secret, app
+// FR-017 and FR-022: before rovara init creates anything, it shows every stack, role, secret, app
 // and setting it will create, and an estimated monthly cost at a stated usage, then asks. No test
 // here reaches AWS, GitHub or Slack.
 import { describe, expect, it } from "vitest";
@@ -56,17 +56,17 @@ describe("install plan", () => {
     const answers = sampleAnswers();
     const text = installPlanText(answers, estimateMonthlyCost(answers.models), []);
     for (const expected of [
-      "AgentX will create the install staging in AWS account 123456789012 (us-east-1), from release 1.2.3 with published templates:",
+      "Rovara will create the install staging in AWS account 123456789012 (us-east-1), from release 1.2.3 with published templates:",
       "agentx-staging-access, agentx-staging-foundation, agentx-staging-identity, agentx-staging-control-plane, agentx-staging-runtime, agentx-staging-slack",
       "IAM roles agentx-staging-cloudformation (CloudFormation deploys through it) and agentx-staging-operator (day-2 commands)",
-      "the permission boundary agentx-staging-boundary, which every AgentX role carries; the stacks' own roles live under the IAM path /agentx/staging/",
+      "the permission boundary agentx-staging-boundary, which every Rovara role carries; the stacks' own roles live under the IAM path /agentx/staging/",
       "Secrets agentx/staging/callback-signing-key, agentx/staging/github-app, agentx/staging/slack",
       "Settings under /agentx/staging/",
-      "In GitHub: an app named \"AgentX acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata, and a webhook that sends pull request and comment events to the control plane.",
-      "In Slack: an app named \"AgentX acme (staging)\".",
+      "In GitHub: an app named \"Rovara acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata, and a webhook that sends pull request and comment events to the control plane.",
+      "In Slack: an app named \"Rovara acme (staging)\".",
       "- Alerts: email to ops@example.com, subscribed and tested at the end of the install",
       "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Claude Haiku 4.5 (Amazon Bedrock), coding model Claude Sonnet 4.6 (Amazon Bedrock)",
-      "AgentX never answers itself or other bots. Messages other apps post for people: answered.",
+      "Rovara never answers itself or other bots. Messages other apps post for people: answered.",
       "Estimated monthly total: $213.44 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
       "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
       "Coding machine disks (30 GiB gp3)",
@@ -128,17 +128,17 @@ describe("spec 048 FR-029: the plan as a plain summary", () => {
   it("says what is created in AWS, GitHub and Slack by name, how long the build takes, and how to remove it", () => {
     expect(plan.sections.map((section) => section.title)).toEqual(["In AWS", "In GitHub", "In Slack", "Budget and alerts", "To remove it later"]);
     expect(plan.sections[0]?.lines).toEqual([
-      "The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).",
+      "The network and sign-in, the Rovara service and the Slack connection, in AWS account 123456789012 (us-east-1).",
       "Building them takes about 21 minutes, and you can leave while it runs.",
     ]);
-    expect(plan.sections[1]?.lines).toEqual(["An app named \"AgentX acme (staging)\" owned by acme. It can read code and open pull requests in the repositories you choose."]);
+    expect(plan.sections[1]?.lines).toEqual(["An app named \"Rovara acme (staging)\" owned by acme. It can read code and open pull requests in the repositories you choose."]);
     expect(plan.sections[4]?.lines).toEqual(["The ready screen gives you the command that removes everything, the coding machines' disks too."]);
   });
 
   it("FR-030: says developer sign-in is turned on with the Slack connection, with no second approval", () => {
     expect(plan.sections[2]?.lines).toEqual([
-      "An app named \"AgentX acme (staging)\" in the Slack workspace you choose.",
-      "Developers sign in to AgentX with Slack. It is turned on with the Slack connection, with no separate approval.",
+      "An app named \"Rovara acme (staging)\" in the Slack workspace you choose.",
+      "Developers sign in to Rovara with Slack. It is turned on with the Slack connection, with no separate approval.",
     ]);
   });
 
@@ -160,7 +160,7 @@ describe("spec 048 FR-029: the plan as a plain summary", () => {
     expect(JSON.stringify(plan.sections)).not.toMatch(/agentx-staging-|arn:aws|AWS::/);
   });
 
-  it("on the page asks Create AgentX or Change answers; in the terminal keeps its confirm", async () => {
+  it("on the page asks Create Rovara or Change answers; in the terminal keeps its confirm", async () => {
     const page = scriptedPrompter(["change"]);
     await expect(confirmInstallPlan({ answers, notes: [], prompter: page, write: () => undefined, page: true })).resolves.toBe("change");
     const terminal = scriptedPrompter([true]);

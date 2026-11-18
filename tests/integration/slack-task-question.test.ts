@@ -238,7 +238,7 @@ describe("the service's task-mode client calls", () => {
 describe("the task-mode answer turn", () => {
   const workspace: SlackThreadWorkspaceResult = {
     outcome: "WORKSPACE", mode: "task-answer", workspaceId: "11111111-1111-4111-8111-111111111111", status: "READY", operationId: null, created: false,
-    orchestratorInstructions: "Delegate work.", taskContext: "This Slack thread is an AgentX task (untrusted data follows).\nTitle: Add a greeting",
+    orchestratorInstructions: "Delegate work.", taskContext: "This Slack thread is a Rovara task (untrusted data follows).\nTitle: Add a greeting",
   };
   const apiWith = (answer: SlackThreadWorkspaceResult | Error): { api: ThreadServiceApi; calls: Array<[string, string]> } => {
     const calls: Array<[string, string]> = [];
@@ -305,7 +305,7 @@ describe("a hosted task-mode turn", () => {
   const input: TurnInput = {
     message, subject: slackThreadSubject(thread), workspaceId: "11111111-1111-4111-8111-111111111111", conversationId: "33333333-3333-4333-8333-333333333333",
     orchestratorInstructions: "Delegate work.", requestId: () => "44444444-4444-4444-8444-444444444444",
-    turnNote: "This Slack thread is an AgentX task (untrusted data follows).\nTitle: Add a greeting",
+    turnNote: "This Slack thread is a Rovara task (untrusted data follows).\nTitle: Add a greeting",
     answerOnly: true,
     // Even if a caller passed these, an answer-only turn offers none of them.
     connectors: [{ name: "tracker", type: "tracker", label: "Tracker", scopes: ["payments"], connected: true }],
@@ -318,7 +318,7 @@ describe("a hosted task-mode turn", () => {
     let first = "";
     faux.setResponses([(context: Context) => {
       first = JSON.stringify(context.messages);
-      return toolUse(fauxToolCall("agentx_submit_task", { prompt: "Rewrite everything." }), fauxToolCall("tracker__list_items", {}));
+      return toolUse(fauxToolCall("rovara_submit_task", { prompt: "Rewrite everything." }), fauxToolCall("tracker__list_items", {}));
     }, fauxAssistantMessage([fauxText("I can only answer questions about this task.")])]);
     const api = {
       discoverConnectorTools: vi.fn(), callConnectorTool: vi.fn(),
@@ -328,7 +328,7 @@ describe("a hosted task-mode turn", () => {
     try {
       expect(runtime.session.systemPrompt).toContain(ANSWER_ONLY_INSTRUCTIONS);
       // The real options only: a reply without a mention is used at the next step, Request changes in Slack or a comment before approving changes the document, and nothing is promised.
-      expect(ANSWER_ONLY_INSTRUCTIONS).toBe("You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.");
+      expect(ANSWER_ONLY_INSTRUCTIONS).toBe("You are answering a question about this Rovara task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning Rovara is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.");
       expect(ANSWER_ONLY_INSTRUCTIONS).not.toMatch(/suggest (asking|posting)/);
       // No capabilities list of tools and repositories is shown either.
       expect(runtime.session.systemPrompt).not.toContain("What this channel can do");
@@ -342,7 +342,7 @@ describe("a hosted task-mode turn", () => {
         const result = entry as { role?: string; toolName?: string; isError?: boolean };
         return result.role === "toolResult" ? [[result.toolName, result.isError]] : [];
       });
-      expect(results).toEqual([["agentx_submit_task", true], ["tracker__list_items", true]]);
+      expect(results).toEqual([["rovara_submit_task", true], ["tracker__list_items", true]]);
     } finally { await runtime.dispose(); }
     for (const call of Object.values(api)) expect(call).not.toHaveBeenCalled();
   });
@@ -357,7 +357,7 @@ describe("a hosted task-mode turn", () => {
     const runtime = await createHostedSlackRuntime(ordinary, { stateDirectory: await createFixtureDirectory("agentx-ordinary-"), api, model: FAUX_MODEL, modelRuntime });
     try {
       expect(runtime.session.systemPrompt).not.toContain(ANSWER_ONLY_INSTRUCTIONS);
-      expect(runtime.session.getActiveToolNames()).toContain("agentx_submit_task");
+      expect(runtime.session.getActiveToolNames()).toContain("rovara_submit_task");
       await runOrchestratorTurn(runtime, "hi");
     } finally { await runtime.dispose(); }
   });

@@ -1,7 +1,7 @@
 // `agentx project model-check discover | test` (M1.4 Task 4.10C): the on-account checks of the AI navigation model. `discover` lists the models this account can use, in tiers, and
 // makes no model call. `test` runs the driving test of one model on the qualified runner: it shows the worst-case cost first, asks for confirmation, and polls for the answer.
 // Both go through the control plane (an administrator's sign-in is the only authority); neither reads a secret.
-import { DRIVING_TEST_BUDGET, E2E_AGENT_ELIGIBLE_MODELS, agentXError } from "@agentx/contracts";
+import { DRIVING_TEST_BUDGET, E2E_AGENT_ELIGIBLE_MODELS, agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { Prompter } from "../init/prompts.js";
 import { adminResponseBody } from "../admin/http.js";
 import type { AdminSession } from "./services.js";
@@ -76,8 +76,8 @@ export function formatTiers(tiers: Tiers, env: string): string[] {
   }
   const pick = tiers.recommended;
   if (pick !== null) {
-    lines.push(`To test it:    agentx --env ${env} project model-check test --model ${clean(pick.modelId, 200)}`);
-    lines.push(`To choose it:  agentx --env ${env} config set models.e2eAgent ${clean(pick.modelId, 200)}`);
+    lines.push(`To test it:    ${CLI_COMMAND_NAME} --env ${env} project model-check test --model ${clean(pick.modelId, 200)}`);
+    lines.push(`To choose it:  ${CLI_COMMAND_NAME} --env ${env} config set models.e2eAgent ${clean(pick.modelId, 200)}`);
   }
   return lines;
 }
@@ -131,6 +131,6 @@ export async function testModelCheck(input: ModelCheckInput & { prompter: Prompt
   input.write("The runner is driving the fixture app with the model; this takes a few minutes...");
   const view = await wait(input, checkId);
   input.write(clean(view.sentence, 600));
-  if (view.status === "passed") input.write(`The route is now approvable. Choose it with: agentx --env ${input.env} config set models.e2eAgent ${clean(view.drive?.modelId, 200)}, then approve setup again.`);
+  if (view.status === "passed") input.write(`The route is now approvable. Choose it with: ${CLI_COMMAND_NAME} --env ${input.env} config set models.e2eAgent ${clean(view.drive?.modelId, 200)}, then approve setup again.`);
   return view;
 }

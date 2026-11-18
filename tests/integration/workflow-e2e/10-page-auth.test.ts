@@ -443,7 +443,7 @@ describe("Suite 10: page and auth", () => {
 
     const designWorkflow = e2e.workflow();
     const designArtifact = designWorkflow.artifacts.at(-1)!;
-    const mcpDecision = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: designWorkflow.revision,
+    const mcpDecision = await e2e.mcp("rovara_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: designWorkflow.revision,
       decision: "APPROVE", reason: "The design is ready.", artifact_digest: designArtifact.sha256 }, SLACK_SAM);
     expect(mcpDecision.isError).toBe(false);
     await e2e.settle();

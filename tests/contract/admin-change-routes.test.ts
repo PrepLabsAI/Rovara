@@ -51,14 +51,14 @@ describe("planning a change (FR-039)", () => {
   it("offers only the methods the environment and the admin allow, and refuses when none is left (FR-041)", async () => {
     const off = await createAdminChangeBroker({ elicitation: false, slackLinked: false });
     const refused = await off.propose(BIND, ["elicitation", "slack"]);
-    expect(refused.body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: the environment does not allow the pop-up, and your admin sign-in matches no Slack user; use agentx admin commands instead" });
+    expect(refused.body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: the environment does not allow the pop-up, and your admin sign-in matches no Slack user; use rovara admin commands instead" });
     const audited = off.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT");
     expect(audited).toEqual([expect.objectContaining({ status: "failed", outcome: "failed", error: expect.objectContaining({ code: "CONFIRMATION_UNAVAILABLE" }) as unknown })]);
     expect(off.db.find((item) => item.entityType === "ADMIN_CHANGE")).toEqual([]);
     const slackOnly = await createAdminChangeBroker({ elicitation: false });
     expect((await slackOnly.propose(BIND, ["elicitation", "slack"])).body.change).toMatchObject({ methodsOffered: ["slack"] });
     const noSlack = await createAdminChangeBroker({ slack: false });
-    expect((await noSlack.propose(BIND, ["slack"])).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: Slack confirmation is not set up in this environment; use agentx admin commands instead" });
+    expect((await noSlack.propose(BIND, ["slack"])).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: Slack confirmation is not set up in this environment; use rovara admin commands instead" });
   });
 
   it("audits a request whose plan is refused, and stores no pending change", async () => {
@@ -552,7 +552,7 @@ describe("reading the records (FR-052)", () => {
 
   it("answers NOT_FOUND for an unknown change and an unknown change route", async () => {
     const broker = await createAdminChangeBroker();
-    expect((await broker.get("77777777-7777-4777-8777-777777777777")).body.error).toEqual({ code: "NOT_FOUND", message: "no change 77777777-7777-4777-8777-777777777777; list the changes with agentx admin changes" });
+    expect((await broker.get("77777777-7777-4777-8777-777777777777")).body.error).toEqual({ code: "NOT_FOUND", message: "no change 77777777-7777-4777-8777-777777777777; list the changes with rovara admin changes" });
     expect((await broker.admin("POST", "/v1/admin/changes/77777777-7777-4777-8777-777777777777/other", { body: {} })).body.error).toMatchObject({ code: "NOT_FOUND" });
   });
 
@@ -686,7 +686,7 @@ describe("the final review's fixes (phase 25e)", () => {
 
   it("says AgentX could not check the Slack link, not that none matches, when the lookup failed (M7)", async () => {
     const broker = await createAdminChangeBroker({ elicitation: false, slackLookupDown: true });
-    expect((await broker.propose(BIND, ["slack"])).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: AgentX could not check your Slack link just now; try again, or use agentx admin commands instead" });
+    expect((await broker.propose(BIND, ["slack"])).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: AgentX could not check your Slack link just now; try again, or use rovara admin commands instead" });
   });
 
   it("reads a pending audit record whose change item is gone, past its 10 minutes, as expired (T7)", async () => {

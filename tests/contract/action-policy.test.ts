@@ -64,11 +64,11 @@ describe("action classes (spec 014 D1)", () => {
   it("classifies in-house tools in code: coding work is a change only while the thread has no compute", () => {
     // Fix round 1 (M3): with no worker passed, the task tools that depend on compute fail closed as a change.
     expect(IN_HOUSE_TOOL_NAMES.map((name) => baseClass(name, undefined, {}))).toEqual(["change", "change", "read", "read", "change", "change"]);
-    expect(baseClass("agentx_submit_task", undefined, {}, prepared(false))).toBe("change");
-    expect(baseClass("agentx_submit_task", undefined, {}, prepared(true))).toBe("read");
-    expect(baseClass("agentx_follow_up", undefined, {}, prepared(false))).toBe("read");
-    for (const action of ["close", "replace", "revert"]) expect(baseClass("agentx_manage_pull_request", undefined, { action })).toBe("destructive");
-    for (const action of ["edit", "append", "sync", "reopen"]) expect(baseClass("agentx_manage_pull_request", undefined, { action })).toBe("change");
+    expect(baseClass("rovara_submit_task", undefined, {}, prepared(false))).toBe("change");
+    expect(baseClass("rovara_submit_task", undefined, {}, prepared(true))).toBe("read");
+    expect(baseClass("rovara_follow_up", undefined, {}, prepared(false))).toBe("read");
+    for (const action of ["close", "replace", "revert"]) expect(baseClass("rovara_manage_pull_request", undefined, { action })).toBe("destructive");
+    for (const action of ["edit", "append", "sync", "reopen"]) expect(baseClass("rovara_manage_pull_request", undefined, { action })).toBe("change");
   });
 
   it("names the existing item a call changes, when the connector declares how", () => {
@@ -135,9 +135,9 @@ describe("rules and built-in defaults", () => {
   });
 
   it("governs in-house tools by rule too", () => {
-    const policy: ActionPolicy = { rules: [{ tool: "agentx_submit_task", outcome: "ask", reason: "Coding work needs a person." }] };
-    expect(evaluatePolicy({ name: "agentx_submit_task", args: { prompt: "fix it" }, policy }).settled).toMatchObject({ outcome: "ask", kind: "admin", rule: 1 });
-    expect(evaluatePolicy({ name: "agentx_submit_task", args: { prompt: "fix it" }, worker: prepared(true) }).settled).toMatchObject({ outcome: "allow", kind: "read" });
+    const policy: ActionPolicy = { rules: [{ tool: "rovara_submit_task", outcome: "ask", reason: "Coding work needs a person." }] };
+    expect(evaluatePolicy({ name: "rovara_submit_task", args: { prompt: "fix it" }, policy }).settled).toMatchObject({ outcome: "ask", kind: "admin", rule: 1 });
+    expect(evaluatePolicy({ name: "rovara_submit_task", args: { prompt: "fix it" }, worker: prepared(true) }).settled).toMatchObject({ outcome: "allow", kind: "read" });
   });
 });
 
@@ -212,7 +212,7 @@ describe("fix round 1 (task 2 review)", () => {
       expect(baseClass("tracker__save_item", write("save_item"), args)).toBe("change");
       expect(baseClass("tracker__save_item", undeclared("save_item"), args)).toBe("change");
       expect(baseClass("mystery_tool", undefined, args)).toBe("change");
-      expect(baseClass("agentx_manage_pull_request", undefined, args)).toBe("change");
+      expect(baseClass("rovara_manage_pull_request", undefined, args)).toBe("change");
       expect(() => destructiveSignal("save_item", args, ["id"])).not.toThrow();
       expect(itemReference(write("save_item"), args)).toBeUndefined();
       expect(evaluatePolicy({ name: "tracker__save_item", args, facts: write("save_item"),
@@ -227,9 +227,9 @@ describe("fix round 1 (task 2 review)", () => {
   });
 
   it("M3: in-house task tools fail closed as a change when no worker is passed", () => {
-    expect(baseClass("agentx_submit_task", undefined, {})).toBe("change");
-    expect(baseClass("agentx_follow_up", undefined, {})).toBe("change");
-    expect(baseClass("agentx_follow_up", undefined, {}, prepared(true))).toBe("read");
+    expect(baseClass("rovara_submit_task", undefined, {})).toBe("change");
+    expect(baseClass("rovara_follow_up", undefined, {})).toBe("change");
+    expect(baseClass("rovara_follow_up", undefined, {}, prepared(true))).toBe("read");
   });
 
   it("D2: only a rule naming the exact tool allows or reclassifies a destructive or bulk call", () => {

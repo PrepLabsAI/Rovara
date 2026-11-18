@@ -17,7 +17,7 @@ export * from "./e2e-environment-guard.js";
 export * from "./e2e-route-derive.js";
 export { classifyProviderFailure, isNetworkCode, signalPattern, BEDROCK_SIGNAL_PATTERN, KEYED_SIGNAL_PATTERN, MODEL_NOT_ENABLED_SIGNAL, MODEL_NOT_OFFERED_SIGNAL } from "./provider-failure.js";
 export type { ProviderFailureFacts } from "./provider-failure.js";
-import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, agentXError, isClaudeAgentModel, isKeyedModelProvider, type InvocationModelRoute, type KeyedModelProvider, type ModelIdentifier, type ThinkingLevel, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -139,7 +139,7 @@ export function modelFallbackModel(value: string | undefined): { provider: "amaz
   return catalogModel({ provider: "amazon-bedrock", modelId: id }) === undefined ? undefined : { provider: "amazon-bedrock", modelId: id };
 }
 
-const FALLBACK_COMMAND = "`agentx --env <env> config set models.fallback <bedrock model id>`";
+const FALLBACK_COMMAND = `\`${CLI_COMMAND_NAME} --env <env> config set models.fallback <bedrock model id>\``;
 
 /**
  * Resolve a missing provider secret before creating a session, so its model and usage agree. There is no default fallback (MODEL3): with no chosen fallback the call fails by name, and with

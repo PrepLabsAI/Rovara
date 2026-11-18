@@ -1,6 +1,6 @@
 // ~/.agentx/developer.yaml: which AgentX environments this computer has signed in to (FR-011).
 // Never holds a token: tokens live in the system token store.
-import { CLI_PACKAGE_NAME } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
@@ -16,7 +16,7 @@ interface DeveloperConfig { default?: string; environments: Record<string, Devel
 
 /** The environment name that means "the `rovara up` on this computer". It is reserved: a hosted sign-in cannot be saved under it. */
 export const LOCAL_ENVIRONMENT = "local";
-export const LOCAL_ENVIRONMENT_RESERVED = `the environment name ${LOCAL_ENVIRONMENT} is reserved for the rovara up running on this computer; sign in to a hosted AgentX under another name`;
+export const LOCAL_ENVIRONMENT_RESERVED = `the environment name ${LOCAL_ENVIRONMENT} is reserved for the rovara up running on this computer; sign in to a hosted Rovara under another name`;
 
 export const developerConfigPath = (home: string): string => join(home, ".agentx", "developer.yaml");
 export const developerTokenKey = (issuer: string): string => tokenStoreKey({ issuer, clientId: AGENTX_CLI_CLIENT_ID, audience: DEVELOPER_TOKEN_AUDIENCE });
@@ -36,7 +36,7 @@ export async function readDeveloperConfig(home: string): Promise<DeveloperConfig
     document = undefined;
   }
   const parsed = ConfigSchema.safeParse(document);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", `${developerConfigPath(home)} is invalid; delete it and run agentx login <url> again`);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `${developerConfigPath(home)} is invalid; delete it and run ${CLI_COMMAND_NAME} login <url> again`);
   return { ...(parsed.data.default === undefined ? {} : { default: parsed.data.default }), environments: parsed.data.environments };
 }
 
@@ -96,7 +96,7 @@ export async function resolveDeveloperEnvironment(home: string, env: string | un
   const name = env ?? config.default;
   const entry = name === undefined ? undefined : config.environments[name];
   if (name === undefined || entry === undefined) {
-    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX${name === undefined ? "" : ` environment ${name}`}; run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`);
+    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to Rovara${name === undefined ? "" : ` environment ${name}`}; run npx ${CLI_PACKAGE_NAME} login <your Rovara URL>`);
   }
   return { env: name, entry };
 }

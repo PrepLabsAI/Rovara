@@ -1,7 +1,7 @@
-// Switch-over gap 3: `agentx upgrade --answers-from-deployed <file>` writes the answers
-// `agentx deploy --mode upgrade --answers` reads, from the deployed environment and its settings,
+// Switch-over gap 3: `rovara upgrade --answers-from-deployed <file>` writes the answers
+// `rovara deploy --mode upgrade --answers` reads, from the deployed environment and its settings,
 // for either engine, deploying nothing. Round-trip: the file loads through loadDeployAnswers and
-// deploys exactly what `agentx upgrade`'s own answers (upgradeAnswers) deploy.
+// deploys exactly what `rovara upgrade`'s own answers (upgradeAnswers) deploy.
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,7 +72,7 @@ async function harness(controlPlane: Record<string, string> = CONTROL_PLANE, set
 
 const options = { env: "staging", yes: false, allowReplace: [] as string[] };
 
-describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
+describe("rovara upgrade --answers-from-deployed (switch-over gap 3)", () => {
   it("writes the answers of a cdk environment, reads only, and deploys nothing", async () => {
     const h = await harness();
     const file = await answersPath();
@@ -151,7 +151,7 @@ describe("agentx upgrade --answers-from-deployed (switch-over gap 3)", () => {
 
   describe("round-trip through loadDeployAnswers", () => {
     for (const [deployedAppId, engine] of [["", "cdk"], ["5389609", "cdk"], ["", "templates"]] as const) {
-      it(`deploys exactly what agentx upgrade's own answers deploy (deployed GitHubAppId ${JSON.stringify(deployedAppId)}, ${engine} engine)`, async () => {
+      it(`deploys exactly what rovara upgrade's own answers deploy (deployed GitHubAppId ${JSON.stringify(deployedAppId)}, ${engine} engine)`, async () => {
         const controlPlane = { ...CONTROL_PLANE, GitHubAppId: deployedAppId };
         const h = await harness(controlPlane);
         const file = await answersPath();

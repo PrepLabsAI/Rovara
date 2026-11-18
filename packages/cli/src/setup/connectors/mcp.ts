@@ -6,7 +6,7 @@
 import { readFile } from "node:fs/promises";
 import {
   agentXError, ConnectorNameSchema, environmentConnectorSecretPrefix, mcpEndpointProblem, McpConnectorSchema, OAuthRefreshTokenSecretSchema,
-  type McpAuth, type McpConnectorConfig,
+  type McpAuth, type McpConnectorConfig, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import { listCredentials, registerCredential } from "../../admin/credential.js";
 import type { AuthorizeSecrets } from "../../admin/authorize.js";
@@ -16,10 +16,10 @@ import type { McpToolSummary } from "./vendors.js";
 import { addConnectorRevision, errorName, loadProjectFile, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const MCP_GUIDE = [
-  "Any MCP server: AgentX connects to the server's endpoint with a credential you create for it.",
+  "Any MCP server: Rovara connects to the server's endpoint with a credential you create for it.",
   "  1. Find the server's remote MCP endpoint (https://...) in the vendor's documentation.",
   "  2. Create a credential that reaches only what this project needs: a scoped API key, or a dedicated bot user that signs in once.",
-  "  3. AgentX lists the server's tools; approve only the ones the project needs. Tools that change data need an ownership rule (--config-file) or your explicit acknowledgment.",
+  "  3. Rovara lists the server's tools; approve only the ones the project needs. Tools that change data need an ownership rule (--config-file) or your explicit acknowledgment.",
   "  The credential is sent only to the endpoint's host.",
 ].join("\n");
 
@@ -118,7 +118,7 @@ export async function addMcp(input: McpAddInput): Promise<{ ref: string; name: s
   const nameProblem = (value: string) => (ConnectorNameSchema.safeParse(value.trim()).success ? undefined : "a connector name is lowercase letters, digits and hyphens, at most 20, starting with a letter");
   const name = (flags.name ?? base.name ?? await input.prompter.ask("A name for this connector (its tools are shown as <name>__<tool>)", { flag: "--name", defaultValue: nameFrom(vendor), validate: nameProblem })).trim();
   if (nameProblem(name) !== undefined) throw agentXError("CONFIG_INVALID", `--name ${name}: ${nameProblem(name)!}`);
-  const rerun = input.rerun ?? `agentx --env ${input.env} connector add mcp --project ${input.projectName} --endpoint ${endpoint} --name ${name}`;
+  const rerun = input.rerun ?? `${CLI_COMMAND_NAME} --env ${input.env} connector add mcp --project ${input.projectName} --endpoint ${endpoint} --name ${name}`;
 
   await refuseLegacyGitHubMcp({ projectName: input.projectName, configDir: input.services.configDir, rerun });
   const existing = (await loadProjectFile({ projectName: input.projectName, configDir: input.services.configDir, rerun })).integrations?.connectors ?? [];
@@ -131,7 +131,7 @@ export async function addMcp(input: McpAddInput): Promise<{ ref: string; name: s
   const auth: McpAuth | undefined = flags.authHeader !== undefined || flags.authPrefix !== undefined
     ? { ...(flags.authHeader === undefined ? {} : { header: flags.authHeader }), ...(flags.authPrefix === undefined ? {} : { prefix: flags.authPrefix }) }
     : base.auth;
-  const kind = flags.auth ?? await input.prompter.choose<"key" | "oauth">(`How does ${vendor} authenticate AgentX?`, [
+  const kind = flags.auth ?? await input.prompter.choose<"key" | "oauth">(`How does ${vendor} authenticate Rovara?`, [
     { value: "key", label: "An API key or token" },
     { value: "oauth", label: "OAuth: a bot user signs in once in a browser" },
   ], { flag: "--auth", defaultValue: "key" });
@@ -201,7 +201,7 @@ async function signInAndList(context: {
   const { input, endpoint, host, ref, secretName, rerun } = context;
   const flags = input.flags;
   const registerClient = flags.registerClient ?? (flags.clientId === undefined && await input.prompter.confirm(
-    `Let AgentX register itself as ${host}'s OAuth client? Choose no to use an OAuth app you created.`, { defaultValue: true },
+    `Let Rovara register itself as ${host}'s OAuth client? Choose no to use an OAuth app you created.`, { defaultValue: true },
   ));
   let client = "{}";
   if (!registerClient) {

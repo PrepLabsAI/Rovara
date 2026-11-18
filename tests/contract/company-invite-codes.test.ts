@@ -203,7 +203,7 @@ describe("an install administrator's changes and list", () => {
   });
 });
 
-describe("agentx admin company-invite", () => {
+describe("rovara admin company-invite", () => {
   const CHANGE = "66666666-6666-4666-8666-666666666666";
   const view = (status: string) => ({ changeId: CHANGE, kind: "create_company_invite", status, effect: "Make company invite code.", methodsOffered: ["cli"], createdAt: "2026-11-17T09:00:00.000Z", expiresAt: "2026-11-17T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
   const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };

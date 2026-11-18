@@ -57,7 +57,7 @@ it("fails closed on missing, malformed or throwing membership before provider re
     for (const [path, body] of [["/v1/dev/client/repositories", undefined], ["/v1/dev/client/projects", { repository: "example/demo" }]] as const) {
       const response = await h.call(path, body);
       expect(response.statusCode).toBe(401);
-      expect(response.body).toContain('"message":"your AgentX sign-in has ended; run agentx login <url> again"');
+      expect(response.body).toContain('"message":"your Rovara sign-in has ended; run rovara login <url> again"');
       expect(response.body).not.toContain("private-canary");
     }
   }

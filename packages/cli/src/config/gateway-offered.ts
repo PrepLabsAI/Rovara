@@ -4,7 +4,7 @@
 //
 // Fail closed: no admin sign-in, a gateway that is not set up, an answer that is not the contract (OfferedAgentModels), a time-out or any other failure refuses the change, in fixed
 // words. Nothing of the broker's or gateway's answer is echoed except the offered model names themselves (each already held to the contract's model-name characters).
-import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, agentXError, isCoreAgentModelId } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, OfferedAgentModelsSchema, agentXError, isCoreAgentModelId, CLI_COMMAND_NAME } from "@agentx/contracts";
 
 /** The longest the read may take. */
 export const GATEWAY_OFFERED_TIMEOUT_MS = 15_000;
@@ -45,7 +45,7 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
   const { key, env, value } = input;
   const notChanged = `${key} was not changed`;
   if (input.session === undefined) {
-    throw agentXError("AUTH_REQUIRED", `${notChanged}: a model other than Claude is checked against the models the model gateway offers, which needs this computer's admin sign-in for ${env}; run agentx --env ${env} login --admin, then try again; nothing changed`);
+    throw agentXError("AUTH_REQUIRED", `${notChanged}: a model other than Claude is checked against the models the model gateway offers, which needs this computer's admin sign-in for ${env}; run ${CLI_COMMAND_NAME} --env ${env} login --admin, then try again; nothing changed`);
   }
   const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${notChanged}: the models the model gateway offers could not be read just now, so ${value} could not be checked; nothing changed, try again`);
   let status: number;
@@ -59,10 +59,10 @@ export async function requireGatewayOffers(input: GatewayOfferedInputs): Promise
     if (status !== 200) await response.body?.cancel().catch(() => undefined);
   } catch { throw unreadable(); }
   if (status === 401 || status === 403) {
-    throw agentXError("AUTH_REQUIRED", `${notChanged}: AgentX would not show the models the model gateway offers to this computer's admin sign-in; run agentx --env ${env} login --admin, then try again; nothing changed`);
+    throw agentXError("AUTH_REQUIRED", `${notChanged}: Rovara would not show the models the model gateway offers to this computer's admin sign-in; run ${CLI_COMMAND_NAME} --env ${env} login --admin, then try again; nothing changed`);
   }
   if (status === 404) {
-    throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway is not set up on ${env} yet, so ${value} cannot be checked; set coreEngine.modelGatewayUrl first (agentx --env ${env} config set coreEngine.modelGatewayUrl <https origin>), then try again; nothing changed`);
+    throw agentXError("CONFIG_INVALID", `${notChanged}: the model gateway is not set up on ${env} yet, so ${value} cannot be checked; set coreEngine.modelGatewayUrl first (${CLI_COMMAND_NAME} --env ${env} config set coreEngine.modelGatewayUrl <https origin>), then try again; nothing changed`);
   }
   if (status !== 200) throw unreadable();
   // The broker's answer is the contract plus its own requestId; only the contract's two fields are judged (the schema is strict).

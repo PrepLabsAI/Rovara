@@ -38,9 +38,9 @@ describe("pi orchestration boundary", () => {
   it("names every retired pull-request tool and its replacement action", () => {
     const prompt = orchestratorSystemPrompt("Delegate.");
     for (const [tool, action] of Object.entries(RETIRED_PULL_REQUEST_TOOLS)) {
-      expect(prompt).toContain(`${tool} → agentx_manage_pull_request action "${action}"`);
+      expect(prompt).toContain(`${tool} → rovara_manage_pull_request action "${action}"`);
     }
-    expect(prompt).toContain("If a call to a retired name fails, use agentx_manage_pull_request instead.");
+    expect(prompt).toContain("If a call to a retired name fails, use rovara_manage_pull_request instead.");
   });
 
   it("characterizes the in-house agentx_* tools byte-for-byte with no connector catalogs (regression guard)", () => {
@@ -65,7 +65,7 @@ describe("pi orchestration boundary", () => {
 
   it("keeps the five tools outside the pull-request lifecycle byte-for-byte (regression guard)", () => {
     const api = { submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), managePullRequest: vi.fn<OrchestrationApi["managePullRequest"]>(), pullRequestResult: vi.fn() };
-    const unchanged = ["agentx_submit_task", "agentx_create_pull_request", "agentx_task_status", "agentx_task_result", "agentx_follow_up"];
+    const unchanged = ["rovara_submit_task", "rovara_create_pull_request", "rovara_task_status", "rovara_task_result", "rovara_follow_up"];
     const tools = createOrchestrationTools(api, { workspaceId: crypto.randomUUID(), conversationId: crypto.randomUUID() })
       .filter((tool) => unchanged.includes(tool.name));
     expect(tools.map((tool) => tool.name)).toEqual(unchanged);
@@ -87,7 +87,7 @@ describe("pi orchestration boundary", () => {
     const tool = createOrchestrationTools(api, {
       workspaceId: crypto.randomUUID(),
       conversationId: crypto.randomUUID(),
-    }).find(({ name }) => name === "agentx_submit_task");
+    }).find(({ name }) => name === "rovara_submit_task");
     expect(tool).toBeDefined();
     if (tool === undefined) throw new Error("expected the submit-task tool");
 
@@ -128,7 +128,7 @@ describe("pi orchestration boundary", () => {
     const tool = createOrchestrationTools(api, {
       workspaceId: crypto.randomUUID(),
       conversationId: crypto.randomUUID(),
-    }).find(({ name }) => name === "agentx_create_pull_request");
+    }).find(({ name }) => name === "rovara_create_pull_request");
     expect(tool).toBeDefined();
 
     await tool!.execute(

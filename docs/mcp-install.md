@@ -8,7 +8,7 @@ Rovara admin).
 Sign in once, in any terminal:
 
 ```
-npx @preplabsai/rovara-code login https://agentx.example.com
+npx @preplabsai/rovara-code login https://rovara.example.com
 ```
 
 Your browser opens. Sign in with Slack or with your company's sign-in. The terminal then shows who
@@ -23,7 +23,7 @@ only runs `npx -y @preplabsai/rovara-code mcp`.
 `@preplabsai/rovara-code@0.4.0`), so your AI tool keeps using that version until you run it again. If
 your admin gave you an environment name, put `--env <name>` before `mcp install`, for example
 `npx @preplabsai/rovara-code --env staging mcp install --client codex`. The entry then passes the same
-`--env` to the server. You can run `mcp install` again at any time: it replaces the agentx entry
+`--env` to the server. You can run `mcp install` again at any time: it replaces the rovara entry (and upgrades the older `agentx` entry this command wrote, removing it)
 and never adds a second one.
 
 Run `mcp install` as yourself, never with `sudo`: it sets up the AI tool for the user who runs it,
@@ -34,21 +34,23 @@ so under `sudo` it would change root's settings instead of yours.
 Install:
 
 ```
-claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code mcp
+claude mcp add --scope user rovara -- npx -y @preplabsai/rovara-code mcp
 ```
 
 or let Rovara run that for you, with the version you have: `npx @preplabsai/rovara-code mcp install --client claude-code`.
-It removes any agentx entry you added for your user before, then adds the new one. If the add
+It removes any rovara entry you added for your user before (and the older agentx entry this command wrote, which it replaces), then adds the new one. If the add
 fails, your old entry is already gone, so it prints the exact command to run yourself.
 
 Claude Code also has local and project entries (`--scope local` and `--scope project`, the second
-kept in a project's `.mcp.json`). An agentx entry there wins over your user entry in that folder, so
+kept in a project's `.mcp.json`). A rovara entry there wins over your user entry in that folder, so
 if Rovara behaves oddly in one project, check `claude mcp list` there and remove the extra entry.
 
 Manual setup: the command above is the whole setup. To see the exact command without running it,
 use `npx @preplabsai/rovara-code mcp install --client claude-code --print`.
 
-Remove it: `claude mcp remove --scope user agentx`.
+Remove it: `claude mcp remove --scope user rovara`.
+
+**Renamed tools.** The tools were called `agentx_*` before and are `rovara_*` now (`rovara_start_task`, `rovara_get_task`, and so on); there are no aliases. Run `mcp install` again for each AI tool, then update saved prompts, allowlists (for Claude Code, `mcp__agentx__agentx_start_task` becomes `mcp__rovara__rovara_start_task`) and any project action-policy rule that names a tool; an action-policy rule written with `agentx_` is still read as its `rovara_` tool.
 
 ## Codex
 
@@ -59,14 +61,14 @@ npx @preplabsai/rovara-code mcp install --client codex
 ```
 
 It adds this to `~/.codex/config.toml`, keeps every other entry, and saves the old file as
-`config.toml.agentx-backup`. If the file is not valid TOML, or already defines agentx in a
+`config.toml.agentx-backup`. If the file is not valid TOML, or already defines rovara in a
 different way, it changes nothing and shows you the entry to add yourself. If the file is a
 symbolic link (from a dotfiles folder, say), it changes the file the link points at and saves the
 backup beside the link. Manual setup: add it
 yourself:
 
 ```
-[mcp_servers.agentx]
+[mcp_servers.rovara]
 command = "npx"
 args = ["-y", "@preplabsai/rovara-code", "mcp"]
 ```
@@ -76,7 +78,7 @@ To see the exact entry without changing anything, use
 somewhere other than `~/.codex` (with `CODEX_HOME`), `mcp install` follows it and edits the
 `config.toml` there. Run it in a terminal where `CODEX_HOME` is set the same way it is for Codex.
 
-Remove it: delete the `[mcp_servers.agentx]` table from `~/.codex/config.toml`.
+Remove it: delete the `[mcp_servers.rovara]` table from `~/.codex/config.toml`.
 
 ## Cursor
 
@@ -93,7 +95,7 @@ nothing and shows you the entry to add yourself. Manual setup: add it yourself:
 ```
 {
   "mcpServers": {
-    "agentx": { "command": "npx", "args": ["-y", "@preplabsai/rovara-code", "mcp"] }
+    "rovara": { "command": "npx", "args": ["-y", "@preplabsai/rovara-code", "mcp"] }
   }
 }
 ```
@@ -101,7 +103,7 @@ nothing and shows you the entry to add yourself. Manual setup: add it yourself:
 To see the exact entry without changing anything, use
 `npx @preplabsai/rovara-code mcp install --client cursor --print`.
 
-Remove it: delete the `agentx` entry under `"mcpServers"` in `~/.cursor/mcp.json`.
+Remove it: delete the `rovara` entry under `"mcpServers"` in `~/.cursor/mcp.json`.
 
 ## Your first task
 
@@ -109,8 +111,8 @@ Start a new session of your AI tool and ask, for example:
 
 > Have Rovara fix the flaky retry test in payments-api and tell me when it is done.
 
-Your AI tool writes the instructions and calls `agentx_start_task`. Rovara answers at once with a
-task ID and works in a private workspace of its own; you keep working. Ask "how is my AgentX task
+Your AI tool writes the instructions and calls `rovara_start_task`. Rovara answers at once with a
+task ID and works in a private workspace of its own; you keep working. Ask "how is my Rovara task
 doing?" to check on it, "continue it and add a test for the timeout" to send more instructions,
 and "open a pull request" when it is ready. For a small task, ask your tool to wait: it can wait up
 to 10 minutes.
@@ -124,15 +126,15 @@ Codex and Cursor handle this themselves.
 Tasks from your AI tool are private unless you share them, or the project requires sharing (see
 below). For a private task, only you see its title, instructions, progress and results. Others who
 can use the project see only that a workspace exists, with its status and times, in
-`agentx workspaces`. Every action is recorded for your admins. Each task keeps a workspace until
-you close it ("close my AgentX task"), and open tasks count against the same limit as your Slack
+`rovara workspaces`. Every action is recorded for your admins. Each task keeps a workspace until
+you close it ("close my Rovara task"), and open tasks count against the same limit as your Slack
 threads (3 at a time unless your admin changed it).
 
 ## Sharing a task to Slack
 
 You can share a task into one of its project's Slack channels, so your team can follow it. Ask
-your AI tool to "share my AgentX task in Slack", or to share it when it starts. It calls
-`agentx_share_task` (or `agentx_start_task` with `share: true`; the older name `share_to_channel` works for one more release). If the project has more than
+your AI tool to "share my Rovara task in Slack", or to share it when it starts. It calls
+`rovara_share_task` (or `rovara_start_task` with `share: true`; the older name `share_to_channel` works for one more release). If the project has more than
 one channel, say which one.
 
 There are two modes:
@@ -148,7 +150,7 @@ workspace is ready, when the task ends (with the worker's summary), when a pull 
 when the mode changes, and when you close the task. Your instructions are not posted. Each time you
 send more instructions from your AI tool, the thread gets that request's end message and the
 worker's summary, but not the instructions.
-`agentx_get_task` shows the thread's link once it is posted.
+`rovara_get_task` shows the thread's link once it is posted.
 
 To change the mode later, ask your AI tool to share the task again with the other mode. The
 channel cannot change, and a shared task stays shared.
@@ -162,19 +164,19 @@ Your admin sets what a project allows, in its `developerTasks` settings:
 - `shareMode.allowContinue`: with `false`, every shared task is view only, even if you ask for
   continue.
 
-`agentx_list_projects` shows each project's settings. To share into a private channel, you must be
+`rovara_list_projects` shows each project's settings. To share into a private channel, you must be
 a member of it. An admin can also switch a shared task between the two modes, within the same
 settings:
 
 ```
-agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
+rovara --env <env> admin task share-mode --task <task-id> --mode view|continue
 ```
 
 ## When something goes wrong
 
 Every Rovara error says what to do next. The common ones:
 
-- `SIGN_IN_REQUIRED`: run `npx @preplabsai/rovara-code login <your AgentX URL>`.
+- `SIGN_IN_REQUIRED`: run `npx @preplabsai/rovara-code login <your Rovara URL>`.
 - `PROJECT_ACCESS_DENIED`: join one of the project's Slack channels, or ask an admin.
 - `WORKSPACE_LIMIT`: close a task you no longer need.
 - `UPGRADE_REQUIRED`: run `npx -y @preplabsai/rovara-code@latest mcp install --client <your tool>`.

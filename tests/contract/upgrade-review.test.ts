@@ -40,7 +40,7 @@ describe("reviewing an upgrade's changes (FR-042, FR-043)", () => {
 
   it("stops a data replacement under --yes unless --allow-replace names it", async () => {
     const data = [{ logicalId: "State", type: "AWS::DynamoDB::Table", verb: "replace" as const }];
-    expect(await guardData({ stackName: "s", data, allowReplace: new Set(), yes: true, ask: answers() })).toBe("upgrade stopped: s would replace State (AWS::DynamoDB::Table) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace State");
+    expect(await guardData({ stackName: "s", data, allowReplace: new Set(), yes: true, ask: answers() })).toBe("upgrade stopped: s would replace State (AWS::DynamoDB::Table) and lose its data; nothing in s changed. If you accept that, run rovara upgrade again with --allow-replace State");
     expect(await guardData({ stackName: "s", data, allowReplace: new Set(["State"]), yes: true, ask: answers() })).toBeUndefined();
   });
 
@@ -57,7 +57,7 @@ describe("reviewing an upgrade's changes (FR-042, FR-043)", () => {
     expect(lines[0]).toBe("Changes for s:");
     const no = upgradeConfirm({ write: () => undefined, ask: answers("n"), yes: false, allowReplace: new Set() });
     expect(await no.confirm({ stackName: "s", changes: [] })).toBe(false);
-    expect(no.refusal()).toBe("upgrade stopped before s: nothing in it changed. Stacks upgraded before it keep the new release; run agentx upgrade again to continue");
+    expect(no.refusal()).toBe("upgrade stopped before s: nothing in it changed. Stacks upgraded before it keep the new release; run rovara upgrade again to continue");
   });
 });
 
@@ -246,7 +246,7 @@ describe("the replacement guard fails safe (FR-043)", () => {
     for (const [action, replacement, verb] of [["Modify", "True", "replace"], ["Modify", "Conditional", "replace"], ["Remove", "", "delete"]] as const) {
       const reviewed = reviewChanges([change(action, "Data", type, replacement)]);
       expect(reviewed.data).toEqual([{ logicalId: "Data", type, verb }]);
-      expect(await guardData({ stackName: "s", data: reviewed.data, allowReplace: new Set(), yes: true, ask: answers() })).toBe(`upgrade stopped: s would ${verb} Data (${type})${loses(type)}; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace Data`);
+      expect(await guardData({ stackName: "s", data: reviewed.data, allowReplace: new Set(), yes: true, ask: answers() })).toBe(`upgrade stopped: s would ${verb} Data (${type})${loses(type)}; nothing in s changed. If you accept that, run rovara upgrade again with --allow-replace Data`);
     }
     expect(reviewChanges([change("Modify", "Data", type, "False")]).data).toEqual([]);
     expect(reviewChanges([change("Add", "Data", type, "")]).data).toEqual([]);
@@ -285,11 +285,11 @@ describe("the replacement guard fails safe (FR-043)", () => {
       { logicalId: "", type: "", verb: "unclear", line: "[~] something new" },
     ]);
     const [first, second] = risks.data;
-    expect(await guardData({ stackName: "s", data: [first!], allowReplace: new Set(), yes: true, ask: answers() })).toBe("upgrade stopped: agentx could not read cdk diff's output for s, so it cannot tell whether it replaces or deletes data ([~] AWS::DynamoDB::Table); nothing in s changed. Check the diff above, and run agentx upgrade again without --yes to review it");
-    expect(await guardData({ stackName: "s", data: [second!], allowReplace: new Set(), yes: true, ask: answers() })).toContain("If you accept that, run agentx upgrade again with --allow-replace ArtifactsABC");
+    expect(await guardData({ stackName: "s", data: [first!], allowReplace: new Set(), yes: true, ask: answers() })).toBe("upgrade stopped: rovara could not read cdk diff's output for s, so it cannot tell whether it replaces or deletes data ([~] AWS::DynamoDB::Table); nothing in s changed. Check the diff above, and run rovara upgrade again without --yes to review it");
+    expect(await guardData({ stackName: "s", data: [second!], allowReplace: new Set(), yes: true, ask: answers() })).toContain("If you accept that, run rovara upgrade again with --allow-replace ArtifactsABC");
     expect(await guardData({ stackName: "s", data: [second!], allowReplace: new Set(["ArtifactsABC"]), yes: true, ask: answers() })).toBeUndefined();
     expect(await guardData({ stackName: "s", data: [first!], allowReplace: new Set(), yes: false, ask: answers("accept") })).toBeUndefined();
-    expect(await guardData({ stackName: "s", data: [first!], allowReplace: new Set(), yes: false, ask: answers("y") })).toContain("upgrade stopped: agentx could not read");
+    expect(await guardData({ stackName: "s", data: [first!], allowReplace: new Set(), yes: false, ask: answers("y") })).toContain("upgrade stopped: rovara could not read");
     expect(await guardData({ stackName: "s", data: [second!], allowReplace: new Set(), yes: false, ask: answers("ArtifactsABC") })).toBeUndefined();
   });
 });
@@ -365,10 +365,10 @@ describe("cdk diff as the real formatter prints it (review round 1)", () => {
     ]);
     // Controller ruling 3(d): one refusal names every unaccepted change.
     expect(await guardData({ stackName: "s", data: risks.data, allowReplace: new Set(), yes: true, ask: answers() })).toBe(
-      "upgrade stopped: s would remove VpcFlowLogsABC (AWS::Logs::LogGroup) from the stack, which orphans the retained log group, delete WorkerLogsABC (AWS::Logs::LogGroup), which deletes its logs, and replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC --allow-replace JobsABC",
+      "upgrade stopped: s would remove VpcFlowLogsABC (AWS::Logs::LogGroup) from the stack, which orphans the retained log group, delete WorkerLogsABC (AWS::Logs::LogGroup), which deletes its logs, and replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run rovara upgrade again with --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC --allow-replace JobsABC",
     );
     expect(await guardData({ stackName: "s", data: risks.data, allowReplace: new Set(["WorkerLogsABC"]), yes: false, ask: answers("VpcFlowLogsABC", "no") })).toBe(
-      "upgrade stopped: s would replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run agentx upgrade again with --allow-replace JobsABC --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC (VpcFlowLogsABC and WorkerLogsABC are changes you already accepted; --yes needs them named too)",
+      "upgrade stopped: s would replace JobsABC (AWS::SQS::Queue) and lose its data; nothing in s changed. If you accept that, run rovara upgrade again with --allow-replace JobsABC --allow-replace VpcFlowLogsABC --allow-replace WorkerLogsABC (VpcFlowLogsABC and WorkerLogsABC are changes you already accepted; --yes needs them named too)",
     );
   });
 

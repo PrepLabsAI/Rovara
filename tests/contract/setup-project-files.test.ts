@@ -70,7 +70,7 @@ describe("proposing setup and test commands from the repository's files (FR-040)
     expect(() => parseCommandLine("   ", CWD, 900)).toThrow("the command is empty");
   });
 
-  it("turns a GitHub repository name into an AgentX name", () => {
+  it("turns a GitHub repository name into a Rovara name", () => {
     expect(agentxRepositoryName("Payments.API")).toBe("payments-api");
     // F2: the cleaned name already starts with a letter (the leading "_" is stripped), so no
     // "repo-" prefix is needed. The prefix only applies when the cleaned name would otherwise
@@ -89,18 +89,18 @@ describe("the installation token", () => {
   it("finds the only installation when none is recorded, and refuses when there are several", async () => {
     const secrets = memoryInitSecrets({ "agentx/staging/github-app": JSON.stringify({ appId: "42", slug: "s", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
     await expect(installationToken({ env: "staging", secrets, github: { ...fakeGitHubApi(), listInstallations: async () => [{ id: 1, account: { login: "a" } }, { id: 2, account: { login: "b" } }] }, nowSeconds: 1 }))
-      .rejects.toThrow("the GitHub App is installed on 2 accounts (a, b); AgentX uses one");
+      .rejects.toThrow("the GitHub App is installed on 2 accounts (a, b); Rovara uses one");
   });
 
   it("refuses when the GitHub App's secret does not exist", async () => {
     await expect(installationToken({ env: "staging", secrets: memoryInitSecrets(), github: fakeGitHubApi(), nowSeconds: 1 }))
-      .rejects.toThrow("secret agentx/staging/github-app does not exist; run agentx init again so the GitHub App step stores it");
+      .rejects.toThrow("secret agentx/staging/github-app does not exist; run rovara init again so the GitHub App step stores it");
   });
 
   it("refuses a malformed secret with parseAppSecret's own message, not a second parser's", async () => {
     const secrets = memoryInitSecrets({ "agentx/staging/github-app": JSON.stringify({ appId: "42" }) });
     await expect(installationToken({ env: "staging", secrets, github: fakeGitHubApi(), nowSeconds: 1 }))
-      .rejects.toThrow("secret agentx/staging/github-app is not an AgentX GitHub App secret; delete it (aws secretsmanager delete-secret --secret-id agentx/staging/github-app --force-delete-without-recovery) and run agentx init again");
+      .rejects.toThrow("secret agentx/staging/github-app is not a Rovara GitHub App secret; delete it (aws secretsmanager delete-secret --secret-id agentx/staging/github-app --force-delete-without-recovery) and run rovara init again");
   });
 });
 

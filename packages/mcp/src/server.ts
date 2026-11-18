@@ -56,7 +56,7 @@ export function createAgentXMcpServer(options: {
   log?(entry: Record<string, unknown>): void;
   /** Spec 025 A15: registered once, disabled until the offer says the admin sign-in fits. */
   adminTools?: readonly ToolDefinition[];
-  /** Spec 025 FR-052: agentx_admin_changes, registered and switched like the admin tools (group audit). */
+  /** Spec 025 FR-052: rovara_admin_changes, registered and switched like the admin tools (group audit). */
   auditTools?: readonly ToolDefinition[];
   /** Spec 025 FR-030: the change tools, registered and switched like the admin tools (group changes). */
   changeTools?: readonly ToolDefinition[];
@@ -71,7 +71,7 @@ export function createAgentXMcpServer(options: {
   firstListWaitMs?: number;
 }): McpServer {
   // Issue 203: one list_changed per offer change, not one per tool switched (see offer.ts).
-  const server = new McpServer({ name: "agentx", version: options.version }, { debouncedNotificationMethods: ["notifications/tools/list_changed"] });
+  const server = new McpServer({ name: "rovara", version: options.version }, { debouncedNotificationMethods: ["notifications/tools/list_changed"] });
   // One memory per server (one per AI tool session), so a retried call reuses its request ID.
   const requestIds = new RequestIdMemory();
   // Filled below; the offer switches whatever the map holds.
@@ -128,7 +128,7 @@ export function createAgentXMcpServer(options: {
         const text = notice === undefined ? result.text : `${notice} ${result.text}`;
         return { content: [{ type: "text" as const, text: safeText(text, LONGEST_TEXT) }], structuredContent: safeStructured(result.structured) };
       } catch (error) {
-        const failure = error instanceof ToolError ? error : new ToolError("CONTROL_PLANE_UNAVAILABLE", "the AgentX MCP server hit an unexpected problem");
+        const failure = error instanceof ToolError ? error : new ToolError("CONTROL_PLANE_UNAVAILABLE", "the Rovara MCP server hit an unexpected problem");
         // The code and tool only: never the message, which can quote the developer's text.
         options.log?.({ event: "tool.failed", tool: tool.name, code: failure.code, ...(error instanceof ToolError ? {} : { error: error instanceof Error ? error.name : "unknown" }) });
         return errorResult(failure);

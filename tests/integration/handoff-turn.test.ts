@@ -94,7 +94,7 @@ describe("the hosted Slack runtime", () => {
     let seen = "";
     faux.setResponses([(input: Context) => {
       seen = JSON.stringify(input.messages);
-      return toolUse(fauxToolCall("agentx_task_status", { operationId: "55555555-5555-4555-8555-555555555555" }));
+      return toolUse(fauxToolCall("rovara_task_status", { operationId: "55555555-5555-4555-8555-555555555555" }));
     }, fauxAssistantMessage([fauxText("Stopped.")])]);
     const taskStatus = vi.fn(async () => ({ status: "RUNNING" }));
     const runtime = await createHostedSlackRuntime({

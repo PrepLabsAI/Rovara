@@ -25,7 +25,7 @@ describe("doctor: secrets (FR-050)", () => {
     const malformed = { ...SECRETS, "agentx/staging/slack": JSON.stringify({ botToken: "xoxp-PERSONALtoken", signingSecret: TEST_SIGNING_SECRET }) };
     delete (malformed as Record<string, string>)["agentx/staging/callback-signing-key"];
     const checks = await secretChecks(withSecrets(malformed));
-    expect(checks.find((entry) => entry.name === "agentx/staging/callback-signing-key")).toMatchObject({ status: "fail", detail: "does not exist", fix: "run agentx --env staging upgrade: it makes a new key and redeploys the control plane with it" });
+    expect(checks.find((entry) => entry.name === "agentx/staging/callback-signing-key")).toMatchObject({ status: "fail", detail: "does not exist", fix: "run rovara --env staging upgrade: it makes a new key and redeploys the control plane with it" });
     const slack = checks.find((entry) => entry.name === "agentx/staging/slack")!;
     expect(slack.status).toBe("fail");
     expect(slack.detail).toBe("holds no bot token (xoxb-)");
@@ -36,7 +36,7 @@ describe("doctor: secrets (FR-050)", () => {
     const checks = await secretChecks(withSecrets({ ...SECRETS, "agentx/staging/callback-signing-key": "short-key" }));
     expect(checks.find((entry) => entry.name === "agentx/staging/callback-signing-key")).toMatchObject({
       status: "fail", detail: "is shorter than the 32 characters the control plane needs",
-      fix: "with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/staging/callback-signing-key --force-delete-without-recovery --region us-east-1), then run agentx --env staging upgrade: it makes a new key and redeploys the control plane with it",
+      fix: "with admin credentials, delete it (aws secretsmanager delete-secret --secret-id agentx/staging/callback-signing-key --force-delete-without-recovery --region us-east-1), then run rovara --env staging upgrade: it makes a new key and redeploys the control plane with it",
     });
     expect(text(checks)).not.toContain("short-key");
   });
@@ -100,7 +100,7 @@ describe("doctor: Slack (FR-050)", () => {
 
   it("fails when the bot token belongs to another workspace than init recorded", async () => {
     const context = doctorContext({ services: doctorServices({ slackApi: fakeSlackApi({ authTest: async () => ({ ok: true, user_id: "U1", bot_id: "B1", team_id: "T0OTHER", team: "Other" }) }) }) });
-    expect((await slackChecks(context))[0]).toMatchObject({ status: "fail", detail: "the bot token is for workspace T0OTHER, but agentx init set up T0TEAM" });
+    expect((await slackChecks(context))[0]).toMatchObject({ status: "fail", detail: "the bot token is for workspace T0OTHER, but rovara init set up T0TEAM" });
   });
 
   it("fails when the events URL does not echo the challenge", async () => {
@@ -115,7 +115,7 @@ describe("doctor: Slack (FR-050)", () => {
 
   it("names --project in the fix for a channel that is gone, since channel add refuses without it (final review M9)", async () => {
     const context = doctorContext({ services: doctorServices({ slackChannels: fakeSlackChannels([]) }) });
-    expect((await slackChecks(context)).find((entry) => entry.name === "#payments")).toMatchObject({ status: "fail", fix: "in #payments, type /invite @agentx, or bind another channel with agentx --env staging channel add --project payments" });
+    expect((await slackChecks(context)).find((entry) => entry.name === "#payments")).toMatchObject({ status: "fail", fix: "in #payments, type /invite @agentx, or bind another channel with rovara --env staging channel add --project payments" });
   });
 
   it("skips the channel check when init bound no channel", async () => {
@@ -170,10 +170,10 @@ describe("doctor: Slack (fix round 1)", () => {
     const urls = (await slackChecks(context)).find((entry) => entry.name === "request URLs")!;
     expect(urls.status).toBe("fail");
     expect(urls.detail).toContain("refuses requests signed with the signing secret stored in agentx/staging/slack");
-    expect(urls.detail).not.toContain("agentx init");
+    expect(urls.detail).not.toContain("rovara init");
     expect(urls.detail).not.toContain("1 minutes");
     expect(urls.fix).toContain("Signing Secret");
-    expect(urls.fix).not.toContain("agentx init");
+    expect(urls.fix).not.toContain("rovara init");
   });
 });
 
@@ -245,7 +245,7 @@ describe("doctor: Slack and GitHub (Task 6 polish)", () => {
     const error = await refusing.catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(SlackSignatureRefusedError);
     expect((error as SlackSignatureRefusedError).url).toBe("https://cp.example.test/slack/events");
-    expect((error as Error).message).toContain("then run agentx init again");
+    expect((error as Error).message).toContain("then run rovara init again");
   });
 
   const lookupFailing = (error: Error) => doctorContext({ services: doctorServices({ slackChannels: { ...fakeSlackChannels([]), find: async () => { throw error; } } }) });
@@ -255,8 +255,8 @@ describe("doctor: Slack and GitHub (Task 6 polish)", () => {
     const scope = await channelCheck(new AgentXError("CONFIG_INVALID", "Slack conversations.list refused: missing_scope; reinstall the Slack app from its manifest so it has channels:read, groups:read and channels:join", 400));
     expect(scope.fix).toContain("reinstall the Slack app");
     expect(scope.fix).not.toContain("network");
-    const many = await channelCheck(new AgentXError("CONFIG_INVALID", "the workspace has more than 50000 channels to search; bind the channel by id with agentx admin slack bind --team <team-id> --channel <channel-id> --project <name>", 400));
-    expect(many.fix).toBe("bind it by ID: agentx admin slack bind --team T0TEAM --channel C0123456789 --project payments");
+    const many = await channelCheck(new AgentXError("CONFIG_INVALID", "the workspace has more than 50000 channels to search; bind the channel by id with rovara admin slack bind --team <team-id> --channel <channel-id> --project <name>", 400));
+    expect(many.fix).toBe("bind it by ID: rovara admin slack bind --team T0TEAM --channel C0123456789 --project payments");
     const network = await channelCheck(new TypeError("fetch failed"));
     expect(network.fix).toContain("network access to slack.com");
     const refused = await channelCheck(new AgentXError("RUNTIME_UNAVAILABLE", "Slack conversations.list refused: invalid_auth", 503));
@@ -265,7 +265,7 @@ describe("doctor: Slack and GitHub (Task 6 polish)", () => {
 
   it("tells a rate-limited channel lookup to wait, not to check the network", async () => {
     const limited = await channelCheck(new SlackRateLimitedError("conversations.list", 30_000));
-    expect(limited).toMatchObject({ status: "fail", detail: "Slack conversations.list is rate limited; try again in 30 seconds", fix: "Slack is rate limiting the bot; run agentx doctor again in a minute" });
+    expect(limited).toMatchObject({ status: "fail", detail: "Slack conversations.list is rate limited; try again in 30 seconds", fix: "Slack is rate limiting the bot; run rovara doctor again in a minute" });
   });
 
   it("blames a suspended installation only on HTTP 403 or 404", async () => {
@@ -290,7 +290,7 @@ describe("doctor: GitHub webhook", () => {
       ["GitHub webhook", "ok", `the App sends events to ${EXPECTED_URL}`],
       ["GitHub webhook", "ok", "subscribed to pull request and comment events; check that Active is on at https://github.com/organizations/acme/settings/apps/agentx-acme-staging"],
       ["GitHub webhook secret", "ok", "stored"],
-      ["GitHub webhook deliveries", "ok", "GitHub delivered an event to AgentX in the last 3 days"],
+      ["GitHub webhook deliveries", "ok", "GitHub delivered an event to Rovara in the last 3 days"],
     ]);
     expect(text(checks)).not.toContain(WEBHOOK_SECRET);
   });
@@ -305,17 +305,17 @@ describe("doctor: GitHub webhook", () => {
     it("warns, naming where Active is switched on, when GitHub made no successful delivery in the last 3 days", async () => {
       for (const deliveries of [[], [{ deliveredAt: hoursAgo(4 * 24), status: "OK", statusCode: 200 }]]) {
         const found = await deliveriesCheck(deliveries);
-        expect(found).toMatchObject({ status: "warn", detail: "no successful deliveries to AgentX in the last 3 days" });
+        expect(found).toMatchObject({ status: "warn", detail: "no successful deliveries to Rovara in the last 3 days" });
         expect(found.fix).toBe(`check that Active is on at ${SETTINGS_PAGE}; GitHub lists each delivery at ${SETTINGS_PAGE}/advanced`);
       }
     });
 
     it("warns when the latest delivery failed, even after an older one went through", async () => {
       const refused = await deliveriesCheck([{ deliveredAt: hoursAgo(1), status: "Bad Gateway", statusCode: 502 }, { deliveredAt: hoursAgo(5), status: "OK", statusCode: 200 }]);
-      expect(refused).toMatchObject({ status: "warn", detail: "GitHub's latest delivery to AgentX failed (HTTP 502)" });
+      expect(refused).toMatchObject({ status: "warn", detail: "GitHub's latest delivery to Rovara failed (HTTP 502)" });
       expect(refused.fix).toContain(`check that Active is on at ${SETTINGS_PAGE}`);
       const unreachable = await deliveriesCheck([{ deliveredAt: hoursAgo(1), status: "Invalid HTTP Response: 0", statusCode: 0 }]);
-      expect(unreachable).toMatchObject({ status: "warn", detail: "GitHub's latest delivery to AgentX failed (it got no answer)" });
+      expect(unreachable).toMatchObject({ status: "warn", detail: "GitHub's latest delivery to Rovara failed (it got no answer)" });
     });
 
     it("is ok when the latest recent delivery went through, whatever order GitHub lists them in", async () => {
@@ -328,7 +328,7 @@ describe("doctor: GitHub webhook", () => {
       const found = checks.find((entry) => entry.name === "GitHub webhook deliveries")!;
       expect(found.status).toBe("warn");
       expect(found.detail).toBe(`GitHub's deliveries go to https://old.example.test/hook, not ${EXPECTED_URL}`);
-      expect(found.fix).toBe("run agentx --env staging upgrade: it points the App's webhook at the control plane");
+      expect(found.fix).toBe("run rovara --env staging upgrade: it points the App's webhook at the control plane");
     });
 
     it("warns, and does not fail, when the deliveries cannot be read", async () => {
@@ -347,7 +347,7 @@ describe("doctor: GitHub webhook", () => {
       const found = (await githubWebhookChecks(contextWith({ ...(hookUrl === undefined ? {} : { hookUrl }) })))[0]!;
       expect(found).toMatchObject({ name: "GitHub webhook", status: "warn" });
       expect(found.detail).toContain(EXPECTED_URL);
-      expect(found.fix).toBe("run agentx --env staging upgrade: it points the App's webhook at the control plane");
+      expect(found.fix).toBe("run rovara --env staging upgrade: it points the App's webhook at the control plane");
     }
   });
 
@@ -362,7 +362,7 @@ describe("doctor: GitHub webhook", () => {
     for (const secret of [appSecret({}), appSecret({ webhookSecret: "short-secret-value" })]) {
       const checks = await githubWebhookChecks(contextWith({ hookUrl: EXPECTED_URL }, secret));
       const found = checks[2]!;
-      expect(found).toMatchObject({ name: "GitHub webhook secret", status: "warn", fix: "run agentx --env staging upgrade: it stores a webhook secret and gives it to GitHub" });
+      expect(found).toMatchObject({ name: "GitHub webhook secret", status: "warn", fix: "run rovara --env staging upgrade: it stores a webhook secret and gives it to GitHub" });
       expect(text(checks)).not.toContain("short-secret-value");
     }
   });

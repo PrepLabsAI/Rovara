@@ -13,7 +13,7 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { STSClient } from "@aws-sdk/client-sts";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { Command } from "commander";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -66,14 +66,14 @@ export function registerDestroyCommand(program: Command, context: DestroyCommand
     .option("--keep-data", "keep the tables, buckets, secrets, Cognito user pool and KMS keys; remove the rest", false)
     .action(async (options: { region?: string; keepData: boolean }, command: Command) => {
       if (command.getOptionValueSourceWithGlobals("env") !== "cli") {
-        throw agentXError("CONFIG_INVALID", "agentx destroy requires an explicit --env, so it can never remove production by default; run agentx --env <name> destroy");
+        throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} destroy requires an explicit --env, so it can never remove production by default; run ${CLI_COMMAND_NAME} --env <name> destroy`);
       }
       const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string }>();
       const overrides = context.overrides ?? {};
       // Every client, the settings store and the plan use this one region, so runDestroy's check
       // against the environment's own region covers everything it touches.
       const region = options.region ?? overrides.region ?? await configuredRegion();
-      if (region === undefined) throw agentXError("CONFIG_INVALID", "agentx destroy could not find an AWS region in your configuration; pass --region <the environment's region>");
+      if (region === undefined) throw agentXError("CONFIG_INVALID", `${CLI_COMMAND_NAME} destroy could not find an AWS region in your configuration; pass --region <the environment's region>`);
       const aws = { region };
       const write = overrides.write ?? ((line: string) => { context.stderr.write(`${line}\n`); });
       const reader = overrides.confirmLine === undefined ? lineReader({ stdin: context.stdin, stderr: context.stderr }) : undefined;

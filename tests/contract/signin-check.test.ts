@@ -42,7 +42,7 @@ async function setup(slackSecret: Record<string, string>, extra: { oidc?: boolea
 const api = (granted = scopes) => fakeSlackApi({ authTest: async () => ({ ok: true, team_id: "T0TEAM", user_id: "U0BOT", bot_id: "B0BOT", scopes: granted }) });
 const complete = { signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN, clientId: "1111.2222", clientSecret: CLIENT_SECRET };
 
-describe("agentx signin check (FR-046, R5)", () => {
+describe("rovara signin check (FR-046, R5)", () => {
   it("passes every check for a complete Slack setup", async () => {
     const { store, secrets } = await setup(complete, { teamId: "T0TEAM" });
     const fetchFn = fetchFor({});
@@ -68,9 +68,9 @@ describe("agentx signin check (FR-046, R5)", () => {
     });
     expect(Object.fromEntries(checks.map((check) => [check.name, check.detail]))).toEqual({
       settings: "Slack sign-in on, company sign-in off",
-      "control plane": "the control plane does not offer Slack sign-in, but the settings say it is on; run agentx signin enable slack again",
-      "Slack app credentials": "the Slack app's client ID and client secret are not stored in agentx/staging/slack; run agentx signin enable slack",
-      "Slack team ID": "no team ID is recorded at /agentx/staging/slack/teamId; run agentx signin enable slack",
+      "control plane": "the control plane does not offer Slack sign-in, but the settings say it is on; run rovara signin enable slack again",
+      "Slack app credentials": "the Slack app's client ID and client secret are not stored in agentx/staging/slack; run rovara signin enable slack",
+      "Slack team ID": "no team ID is recorded at /agentx/staging/slack/teamId; run rovara signin enable slack",
       "Slack bot scopes": "the app is missing channels:read, groups:read, im:write, users:read.email; add them on OAuth & Permissions and reinstall the app",
       "Slack redirect URL": "Slack does not list https://abc.execute-api.us-east-1.amazonaws.com/v1/auth/callback/slack as a redirect URL; add it on OAuth & Permissions",
     });
@@ -82,8 +82,8 @@ describe("agentx signin check (FR-046, R5)", () => {
     const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchOverride ?? fetchFor(slackAuthorize === undefined ? {} : { slackAuthorize }) });
     return checks.find((check) => check.name === "Slack redirect URL");
   }
-  const unverified = (why: string) => ({ name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${why}. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${API} to check sign-in.` });
-  const unreachable = { name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${API} to check sign-in.` };
+  const unverified = (why: string) => ({ name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${why}. If signing in on the task page works, you can ignore this warning. Otherwise run rovara login ${API} to check sign-in.` });
+  const unreachable = { name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run rovara login ${API} to check sign-in.` };
 
   it("counts a redirect back to the callback as registered, even with an error that is not about redirect_uri (fix round 1, I2)", async () => {
     expect(await redirectCheckFor(redirectTo(`${CALLBACK}?error=access_denied&state=agentx-signin-check`))).toEqual({ name: "Slack redirect URL", ok: true, detail: `Slack sent a test sign-in request back to ${CALLBACK}, so it is a registered redirect URL` });
@@ -115,7 +115,7 @@ describe("agentx signin check (FR-046, R5)", () => {
     const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchFor({ issuer: "https://other.example.test/v1/auth" }) });
     expect(checks.find((check) => check.name === "control plane")).toEqual({
       name: "control plane", ok: false,
-      detail: `the control plane names issuer https://other.example.test/v1/auth, not ${API}/v1/auth; check that this environment's settings name its own control plane (agentx env adopt or agentx init)`,
+      detail: `the control plane names issuer https://other.example.test/v1/auth, not ${API}/v1/auth; check that this environment's settings name its own control plane (rovara env adopt or rovara init)`,
     });
   });
 
@@ -130,6 +130,6 @@ describe("agentx signin check (FR-046, R5)", () => {
 
   it("says sign-in is not set up when there are no settings", async () => {
     const checks = await checkDeveloperSignIn({ env: "staging", store: new MemoryParameterStore(), secrets: memoryInitSecrets(), settings: stagingSettings, slackApi: api(), fetch: fetchFor({}) });
-    expect(checks).toEqual([{ name: "settings", ok: false, detail: "developer sign-in is not set up; run agentx signin enable slack (or oidc)" }]);
+    expect(checks).toEqual([{ name: "settings", ok: false, detail: "developer sign-in is not set up; run rovara signin enable slack (or oidc)" }]);
   });
 });

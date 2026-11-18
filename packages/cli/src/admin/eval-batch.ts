@@ -1,5 +1,5 @@
 import { readFile, writeFile } from "node:fs/promises";
-import { EvalBatchFileSchema, SlackChannelIdSchema, SlackTeamIdSchema, agentXError, type EvalBatchSummary } from "@agentx/contracts";
+import { EvalBatchFileSchema, SlackChannelIdSchema, SlackTeamIdSchema, agentXError, type EvalBatchSummary, CLI_COMMAND_NAME } from "@agentx/contracts";
 import YAML from "yaml";
 import { adminResponseBody } from "./http.js";
 
@@ -83,7 +83,7 @@ export function evalBatchStartText(result: unknown): string {
   if (batch.runs !== undefined) lines.push(`Runs queued: ${str(batch.runs)}`);
   const thread = record(answer.thread);
   if (thread.channelId !== undefined) lines.push(`Thread: ${str(thread.channelId)}/${str(thread.threadTs)}`);
-  lines.push(`Follow it with: agentx admin eval batch show ${str(batch.batchId)}`);
+  lines.push(`Follow it with: ${CLI_COMMAND_NAME} admin eval batch show ${str(batch.batchId)}`);
   return lines.join("\n");
 }
 

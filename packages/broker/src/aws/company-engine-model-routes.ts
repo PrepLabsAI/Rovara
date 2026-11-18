@@ -12,7 +12,7 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import type { z } from "zod";
-import { CompanyEngineModelBodySchema, agentXError, companyLog, OrgIdSchema, orgScoped, orgSettingsKey, type CompanyEngineModelView } from "@agentx/contracts";
+import { CompanyEngineModelBodySchema, agentXError, companyLog, OrgIdSchema, orgScoped, orgSettingsKey, type CompanyEngineModelView, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -25,7 +25,7 @@ export const ENGINE_MODEL_BODY_INVALID = "Send the model to use, as { \"model\":
 export const ENGINE_MODEL_NOT_OFFERED_TO_COMPANY = "That model isn't offered to this company now. Pick one from the list.";
 export const ENGINE_MODEL_LIST_UNAVAILABLE = "The AI models this company can use could not be read just now; nothing was changed. Try again in a moment.";
 export const ENGINE_MODEL_SETTING_UNAVAILABLE = "The company's AI model setting could not be read or saved just now; try again.";
-const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+const SIGN_IN_AGAIN = `your Rovara sign-in has ended; run ${CLI_COMMAND_NAME} login <url> again`;
 
 export interface CompanyEngineModelWiring {
   /** The models the gateway offers one company now (`adminOfferedModelsFromEnvironment`); checked against the contract here. */

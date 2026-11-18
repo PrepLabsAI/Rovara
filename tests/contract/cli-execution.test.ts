@@ -8,7 +8,7 @@ import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
-describe("AgentX administration workflow", () => {
+describe("Rovara administration workflow", () => {
   it("lists admin workspaces with each person's stable identity", async () => {
     const context = await administratorContext("agentx-cli-list-workspaces-");
     const workspaceId = randomUUID();
@@ -72,7 +72,7 @@ describe("AgentX administration workflow", () => {
       stderr: { write(text) { errors += text; } },
     });
     expect(exitCode).toBe(5);
-    expect(errors).toContain("AgentX error [WORKSPACE_BUSY]");
+    expect(errors).toContain("Rovara error [WORKSPACE_BUSY]");
     expect(errors).toContain("try again");
   });
 

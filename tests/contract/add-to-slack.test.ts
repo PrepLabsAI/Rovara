@@ -1,6 +1,6 @@
 // Add to Slack, on the setup page: one configuration token instead of four pasted values, Slack's
 // own install page, its redirect back to the setup page, and the events added once Slack can reach
-// AgentX. Nothing here reaches AWS or Slack.
+// Rovara. Nothing here reaches AWS or Slack.
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OpenSlackInstallHost } from "../../packages/cli/src/init/context.js";
@@ -23,7 +23,7 @@ const SETUP = "https://setup.example.com";
 const CONFIG_TOKEN = ["xoxe", "xoxp-1-NOTAREALTOKENFORTESTS"].join(".");
 const SLACK_SECRET = slackSecretName("staging");
 const MANIFEST = slackAppManifest({
-  appName: "AgentX", eventsUrl: "https://api.example.com/v1/slack/events", interactivityUrl: "https://api.example.com/v1/slack/interactions",
+  appName: "Rovara", eventsUrl: "https://api.example.com/v1/slack/events", interactivityUrl: "https://api.example.com/v1/slack/interactions",
   signInCallbackUrl: "https://api.example.com/v1/auth/callback/slack",
 });
 
@@ -126,7 +126,7 @@ describe("Add to Slack", () => {
     expect(prompter.asked).not.toContain("How do you want to make the Slack app?");
   });
 
-  it("builds its manifest and Slack's install address from the one AgentX always makes", () => {
+  it("builds its manifest and Slack's install address from the one Rovara always makes", () => {
     const { create, complete } = slackManifestForAddToSlack(MANIFEST, `${SETUP}/slack/callback`);
     expect(create.settings.event_subscriptions).toBeUndefined();
     expect(complete.settings.event_subscriptions).toEqual(MANIFEST.settings.event_subscriptions);
@@ -174,7 +174,7 @@ describe("Slack's redirect back to the setup page", () => {
     expect((await handle(back({ code: "c", state: "s" }))).status).toBe(400);
     await store.putSlackInstall("s".repeat(32));
     expect((await handle(back({ code: "c", state: "x".repeat(32) }))).status).toBe(400);
-    expect((await handle(back({ code: "c", state: "s".repeat(32) }))).body).toContain("Slack sent AgentX the app's install");
+    expect((await handle(back({ code: "c", state: "s".repeat(32) }))).body).toContain("Slack sent Rovara the app's install");
     expect(await store.takeSlackCode("s".repeat(32))).toBe("c");
     expect((await handle(back({ code: "again", state: "s".repeat(32) }))).status).toBe(400);
   });

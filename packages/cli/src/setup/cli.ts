@@ -1,6 +1,6 @@
 // agentx project add, channel add, connector add and alerts test (phase 15d2): day-2 forms of
 // init's finishing steps, built on the same setup/ modules.
-import { agentXError, AgentXNameSchema } from "@agentx/contracts";
+import { agentXError, AgentXNameSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import type { Command } from "commander";
 import { readSlackBotToken } from "../init/slack-app.js";
 import { definedEntries, secretSource } from "../signin/cli.js";
@@ -34,7 +34,7 @@ function projectOption(command: Command, what: string): string {
 }
 
 export function registerSetupCommands(program: Command, context: SetupCommandContext): void {
-  const project = program.command("project").description("AgentX projects");
+  const project = program.command("project").description("Rovara projects");
   withRegion(project
     .command("add")
     .description("register a new project from a repository the GitHub App sees, on EC2 workers"))
@@ -87,7 +87,7 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
     .option("--yes", "do not ask for confirmation")
     .action(testAction);
 
-  const channel = program.command("channel").description("Slack channels bound to AgentX projects");
+  const channel = program.command("channel").description("Slack channels bound to Rovara projects");
   withRegion(channel
     .command("add")
     .description("bind a Slack channel to the --project, invite the bot, and check a mention gets a threaded reply"))
@@ -105,7 +105,7 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       if (options.check) {
         await waitForThreadedReply({
           env: run.env, session: run.session, fetch: run.services.fetch, teamId: identity.teamId, channelId: bound.channelId, channelName: bound.channelName, botUserId: identity.botUserId,
-          rerun: `agentx --env ${run.env} channel add --project ${projectName} --channel ${bound.channelName}`, write: run.write, sleep: run.sleep, now: run.now,
+          rerun: `${CLI_COMMAND_NAME} --env ${run.env} channel add --project ${projectName} --channel ${bound.channelName}`, write: run.write, sleep: run.sleep, now: run.now,
         });
       }
       run.print({ ...bound, projectName }, `Bound #${bound.channelName} to ${projectName}\n`);
@@ -178,7 +178,7 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
     .option("--key-env <NAME>", "with --auth key: environment variable holding the key")
     .option("--auth-header <name>", "with --auth key: the header the key goes in (default Authorization)")
     .option("--auth-prefix <text>", "with --auth key: the text before the key (default \"Bearer \"; \"\" for none)")
-    .option("--register-client", "with --auth oauth: register AgentX as the server's OAuth client")
+    .option("--register-client", "with --auth oauth: register Rovara as the server's OAuth client")
     .option("--client-id <id>", "with --auth oauth: your OAuth app's client ID")
     .option("--client-secret-file <path>", "with --auth oauth: file holding the app's client secret, if it has one")
     .option("--client-secret-env <NAME>", "with --auth oauth: environment variable holding the app's client secret")
@@ -207,14 +207,14 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
     });
 
   // FR-046: needs no admin session, only AWS (SetAlarmState on this one alarm, Task 1), so openAws.
-  const alerts = program.command("alerts").description("AgentX alerts");
+  const alerts = program.command("alerts").description("Rovara alerts");
   withRegion(alerts.command("test"))
     .description("send a test alarm to the alert address and ask whether it arrived (FR-046)")
     .action(async (_options: unknown, command: Command) => {
       const run = await context.openAws(command);
       const topicArn = await alertsTopicArn({
         stackOutputs: run.services.stackOutputs, stackName: run.settings.stacks["control-plane"],
-        next: `run agentx init --env ${run.env} to update it, then run agentx alerts test`,
+        next: `run ${CLI_COMMAND_NAME} init --env ${run.env} to update it, then run ${CLI_COMMAND_NAME} alerts test`,
       });
       const shownAs = run.settings.alertAddress ?? "the alert address";
       await sendTestAlarm({ api: run.services.alerts, topicArn, env: run.env, shownAs, prompter: run.prompter, write: run.write, sleep: run.sleep, now: run.now });

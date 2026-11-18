@@ -1,4 +1,4 @@
-// Spec 025 A14: agentx mcp offers the admin tools with this computer's unexpired admin sign-in, and
+// Spec 025 A14: rovara mcp offers the admin tools with this computer's unexpired admin sign-in, and
 // hides them once it expires.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -23,15 +23,15 @@ import { ADMIN_READ_TOOLS, DEVELOPER_TOOLS } from "../../packages/mcp/src/index.
 
 // The tools an agent is offered, by name: the developer tools alone, and with the admin read tools of an unexpired admin sign-in. The five session tools (Plan 5, Task 23) are pinned
 // by name so that a tool added or dropped changes this test, not only a count.
-const SESSION_TOOLS = ["agentx_list_sessions", "agentx_get_session", "agentx_comment_on_session", "agentx_tell_session_agent", "agentx_stop_session"];
+const SESSION_TOOLS = ["rovara_list_sessions", "rovara_get_session", "rovara_comment_on_session", "rovara_tell_session_agent", "rovara_stop_session"];
 const DEVELOPER_TOOL_NAMES = DEVELOPER_TOOLS.map((tool) => tool.name).sort();
 const WITH_ADMIN_TOOL_NAMES = [...DEVELOPER_TOOLS, ...ADMIN_READ_TOOLS].map((tool) => tool.name).sort();
 const offered = async (client: Client) => (await client.listTools()).tools.map((tool) => tool.name).sort();
 
 describe("the tool lists", () => {
-  it("are 46 developer tools, including the five session tools, agentx_start (the one start tool; the three old start tools stay as aliases), agentx_get_plan and agentx_answer_task_questions, and 54 with the eight admin read tools", () => {
+  it("are 46 developer tools, including the five session tools, rovara_start (the one start tool; the three old start tools stay as aliases), rovara_get_plan and rovara_answer_task_questions, and 54 with the eight admin read tools", () => {
     expect(DEVELOPER_TOOL_NAMES).toHaveLength(46);
-    expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(["agentx_start", "agentx_start_task", "agentx_start_workflow", "agentx_run_agent"]));
+    expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(["rovara_start", "rovara_start_task", "rovara_start_workflow", "rovara_run_agent"]));
     expect(DEVELOPER_TOOL_NAMES).toEqual(expect.arrayContaining(SESSION_TOOLS));
     expect(ADMIN_READ_TOOLS).toHaveLength(8);
     expect(WITH_ADMIN_TOOL_NAMES).toHaveLength(54);
@@ -79,12 +79,12 @@ async function server(options: { admin?: { expiresAt: number }; adminApiVersion?
   return { client, fetch, stderr };
 }
 
-describe("agentx mcp and the admin sign-in (A14)", () => {
+describe("rovara mcp and the admin sign-in (A14)", () => {
   it("offers the admin tools with an unexpired admin sign-in, and calls /v1/admin/* with it", async () => {
     const admin = { expiresAt: Date.now() + 600_000 };
     const { client, fetch, stderr } = await server({ admin, adminApiVersion: "1.0" });
-    await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
-    const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
+    await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "rovara_admin_list_projects")).toBe(true);
+    const result = await client.callTool({ name: "rovara_admin_list_projects", arguments: {} });
     expect(result.structuredContent).toEqual({ projects: [] });
     const call = fetch.mock.calls.find((entry) => fetchRequestUrl(entry[0]).endsWith("/v1/admin/projects")) as unknown as [string, RequestInit];
     expect(new Headers(call[1].headers).get("authorization")).toBe(`Bearer ${ADMIN_TOKEN}`);
@@ -96,39 +96,39 @@ describe("agentx mcp and the admin sign-in (A14)", () => {
     const { client } = await server({ admin, adminApiVersion: "1.0" });
     await expect.poll(() => offered(client)).toEqual(WITH_ADMIN_TOOL_NAMES);
     admin.expiresAt = Date.now() - 1;
-    await client.callTool({ name: "agentx_whoami", arguments: {} });
+    await client.callTool({ name: "rovara_whoami", arguments: {} });
     await expect.poll(() => offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
-    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login --admin" });
   });
 
   it("offers no admin tool against a control plane without the admin API, and whoami says why", async () => {
     const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 } });
     expect(await offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
-    const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
-    expect(JSON.stringify(whoami.content)).toContain("AgentX has no admin tools yet; ask your AgentX admin to upgrade AgentX");
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: UPGRADE_AGENTX_STEP });
+    const whoami = await client.callTool({ name: "rovara_whoami", arguments: {} });
+    expect(JSON.stringify(whoami.content)).toContain("Rovara has no admin tools yet; ask your Rovara admin to upgrade Rovara");
+    expect(toolError(await client.callTool({ name: "rovara_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: UPGRADE_AGENTX_STEP });
   });
 
   it("offers no admin tool against a control plane whose admin API major differs, and a direct call says to upgrade the CLI", async () => {
     const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 }, adminApiVersion: "2.0" });
-    await client.callTool({ name: "agentx_whoami", arguments: {} });
+    await client.callTool({ name: "rovara_whoami", arguments: {} });
     expect(await offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: NEXT_STEPS.UPGRADE_REQUIRED });
+    expect(toolError(await client.callTool({ name: "rovara_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: NEXT_STEPS.UPGRADE_REQUIRED });
   });
 
   // Final review, item 5: the offer's compatibility check needs the developer sign-in; without it
   // the admin is told to sign in as a developer, not to run login --admin again.
   it("answers the compatibility check's SIGN_IN_REQUIRED for an admin with no developer sign-in", async () => {
     const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 }, adminApiVersion: "1.0", developerSignIn: false });
-    await client.callTool({ name: "agentx_whoami", arguments: {} });
+    await client.callTool({ name: "rovara_whoami", arguments: {} });
     expect(await offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
-    const refused = toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }));
+    const refused = toolError(await client.callTool({ name: "rovara_admin_health", arguments: {} }));
     expect(refused).toMatchObject({ code: "SIGN_IN_REQUIRED" });
     expect(JSON.stringify(refused)).not.toContain("login --admin");
   });
 });
 
-/** A client transport over the in-process `agentx mcp` command's stdin and stdout. */
+/** A client transport over the in-process `rovara mcp` command's stdin and stdout. */
 function streamTransport(toServer: PassThrough, fromServer: PassThrough): Transport {
   const buffer = new ReadBuffer();
   const transport: Transport = {
@@ -144,7 +144,7 @@ function streamTransport(toServer: PassThrough, fromServer: PassThrough): Transp
   return transport;
 }
 
-describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
+describe("rovara mcp's own admin sign-in (main.ts, A14)", () => {
   async function cli(admin: { expiresAt: number }) {
     const home = await mkdtemp(join(tmpdir(), "agentx-admin-mcp-cli-"));
     const tokenStore = new InMemoryTokenStore();
@@ -177,7 +177,7 @@ describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
   it("reads the recorded environment's admin token, and calls the control plane's URL without its trailing slash", async () => {
     const { client, fetch, stderr, stop } = await cli({ expiresAt: Date.now() + 600_000 });
     await expect.poll(() => offered(client)).toEqual(WITH_ADMIN_TOOL_NAMES);
-    const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
+    const result = await client.callTool({ name: "rovara_admin_list_projects", arguments: {} });
     expect(result.structuredContent).toEqual({ projects: [] });
     const call = fetch.mock.calls.find((entry) => new URL(fetchRequestUrl(entry[0])).pathname.endsWith("/admin/projects")) as unknown as [string, RequestInit];
     expect(String(call[0])).toBe(`${URL_BASE}/v1/admin/projects`);
@@ -188,11 +188,11 @@ describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
 
   it("answers no admin sign-in for an expired admin token, and never refreshes it", async () => {
     const { client, fetch, stderr, stop } = await cli({ expiresAt: Date.now() - 1 });
-    const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
+    const whoami = await client.callTool({ name: "rovara_whoami", arguments: {} });
     expect(whoami.structuredContent).toMatchObject({ admin: false });
     expect(await offered(client)).toEqual(DEVELOPER_TOOL_NAMES);
     // Issue #218: an expired sign-in names its environment and the exact command.
-    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run agentx --env staging login --admin" });
+    expect(toolError(await client.callTool({ name: "rovara_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run agentx --env staging login --admin" });
     expect(fetch.mock.calls.some((entry) => new URL(fetchRequestUrl(entry[0])).pathname.includes("/token") || new URL(fetchRequestUrl(entry[0])).pathname.startsWith("/v1/admin/"))).toBe(false);
     expect(await stop()).toBe(0);
     expect(stderr.join("")).not.toContain(ADMIN_TOKEN);

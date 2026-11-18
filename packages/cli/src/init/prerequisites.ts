@@ -9,7 +9,7 @@ import { ProviderCheckHttpError, bedrockThrottleSentence, checkModel, type Model
 import type { QuotaClient } from "@agentx/model-runtime/model-discovery";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider } from "@agentx/contracts";
+import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS, type ModelProvider, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -89,9 +89,9 @@ export function releaseImageChecks(input: { version: string; images: ReleaseImag
     const flag = `${IMAGE_FLAGS[which]} <repository@sha256:...>`;
     const detail = input.audience === "page"
       ? {
-        missing: `This release has no ${words} image. Use a published AgentX release.`,
-        "not-public": `This release's ${words} image is not on Amazon ECR Public, so AWS cannot pull it. Use a published AgentX release, or start the install again with an image address AWS can reach.`,
-        "not-pinned": `This release's ${words} image is not pinned to one exact version, so AWS cannot pull it safely. Use a published AgentX release.`,
+        missing: `This release has no ${words} image. Use a published Rovara release.`,
+        "not-public": `This release's ${words} image is not on Amazon ECR Public, so AWS cannot pull it. Use a published Rovara release, or start the install again with an image address AWS can reach.`,
+        "not-pinned": `This release's ${words} image is not pinned to one exact version, so AWS cannot pull it safely. Use a published Rovara release.`,
       }[problem]
       : {
         missing: `release ${input.version} has no ${which} image digest; use a published release, or pass ${flag}`,
@@ -103,9 +103,9 @@ export function releaseImageChecks(input: { version: string; images: ReleaseImag
 }
 
 /** FR-017: shown once, on the account card. */
-export const DEDICATED_ACCOUNT_NOTE = "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.";
+export const DEDICATED_ACCOUNT_NOTE = "Tip: a separate AWS account just for Rovara keeps its costs and permissions apart from your other work.";
 /** FR-016. */
-export const ROOT_WARNING = "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.";
+export const ROOT_WARNING = "You are signed in as the AWS root user. Rovara works, but AWS advises an admin user instead.";
 /** AWS's guide to an IAM user with admin rights. Confirm it loads before committing (curl -sI); if AWS moved it, use the IAM User Guide page on creating an administrative user. */
 export const ADMIN_USER_GUIDE_URL = "https://docs.aws.amazon.com/IAM/latest/UserGuide/getting-started-account-iam.html";
 export const isRootUser = (arn: string): boolean => /^arn:aws[a-z-]*:iam::\d{12}:root$/.test(arn);
@@ -143,7 +143,7 @@ function inferenceProfileHint(modelId: string, region: string, change: string): 
 /** How modelCheckProblem's messages say to change a model and to try again. init's defaults name its
  * flags; agentx doctor names agentx config set (a model is changed there after install). */
 export interface ModelProblemWording { changeModel: string; rerun: string; region: string }
-const initWording = (role: ModelRole): ModelProblemWording => ({ changeModel: `--${role}-model`, rerun: "run agentx init again", region: "choose another region with --region" });
+const initWording = (role: ModelRole): ModelProblemWording => ({ changeModel: `--${role}-model`, rerun: `run ${CLI_COMMAND_NAME} init again`, region: "choose another region with --region" });
 /** How a model problem reads on the page: what to do there, not a flag (spec 048 FR-027, FR-080). */
 const pageWording = (): ModelProblemWording => ({ changeModel: "the model question", rerun: "choose Check again", region: "start again in another region" });
 
@@ -333,8 +333,8 @@ export async function checkPrerequisites(input: {
       }
     } catch (error) {
       failed("Answer checks", audience === "page"
-        ? `AgentX could not finish checking your answers: ${errorMessage(error)}. Check AWS and GitHub access, then check again.`
-        : `could not run the answer checks: ${errorMessage(error)}; check AWS and GitHub access, then run agentx init again`);
+        ? `Rovara could not finish checking your answers: ${errorMessage(error)}. Check AWS and GitHub access, then check again.`
+        : `could not run the answer checks: ${errorMessage(error)}; check AWS and GitHub access, then run ${CLI_COMMAND_NAME} init again`);
     }
   }
 

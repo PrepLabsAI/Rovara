@@ -33,7 +33,7 @@ import { jsonOf, locate, settled, type RowRef } from "./start.js";
 import type { Ended } from "./results.js";
 
 /** The branch a publication pushes: named after the operation, so two publications never share one. */
-export const headBranchOf = (operationId: string): string => `agentx/${operationId}`;
+export const headBranchOf = (operationId: string): string => `rovara/${operationId}`;
 
 const scopeOf = (deps: Pick<TaskFlowDeps, "companyId">) => ({ orgId: deps.companyId });
 

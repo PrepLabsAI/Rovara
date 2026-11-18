@@ -5,18 +5,18 @@ import type { ConnectorCallRequest, ConnectorCatalog } from "@agentx/contracts";
 import { createConnectorTools } from "./connector-tools.js";
 
 export const ORCHESTRATION_TOOL_NAMES = [
-  "agentx_submit_task",
-  "agentx_create_pull_request",
-  "agentx_task_status",
-  "agentx_task_result",
-  "agentx_follow_up",
-  "agentx_manage_pull_request",
+  "rovara_submit_task",
+  "rovara_create_pull_request",
+  "rovara_task_status",
+  "rovara_task_result",
+  "rovara_follow_up",
+  "rovara_manage_pull_request",
 ] as const;
 
-export const RECOVERY_TOOL_NAMES = ["agentx_task_status", "agentx_task_result"] as const;
+export const RECOVERY_TOOL_NAMES = ["rovara_task_status", "rovara_task_result"] as const;
 
 /** In-house tools that run on the remote worker, so a thread without compute prepares it first (spec 014). */
-export const WORKER_TOOL_NAMES = ["agentx_submit_task", "agentx_follow_up"] as const;
+export const WORKER_TOOL_NAMES = ["rovara_submit_task", "rovara_follow_up"] as const;
 
 /** Why a tool that needs the worker cannot run; handed to the model as the tool result. */
 export interface WorkerRefusal {
@@ -29,7 +29,7 @@ export interface WorkerAccess {
   /**
    * True once this thread has prepared compute in this turn. A plain, externally readable fact,
    * not just an internal detail of these tools: 14c part 2's confirmation gate reads it to decide
-   * whether agentx_submit_task counts as a write (spec 014 D5).
+   * whether rovara_submit_task counts as a write (spec 014 D5).
    */
   prepared(): boolean;
   /** Prepares compute once per turn. Undefined when the worker can take work; otherwise a refusal. */
@@ -37,12 +37,12 @@ export interface WorkerAccess {
 }
 
 /** Issue 157: why a task tool started nothing, once its turn was handed off to a new task. */
-const TASK_NOT_STARTED = "AgentX is restarting, so the task was not started.";
+const TASK_NOT_STARTED = "Rovara is restarting, so the task was not started.";
 
 /** A thread with no compute has no changes to publish; preparing a fresh clone would not change that. */
 export const NO_WORKSPACE_TO_PUBLISH = {
   status: "NO_WORKSPACE",
-  message: "This thread has no workspace yet, so it has no changes to publish. Run the coding work with agentx_submit_task first.",
+  message: "This thread has no workspace yet, so it has no changes to publish. Run the coding work with rovara_submit_task first.",
 } as const;
 
 /** Retired in feature 013; kept so the orchestrator can tell the model the new name for one release. */
@@ -132,7 +132,7 @@ export function createOrchestrationTools(
      */
     onOperationAccepted?: (operationId: string) => Promise<void>;
     /**
-     * Issue 173: told the operation agentx_task_result re-attaches to, before it waits, so the host
+     * Issue 173: told the operation rovara_task_result re-attaches to, before it waits, so the host
      * can show a turn waits on it. It starts no work. It must not throw.
      */
     onOperationAttached?: (operationId: string) => Promise<void>;
@@ -143,10 +143,10 @@ export function createOrchestrationTools(
   const operationParameters = Type.Object({ operationId: Type.String({ format: "uuid" }) });
   const tools: ToolDefinition[] = [
     defineTool({
-      name: "agentx_submit_task",
+      name: "rovara_submit_task",
       label: "Delegate coding task",
       description:
-        "Run repository inspection, editing, build, or test work on the remote AgentX worker. " +
+        "Run repository inspection, editing, build, or test work on the remote Rovara worker. " +
         "This waits for completion and returns the worker's final response; do not poll or resubmit the task.",
       parameters: promptParameters,
       execute: async (_id, parameters, signal, onUpdate) => {
@@ -161,7 +161,7 @@ export function createOrchestrationTools(
         });
         const operationId = acceptedOperationId(accepted);
         await options.onOperationAccepted?.(operationId);
-        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote AgentX worker accepted the task." }));
+        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote Rovara worker accepted the task." }));
         return toolResult(await api.taskResult(
           { workspaceId: context.workspaceId, operationId },
           {
@@ -172,13 +172,13 @@ export function createOrchestrationTools(
       },
     }),
     defineTool({
-      name: "agentx_create_pull_request",
+      name: "rovara_create_pull_request",
       label: "Create pull request",
       description:
         "Explicitly validate and publish one changed registered repository as a pull request. " +
-        "AgentX opens it as a draft when a check fails, and the result says draft. " +
-        "AgentX itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, " +
-        "and the result says so when there is nothing to publish. Do not run agentx_submit_task or agentx_follow_up first to inspect, " +
+        "Rovara opens it as a draft when a check fails, and the result says draft. " +
+        "Rovara itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, " +
+        "and the result says so when there is nothing to publish. Do not run rovara_submit_task or rovara_follow_up first to inspect, " +
         "commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says " +
         "nothing, use a short title naming the repository. " +
         "Call this only when the user clearly asks to create or raise a pull request.",
@@ -197,7 +197,7 @@ export function createOrchestrationTools(
           ...(parameters.body === undefined ? {} : { body: parameters.body }),
         });
         const operationId = acceptedOperationId(accepted);
-        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "AgentX accepted pull request publication." }));
+        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Rovara accepted pull request publication." }));
         return toolResult(await api.pullRequestResult(
           { workspaceId: context.workspaceId, operationId },
           {
@@ -208,16 +208,16 @@ export function createOrchestrationTools(
       },
     }),
     defineTool({
-      name: "agentx_task_status",
+      name: "rovara_task_status",
       label: "Remote task status",
-      description: "Recovery only: read durable status for a previously interrupted AgentX operation.",
+      description: "Recovery only: read durable status for a previously interrupted Rovara operation.",
       parameters: operationParameters,
       execute: async (_id, parameters) => toolResult(
         await api.taskStatus({ workspaceId: context.workspaceId, operationId: parameters.operationId }),
       ),
     }),
     defineTool({
-      name: "agentx_task_result",
+      name: "rovara_task_result",
       label: "Remote task result",
       description:
         "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
@@ -236,7 +236,7 @@ export function createOrchestrationTools(
       },
     }),
     defineTool({
-      name: "agentx_follow_up",
+      name: "rovara_follow_up",
       label: "Remote follow-up",
       description:
         "Run a follow-up on the same remote workspace and conversation. " +
@@ -254,7 +254,7 @@ export function createOrchestrationTools(
         });
         const operationId = acceptedOperationId(accepted);
         await options.onOperationAccepted?.(operationId);
-        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote AgentX worker accepted the follow-up." }));
+        onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote Rovara worker accepted the follow-up." }));
         return toolResult(await api.taskResult(
           { workspaceId: context.workspaceId, operationId },
           {
@@ -266,10 +266,10 @@ export function createOrchestrationTools(
     }),
   ];
   tools.push(defineTool({
-    name: "agentx_manage_pull_request",
+    name: "rovara_manage_pull_request",
     label: "Manage pull request",
     description:
-      "Change an existing AgentX-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; " +
+      "Change an existing Rovara-owned pull request. Actions: edit its title or body; append new workspace commits with a normal fast-forward push; " +
       "sync by merging the latest base branch into it; close it; reopen a closed, unmerged one; replace it with clean history (the new pull request is " +
       "created before the original is closed); revert a merged one with a reviewable revert pull request. History is never rebased or force-pushed. " +
       "Title and body apply only to edit, replace and revert. Call only for the action the user explicitly asked for.",
@@ -292,7 +292,7 @@ export function createOrchestrationTools(
         ...(titled && parameters.body !== undefined ? { body: parameters.body } : {}),
       });
       const operationId = acceptedOperationId(accepted);
-      onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `AgentX accepted pull request ${parameters.action}.` }));
+      onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: `Rovara accepted pull request ${parameters.action}.` }));
       return toolResult(await api.pullRequestResult(
         { workspaceId: context.workspaceId, operationId },
         {
@@ -333,12 +333,12 @@ function toolResult(value: unknown) {
 }
 
 function acceptedOperationId(value: unknown): string {
-  if (!value || typeof value !== "object") throw new Error("AgentX returned an invalid task acceptance response");
+  if (!value || typeof value !== "object") throw new Error("Rovara returned an invalid task acceptance response");
   const operation = (value as Record<string, unknown>).operation;
-  if (!operation || typeof operation !== "object") throw new Error("AgentX task acceptance omitted the operation");
+  if (!operation || typeof operation !== "object") throw new Error("Rovara task acceptance omitted the operation");
   const operationId = (operation as Record<string, unknown>).id;
   if (typeof operationId !== "string" || operationId.length === 0) {
-    throw new Error("AgentX task acceptance omitted the operation ID");
+    throw new Error("Rovara task acceptance omitted the operation ID");
   }
   return operationId;
 }

@@ -143,7 +143,7 @@ describe("oauth-refresh-token provider", () => {
     const { endpoint, container } = setup();
     endpoint.fail = { status: 400, body: JSON.stringify({ error: "invalid_grant", error_description: `token ${REFRESH} revoked` }) };
     const failure = await container().issue(undefined, "read").catch((error: unknown) => error);
-    expect(failure).toEqual(new CredentialUnavailable("credential asana-bot: the token endpoint refused the refresh token with HTTP 400 (invalid_grant); the bot user must sign in again with agentx admin credential authorize --ref asana-bot"));
+    expect(failure).toEqual(new CredentialUnavailable("credential asana-bot: the token endpoint refused the refresh token with HTTP 400 (invalid_grant); the bot user must sign in again with rovara admin credential authorize --ref asana-bot"));
     expect(String((failure as Error).message)).not.toContain(REFRESH);
     expect(String((failure as Error).message)).not.toContain(CLIENT.clientSecret);
   });

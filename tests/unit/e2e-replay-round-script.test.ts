@@ -23,14 +23,14 @@ describe("the arguments", () => {
   it("need an environment, a task and a round that are what they say, and refuse anything else", () => {
     expect(parseReplayArgs(ARGS)).toMatchObject({ env: "agentxlivetest123", task: TASK, round: ROUND, pollSeconds: 15, timeoutMinutes: 40, wait: true });
     expect(parseReplayArgs([...ARGS, "--no-wait", "--poll-seconds", "5", "--timeout-minutes", "10", "--profile", "p", "--region", "us-east-1"])).toMatchObject({ wait: false, pollSeconds: 5, timeoutMinutes: 10, profile: "p", region: "us-east-1" });
-    for (const bad of [["--env", "x"], ["--task", TASK, "--round", ROUND], [...ARGS, "--force"], [...ARGS, "--task", TASK], ["--env", "AgentX!", "--task", TASK, "--round", ROUND],
+    for (const bad of [["--env", "x"], ["--task", TASK, "--round", ROUND], [...ARGS, "--force"], [...ARGS, "--task", TASK], ["--env", "Rovara!", "--task", TASK, "--round", ROUND],
       ["--env", "agentxlivetest123", "--task", "nope", "--round", ROUND], [...ARGS, "--poll-seconds", "0"], [...ARGS, "--timeout-minutes", "1000"]]) {
       expect(() => parseReplayArgs(bad), bad.join(" ")).toThrow();
     }
   });
 });
 
-/** What `agentx --json` really prints for a success: `{ ok: true, data: <the broker's answer> }` (packages/cli/src/output.ts formatSuccess). The broker's start answer is { replay: { sourceRoundId, attempt, operationId, roundId, state } }. */
+/** What `rovara --json` really prints for a success: `{ ok: true, data: <the broker's answer> }` (packages/cli/src/output.ts formatSuccess). The broker's start answer is { replay: { sourceRoundId, attempt, operationId, roundId, state } }. */
 const cliOk = (data: unknown): CliResult => ok({ ok: true, data });
 const brokerStart = { replay: { sourceRoundId: ROUND, attempt: 1, operationId: "must-not-be-echoed", roundId: "66666666-6666-4666-8666-666666666666", state: "STARTED" } };
 
@@ -135,7 +135,7 @@ describe("the run", () => {
   });
 });
 
-describe("agentx admin task e2e-replay", () => {
+describe("rovara admin task e2e-replay", () => {
   it("posts the round with the admin token to the task's replay route, reads the attempts with a GET, and reports the broker's refusal with its own code", async () => {
     const { startTaskE2EReplay, showTaskE2EReplays } = await import("../../packages/cli/src/admin/task-e2e-replay.js");
     const post = vi.fn(async () => Response.json({ replay: { attempt: 1 } }, { status: 202 }));
@@ -152,7 +152,7 @@ describe("agentx admin task e2e-replay", () => {
     const refused = vi.fn(async () => Response.json({ error: { code: "CONFIG_INVALID", message: "replay-no-recording: the qualified round left no recording to replay" } }, { status: 400 }));
     await expect(startTaskE2EReplay({ controlPlaneUrl: "https://agentx.example.test", accessToken: "t", taskId: TASK, roundId: ROUND }, refused as unknown as typeof fetch)).rejects.toThrow(/replay-no-recording/);
   });
-  it("refuses a --task or --round that is not an ID before signing in or calling AgentX", async () => {
+  it("refuses a --task or --round that is not an ID before signing in or calling Rovara", async () => {
     const { executeCli } = await import("../../packages/cli/src/main.js");
     const fetchImplementation = vi.fn();
     let stderr = "";

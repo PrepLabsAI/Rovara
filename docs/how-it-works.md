@@ -2,14 +2,17 @@
 
 The request path, the two Pi roles, what the worker reads from your repositories, the check report, usage records, and how stacks are named.
 
-> **Naming:** Rovara was called AgentX. Commands, AWS resource names, paths, tool names and the
-> default Slack app name still use `agentx` or `AgentX` (for example `agentx init`,
-> `AgentXControlPlane`, `~/.agentx` and `@AgentX`), so every command in these docs works as written.
+> **Naming:** Rovara was called AgentX. The command is `rovara`; `agentx` still works as an alias.
+> Resources an existing install already created keep their original names, so nothing breaks on
+> upgrade: AWS stacks and resources (`agentx-<env>-*`, `AgentXControlPlane`), settings paths
+> (`/agentx/<env>/`), secrets (`agentx/<env>/`), the `~/.agentx` folder and the `agentx:env` tag.
+> New installs, command help, setup screens, AI tool names (`rovara_*`) and pull request branches
+> (`rovara/<id>`) say Rovara.
 
 ```text
 Slack thread -> hosted Pi orchestrator -> Rovara control plane -> remote Pi coding worker
                                                               -> approved GitHub MCP tools
-AI tool (Claude Code, Codex, Cursor) -> agentx mcp -> Rovara developer task API -> remote Pi coding worker
+AI tool (Claude Code, Codex, Cursor) -> rovara mcp -> Rovara developer task API -> remote Pi coding worker
 ```
 
 The hosted Pi session is an orchestration-only client. It has Rovara control-plane and approved
@@ -17,8 +20,8 @@ MCP tools but no source, file-editing, or shell tools. The remote Pi session own
 and exposes `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` inside that thread's
 workspace.
 Rovara wraps remote Pi only to provide authentication, workspace allocation, operation fencing,
-durable callbacks, and Git/tool-evidence artifacts. The `agentx` executable administers
-environments and projects. Its `agentx mcp` server also lets a signed-in developer's AI tool hand
+durable callbacks, and Git/tool-evidence artifacts. The `rovara` executable administers
+environments and projects. Its `rovara mcp` server also lets a signed-in developer's AI tool hand
 coding tasks to Rovara through the developer task API. Every other coding operation must come from
 the orchestrator's service identity; the control plane refuses it otherwise.
 
@@ -40,7 +43,7 @@ an installed one) exposes `PromptCacheRetention` as a CloudFormation parameter w
 `long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
 Slack turns.
 
-Admin usage (`GET /v1/admin/usage` and `agentx_admin_usage`) includes uncached input, cache reads
+Admin usage (`GET /v1/admin/usage` and `rovara_admin_usage`) includes uncached input, cache reads
 and cache writes in its input-token total; output and provider cost stay separate. Existing Slack
 turn records retain those categories and are counted in full. Worker usage index rows written
 before the #220 fix retain their stored uncached-input count: the cache breakdown was discarded,
@@ -49,7 +52,7 @@ so historical worker totals can still undercount. No backfill or token estimate 
 Both roles currently use `@earendil-works/pi-coding-agent` 1.5.2. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
-A plan, design or requirements document waiting for its owner can also be decided on the AgentX task
+A plan, design or requirements document waiting for its owner can also be decided on the Rovara task
 page. The owner's answers to the plan's decisions and the comments they choose to send go through the
 same single decision as a Slack or AI-tool approval, so exactly one decision is recorded however many
 places it is pressed. The coding and review steps read the plan with the owner's answers, and the
@@ -89,19 +92,19 @@ EC2 project revision for new work.
 
 What is built today:
 
-- **The installer.** `agentx init` installs a complete environment in your own AWS account. Then
+- **The installer.** `rovara init` installs a complete environment in your own AWS account. Then
   `project add`, `channel add` and `connector add` add more projects, channels and connectors:
   Linear, Jira, Asana, or any other remote MCP server.
-- **Day-2 commands.** `agentx config`, `doctor`, `upgrade` (and `upgrade --export` for a platform
+- **Day-2 commands.** `rovara config`, `doctor`, `upgrade` (and `upgrade --export` for a platform
   team's pipeline) and `destroy` run and remove an installed environment.
 - **Developer sign-in.** Developers sign in with Slack, your company's sign-in, or both, with
-  `agentx login <url>`. They need no AWS credentials.
-- **Tasks from an AI tool.** `agentx mcp install` adds Rovara to Claude Code, Codex or Cursor, and
-  `agentx mcp` gives that tool 11 Rovara tools. With them it lists the projects the developer may
+  `rovara login <url>`. They need no AWS credentials.
+- **Tasks from an AI tool.** `rovara mcp install` adds Rovara to Claude Code, Codex or Cursor, and
+  `rovara mcp` gives that tool 11 Rovara tools. With them it lists the projects the developer may
   use, starts, checks, continues, shares, cancels and closes coding tasks, and opens pull requests.
 - **Sharing to Slack.** A developer can share a task into the project's Slack channel, view only
   or open to the channel ("continue"). A project can require sharing, and an administrator can
-  switch a shared task's mode with `agentx admin task share-mode`.
+  switch a shared task's mode with `rovara admin task share-mode`.
 
 Not built yet:
 
@@ -122,4 +125,4 @@ connector secrets live under `agentx/<env>/connectors/`. The maintainers' own de
 the installer and keeps fixed names: `AgentXProductionFoundation`, `AgentXProductionRuntime`,
 `AgentXControlPlane` and `AgentXSlackOrchestrator`, with no access or identity stack. Where these
 docs name an `AgentX...` stack or a stack parameter, it means the maintainers' deployment; in
-your environment, use the matching `agentx-<env>-...` stack, or `agentx config` where a key exists.
+your environment, use the matching `agentx-<env>-...` stack, or `rovara config` where a key exists.

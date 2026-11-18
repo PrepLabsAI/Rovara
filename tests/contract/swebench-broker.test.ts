@@ -136,7 +136,7 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
     await enable(notInstalled.handler);
     expect((await start(notInstalled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_INSTALLED", message: expect.stringMatching(/^Eval runs are not installed in this deployment\./) as unknown });
     const notEnabled = await evalBroker();
-    expect((await start(notEnabled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_ENABLED", message: expect.stringMatching(/^Eval runs are not enabled in this channel\. .*agentx admin eval enable/) as unknown });
+    expect((await start(notEnabled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_ENABLED", message: expect.stringMatching(/^Eval runs are not enabled in this channel\. .*rovara admin eval enable/) as unknown });
     expect(notEnabled.startExecution).not.toHaveBeenCalled();
   });
 

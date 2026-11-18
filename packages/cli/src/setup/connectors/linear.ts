@@ -7,11 +7,11 @@ import { secretFromSource } from "../../init/prompts.js";
 import { addConnectorRevision, connectorRerun, connectorSecretName, refuseLegacyGitHubMcp, scopeAlias, storeConnectorSecret, type ConnectorAddInput } from "./revision.js";
 
 export const LINEAR_GUIDE = [
-  "Linear: AgentX uses a Linear API key, which acts as the Linear user who made it.",
+  "Linear: Rovara uses a Linear API key, which acts as the Linear user who made it.",
   "  1. In Linear, open Settings, Account, Security & Access. Under Personal API keys, choose New API key.",
-  "  2. Permissions: Read, plus Create issues and Create comments (or Write, to let AgentX update issues).",
+  "  2. Permissions: Read, plus Create issues and Create comments (or Write, to let Rovara update issues).",
   "  3. Team access: only the teams this project may use.",
-  "  4. Create the key and copy it; Linear shows it once. A dedicated Linear user keeps AgentX's writes apart from a person's.",
+  "  4. Create the key and copy it; Linear shows it once. A dedicated Linear user keeps Rovara's writes apart from a person's.",
 ].join("\n");
 
 export const LINEAR_TOOLS: ConnectorConfig["tools"] = [

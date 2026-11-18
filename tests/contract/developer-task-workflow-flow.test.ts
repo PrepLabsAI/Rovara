@@ -5215,7 +5215,7 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     for (const [error, cause, text] of [
       ["STALE_FENCE: pull request head changed outside AgentX", "HEAD_MOVED", `I couldn't push the fix to <${PR_URL}|PR #42>: ${STOPPED_FOLLOWING}`],
       ["git push failed: remote rejected", "PUSH_REFUSED", `I couldn't push the fix to <${PR_URL}|PR #42>: GitHub refused the push. ${STILL_WATCHING}`],
-      [`RUNTIME_UNAVAILABLE: ${workflowContracts.WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED}`, "WORKER_OUTDATED", `I couldn't push the fix because this AgentX worker is out of date. Ask an admin to run agentx upgrade. ${STILL_WATCHING}`],
+      [`RUNTIME_UNAVAILABLE: ${workflowContracts.WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED}`, "WORKER_OUTDATED", `I couldn't push the fix because this Rovara worker is out of date. Ask an admin to run rovara upgrade. ${STILL_WATCHING}`],
     ] as const) {
       const { harness, taskId, workspaceId, first, pass } = await fixPassed();
       await pass();

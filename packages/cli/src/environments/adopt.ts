@@ -1,6 +1,6 @@
 import { DescribeStacksCommand, type CloudFormationClient, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
-import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart } from "@agentx/contracts";
+import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { DIRECT_PROVIDERS, ModelsAnswersSchema, type DirectProvider } from "../deploy/answer-schemas.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
@@ -169,7 +169,7 @@ export async function adoptEnvironment(input: {
       const detail = errnoDetail(error);
       throw agentXError(
         "RUNTIME_UNAVAILABLE",
-        `settings for ${input.env} were saved to ${settingsParameterName(input.env)}, but the local cache could not be written${detail}; run agentx --env ${input.env} env use`,
+        `settings for ${input.env} were saved to ${settingsParameterName(input.env)}, but the local cache could not be written${detail}; run ${CLI_COMMAND_NAME} --env ${input.env} env use`,
       );
     }
     return settings;

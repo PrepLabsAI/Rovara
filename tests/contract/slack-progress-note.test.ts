@@ -145,7 +145,7 @@ describe("a long Slack task's progress in the processor (#219)", () => {
 
   it("names what the member approved in a turn run on their yes, after the gate used the approval (review)", async () => {
     const h = harness(1);
-    const approval = { tool: "agentx_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' };
+    const approval = { tool: "rovara_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' };
     const confirmations = {
       load: async () => undefined, save: async () => undefined, claim: async () => true, open: async () => undefined, retire: async () => undefined,
       yesToAll: async () => false, grantYesToAll: async () => undefined,

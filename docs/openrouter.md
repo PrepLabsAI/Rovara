@@ -7,7 +7,7 @@ OpenAI directly with your own key, see [Your own Anthropic or OpenAI API key](mo
 
 ## Configure an installation
 
-`agentx init` asks for the model provider first: `1. Amazon Bedrock (recommended) (default)`,
+`rovara init` asks for the model provider first: `1. Amazon Bedrock (recommended) (default)`,
 `2. OpenRouter`. Choosing OpenRouter sets the orchestrator, classifier and worker providers to
 `openrouter`, asks for each one's OpenRouter model id (there is no default: pick models you have
 checked), then asks for your **OpenRouter API key** in a hidden prompt. Init stores the raw key, not
@@ -51,7 +51,7 @@ administrator-managed `kms:Decrypt` grant and key policy; Rovara does not add th
 These are example IDs, not a cost or model recommendation. Each omitted provider defaults to
 `amazon-bedrock`; an OpenRouter role needs its own OpenRouter model ID. `init --export` stores no
 secret, so it takes `--openrouter-secret-arn` (a secret you made yourself), not a key; with
-`agentx deploy` the secret ARN may be omitted until the secret is ready. A deploy answers file uses:
+`rovara deploy` the secret ARN may be omitted until the secret is ready. A deploy answers file uses:
 
 ```json
 {
@@ -89,7 +89,7 @@ The Slack stack also accepts `GateClassifierProvider`, independently of `ModelPr
 stacks. Do not use a CloudFormation dynamic reference that substitutes the actual secret value.
 
 For manual change sets, compare `OpenRouterSecretArn` in the control-plane, runtime, and Slack
-stack parameters before enabling models or rotating to a different ARN. `agentx deploy` supplies
+stack parameters before enabling models or rotating to a different ARN. `rovara deploy` supplies
 the same reference to all three; independently edited change sets can drift. A grant/configuration
 mismatch causes `AccessDenied` and is deliberately not treated as a missing secret. Repair the
 mismatched parameter and redeploy/restart the affected service. A single authoritative reference
@@ -130,8 +130,8 @@ Add approved pairs to the project's existing `approvedModels`, for example:
 Reply in the project thread:
 
 ```text
-@agentx models
-@agentx use OpenRouter Sonnet
+@rovara models
+@rovara use OpenRouter Sonnet
 ```
 
 The list and confirmation show the provider. Selection applies to subsequent coding turns in
@@ -184,7 +184,7 @@ They do not establish connectivity, billing, or live upstream compatibility.
    names OpenRouter. Inspect both Slack and worker logs for the requested model and token usage;
    verify there were no Bedrock inference requests for these tasks.
 5. Reply with a follow-up referring to the first change. Stop/resume the worker and repeat to
-   test persisted conversation continuity. Use `@agentx models`, select the second approved
+   test persisted conversation continuity. Use `@rovara models`, select the second approved
    model, and check the next coding turn uses it.
 6. Cancel a running task. Verify it stops and completed side effects are not repeated on the
    next turn. With a disposable invalid key, verify failures contain no credential or prompt
@@ -217,7 +217,7 @@ request or deployment was made during implementation.
 An omitted ARN, a Secrets Manager `ResourceNotFoundException`, or an empty secret value no longer selects a
 Bedrock model silently. Without a chosen fallback (`models.fallback`, default `none`) the session fails with a
 named error that says the OpenRouter key secret is missing and how to choose a fallback. With one, for example
-`agentx --env <env> config set models.fallback us.anthropic.claude-sonnet-4-6`, the work runs on that Bedrock
+`rovara --env <env> config set models.fallback us.anthropic.claude-sonnet-4-6`, the work runs on that Bedrock
 model and says so on the task page and in the Slack thread. Logs emit `model_fallback` with the requested and
 effective model; session and usage records use the effective model. The project's selected OpenRouter model
 remains selected, so subsequent sessions can use it once the secret is populated. Restart the Slack service to

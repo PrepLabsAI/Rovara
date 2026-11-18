@@ -1,4 +1,4 @@
-import { AsanaConnectorSchema } from "@agentx/contracts";
+import { AsanaConnectorSchema, CLI_COMMAND_NAME } from "@agentx/contracts";
 import { ASANA_MCP_ENDPOINT, ASANA_TOKEN_ENDPOINT, asanaConnector, type AsanaProjectScope } from "@agentx/gateway";
 import { presetConnectorType } from "./connector-presets.js";
 
@@ -15,7 +15,7 @@ export const asanaConnectorType = presetConnectorType<typeof AsanaConnectorSchem
     requireHostPin: false,
     accepts: ["oauth-refresh-token"],
     // Asana's MCP server takes only OAuth user tokens: no API keys and no client credentials.
-    wrongType: (ref, type) => `credential ${ref} is ${type}; an Asana connector needs an oauth-refresh-token credential from agentx admin credential authorize`,
+    wrongType: (ref, type) => `credential ${ref} is ${type}; an Asana connector needs an oauth-refresh-token credential from ${CLI_COMMAND_NAME} admin credential authorize`,
     tokenEndpoint: ASANA_TOKEN_ENDPOINT,
     definition: asanaConnector,
   }),

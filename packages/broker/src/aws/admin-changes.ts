@@ -12,7 +12,7 @@ import {
   ApplyAdminChangeRequestSchema, ConfigChangeOutcomeRequestSchema, DeclineAdminChangeRequestSchema, RecordConfigChangeRequestSchema, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
   adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, redactSecrets, redactText,
   type AdminChangeAuditRecord, type AdminChangeInput, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
-  type PendingChange, type RefusedAttemptReason,
+  type PendingChange, type RefusedAttemptReason, CLI_COMMAND_NAME,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { auditStepItem, listAudit, logChangeStep, proposalItem, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore, type TransactItem } from "./admin-change-audit.js";
@@ -203,7 +203,7 @@ const storedIdentity = (change: PendingChange): AuthenticatedIdentity => ({ issu
 
 async function requireOwn(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, changeId: string): Promise<PendingChange> {
   const change = await getPending(deps, changeId);
-  if (change === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with agentx admin changes`);
+  if (change === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with ${CLI_COMMAND_NAME} admin changes`);
   if (!isPlanner(change, identity)) {
     await refuseAttempt(deps, changeId, "another_admin");
     logChangeStep(deps.log, "refused", { ...traced(change), error: "another_admin" });
@@ -245,7 +245,7 @@ function unavailableMessage(deps: AdminChangeDependencies, methods: readonly Con
   const slackSetUp = deps.confirm.slack && deps.identity !== undefined;
   const checkFailed = methods.includes("slack") && slackSetUp && lookupFailed;
   if (methods.includes("slack")) reasons.push(!slackSetUp ? "Slack confirmation is not set up in this environment" : lookupFailed ? "AgentX could not check your Slack link just now" : "your admin sign-in matches no Slack user");
-  return `no confirmation method is available: ${reasons.join(", and ")}; ${checkFailed ? "try again, or use" : "use"} agentx admin commands instead`;
+  return `no confirmation method is available: ${reasons.join(", and ")}; ${checkFailed ? "try again, or use" : "use"} ${CLI_COMMAND_NAME} admin commands instead`;
 }
 
 /**
@@ -770,7 +770,7 @@ async function recordConfigChange(deps: AdminChangeDependencies, identity: Authe
 /** Issue #205: how a recorded config change ended, once, by the admin who recorded it. */
 async function recordConfigOutcome(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, changeId: string, value: unknown): Promise<Answer> {
   const record = await readAudit(deps.audit, changeId);
-  if (record === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with agentx admin changes`);
+  if (record === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with ${CLI_COMMAND_NAME} admin changes`);
   if (record.kind !== "set_config" || (await getPending(deps, changeId)) !== undefined) {
     throw agentXError("CONFIG_INVALID", `change ${changeId} is not a recorded config change; confirm or decline it instead`);
   }
@@ -830,7 +830,7 @@ async function routeChange(deps: AdminChangeDependencies, identity: Authenticate
   if (changeId !== undefined) {
     if (request.method === "GET" && match?.[2] === undefined) {
       const change = await getPending(deps, changeId);
-      if (change === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with agentx admin changes`);
+      if (change === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with ${CLI_COMMAND_NAME} admin changes`);
       return { status: 200, body: { change: viewOf(deps, await settle(deps, change), isPlanner(change, identity)) } };
     }
     if (request.method === "POST" && match?.[2] === "slack") return startSlack(deps, identity, changeId);

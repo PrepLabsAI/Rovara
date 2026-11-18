@@ -2263,7 +2263,7 @@ export class GitHubAppCredentialProvider {
 
   /** The commit a branch points at now, as GitHub says; throws when the branch does not exist. */
   async getBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string> {
-    if (!/^agentx\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (!/^(?:rovara|agentx)\/[0-9a-f-]{36}$/iu.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
     const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
     const token = await this.createInstallationToken(repository, { contents: "read" }, scope);
     const response = await this.fetchImplementation(
@@ -2281,7 +2281,7 @@ export class GitHubAppCredentialProvider {
 
   /**
    * The commit a repository's branch points at now, for any ordinary branch name (a project's default branch), as GitHub says; throws when the branch does not exist.
-   * `getBranchHead` is for Rovara's own `agentx/*` branches only.
+   * `getBranchHead` is for Rovara's own `rovara/*` (or older `agentx/*`) branches only.
    */
   async getDefaultBranchHead(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<string> {
     if (!GitBranchNameSchema.safeParse(branch).success) throw agentXError("CONFIG_INVALID", "branch name is invalid");
@@ -2671,22 +2671,26 @@ export class GitHubAppCredentialProvider {
   }
 
   /**
-   * The App's slug, which makes its install address (https://github.com/apps/<slug>/installations/new): from the App's secret,
-   * or from GitHub when the secret has none. Refused when it is not letters, digits and hyphens.
+   * The App's slug, which makes its install address (https://github.com/apps/<slug>/installations/new) and its `<slug>[bot]` login:
+   * what GitHub reports for the App now, so an App renamed in GitHub's settings keeps working; the slug the install stored in the
+   * App's secret is only the fallback when GitHub cannot be asked. Refused when it is not letters, digits and hyphens.
    */
   async appSlug(): Promise<string> {
     if (this.slug !== undefined) return this.slug;
-    const fromSecret = this.options.getAppSecret === undefined ? undefined : secretField(await this.options.getAppSecret(), "slug");
-    let slug = fromSecret;
-    if (slug === undefined) {
+    let slug: string | undefined;
+    try {
       const response = await this.fetchImplementation("https://api.github.com/app", { headers: await this.appHeaders(), signal: AbortSignal.timeout(5_000), redirect: "error" });
       if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub App lookup failed with HTTP ${response.status}`);
       const body: unknown = await response.json();
-      slug = body && typeof body === "object" && "slug" in body && typeof body.slug === "string" ? body.slug : undefined;
+      slug = body && typeof body === "object" && "slug" in body && typeof body.slug === "string" && GITHUB_APP_SLUG.test(body.slug) ? body.slug : undefined;
+    } catch (error) {
+      if (this.options.getAppSecret === undefined) throw error;
     }
-    if (slug === undefined || !GITHUB_APP_SLUG.test(slug)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App slug is missing or not valid");
-    this.slug = slug;
-    return slug;
+    if (slug !== undefined) { this.slug = slug; return slug; }
+    // GitHub could not be asked: the stored slug answers this call only, so a later call asks GitHub again.
+    const stored = this.options.getAppSecret === undefined ? undefined : secretField(await this.options.getAppSecret(), "slug");
+    if (stored === undefined || !GITHUB_APP_SLUG.test(stored)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App slug is missing or not valid");
+    return stored;
   }
 
   /**
