@@ -14,7 +14,8 @@ import type { LessonAuditSink } from "./ports.js";
 import { readVisibleRanked, type LessonLog } from "./read-visible.js";
 import type { AccessCheckPort } from "./access-port.js";
 import type { ApproverDirectory } from "./ports.js";
-import { MAX_STOP_WINDOWS, pausedKindsOfFlags } from "./paused-kinds.js";
+import { updateFlags, type FlagsLog } from "./flags-fence.js";
+import { MAX_STOP_WINDOWS, pausedKindsOfFlags, noteFailedStop, settleFailedStop } from "./paused-kinds.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import { idIn, type Lesson, type SpanKind } from "./types.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
@@ -72,29 +73,43 @@ export type PauseSourceOutcome = { ok: true; paused: boolean; changed: boolean }
 /**
  * A person pauses or resumes one row. Pausing records the person's action FIRST (no record, no change) and then stops every kind of the row; resuming records first too and then clears each kind's stop. A resume
  * re-settles nothing and brings nothing back: what was not read while paused does not exist. Idempotent. Who may do it is the caller's check (a project admin, or a company owner or admin, read live).
+ * Lead 4 L4-LP3Wd: the write is a conditional read-modify-write of the flags row (`flags-fence.ts`), so a flood-guard hold or an erasure written at the same moment does not drop the stop. If it cannot settle, a PAUSE fails
+ * closed (the kinds read as stopped in this process, `noteFailedStop`, and the call throws so the person is told it was not saved); a RESUME that cannot settle leaves the stop in place and throws.
  */
-export async function setLearningSourcePause(deps: { store: LessonStore; audit: LessonAuditSink; now: () => number }, key: ScopeKey, actor: string, sourceKey: LearningSourceKey, paused: boolean): Promise<PauseSourceOutcome> {
+export async function setLearningSourcePause(deps: { store: LessonStore; audit: LessonAuditSink; now: () => number; log?: FlagsLog | undefined; metrics?: { count(name: string, tags?: Record<string, string>): void } | undefined }, key: ScopeKey, actor: string, sourceKey: LearningSourceKey, paused: boolean): Promise<PauseSourceOutcome> {
   const kinds = SOURCE_KINDS[sourceKey];
   const stopped = pausedKindsOfFlags(await deps.store.flags(key));
+  const fence = { log: deps.log, metrics: deps.metrics };
   if (paused) {
     if (kinds.every((kind) => stopped.has(kind))) return { ok: true, paused: true, changed: false };
     if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: true } }))) return { ok: false, code: "audit_unavailable" };
     const at = deps.now();
-    // Re-read just before the write so a stop another change made in between is kept.
-    const latest = await deps.store.flags(key);
-    const next = { ...(latest.stoppedKinds ?? {}) };
-    for (const kind of kinds) if (next[kind] === undefined) next[kind] = { at };
-    await deps.store.setFlags(key, { ...latest, stoppedKinds: next });
-    return { ok: true, paused: true, changed: true };
+    try {
+      const result = await updateFlags(deps.store, key, (latest) => {
+        const next = { ...(latest.stoppedKinds ?? {}) };
+        let added = false;
+        for (const kind of kinds) if (next[kind] === undefined) { next[kind] = { at }; added = true; }
+        return added ? { ...latest, stoppedKinds: next } : undefined;
+      }, { writer: "pause", ...fence });
+      settleFailedStop(key, kinds);
+      return { ok: true, paused: true, changed: result.changed };
+    } catch (error) {
+      // The person asked Rovara to stop reading this: it reads as stopped here until a write settles, whatever went wrong.
+      noteFailedStop(key, kinds);
+      throw error;
+    }
   }
-  if (!kinds.some((kind) => stopped.has(kind))) return { ok: true, paused: false, changed: false };
+  if (!kinds.some((kind) => stopped.has(kind))) { settleFailedStop(key, kinds); return { ok: true, paused: false, changed: false }; }
   if (!(await requireAudit(deps.audit, { action: "lesson.learning_source_switched", workspaceId: key.workspaceId, project: key.project, actor, facts: { source: sourceKey, paused: false } }))) return { ok: false, code: "audit_unavailable" };
-  const latest = await deps.store.flags(key);
   const to = deps.now();
-  const rest = { ...(latest.stoppedKinds ?? {}) };
-  // The stopped time stays on record as a window, so evidence of a task that was alive during it is not read after the resume.
-  const lifted = kinds.flatMap((kind) => { const entry = rest[kind]; return entry === undefined ? [] : [{ kind, from: entry.at, to }]; });
-  for (const kind of kinds) delete rest[kind];
-  await deps.store.setFlags(key, { ...latest, stoppedKinds: rest, stopWindows: [...(latest.stopWindows ?? []), ...lifted].slice(-MAX_STOP_WINDOWS) });
-  return { ok: true, paused: false, changed: true };
+  const result = await updateFlags(deps.store, key, (latest) => {
+    const rest = { ...(latest.stoppedKinds ?? {}) };
+    // The stopped time stays on record as a window, so evidence of a task that was alive during it is not read after the resume.
+    const lifted = kinds.flatMap((kind) => { const entry = rest[kind]; return entry === undefined ? [] : [{ kind, from: entry.at, to }]; });
+    if (lifted.length === 0) return undefined;
+    for (const kind of kinds) delete rest[kind];
+    return { ...latest, stoppedKinds: rest, stopWindows: [...(latest.stopWindows ?? []), ...lifted].slice(-MAX_STOP_WINDOWS) };
+  }, { writer: "resume", ...fence });
+  settleFailedStop(key, kinds);
+  return { ok: true, paused: false, changed: result.changed };
 }
