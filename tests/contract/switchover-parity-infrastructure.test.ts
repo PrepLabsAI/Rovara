@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { App, Stack, aws_cloudwatch as cloudwatch, aws_logs as logs, aws_sns as sns } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_ALLOW_DOMAINS } from "@agentx/contracts";
+import { DEFAULT_AGENT_ALLOW_DOMAINS, GOOGLE_VERTEX_AI_ALLOW_GROUP } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import {
   DNS_FIREWALL_ASSOCIATION_PRIORITY, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, isBroadAllowedDomain, parseExtraAllowDomains,
@@ -40,13 +40,31 @@ const withoutMetadata = (resource: Resource): Resource => {
 const resourcesOf = (template: Template, type: string) => template.findResources(type) as Record<string, Resource>;
 
 describe("the staging foundation keeps the live DNS firewall and egress alarms", () => {
-  it("has every live firewall and alarm resource under the same logical id with the same type and properties", () => {
+  // The one intended change since the live 0.5.18 template: the allow list also holds the named "Google Vertex AI" group (owner 2026-11-17). Everything else is the live resource, byte for byte.
+  const vertexHosts = GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.map((entry) => entry.host);
+  const allowListId = Object.entries(liveFirewall).find(([, resource]) => resource.Type === "AWS::Route53Resolver::FirewallDomainList" && resource.Properties.Name === "agentx-staging-allow")![0];
+
+  it("has every live firewall and alarm resource under the same logical id with the same type and properties, the allow list differing only by the Google Vertex AI group", () => {
     expect(Object.keys(liveFirewall)).toHaveLength(12);
     for (const [id, live] of Object.entries(liveFirewall)) {
       const synthesized = stagingStacks.foundation.Resources[id];
       expect(synthesized, id).toBeDefined();
-      expect(withoutMetadata(synthesized!), id).toStrictEqual(live);
+      if (id !== allowListId) expect(withoutMetadata(synthesized!), id).toStrictEqual(live);
     }
+  });
+
+  it("adds only the Google Vertex AI group to the allow list: the live domains in the live order, with exactly these exact hosts in one block after the default list's own names", () => {
+    const synthesized = withoutMetadata(stagingStacks.foundation.Resources[allowListId]!);
+    const domains = synthesized.Properties.Domains as string[];
+    const start = domains.indexOf(vertexHosts[0]!);
+    expect(start).toBeGreaterThan(0);
+    expect(domains.slice(start, start + vertexHosts.length)).toEqual(vertexHosts);
+    const without = [...domains.slice(0, start), ...domains.slice(start + vertexHosts.length)];
+    expect({ ...synthesized, Properties: { ...synthesized.Properties, Domains: without } }).toStrictEqual(liveFirewall[allowListId]);
+    // The block is the end of Code's default list; nothing broad came with it.
+    expect(domains.slice(0, start + vertexHosts.length)).toEqual([...DEFAULT_AGENT_ALLOW_DOMAINS]);
+    expect(domains.filter((domain) => typeof domain === "string" && domain.endsWith("googleapis.com"))).toEqual(vertexHosts);
+    expect(vertexHosts.some((host) => host.includes("*"))).toBe(false);
   });
 
   it("keeps the fixed names, the rule priorities and actions, and the association priority", () => {

@@ -6,7 +6,7 @@
 //
 // ON by default. The owner's own config can switch it off for one project (`projectSettings.<project>.sandboxModelHosts: "allow"`), for a customer whose tests really call a model with the repository's own key; the evidence then says so.
 //
-// Not here, on purpose: Google's token hosts (oauth2, sts, iamcredentials.googleapis.com). Whether they stay on any list is a separate owner decision.
+// Not here, on purpose: Google's token hosts (oauth2, sts, iamcredentials.googleapis.com). They are shared by other Google APIs, and since 2026-11-17 they are in the default list's named group "Google Vertex AI" (contracts/default-allow-domains.ts).
 import { builtinModelCatalog, type CompanyGatewayRow, type ModelCatalogRow, type PluginConfig } from "@agentx/contracts";
 
 /** The five hosts the default allow list gives the sandboxes today. Pinned here, so the deny never shrinks if the catalog changes. */

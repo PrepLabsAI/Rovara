@@ -71,8 +71,8 @@ describe("the setup agent cannot ask for a model host back (M1)", () => {
     const table = { store, now: () => Date.parse("2026-11-13T12:00:00Z") };
     const taskId = randomUUID();
     await store.put({ item: taskRow(taskId) });
-    // `generativelanguage.googleapis.com` is a catalog host that is not on the default list, so it becomes a card while the project's sandbox is allowed model hosts.
-    const host = "generativelanguage.googleapis.com";
+    // `firebasevertexai.googleapis.com` (Firebase AI Logic) is a catalog host that is not on the default list (the "Google Vertex AI" group has the Gemini API and Vertex hosts, not this one), so it becomes a card while the project's sandbox is allowed model hosts.
+    const host = "firebasevertexai.googleapis.com";
     expect(await requestHostAsk(table, { orgId, project: "payments", host, taskId, projectDomains: [], sandboxDenied: [] })).toMatchObject({ outcome: "created" });
     const subjectId = hostAskSubjectId(orgId, "payments", host);
     const attempt = { companyId: orgId, kind: SETUP_HOST_KIND, subjectId, requestId: "r1", outcome: "approve", seen: { revision: 1, artifactDigest: "x" } } as never;
