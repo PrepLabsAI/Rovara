@@ -265,6 +265,9 @@ export function localAwsEnvLines(input: { credentials: HelperCredentials; addres
   ];
 }
 
+/** The environment of a helper that runs Google's SDK image: gcloud's settings on the tmpfs, no usage report, no update check, no prompt. */
+const GCP_SDK_ENV_LINES: string[] = ["HOME=/tmp", "CLOUDSDK_CONFIG=/tmp/gcloud", "CLOUDSDK_CORE_DISABLE_USAGE_REPORTING=true", "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true", "CLOUDSDK_CORE_DISABLE_PROMPTS=1"];
+
 /** The families a helper may be, and the one way each takes its per-run credentials. A family not listed here is refused: whatever its image does with no setup is not decided by this launcher. */
 const FAMILY_RULES: Record<string, FamilyRule> = {
   postgres: { prepare: ({ credentials }) => ({ env: [`POSTGRES_USER=${need(credentials.user, USER)}`, `POSTGRES_PASSWORD=${need(credentials.password, PASSWORD)}`, `POSTGRES_DB=${need(credentials.database, DATABASE)}`] }) },
@@ -280,6 +283,15 @@ const FAMILY_RULES: Record<string, FamilyRule> = {
   "fake-server": { prepare: () => ({ env: [] }) },
   // The official image with no authentication (owner-image-list.ts says why): the run's network is sealed and nothing from the project is let in to it.
   mongodb: { prepare: () => ({ env: [] }) },
+  // The GCP pack (contracts gcp-pack-images.ts). None takes a credential: the emulators have no sign-in, and the run's network is sealed. Google's SDK image runs `gcloud` as an arbitrary numeric user with a read-only root, so
+  // gcloud's own settings go to the tmpfs, and it neither reports usage nor looks for an update. The other three images (Spanner, Cloud Storage, BigQuery) need nothing.
+  pubsub: { prepare: () => ({ env: [...GCP_SDK_ENV_LINES] }) },
+  firestore: { prepare: () => ({ env: [...GCP_SDK_ENV_LINES] }) },
+  datastore: { prepare: () => ({ env: [...GCP_SDK_ENV_LINES] }) },
+  bigtable: { prepare: () => ({ env: [...GCP_SDK_ENV_LINES] }) },
+  spanner: { prepare: () => ({ env: [] }) },
+  gcs: { prepare: () => ({ env: [] }) },
+  bigquery: { prepare: () => ({ env: [] }) },
 };
 
 /** The fixed commands of the `command` health checks, by catalog check id. A cache's client is named after the entry (Valkey's own, or Redis's). */

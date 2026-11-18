@@ -34,7 +34,7 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import { open, readFile, realpath, stat } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import {
-  CATALOG_REGISTRY_ROOT, TEST_SERVICES_LIMIT_DEFAULTS, TEST_SERVICES_OVER_LIMIT_SENTENCE, TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE, TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
+  CATALOG_REGISTRY_ROOT, TEST_SERVICES_LIMIT_DEFAULTS, TEST_SERVICES_OVER_LIMIT_SENTENCE, TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE, TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE, catalogSigningKeysCompiledIn, OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, isGcpPackFamily, normalizeOwnerList, ownerCatalogOf, ownerImageReferences, PrepullListSchema, ServiceCatalogSchema, TEST_SERVICES_AWS_ALL_SERVICES_FEATURE, TEST_SERVICES_AWS_PLAN_FEATURE, TEST_SERVICES_FAKE_PLAN_FEATURE, TEST_SERVICES_FILE_SEED_FEATURE, TEST_SERVICES_PLAN_FEATURE, TEST_SERVICES_SEED_LOCK_FEATURE, TEST_SERVICES_USAGE_LIMITS, TEST_SERVICES_USAGE_RESULT_KEY, TestServicesUsageRecordSchema, AWS_EMULATOR_ENGINE_VERSION, agentXError, awsPlanNeedsAllServices, catalogEntryById, catalogRepositoryName, checkEmulatorEngine, normaliseAwsServiceKey,
   type CatalogEdition, type CatalogEntry, type ServiceCatalog, type TaskAwsResource, type TaskDependencyPlan, type TestEnvTaskPlan, type TestServicesStartFailure, type TestServicesUsageRecord,
 } from "@agentx/contracts";
 import { TASK_SANDBOX_IMAGE_ENVIRONMENT, type TaskSandbox } from "./task-sandbox.js";
@@ -593,6 +593,8 @@ export function environmentFor(sandbox: "working" | "check", resolved: readonly 
   const emulator = resolved.find((item) => item.emulator !== undefined);
   return buildServiceEnvironment({
     sandbox, sinkholeUrl: SINKHOLE_URL, dependencies: resolved.flatMap((item) => (item.env === undefined ? [] : [item.env])), neverValues: neverValuesFor(resolved),
+    // A dependency of the GCP pack: the code is told a made-up project id (and no credential) next to the emulator variable its own connection template sets.
+    ...(resolved.some((item) => isGcpPackFamily(item.entry.family)) ? { gcp: {} } : {}),
     ...(emulator?.emulator === undefined ? {} : {
       aws: { alias: emulator.host, port: emulator.port, region: emulator.emulator.region, emulatedServices: emulator.emulator.services, repoEndpointNames },
     }),
