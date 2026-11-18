@@ -358,6 +358,40 @@ export class DeveloperSignIn extends Construct {
       // Secrets Manager appends "-" and six characters to a secret's name in its ARN.
       resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${oidcSecretName}-??????`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
     }));
+    // DEC 254zzz33: what the company layer's own sign-in writes and reads need beyond the grants above (each call site listed; staging audit 2026-11-18). Its own role policy, named
+    // environments only (the legacy template stays as deployed), as the broker's BrokerCompanyImportReads: never the DefaultPolicy. Every table statement names its key families
+    // with the Null guard; no ORG# family but the three named, for a company id of the shape OrgIdSchema accepts.
+    if (named) new iam.Policy(this, "SignInCompanyGrants", {
+      roles: [fn.role!],
+      statements: [
+        // (1) TransactWriteItems' condition checks: a member change's live-member and owner checks (company-membership.ts liveMemberCheck), self-serve create's switch
+        // (company-invites.ts SELF_SERVE_KEY), a sign-in link's finish (sign-in-links.ts: DEVELOPER#, COMPANY_MEMBER#, SESSION#) and an admin's unlink (COMPANY_MEMBER#).
+        new iam.PolicyStatement({
+          actions: ["dynamodb:ConditionCheckItem"], resources: [table.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*", "COMPANY_SELF_SERVE", "DEVELOPER#*", "SESSION#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        }),
+        // (2) Lists: a company's members (and the last-owner check), its pending pre-approvals, the invite codes, and a person's connected sign-ins.
+        new iam.PolicyStatement({
+          actions: ["dynamodb:Query"], resources: [table.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS", "ORG#org_????????????????????#PREAPPROVAL", "COMPANY_INVITE_CODES", "SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        }),
+        // (4) Unlinking a connected sign-in deletes its link row only (sign-in-links.ts); the linked identity's DEVELOPER# record is kept, never deleted.
+        new iam.PolicyStatement({
+          actions: ["dynamodb:DeleteItem"], resources: [table.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        }),
+        // (5) The operator's company import undo (company-import.ts undoImport): the imported company record, member views and memberships, each conditioned on being unchanged.
+        new iam.PolicyStatement({
+          actions: ["dynamodb:DeleteItem"], resources: [table.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#MEMBERS", "COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        }),
+        // (3) A company's own OIDC client secret (company-issuer.ts companyIssuerSecretName: agentx/<env>/org-signin/<company>/oidc), read-only. An operator stores it (no role writes it).
+        new iam.PolicyStatement({
+          actions: ["secretsmanager:GetSecretValue"],
+          resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/org-signin/*/oidc-??????`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+        }),
+      ],
+    });
 
     const integration = new apigwv2.CfnIntegration(this, "Integration", {
       apiId: props.api.ref, integrationType: "AWS_PROXY", integrationUri: fn.functionArn, payloadFormatVersion: "2.0",
@@ -462,7 +496,11 @@ export class DeveloperSignIn extends Construct {
           actions: ["dynamodb:GetItem"],
           resources: [table.tableArn],
           conditions: {
-            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY"] },
+            // DEC 254zzz29: and the company's own sign-in issuer row (ORG#<id>#SIGNIN_ISSUER / OIDC), which the broker's company session check reads on every
+            // request of a session in a company that is not the built-in one (developer-routes.ts companyOidcSession); without it that check was AccessDenied (401).
+            // DEC 254zzz32: and the company's email index (ORG#<id>#EMAIL#<sha256>, store.ts emailIndexKey), which admin-actions.ts resolveDeveloper reads to name a
+            // person by email in a company that is not the built-in one (project members, admin plans). Read-only, one company's index rows by key.
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#SIGNIN_ISSUER", "ORG#org_????????????????????#EMAIL#*"] },
             Null: { "dynamodb:LeadingKeys": "false" },
           },
         }),

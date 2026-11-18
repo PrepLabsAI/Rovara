@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, SERVICE_ROLE_SERVICES, type PolicyStatementJson } from "@agentx/contracts";
+import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
@@ -15,9 +15,18 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
-import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
+import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
+import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
+import type { DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
+import { resolveDeveloper } from "../../packages/broker/src/aws/admin-actions.js";
+import { authorizeQuery, httpEvent } from "../support/developer-fakes.js";
+import { fakeGithub, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, type FakeGithubUser } from "../support/fake-github.js";
+import { B, SECRET, sharedSignInWorld, WEB, X, type SharedSignInWorld } from "../support/company-shared-signin-world.js";
 
 skipLambdaBundling();
 
@@ -39,6 +48,7 @@ function leadingKeysOf(statement: Statement): string[] {
 }
 
 let named: TemplateJson;
+let namedWithSignInGrants: TemplateJson;
 let legacy: TemplateJson;
 let brokerEstimate: number;
 let brokerArnEstimate: number;
@@ -128,7 +138,11 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  named = withoutSlackCompanyMode(controlPlane(app, "agentx-staging-control-plane")) as TemplateJson;
+  const full = withoutSlackCompanyMode(controlPlane(app, "agentx-staging-control-plane")) as TemplateJson;
+  namedWithSignInGrants = structuredClone(full);
+  // DEC 254zzz33: the sign-in function's company grants (SignInCompanyGrants) are asserted exactly by tests/support/company-import-reads-template.ts and taken out, so every pin
+  // below holds what it held before (rule D); tests/contract/signin-company-grants.test.ts runs each code path under the full synthesized policy.
+  named = withoutSignInCompanyGrants(full);
   foundation = controlPlane(app, "agentx-staging-foundation");
   const policy = app.node.findAll().find((node) => node instanceof iam.Policy && node.node.path.endsWith("/Broker/ServiceRole/DefaultPolicy")) as iam.Policy;
   // CDK's splitter uses these estimates on unresolved tokens, not serialized template length.
@@ -1580,7 +1594,8 @@ const BROKER_ARN_ESTIMATE = 144;
 // ENV-ROOM 2 (2026-11-17): the names parameter's ARN joins the GetParameters statement (+147 estimated), paid for by merging the broker's two lambda:InvokeFunction and two
 // states:StartExecution statements (-68 each) and dropping the two inert stream actions from the State statement (-50). Was 6114 / 7492.
 // DEC 254zzz(2): +710 for BrokerCompanyImportReads (6026 before): the broker's second role policy, counted here with every other inline document. The DefaultPolicy estimate below is unchanged.
-const BROKER_RESOLVED_INLINE_SIZE = 6736; // All inline documents after realistic ARN expansion.
+// DEC 254zzz29/254zzz32: +84 for ORG#<id>#SIGNIN_ISSUER (+45) and ORG#<id>#EMAIL#* (+39) in BrokerCompanyImportReads' GetItem keys (6736 before). DefaultPolicy unchanged.
+const BROKER_RESOLVED_INLINE_SIZE = 6820; // All inline documents after realistic ARN expansion.
 const BROKER_INLINE_ESTIMATE = 7453; // This replaces the R3R4 pin.
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
@@ -1717,7 +1732,8 @@ const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:G
 const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
 /** DEC 254zzz(2): the install company import's two sign-in table reads (BrokerCompanyImportReads); asserted statement by statement in "gives the broker exactly the install company import's two reads". */
 const companyImportTuples: AccessTuple[] = [
-  ["role:BrokerServiceRole", "Allow", "dynamodb:GetItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#COMPANY\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
+  // DEC 254zzz29/254zzz32 (rule D: this one row's condition gains ORG#<id>#SIGNIN_ISSUER and ORG#<id>#EMAIL#*; "rule D: taking the new keys out ..." proves every other row is unchanged).
+  ["role:BrokerServiceRole", "Allow", "dynamodb:GetItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#COMPANY\",\"ORG#org_????????????????????#EMAIL#*\",\"ORG#org_????????????????????#SIGNIN_ISSUER\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
   ["role:BrokerServiceRole", "Allow", "dynamodb:Query", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#MEMBERS\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
 ];
 /**
@@ -1920,7 +1936,8 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     expect(statementsIn(policy.Properties.PolicyDocument)).toEqual([
       {
         Action: "dynamodb:GetItem", Effect: "Allow", Resource: { "Fn::GetAtt": [signInTableOf(named), "Arn"] },
-        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [COMPANY_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } },
+        // DEC 254zzz29/254zzz32: with the company's sign-in issuer row and email index (asserted in "company sign-in issuer read (DEC 254zzz29)").
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [COMPANY_PARTITION, "ORG#org_????????????????????#SIGNIN_ISSUER", "ORG#org_????????????????????#EMAIL#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
       },
       {
         Action: "dynamodb:Query", Effect: "Allow", Resource: { "Fn::GetAtt": [signInTableOf(named), "Arn"] },
@@ -2014,6 +2031,251 @@ describe("install company import reads (DEC 254zzz(2))", () => {
     for (const { command, pk } of signIn) {
       const action = command === "GetCommand" ? "dynamodb:GetItem" : command === "QueryCommand" ? "dynamodb:Query" : "unexpected";
       expect(probe(tuples, "role:BrokerServiceRole", action, "table:DeveloperSignInTable", { "dynamodb:LeadingKeys": [pk] }), `${command} ${pk}`).toBe(true);
+    }
+  });
+});
+
+// DEC 254zzz29 (staging, 2026-11-18): after a Slack sign-in into a company that is not the built-in one, Cloud's POST /v1/dev/access answered 401. The broker's company session check
+// (developer-routes.ts companyOidcSession, from authenticateClientToken) reads the company's own sign-in issuer row, ORG#<id>#SIGNIN_ISSUER / OIDC, on the sign-in table; the broker held
+// no grant for that partition, so the read was AccessDenied and the check refused. The fix is that one partition, added to BrokerCompanyImportReads' GetItem statement (same Null guard).
+describe("company sign-in issuer read (DEC 254zzz29)", () => {
+  const COMPANY_PARTITION = "ORG#org_????????????????????#COMPANY";
+  const ISSUER_PARTITION = "ORG#org_????????????????????#SIGNIN_ISSUER";
+  // DEC 254zzz32: the company's email index (admin-actions.ts resolveDeveloper by email in a company that is not the built-in one).
+  const EMAIL_PARTITION = "ORG#org_????????????????????#EMAIL#*";
+  const MEMBERS_PARTITION = "ORG#org_????????????????????#MEMBERS";
+  const broker = "role:BrokerServiceRole";
+  const table = "table:DeveloperSignInTable";
+  const keys = (...pk: string[]) => ({ "dynamodb:LeadingKeys": pk });
+  /** The template as it was before this change: the two new partitions taken out of the one GetItem statement, nothing else touched. */
+  const withoutIssuerKey = (template: TemplateJson): TemplateJson => {
+    const copy = structuredClone(template);
+    const [[, policy]] = companyImportPolicies(copy) as [[string, Resource]];
+    const statements = statementsIn(policy.Properties.PolicyDocument).filter((s) => allows(s, "dynamodb:GetItem"));
+    expect(statements).toHaveLength(1);
+    const condition = statements[0]!.Condition!["ForAllValues:StringLike"] as Record<string, string[]>;
+    expect(condition["dynamodb:LeadingKeys"]).toEqual(expect.arrayContaining([ISSUER_PARTITION, EMAIL_PARTITION]));
+    condition["dynamodb:LeadingKeys"] = condition["dynamodb:LeadingKeys"]!.filter((key) => key !== ISSUER_PARTITION && key !== EMAIL_PARTITION);
+    return copy;
+  };
+  const signInTableArn = () => ({ "Fn::GetAtt": [ofType(named, "AWS::DynamoDB::Table").find(([id]) => id.startsWith("DeveloperSignInTable"))![0], "Arn"] });
+
+  it("adds exactly ORG#<id>#SIGNIN_ISSUER and ORG#<id>#EMAIL#* to the broker's one GetItem statement on the sign-in table, with the Null guard, named environments only", () => {
+    const [[, policy]] = companyImportPolicies(named) as [[string, Resource]];
+    expect(policy.Properties.PolicyDocument).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        { Action: "dynamodb:GetItem", Effect: "Allow", Resource: signInTableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [COMPANY_PARTITION, ISSUER_PARTITION, EMAIL_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } } },
+        { Action: "dynamodb:Query", Effect: "Allow", Resource: signInTableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [MEMBERS_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } } },
+      ],
+    });
+    // The id is the shape OrgIdSchema accepts and companyIssuerKey builds: ORG#org_<20 base-36>#SIGNIN_ISSUER.
+    expect(companyScoped(COMPANY_A.orgId, "SIGNIN_ISSUER")).toMatch(globRegExp(ISSUER_PARTITION));
+    // And the email index key emailIndexKey builds for a company: ORG#<id>#EMAIL#<sha256 of the email>; the built-in company's stays EMAIL#<sha256> (granted before).
+    expect(emailIndexKey("Person@Example.test", COMPANY_A.orgId).pk).toMatch(globRegExp(EMAIL_PARTITION));
+    expect(emailIndexKey("Person@Example.test", IMPLICIT_COMPANY_ID).pk).toMatch(/^EMAIL#[a-f0-9]{64}$/u);
+    // Nowhere else: not the DefaultPolicy, not another role, not the legacy (production) template.
+    expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("SIGNIN_ISSUER");
+    expect(JSON.stringify(brokerDefaultStatements(named))).not.toContain("ORG#");
+    expect(Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r).includes("SIGNIN_ISSUER"))).toHaveLength(1);
+    expect(JSON.stringify(legacy)).not.toContain("SIGNIN_ISSUER");
+  });
+
+  it("DEC 254zzz33: the sign-in function's company grants are one named-only role policy, and removing it gives back exactly the old template", () => {
+    const policies = Object.keys(namedWithSignInGrants.Resources).filter((id) => /^DeveloperSignInSignInCompanyGrants[0-9A-F]{8}$/u.test(id));
+    expect(policies).toHaveLength(1);
+    expect(namedWithSignInGrants.Resources[policies[0]!]!.Type).toBe("AWS::IAM::Policy");
+    // The helper asserts the exact five statements before taking it out; what is left is byte-identical to the pinned template.
+    expect(JSON.stringify(withoutSignInCompanyGrants(structuredClone(namedWithSignInGrants)))).toBe(JSON.stringify(named));
+    expect(JSON.stringify(legacy)).not.toContain("SignInCompanyGrants");
+    expect(JSON.stringify(legacy)).not.toContain("org-signin");
+  });
+
+  it("allows the issuer row's GetItem for any company and nothing wider", () => {
+    const tuples = accessTuples(named);
+    for (const [action, pk, allowed] of [
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, true], ["dynamodb:GetItem", `ORG#${COMPANY_B.orgId}#SIGNIN_ISSUER`, true],
+      // GetItem only: no Query, Scan or write on the issuer partition.
+      ["dynamodb:Query", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, false], ["dynamodb:Scan", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, false],
+      ["dynamodb:PutItem", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, false], ["dynamodb:UpdateItem", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, false],
+      ["dynamodb:DeleteItem", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, false],
+      // Only the exact company id shape and the exact suffix.
+      ["dynamodb:GetItem", "ORG#org_aaaaaaaaaaaaaaaaaaa#SIGNIN_ISSUER", false], ["dynamodb:GetItem", "ORG#org_aaaaaaaaaaaaaaaaaaaaa#SIGNIN_ISSUER", false],
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER#x`, false], ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#SIGNIN`, false],
+      ["dynamodb:GetItem", "ORG#x#SIGNIN_ISSUER", false],
+      // DEC 254zzz32: the email index, GetItem only, for any company id of the right shape; never another family or a write.
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#EMAIL#${"a".repeat(64)}`, true], ["dynamodb:GetItem", `ORG#${COMPANY_B.orgId}#EMAIL#${"b".repeat(64)}`, true],
+      ["dynamodb:Query", `ORG#${COMPANY_A.orgId}#EMAIL#${"a".repeat(64)}`, false], ["dynamodb:PutItem", `ORG#${COMPANY_A.orgId}#EMAIL#${"a".repeat(64)}`, false],
+      ["dynamodb:DeleteItem", `ORG#${COMPANY_A.orgId}#EMAIL#${"a".repeat(64)}`, false],
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#EMAILS`, false], ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#EMAIL`, false],
+      ["dynamodb:GetItem", `ORG#org_aaaaaaaaaaaaaaaaaaa#EMAIL#${"a".repeat(64)}`, false], ["dynamodb:GetItem", `ORG#x#EMAIL#${"a".repeat(64)}`, false],
+      ["dynamodb:GetItem", `ORG#${COMPANY_A.orgId}#BAN`, false],
+    ] as const) expect(probe(tuples, broker, action, table, keys(pk)), `${action} ${pk}`).toBe(allowed);
+    // ForAllValues: beside a partition it may not read, refused. No leading key at all: this statement's Null guard refuses (probed against its own tuple alone, since the
+    // DefaultPolicy's older GetItem statement on the table has no Null guard; a real GetItem always carries its partition key).
+    expect(probe(tuples, broker, "dynamodb:GetItem", table, keys(`ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`, `ORG#${COMPANY_A.orgId}#BAN`))).toBe(false);
+    const own = tuples.filter(([p, , a, r, c]) => p === broker && a === "dynamodb:GetItem" && r === table && c.includes("#SIGNIN_ISSUER"));
+    expect(own).toHaveLength(1);
+    expect(probe(own, broker, "dynamodb:GetItem", table, keys(`ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`))).toBe(true);
+    expect(probe(own, broker, "dynamodb:GetItem", table, {})).toBe(false);
+    // No role without a sign-in table grant gets it (the sign-in function already reads its whole table, as before: it writes these rows).
+    for (const other of ["role:DispatcherServiceRole", "role:SlackIngressServiceRole", "role:agentx-other-env"]) {
+      expect(probe(tuples, other, "dynamodb:GetItem", table, keys(`ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER`)), other).toBe(false);
+    }
+  });
+
+  it("rule D: taking the new keys out gives back exactly the old policy, the old tuples and the old pinned remainder", () => {
+    const before = withoutIssuerKey(named);
+    const [[, policy]] = companyImportPolicies(before) as [[string, Resource]];
+    // The policy exactly as #966 left it.
+    expect(policy.Properties.PolicyDocument).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        { Action: "dynamodb:GetItem", Effect: "Allow", Resource: signInTableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [COMPANY_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } } },
+        { Action: "dynamodb:Query", Effect: "Allow", Resource: signInTableArn(), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [MEMBERS_PARTITION] }, Null: { "dynamodb:LeadingKeys": "false" } } },
+      ],
+    });
+    // The tuples differ in exactly one row: the GetItem statement's condition. Every other row of every role is unchanged.
+    const text = (tuples: AccessTuple[]) => new Set(tuples.map((tuple) => JSON.stringify(tuple)));
+    const now = text(accessTuples(named)), old = text(accessTuples(before));
+    const oldRow = JSON.stringify([broker, "Allow", "dynamodb:GetItem", table, `{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["${COMPANY_PARTITION}"]},"Null":{"dynamodb:LeadingKeys":["false"]}}`]);
+    const newRow = JSON.stringify([broker, "Allow", "dynamodb:GetItem", table, `{"ForAllValues:StringLike":{"dynamodb:LeadingKeys":["${COMPANY_PARTITION}","${EMAIL_PARTITION}","${ISSUER_PARTITION}"]},"Null":{"dynamodb:LeadingKeys":["false"]}}`]);
+    expect([...now].filter((row) => !old.has(row))).toEqual([newRow]);
+    expect([...old].filter((row) => !now.has(row))).toEqual([oldRow]);
+    // Everything the digest and snapshot pins hold is the template without this policy: identical with and without the new key.
+    const remainder = (template: TemplateJson) => {
+      const copy = structuredClone(template);
+      for (const [id] of companyImportPolicies(copy)) delete copy.Resources[id];
+      return createHash("sha256").update(JSON.stringify(copy)).digest("hex");
+    };
+    expect(remainder(named)).toBe(remainder(before));
+  });
+
+  it("is a role policy the deploy role and the permissions boundary allow, and the boundary allows the read itself", () => {
+    const brokerRole = "arn:aws:iam::111122223333:role/agentx/staging/agentx-staging-control-plane-BrokerServiceRole-AbCdEf";
+    for (const action of ["iam:PutRolePolicy", "iam:DeleteRolePolicy"]) {
+      expect(policyAllows(deploy, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `deploy ${action}`).toBe(true);
+      expect(policyAllows(boundary, action, brokerRole, { "iam:PermissionsBoundary": boundaryArn }), `boundary ${action}`).toBe(true);
+    }
+    expect(policyAllows(deploy, "iam:CreatePolicy", "*"), "no managed policy").toBe(false);
+    expect(ofType(named, "AWS::IAM::ManagedPolicy")).toHaveLength(0);
+    expect(policyAllows(boundary, "dynamodb:GetItem", SAMPLE_TABLE_ARN, { "dynamodb:LeadingKeys": `ORG#${COMPANY_A.orgId}#SIGNIN_ISSUER` }), "boundary GetItem").toBe(true);
+    // probe() also checks the boundary: the read is allowed end to end.
+    expect(probe(accessTuples(named), broker, "dynamodb:GetItem", table, keys(`ORG#${COMPANY_B.orgId}#SIGNIN_ISSUER`))).toBe(true);
+  });
+
+  /** A document client that answers as DynamoDB would for the broker role under `tuples`: a sign-in table call the tuples do not allow is AccessDenied. */
+  function underIam(db: FakeDynamoDb, tuples: AccessTuple[], calls: Array<{ action: string; pk: string; allowed: boolean }>) {
+    return {
+      send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        const input = command.input as { TableName?: string; Key?: { pk?: string }; KeyConditionExpression?: string; ExpressionAttributeValues?: Record<string, unknown> };
+        if (input.TableName === "signin") {
+          const action = ({ GetCommand: "dynamodb:GetItem", QueryCommand: "dynamodb:Query" } as Record<string, string>)[command.constructor.name] ?? `unexpected:${command.constructor.name}`;
+          const placeholder = /\bpk\s*=\s*(:\w+)/u.exec(input.KeyConditionExpression ?? "")?.[1];
+          const raw = input.Key?.pk ?? (placeholder === undefined ? undefined : input.ExpressionAttributeValues?.[placeholder]);
+          const pk = typeof raw === "string" ? raw : "";
+          const allowed = probe(tuples, broker, action, table, pk === "" ? {} : keys(pk));
+          calls.push({ action, pk, allowed });
+          if (!allowed) throw Object.assign(new Error("not authorized to perform this action"), { name: "AccessDeniedException" });
+        }
+        return db.send(command);
+      },
+    };
+  }
+  const githubUsers: FakeGithubUser[] = [{ id: 2001, login: "octo-x", name: "Octo X", emails: [{ email: "octo-x@example.test", primary: true, verified: true }] }];
+  /** A real GitHub sign-in through the web app, naming a company (as company-github-signin.test.ts does). */
+  async function githubSignIn(w: SharedSignInWorld, gh: ReturnType<typeof fakeGithub>, login: string, company: string): Promise<string> {
+    let response = await w.http(httpEvent("GET", authorizeQuery({ client_id: "web-app", redirect_uri: WEB, company })));
+    if (response.statusCode === 200) response = await w.http(httpEvent("GET", /href="([^"]*method=github)"/.exec(response.body)![1]!.replaceAll("&amp;", "&")));
+    const back = await w.http(httpEvent("GET", gh.approve(response.headers.location!, login)));
+    const code = new URL(back.headers.location!).searchParams.get("code");
+    if (code === null) throw new Error("test setup: GitHub sign-in refused");
+    const tokens = await w.exchange(code, { client_id: "web-app", client_secret: SECRET, redirect_uri: WEB });
+    return tokens.body.access_token as string;
+  }
+  /** Two companies: X (self-serve, no issuer row: the shared method) and B (its own issuer). A Slack person and a GitHub person each signed in to X by the install's method. */
+  async function twoCompanyWorld() {
+    const w = sharedSignInWorld({ slackUsers: [{ userId: "U0XSLACK1", teamId: "T0OTHER9", name: "Slack X", email: "slack-x@other.test" }] });
+    const gh = fakeGithub(githubUsers);
+    w.deps.config.github = {};
+    w.deps.providers.github = githubSignInProvider({ clientId: GITHUB_CLIENT_ID, clientSecret: async () => GITHUB_CLIENT_SECRET, fetch: gh.fetch, now: w.now });
+    w.routes.developer.methods.github = true;
+    await w.setup();
+    // Slack: an invite code into X (made like the owner's), then a plain Slack sign-in lands in X with the shared-method mark.
+    const slackFirst = await w.signIn("U0XSLACK1", { slackTeam: "T0OTHER9" });
+    const slackId = ownerKeyForSubject(SLACK_OIDC_ISSUER, "T0OTHER9:U0XSLACK1");
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "octo-x@example.test", role: "member", expiresInHours: 24 });
+    w.db.set({ pk: membershipKey(slackId).pk, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: slackId, companyId: X, role: "member", joinedAt: new Date(w.now()).toISOString(), joinedVia: "preapproval" });
+    expect(slackFirst.refused).toBeUndefined();
+    const slack = await w.signIn("U0XSLACK1", { slackTeam: "T0OTHER9" });
+    const github = await githubSignIn(w, gh, "octo-x", X);
+    const githubId = ownerKeyForSubject(GITHUB_ISSUER, "2001");
+    for (const [id, amr] of [[slackId, "slack"], [githubId, "github"]] as const) {
+      expect(w.sessionOf(id), amr).toEqual(expect.arrayContaining([expect.objectContaining({ amr, companyId: X, installMethod: true })]));
+    }
+    // B has its own issuer row; X has none.
+    expect(w.db.get(companyScoped(B, "SIGNIN_ISSUER"), "OIDC")).toBeDefined();
+    expect(w.db.get(companyScoped(X, "SIGNIN_ISSUER"), "OIDC")).toBeUndefined();
+    return { w, people: [{ amr: "slack", id: slackId, token: slack.access! }, { amr: "github", id: githubId, token: github }] as const };
+  }
+  const accessUnder = async (w: SharedSignInWorld, tuples: AccessTuple[], token: string) => {
+    const calls: Array<{ action: string; pk: string; allowed: boolean }> = [];
+    const client = underIam(w.db, tuples, calls);
+    const on: DeveloperRouteDependencies = { ...w.routes, documentClient: client, companies: companyMembershipFromDynamo(client, "signin") };
+    return { answer: await w.callOn(on, "POST", "/v1/dev/access", token, {}), calls };
+  };
+
+  it("a Slack or GitHub shared-method session in a company that is not the built-in one passes POST /v1/dev/access under the synthesized policy, with no AccessDenied", async () => {
+    const { w, people } = await twoCompanyWorld();
+    for (const { amr, id, token } of people) {
+      const { answer, calls } = await accessUnder(w, accessTuples(named), token);
+      expect(answer, amr).toEqual({ status: 200, body: expect.objectContaining({ developerId: id, companyId: X, companyRole: "member" }) as unknown });
+      expect(calls.filter((call) => !call.allowed), amr).toEqual([]);
+      // The issuer read happened, for X only (never B's row: isolation), and every ORG# read is X's.
+      expect(calls.filter((call) => call.pk.endsWith("#SIGNIN_ISSUER")), amr).toEqual([{ action: "dynamodb:GetItem", pk: companyScoped(X, "SIGNIN_ISSUER"), allowed: true }]);
+      expect(calls.filter((call) => call.pk.startsWith("ORG#") && !call.pk.startsWith(`ORG#${X}#`)), amr).toEqual([]);
+      // Every sign-in table read the route made: only these key families.
+      expect([...new Set(calls.map((call) => `${call.action} ${call.pk.replace(/[a-f0-9]{64}|org_[0-9a-z]{20}|[0-9a-f-]{36}/gu, "<id>")}`))].sort(), amr).toEqual([
+        "dynamodb:GetItem COMPANY_MEMBER#<id>", "dynamodb:GetItem DEVELOPER#<id>", "dynamodb:GetItem ORG#<id>#COMPANY", "dynamodb:GetItem ORG#<id>#SIGNIN_ISSUER",
+        "dynamodb:GetItem SESSION#<id>", "dynamodb:GetItem SIGNIN_CLIENTS",
+      ]);
+    }
+  });
+
+  it("DEC 254zzz32: naming a person by email in a company that is not the built-in one reads that company's email index under the synthesized policy (two companies)", async () => {
+    const db = new FakeDynamoDb({ seed: 11 });
+    const people = { [COMPANY_A.orgId]: "a".repeat(64), [COMPANY_B.orgId]: "b".repeat(64) };
+    for (const [company, id] of Object.entries(people)) {
+      db.set({ ...emailIndexKey("same@example.test", company), entityType: "DEVELOPER_EMAIL", developerId: id, updatedAt: "2026-11-18T00:00:00.000Z" });
+      db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "oidc", displayName: `Person ${company}`, email: "same@example.test", revoked: false });
+      db.set({ ...membershipKey(id), entityType: "COMPANY_MEMBERSHIP", personId: id, companyId: company, role: "member", joinedAt: "2026-11-18T00:00:00.000Z" });
+    }
+    const resolveUnder = async (tuples: AccessTuple[], company: string) => {
+      const calls: Array<{ action: string; pk: string; allowed: boolean }> = [];
+      const client = underIam(db, tuples, calls);
+      const deps = { documentClient: client, tableName: "State", signInTableName: "signin", limitDefaults: { member: 1, organization: 1 }, companies: companyMembershipFromDynamo(client, "signin"), now: () => 0 };
+      try { return { person: (await resolveDeveloper(deps, "same@example.test", company)).developerId, calls }; }
+      catch (error) { return { refused: (error as { code?: string }).code, calls }; }
+    };
+    for (const company of [COMPANY_A.orgId, COMPANY_B.orgId]) {
+      // Each company's email names its own person only (one company's index row, read by key).
+      const now = await resolveUnder(accessTuples(named), company);
+      expect(now.person, company).toBe(people[company]);
+      expect(now.calls.filter((call) => !call.allowed), company).toEqual([]);
+      expect(now.calls.filter((call) => call.pk.startsWith("ORG#")).map((call) => call.pk), company).toEqual([emailIndexKey("same@example.test", company).pk]);
+      // Before: the index read was AccessDenied.
+      const before = await resolveUnder(accessTuples(withoutIssuerKey(named)), company);
+      expect(before.refused, company).toBe("NOT_FOUND");
+      expect(before.calls.filter((call) => !call.allowed), company).toEqual([{ action: "dynamodb:GetItem", pk: emailIndexKey("same@example.test", company).pk, allowed: false }]);
+    }
+  });
+
+  it("before this change the same call was the staging 401: the issuer read is AccessDenied", async () => {
+    const { w, people } = await twoCompanyWorld();
+    for (const { amr, token } of people) {
+      const { answer, calls } = await accessUnder(w, accessTuples(withoutIssuerKey(named)), token);
+      expect(answer, amr).toEqual({ status: 401, body: { error: { code: "AUTH_REQUIRED" } } });
+      expect(calls.filter((call) => !call.allowed), amr).toEqual([{ action: "dynamodb:GetItem", pk: companyScoped(X, "SIGNIN_ISSUER"), allowed: false }]);
     }
   });
 });

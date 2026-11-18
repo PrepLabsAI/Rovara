@@ -335,10 +335,11 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const clearsSlack = slack !== undefined && person.slackUserId === slack;
       const writes: Write[] = [
         { Delete: { TableName: tableName, Key: { pk: `SIGNIN_LINKS#${personDeveloperId}`, sk: `METHOD#${method}` }, ConditionExpression: "linkedId = :linked", ExpressionAttributeValues: { ":linked": linkedId } } },
-        // A linked identity an admin turned off stays turned off (its record is kept, no longer pointing at the person); any other is deleted.
-        linked.revoked === true
-          ? { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, UpdateExpression: "REMOVE mergedInto", ConditionExpression: "mergedInto = :person AND revoked = :true", ExpressionAttributeValues: { ":person": personDeveloperId, ":true": true } } }
-          : { Delete: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, ConditionExpression: "mergedInto = :person AND revoked = :false", ExpressionAttributeValues: { ":person": personDeveloperId, ":false": false } } },
+        // DEC 254zzz33 (4): the linked identity's record is kept, never deleted (the sign-in role deletes no DEVELOPER# row): it no longer points at the person, and records when and
+        // from whom it was unlinked. One an admin turned off stays turned off. Any other signs in again as nobody's person, as a deleted record did: `companyless` (DEC 253z) so the
+        // kept record is never "legacy" (company-membership.ts join would otherwise seat it in the built-in company with no invitation) and it may take a company-less session.
+        { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" }, UpdateExpression: "REMOVE mergedInto SET unlinkedAt = :at, unlinkedFrom = :person, companyless = :true",
+          ConditionExpression: "mergedInto = :person AND revoked = :revoked", ExpressionAttributeValues: { ":person": personDeveloperId, ":revoked": linked.revoked === true, ":at": at, ":true": true } } },
         // An admin's own membership still stands as checked (live, the person's company, owner or admin).
         ...(self ? [] : [{ ConditionCheck: { TableName: tableName, Key: membershipKey(developerId), ConditionExpression: "companyId = :company AND attribute_not_exists(revokedAt) AND (#role = :owner OR #role = :admin)",
           ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":company": membership.companyId, ":owner": "owner", ":admin": "admin" } } } satisfies Write]),

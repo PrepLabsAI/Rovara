@@ -8,7 +8,7 @@ type Resource = { Type: string; Properties: Record<string, unknown>; Condition?:
 type Template = { Parameters?: Record<string, unknown>; Conditions?: Record<string, unknown>; Resources: Record<string, Resource> };
 
 /** The policies' logical-id prefixes, one per consumer role (control-plane.ts). */
-export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperTaskNotifier", "DeveloperIdentity", "SlackIngressMembers", "ChannelApiMembers", "SessionReconciler", "SlackOrchestrator"] as const;
+export const SLACK_COMPANY_POLICIES = ["SlackIngress", "ChannelApi", "DeveloperTaskNotifier", "DeveloperIdentity", "SlackIngressMembers", "ChannelApiMembers", "SessionReconciler", "SlackOrchestrator", "Broker"] as const;
 /** Each consumer function's logical-id prefix and the variables the switch adds to it. */
 const VARIABLES: ReadonlyArray<readonly [RegExp, readonly string[]]> = [
   [/^SlackIngress[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "DEVELOPER_SIGNIN_TABLE_NAME", "AGENTX_ENV", "SLACK_TEAM_ID"]],

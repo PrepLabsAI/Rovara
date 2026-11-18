@@ -1004,6 +1004,12 @@ export class ControlPlaneStack extends Stack {
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
       // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
       addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
+      // DEC 254zzz32: the broker reads a company's own bot token (slack-company-wiring.ts readSecret: the hosted core's Slack task threads, link notices), as the other
+      // Slack consumers do. Read-only, the token family only, its own policy under the switch's condition (nothing while it is off; never the broker's DefaultPolicy).
+      // DEC 254zzz35: and the install's own Slack app secret (agentx/<env>/slack), read-only, for the install's own workspace (built-in company), which has no company token: its
+      // bot token is that secret's (the broker's Slack company wiring passes it as legacyToken). Same policy, same condition: nothing while company mode is off.
+      slackCompany.grant("Broker", broker.role!, [slackCompany.tokenRead(),
+        new iam.PolicyStatement({ sid: "ReadInstallSlackToken", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] })]);
       // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
       channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
     }
