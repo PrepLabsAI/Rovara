@@ -48,7 +48,7 @@ import { writeEvalCheckSetting } from "../../packages/broker/src/core/ci-evidenc
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { fromDocument, toDocument, type OperationRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { recordCritiqued } from "../../packages/broker/src/core/plan/check.js";
-import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { shortDigest } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
 import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
 import { verifiedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
@@ -65,6 +65,7 @@ import { startFakeProvider } from "../support/model-proxy-world.js";
 import { lessonRecord, draft } from "./lessons/lesson-helpers.js";
 import { catalogModelIds, listPricesPerMillion } from "../../packages/model-runtime/src/catalog.js";
 import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+import { createCompanyTaskSpend } from "../../packages/broker/src/core-host/company-task-spend.js";
 import { catalogPriceOf, costMicrosOf } from "../../packages/broker/src/core/cost/price-table.js";
 import { planAnswer, testedPlanDocument } from "../support/plan-documents.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
@@ -2781,6 +2782,92 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     const unpriced = await toReview(g);
     await g.callback(unpriced.review, "result", reviewsOf(unpriced.review, "d".repeat(40), "findings"));
     expect((await taskRecord(g, unpriced.taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
+  });
+
+  // L4-TSU: the same flow as a hosted install runs it: `taskSpendUsd` is the hosted reader of the company's own cost ledger (core-host/company-task-spend.ts) instead of the laptop's.
+  describe("with the hosted task spend reader (L4-TSU)", () => {
+    const OTHER_COMPANY = "org_bbbbbbbbbbbbbbbbbbbb";
+    const autoFixes = (record: Awaited<ReturnType<typeof taskRecord>>) => record.workflow.decisions.filter((decision) => decision.source === "AUTO_FIX");
+    type Put = (companyId: string, task: string, micros: number, over?: Record<string, unknown>) => Promise<unknown>;
+    /** The end report each of the task's model runs sends on a hosted install, booked (the fake worker books none). */
+    async function bookEndReports(h: Harness, taskId: string, workspaceId: string, except: readonly string[] = []) {
+      const store = h.runtime.registry.require("storage");
+      for (const run of await workspaceOperations({ store, companyId: IMPLICIT_COMPANY_ID }, workspaceId)) {
+        if (run.kind !== "task" || run.workflowMode === "CHECKS" || except.includes(run.id)) continue;
+        await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: `ENTRY#usage:${run.id}:t`, entityType: "COST_ENTRY", companyId: IMPLICIT_COMPANY_ID, taskId } });
+      }
+    }
+    /** A task blocked at its reviews with findings, under the hosted reader and the rows the test seeds (given the task id once it exists). */
+    async function blockedWith(seed: (taskId: string, put: Put) => Promise<void>, options: { endReports?: boolean } = {}) {
+      const h = await launch();
+      const store = h.runtime.registry.require("storage");
+      h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
+      const { taskId, workspaceId, review } = await toReview(h);
+      await seed(taskId, (companyId, task, micros, over = {}) => store.put({ item: { pk: costPartition(companyId, task), sk: "TOTAL", entityType: "COST_TOTAL", companyId, taskId: task, currency: "USD", micros, entries: 2, unpricedEntries: 0, ...over } }));
+      if (options.endReports !== false) await bookEndReports(h, taskId, workspaceId);
+      await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "findings"));
+      return taskRecord(h, taskId);
+    }
+
+    it("sends back while the task's spend plus one more round fits the cap, and stops (asks the owner) one micro-dollar past it", async () => {
+      // cap $15, one round estimated at $3: $12.00 still fits, $12.000001 does not
+      const fits = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 12_000_000); });
+      expect(autoFixes(fits)).toHaveLength(1);
+      expect(fits.autofixAsk).toBeUndefined();
+      const over = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 12_000_001); });
+      expect(autoFixes(over)).toHaveLength(0);
+      expect(over.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+      expect(over.autofixAsk).toMatchObject({ reason: "spend-cap" });
+    });
+
+    it("counts unknown spend as at the cap, never as nothing spent: no ledger row, a call with no price, a currency other than dollars and a run whose usage is not booked all ask the owner and send nothing back", async () => {
+      const none = await blockedWith(async () => undefined);
+      const unpriced = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 100_000, { unpricedEntries: 1 }); });
+      const euros = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 100_000, { currency: "EUR" }); });
+      // a small, readable total, but the coding and review runs' end reports are not booked (a lost run, or a flush the broker refused): the total is short by their spend
+      const unreported = await blockedWith(async (taskId, put) => { await put(IMPLICIT_COMPANY_ID, taskId, 100_000); }, { endReports: false });
+      for (const [label, record] of [["no row", none], ["unpriced", unpriced], ["euros", euros], ["unreported runs", unreported]] as const) {
+        expect(autoFixes(record), label).toHaveLength(0);
+        expect(record.autofixAsk, label).toMatchObject({ reason: "inputs-missing" });
+      }
+    });
+
+    it("counts only this task of this company: another task's big spend and another company's big spend for the same task id change nothing", async () => {
+      const own = await blockedWith(async (taskId, put) => {
+        await put(IMPLICIT_COMPANY_ID, taskId, 1_000_000);
+        await put(IMPLICIT_COMPANY_ID, "99999999-9999-4999-8999-999999999999", 500_000_000);
+        await put(OTHER_COMPANY, taskId, 500_000_000);
+      });
+      expect(autoFixes(own)).toHaveLength(1);
+      expect(own.autofixAsk).toBeUndefined();
+      // and the other way round: this task's own big spend binds even when everything else is small, and another company's small row never stands in for a missing one
+      const bound = await blockedWith(async (taskId, put) => {
+        await put(IMPLICIT_COMPANY_ID, taskId, 14_000_000);
+        await put(OTHER_COMPANY, taskId, 100_000);
+      });
+      expect(autoFixes(bound)).toHaveLength(0);
+      expect(bound.autofixAsk).toMatchObject({ reason: "spend-cap" });
+      const foreignOnly = await blockedWith(async (taskId, put) => { await put(OTHER_COMPANY, taskId, 100_000); });
+      expect(autoFixes(foreignOnly)).toHaveLength(0);
+      expect(foreignOnly.autofixAsk).toMatchObject({ reason: "inputs-missing" });
+    });
+
+    it("also holds a retry of a lost run to the cap (the retry path reads the same spend), and asks at once when the lost run's usage is not booked yet", async () => {
+      for (const booked of [true, false]) {
+        const h = await launch();
+        const store = h.runtime.registry.require("storage");
+        h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
+        const { taskId, workspaceId, review } = await toReview(h);
+        await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", companyId: IMPLICIT_COMPANY_ID, taskId, currency: "USD", micros: booked ? 13_000_000 : 100_000, entries: 2, unpricedEntries: 0 } });
+        // the earlier runs reported; the review run that is about to be lost has not (a lost run reports nothing)
+        await bookEndReports(h, taskId, workspaceId, [review.operationId]);
+        if (booked) await bookEndReports(h, taskId, workspaceId);
+        await h.runtime.app.flow.recordResult({ workspaceId: review.workspaceId, operationId: review.operationId, fence: review.fence, status: "INTERRUPTED", error: "the machine was lost" });
+        const asked = await taskRecord(h, taskId);
+        expect(asked.workflow.decisions.filter((decision) => decision.source === "AUTO_RETRY"), String(booked)).toHaveLength(0);
+        expect(asked.autofixAsk, String(booked)).toMatchObject({ reason: booked ? "spend-cap" : "inputs-missing" });
+      }
+    });
   });
 });
 

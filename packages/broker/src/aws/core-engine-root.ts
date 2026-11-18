@@ -45,6 +45,7 @@ import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
 import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
+import { createCompanyTaskSpend } from "../core-host/company-task-spend.js";
 import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
 import { hostedStandingInstructions } from "../core-host/standing-instructions.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
@@ -744,6 +745,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
+      // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap: the settled figure in THIS company's cost ledger, read fresh each time; anything not known to be complete throws (an ask, never "nothing spent").
+      taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.task_spend_refused", companyId, reason }) }),
       // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
       ...(inputs.linearIntake === undefined && inputs.chatThreads === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }) }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),

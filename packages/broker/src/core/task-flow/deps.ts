@@ -316,7 +316,7 @@ export interface TaskFlowDeps {
   /**
    * Lane L10, Rovara's own fixing of a block (the owner's rule: a code fault is sent back to coding by itself at most twice, one hiccup of the checks is retried once, anything unclear is asked
    * about). `capUsd` bounds what automatic rounds may add to a task whose spend is known; `taskSpendUsd` says what it is (undefined: nothing is priced, which Code treats as 0 so the
-   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead).
+   * count limits alone bound the rounds, and a Cloud install that cannot read it fills this with a function that throws, which asks the owner instead; the hosted roots fill it with `core-host/company-task-spend.ts`, which never answers undefined: anything not known to be complete, including a run whose usage is not booked yet, throws).
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
