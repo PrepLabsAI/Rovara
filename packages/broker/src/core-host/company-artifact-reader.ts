@@ -68,6 +68,8 @@ export async function workspaceHoldingKey(options: Pick<CompanyArtifactReaderOpt
  */
 export function createCompanyArtifactReader(options: CompanyArtifactReaderOptions): ArtifactReader {
   const { blobs, store, companyId } = options;
+  // A cap that is not a whole positive number of bytes is no cap: the default stands.
+  const cap = Number.isSafeInteger(options.maxReadBytes) && options.maxReadBytes! > 0 ? options.maxReadBytes! : COMPANY_ARTIFACT_READ_MAX_BYTES;
   const refuse = (reason: ArtifactReadRefusal): undefined => {
     try { options.refused?.(reason); } catch { /* a log never changes an answer */ }
     return undefined;
@@ -75,7 +77,7 @@ export function createCompanyArtifactReader(options: CompanyArtifactReaderOption
   return {
     async get(objectKey, maxBytes) {
       if (typeof maxBytes !== "number" || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) return refuse("bad_request");
-      const limit = Math.min(maxBytes, options.maxReadBytes ?? COMPANY_ARTIFACT_READ_MAX_BYTES);
+      const limit = Math.min(maxBytes, cap);
       const scope = artifactKeyScopeOf(objectKey);
       if (scope === undefined) return refuse("key_not_task_document");
       const held = await workspaceHoldingKey({ store, companyId }, scope);
