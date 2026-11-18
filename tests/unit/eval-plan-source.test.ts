@@ -335,7 +335,7 @@ const KEY = Buffer.alloc(32, 9);
 const EVAL_REQUEST = { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 } as const;
 const RECORD: EvalBaseRecord = { schemaVersion: 1, measures: [{ name: "accuracy", unit: "fraction", value: 0.8, direction: "up_good", spread: 0.04, count: 2 }], questions: [{ id: "q1", samples: [{ pass: true, answer: "a" }, { pass: true, answer: "a" }, { pass: true, answer: "a" }] }, { id: "q2", samples: [{ pass: true, answer: "b" }, { pass: true, answer: "b" }, { pass: true, answer: "b" }] }], caseCount: 2, recordedOn: "2026-11-16", roundKind: "check_unsealed", runnerSchemaVersion: 1 };
 
-async function endToEnd(options: { adapter?: boolean; head?: Record<string, string>; base?: Record<string, string> } = {}) {
+async function endToEnd(options: { adapter?: boolean | "no-answer-not-connected" | "no-answer-unknown"; head?: Record<string, string>; base?: Record<string, string> } = {}) {
   const repo = await candidate(options.base ?? { "evals/demo/q1.txt": Q1, "evals/demo/q2.txt": Q2 }, options.head ?? { "src/app.ts": "changed\n" });
   const a = company(A);
   await a.approve();
@@ -350,7 +350,7 @@ async function endToEnd(options: { adapter?: boolean; head?: Record<string, stri
   const parts = { company: A, project, baseCommit: repo.baseSha, codeHash: evalCodeHash(repo.baseSha), judgePin, commandFingerprint: inputs.commandFingerprint, catalogRowId: "model", model: "model", modelVersion: "version-1", evalSetHash: inputs.evalSetHash, hiddenSetHash: "none", settingsFingerprint: inputs.settingsFingerprint };
   await createDocumentBaseScoreCache(store, { companyId: A }).write(parts, RECORD, { writer: "rovara_base_round", baseCommit: repo.baseSha });
   const handler = createCallbackHandler({ flow: { store, companyId: A, callbackSigningKey: KEY } as never, blobs: {} as never, grants: {} as never,
-    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, registry: registryWith(options.adapter === true ? a.adapter : undefined) }) });
+    evalPlan: createEvalPlanSources({ store, companyId: A, members: a.members, registry: registryWith(options.adapter === true ? a.adapter : options.adapter === undefined || options.adapter === false ? undefined : { ...a.adapter, authority: async () => undefined, ...(options.adapter === "no-answer-not-connected" ? { providerConnected: async () => false } : {}) }) }) });
   const capability = new CallbackCapabilities(KEY).issue({ workspaceId, operationId, fence: 3, actions: [EVAL_PLAN_DELIVERY_ACTION], expiresInSeconds: 60 });
   const asks: string[] = [];
   // The worker's fetch reaches the broker's callback handler directly (no network).
@@ -389,6 +389,33 @@ describe("end to end: the signed eval-plan route, the worker's pinned hashes and
     const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
     expect(artifact?.outcome).toBe("not_run");
     expect(["spend_not_approved", "not_connected"]).not.toContain(artifact?.notRunReason);
+  });
+
+  it("L4-T3: an approved eval whose AI provider is not connected reads provider_not_connected (the new sentence), never 'not approved', with zero calls; unknown stays 'not approved'", async () => {
+    const run = async (adapter: "no-answer-not-connected" | "no-answer-unknown") => {
+      const e = await endToEnd({ adapter });
+      const grant = await e.sources.approval.read();
+      let calls = 0;
+      const ports = { roundKind: "check_unsealed" as const, ...e.sources, meter: { reserve: async () => { calls++; return undefined; } }, runner: async () => { calls++; throw new Error("no run"); } };
+      const artifact = await withEvalPinnedCandidate(e.repo.repositories, e.repo.candidates, new AbortController().signal, () => runFinalCheckEval(EVAL_REQUEST, ports, facts()));
+      expect(calls).toBe(0);
+      return { grant, artifact };
+    };
+    const off = await run("no-answer-not-connected");
+    expect(off.grant).toMatchObject({ company: A, project, selection: "evals/demo", provider: "customer", connected: false });
+    expect(off.artifact).toMatchObject({ outcome: "not_run", notRunReason: "provider_not_connected", evalConfigured: true });
+    expect(EVAL_NOT_RUN_SENTENCES.provider_not_connected).toMatch(/not connected/u); expect(JSON.stringify(off.artifact)).not.toMatch(/spend_not_approved/u);
+    const unknown = await run("no-answer-unknown");
+    expect(unknown.grant).toBeUndefined();
+    expect(unknown.artifact).toMatchObject({ outcome: "not_run", notRunReason: "spend_not_approved" });
+  });
+
+  it("L4-T3: the delivered grant carries `connected` as a boolean (false reads 'not connected'); anything else is not a delivery", () => {
+    const grant = { company: A, project, selection: "evals/demo", role: "owner", inputsDigest: "a".repeat(64), provider: "customer", maxCalls: 6, maxCostMicros: 60 };
+    const ready = (connected: unknown) => ({ status: "ready", plan: {}, approval: { ...grant, connected }, baseline: null });
+    expect(EvalPlanDeliverySchema.safeParse(ready(true)).success).toBe(true);
+    expect(EvalPlanDeliverySchema.safeParse(ready(false)).success).toBe(true);
+    for (const bad of ["false", 0, null, undefined]) expect(EvalPlanDeliverySchema.safeParse(ready(bad)).success, String(bad)).toBe(false);
   });
 
   it("a question file changed on main since approval reads its own reason, \"questions changed since setup approval: re-approve\", with zero calls (mutants: the worker's base hash check, the stale reason)", async () => {

@@ -322,6 +322,16 @@ describe("the result", () => {
     expect(await w.cache().readMeasurement!(await partsOf(w))).toBe("idle");
     expect(evalHealthNotRunWords("monthly_cap")).toMatch(/monthly AI spending limit/u);
   });
+  it("L4-T3: a worker that found the AI provider not connected ends the run with the new fixed words, and the card says them (never 'not approved')", async () => {
+    const w = await world(); const { requestId, claimId } = await started(w);
+    expect((await recordEvalHealthResult(w.deps(), project, body(requestId, claimId, { status: "not_run", reason: "provider_not_connected" }))).outcome).toBe("not_run");
+    expect(await w.row()).toMatchObject({ state: "not_run", notRun: { reason: "provider_not_connected" } });
+    const words = evalHealthNotRunWords("provider_not_connected");
+    expect(words).toBe("Not run: the AI your evals call is not connected for this project. Connect it in Company settings, then check again.");
+    expect(words).not.toBe(evalHealthNotRunWords("not_confirmed")); expect(words).not.toMatch(/not approved/iu);
+    const card = await readEvalCard({ store: w.w.store, companyId: A, members: w.w.members, monthlyCap: async () => CAP, healthRuns: true, now: () => w.clock.now }, project, person(A, "admin"));
+    expect(card.health).toMatchObject({ state: "not_run", words });
+  });
   it("is not taken after the window, or when the approval changed while it ran (the numbers were for another plan)", async () => {
     const late = await world(); const a = await started(late);
     late.clock.now += EVAL_HEALTH_RUN_MAX_MS + 1;

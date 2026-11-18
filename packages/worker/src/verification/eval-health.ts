@@ -15,7 +15,7 @@ export interface EvalHealthInput {
   cache: BaseScoreCache;
   run(request: { run: number; call: EvalMeterReservation["call"] }): Promise<{ measures: MeasuresFile; attestation: EvalBaseAttestation; seconds: number }>;
 }
-export type EvalHealthRefusal = "not_connected" | "invalid_questions" | "over_cap" | "invalid_identity" | "not_confirmed" | "monthly_cap" | "provider_incomplete" | "invalid_results" | "incomplete_questions" | "unavailable";
+export type EvalHealthRefusal = "not_connected" | "invalid_questions" | "over_cap" | "invalid_identity" | "not_confirmed" | "provider_not_connected" | "monthly_cap" | "provider_incomplete" | "invalid_results" | "incomplete_questions" | "unavailable";
 export type EvalHealthResult =
   | { status: "not_run"; reason: EvalHealthRefusal; message: string }
   | { status: "measured"; questionCount: number; passRate: number; flaky: string[]; callsPerRun: number[]; secondsPerRun: number[]; perQuestion: true; baseline: "stored" | "refused"; sensitivity: EvalHealthSensitivity; summary: string };
@@ -44,7 +44,13 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
     evalBaseCacheKey(key);
     if (input.key.codeHash === undefined || input.key.judgePin === undefined || input.key.hiddenSetHash !== "none") return refused("invalid_identity", "a public eval needs its code hash and judge pin");
     const grant = await input.approval.read();
-    if (grant === undefined || !["owner", "maintainer", "admin"].includes(grant.role) || grant.company !== input.key.company || grant.project !== input.key.project || grant.selection !== input.selection || grant.inputsDigest !== evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint }) || grant.provider !== "customer" || grant.connected !== true || !whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("not_confirmed", "an owner, maintainer or admin must confirm the connected customer's call estimate");
+    // L4-T3: an approval that stands for this very eval but whose AI provider is not connected reads as that (the person's next step is to connect it), never as "not approved".
+    const standing = grant !== undefined && ["owner", "maintainer", "admin"].includes(grant.role) && grant.company === input.key.company && grant.project === input.key.project && grant.selection === input.selection
+      && grant.inputsDigest === evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint })
+      && grant.provider === "customer";
+    if (grant === undefined || !standing) return refused("not_confirmed", "an owner, maintainer or admin must confirm the connected customer's call estimate");
+    if (grant.connected !== true) return refused("provider_not_connected", "the AI your evals call is not connected for this project");
+    if (!whole(grant.maxCalls) || !whole(grant.maxCostMicros) || grant.maxCalls < calls || grant.maxCostMicros < costMicros) return refused("not_confirmed", "an owner, maintainer or admin must confirm the connected customer's call estimate");
     const reservation = await input.meter.reserve({ approval: grant, calls, costMicros });
     if (reservation === undefined) return refused("monthly_cap", "the monthly cap cannot fit these runs");
     let usedCalls = 0; let usedCost = 0; let dispatched = 0; let closed = false; let failed = false;

@@ -55,7 +55,7 @@ import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hos
 import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
-import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
+import { boundEvalMonthlyCap, boundEvalProviderConnected } from "../core/setup-agent/eval-reservation.js";
 import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf, type EvalEnvironmentSource } from "../core/setup-agent/eval-environment-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
@@ -1013,6 +1013,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // L4-EVC (DEC 254zzz20): the eval card. The monthly cap comes only from the install's bound `eval-reservation` adapter (no adapter: no eval is confirmed); the broker hashes the confirmed files from the company's own code host.
             eval: {
               ...(boundEvalMonthlyCap(registry) === undefined ? {} : { monthlyCap: boundEvalMonthlyCap(registry)! }),
+              ...(boundEvalProviderConnected(registry) === undefined ? {} : { providerConnected: boundEvalProviderConnected(registry)! }),
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
               ...(healthDeps === undefined ? {} : { healthRuns: true, healthRun: (project: string) => kickEvalHealth(healthDeps, project) }),

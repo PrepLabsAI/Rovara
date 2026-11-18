@@ -14,7 +14,7 @@ import { buildCoreRegistry, type CoreAdapterContext } from "../../packages/broke
 import { createAdapterRegistry, registerCodeDefaults } from "../../packages/broker/src/ports/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { evalSpendKey } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
-import { boundEvalMonthlyCap, boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
+import { boundEvalMonthlyCap, boundEvalProviderConnected, boundEvalReservation, createBoundEvalSpendCapabilities } from "../../packages/broker/src/core/setup-agent/eval-reservation.js";
 import { evalSpendDigest, evalSpendInputsDigest } from "../../packages/contracts/src/eval-spend.js";
 import type { SessionMembers } from "../../packages/broker/src/core/sessions/access.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
@@ -384,5 +384,54 @@ describe("DEC 253q(c): the eval monthly cap from Cloud's company budget (monthly
     const g = gateway(() => capOk());
     const bound = boundEvalMonthlyCap({ names: (point: string) => (point === "eval-reservation" ? ["model-gateway"] : []), get: () => adapter(g.fetchImpl) } as never);
     expect(await bound!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
+  });
+});
+
+// L4-T3 (G2): the one additive member of the cap answer, `connected`: whether the project's own AI key is connected. The same signed read, no new route.
+describe("L4-T3: whether the project's AI provider is connected (providerConnected, from the cap answer's additive `connected`)", () => {
+  const capWith = (extra: Record<string, unknown> = {}) => ok({ company: ORG_A, project: PROJECT, monthlyCapMicros: 25_000_000, ...extra });
+  it("answers true and false as the gateway says, over the very same signed cap read (no other route, one call)", async () => {
+    for (const connected of [true, false]) {
+      const g = gateway(() => capWith({ connected }));
+      expect(await adapter(g.fetchImpl).providerConnected!({ company: ORG_A, project: PROJECT })).toBe(connected);
+      expect(g.seen).toHaveLength(1); expect(g.seen[0]!.url).toBe(`${GATEWAY}${EVAL_CAP_PATH}`);
+      expect(bodyOf(g.seen[0]!)).toEqual({ company: ORG_A, project: PROJECT });
+      expect(decode(tokenOf(g.seen[0]!).split(".")[1]!)).toMatchObject({ aud: EVAL_CAP_AUDIENCE, cid: ORG_A });
+    }
+  });
+  it("the cap still reads as before with or without the member, and `connected` never changes it (mutant: the optional member)", async () => {
+    expect(await adapter(gateway(() => capWith({ connected: false })).fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
+    expect(await adapter(gateway(() => capWith()).fetchImpl).monthlyCapMicros!({ company: ORG_A, project: PROJECT })).toBe(25_000_000);
+  });
+  it("a gateway that does not say is 'unknown', never a guess", async () => {
+    expect(await adapter(gateway(() => capWith()).fetchImpl).providerConnected!({ company: ORG_A, project: PROJECT })).toBeUndefined();
+  });
+  it("any other answer is unknown: another company or project, a non-boolean, an extra member, a non-200, unparseable JSON, a fault, the timeout", async () => {
+    const replies: Array<() => Response | Promise<Response>> = [
+      () => ok({ company: ORG_B, project: PROJECT, monthlyCapMicros: 1, connected: false }), () => ok({ company: ORG_A, project: "other", monthlyCapMicros: 1, connected: false }),
+      () => capWith({ connected: "false" }), () => capWith({ connected: 0 }), () => capWith({ connected: false, extra: true }), () => new Response("{}", { status: 404 }),
+      () => new Response("not json", { status: 200 }), () => { throw new Error("fault"); }, () => new Promise<Response>(() => undefined),
+    ];
+    for (const reply of replies) expect(await adapter(gateway(reply).fetchImpl).providerConnected!({ company: ORG_A, project: PROJECT })).toBeUndefined();
+  });
+  it("refuses before signing or sending for a company or project it could never ask about", async () => {
+    const g = gateway(() => capWith({ connected: false }));
+    expect(await adapter(g.fetchImpl).providerConnected!({ company: "not an org", project: PROJECT })).toBeUndefined();
+    expect(await adapter(g.fetchImpl).providerConnected!({ company: ORG_A, project: "../x" })).toBeUndefined();
+    expect(g.seen).toHaveLength(0);
+  });
+  it("the install's source is the bound adapter's only: none bound (a laptop) or an adapter without it is no source, and a fault or non-boolean is unknown", async () => {
+    const empty = createAdapterRegistry();
+    expect(boundEvalProviderConnected(empty)).toBeUndefined();
+    const bind = (providerConnected?: EvalReservationAdapter["providerConnected"]) => { const r = createAdapterRegistry(); r.register("eval-reservation", "test", { authority: async () => undefined, reserve: async () => undefined, ...(providerConnected === undefined ? {} : { providerConnected }) }); return r; };
+    expect(boundEvalProviderConnected(bind())).toBeUndefined();
+    expect(await boundEvalProviderConnected(bind(async () => false))!({ company: ORG_A, project: PROJECT })).toBe(false);
+    expect(await boundEvalProviderConnected(bind(async () => { throw new Error("private"); }))!({ company: ORG_A, project: PROJECT })).toBeUndefined();
+    expect(await boundEvalProviderConnected(bind((async () => "yes") as never))!({ company: ORG_A, project: PROJECT })).toBeUndefined();
+  });
+  it("two companies: company B's token and body never read company A's answer (the answer must name the company asked about)", async () => {
+    const g = gateway(() => ok({ company: ORG_A, project: PROJECT, monthlyCapMicros: 1, connected: false }));
+    expect(await adapter(g.fetchImpl).providerConnected!({ company: ORG_B, project: PROJECT })).toBeUndefined();
+    expect(decode(tokenOf(g.seen[0]!).split(".")[1]!)).toMatchObject({ cid: ORG_B });
   });
 });
