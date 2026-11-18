@@ -397,7 +397,7 @@ import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEve
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { companyInvitesThroughLambda, companyPreapprovalsThroughLambda, companySelfCreateThroughLambda, channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, setDisplayNameThroughLambda, routeAppRequest, routeDeveloperRequest, routeLinkingRequest, signInClientsThroughLambda, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller, type DeveloperRouteDependencies } from "./developer-routes.js";
-import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
+import { companyMemberActionsThroughLambda } from "./company-member-forwarding.js"; import { githubLinkWiringFromEnvironment } from "./github-link-wiring.js"; import { signInLinksThroughLambda } from "./sign-in-link-routes.js";
 import { companyImportThroughLambda } from "./company-import-forwarding.js";
 import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
@@ -15521,6 +15521,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
       // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
       githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine },
+      // L4-GH: a person links their own GitHub account (github-account-link-routes.ts), through the same App client's OAuth client and the core's own store.
+      ...((wiring) => (wiring === undefined ? {} : { githubLink: wiring }))(githubLinkWiringFromEnvironment(process.env, { dynamo: dynamoClient, github: new GitHubAppClient(github.clientOptions), log: brokerLogLine })),
       // Guided onboarding PR 4: Add to Slack (slack-company-install.ts).
       ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
       ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),

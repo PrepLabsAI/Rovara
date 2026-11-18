@@ -1,5 +1,5 @@
 import { createHash, createSign } from "node:crypto";
-import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
+import { githubUserOfCode, userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
 import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
@@ -2730,6 +2730,17 @@ export class GitHubAppCredentialProvider {
     } catch { throw new UserAuthorizationRefused(); }
     if (client === undefined) throw new UserAuthorizationRefused();
     return userControlledInstallations({ fetch: this.fetchImplementation, clientId: client.clientId, clientSecret: client.clientSecret, appId, code, now: this.now });
+  }
+
+  /**
+   * L4-GH: who the person behind a user authorization `code` is on GitHub (numeric id and login), through the same OAuth client as the install flow. The user token lives only inside the call: never
+   * returned, stored or logged. No OAuth client: refused.
+   */
+  async githubUserOfCode(code: string): Promise<{ id: number; login: string }> {
+    let client: { clientId: string; clientSecret: string } | undefined;
+    try { client = await this.oauthClient(); } catch { throw new UserAuthorizationRefused(); }
+    if (client === undefined) throw new UserAuthorizationRefused();
+    return githubUserOfCode({ fetch: this.fetchImplementation, clientId: client.clientId, clientSecret: client.clientSecret, code, now: this.now });
   }
 
   /** One installation of the App, by id (the App's JWT; GitHub tells it nothing of an installation of another App). */
