@@ -75,6 +75,47 @@ describe("a sealed eval that tried to reach something else is named, in fixed wo
   });
 });
 
+describe("review fixes: model route, causes and cost", () => {
+  it("a connection to a model host (any catalog host, or an Azure suffix) is the model route, never 'blocked'", () => {
+    for (const host of ["api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "us-central1-aiplatform.googleapis.com", "myres.openai.azure.com"]) {
+      expect(run(`Error: getaddrinfo ENOTFOUND ${host}`), host).toMatchObject({ code: "exited" });
+    }
+    expect(run("requests.exceptions.ConnectionError: HTTPSConnectionPool(host='api.openai.com', port=443): Max retries exceeded (Caused by NameResolutionError(\"Failed to resolve 'api.openai.com'\"))").code).toBe("exited");
+  });
+
+  it("a pool line with another cause (a read timeout, an SSL error) and a connection reset are not 'blocked'", () => {
+    expect(run("requests.exceptions.ReadTimeout: HTTPSConnectionPool(host='api.example.com', port=443): Read timed out. (read timeout=10)").code).toBe("exited");
+    expect(run("requests.exceptions.SSLError: HTTPSConnectionPool(host='api.example.com', port=443): Max retries exceeded with url: /x (Caused by SSLError(SSLCertVerificationError))").code).toBe("exited");
+    expect(run("Error: read ECONNRESET 52.1.2.3:443").code).toBe("exited");
+    expect(run("Error: connect ECONNRESET api.example.com:443").code).toBe("exited");
+  });
+
+  it("hostile output is read in bounded time: one 16 KB line of repeated triggers, for every shape", () => {
+    const hostile = [
+      "ENOTFOUND ".repeat(1_700), "ENOTFOUND'".repeat(1_600), `HTTPSConnectionPool(host='a.com', port=1)`.repeat(450), "could not translate host name \"".repeat(500),
+      "server running on host \"a\"".repeat(700), "getaddrinfo ENOTFOUND ".repeat(700), "dial tcp: lookup ".repeat(900), "Error 1 connecting to ".repeat(750), ("a".repeat(250) + ":").repeat(64),
+    ];
+    for (const text of hostile) {
+      const started = Date.now();
+      run(text);
+      expect(Date.now() - started, text.slice(0, 30)).toBeLessThan(400);
+    }
+  });
+
+  it("two databases are 'databases' with their ports; an opaque long label is not a host", () => {
+    const d = run("Error: connect ECONNREFUSED 10.0.0.1:5432\nError: connect ECONNREFUSED 10.0.0.2:6379");
+    expect(blockedOf(d).items).toEqual([{ kind: "database", port: 5432 }, { kind: "database", port: 6379 }]);
+    expect(evalRunFailureSentence(d)).toBe("your eval tried to reach databases (ports 5432, 6379). Rovara's sealed check can't reach those yet");
+    expect(run(`Error: getaddrinfo ENOTFOUND ${"a1b2c3d4e5".repeat(3)}xy.example.com`).code).toBe("exited");
+    for (const port of [3306, 27017, 1433]) expect(blockedOf(run(`Error: connect ECONNREFUSED 10.0.0.1:${port}`)).items).toEqual([{ kind: "database", port }]);
+  });
+
+  it("the public list keeps 'more' and drops ports and hosts", () => {
+    const d = run(`Error: getaddrinfo ENOTFOUND a1.example.com\nError: getaddrinfo ENOTFOUND a2.example.com\nError: getaddrinfo ENOTFOUND a3.example.com\nError: getaddrinfo ENOTFOUND a4.example.com`);
+    expect(evalRunFailureSentence(d, { named: false })).toBe("your eval tried to reach outside services, among others. Rovara's sealed check can't reach those yet");
+  });
+});
+
 describe("nothing secret-shaped leaks, whatever the line carried", () => {
   it("a URL with a token in its query shows only the host: not the path, the query, the token or a port", () => {
     const d = run(lines(PY_HTTP), { secrets: [TOKEN] });

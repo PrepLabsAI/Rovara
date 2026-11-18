@@ -10,7 +10,7 @@
 //     shape, and are dropped when they carry a secret this run knows. Addresses, `localhost` and the model route's own names are never named;
 //   - nothing here runs, reads a file or throws: any fault is a diagnostic with an empty tail.
 import {
-  EVAL_BLOCKED_HOST, EVAL_BLOCKED_REACH_MAX_ITEMS, EVAL_RUN_FAILURE_NAME, EVAL_RUN_TAIL_MAX_CHARS, redactText,
+  EVAL_BLOCKED_HOST, EVAL_BLOCKED_REACH_MAX_ITEMS, builtinModelCatalog, modelHostBlockList, modelHostSuffixBlockList, EVAL_RUN_FAILURE_NAME, EVAL_RUN_TAIL_MAX_CHARS, redactText,
   type EvalBlockedReach, type EvalRunDiagnostic, type EvalRunFailureCode,
 } from "@agentx/contracts";
 
@@ -114,9 +114,10 @@ function match(text: string, secrets: readonly string[]): Match | undefined {
 
 /** Ports of the common databases and caches: a connection to one is "a database", named by its port only. */
 const DATABASE_PORTS: ReadonlySet<number> = new Set([5432, 5433, 5439, 3306, 3307, 6379, 27017, 1433, 1521, 9042, 11211]);
-/** The model route's own names (the helper and every pinned model host): a connection to one is the model route, never "blocked". */
-const MODEL_ROUTE_HOSTS: ReadonlySet<string> = new Set(["rovara-models", "metadata.google.internal", "generativelanguage.googleapis.com", "aiplatform.googleapis.com"]);
-const MODEL_ROUTE_SUFFIX = "-aiplatform.googleapis.com";
+/** The model route's own names: the helper, the metadata name and EVERY catalog model host (all pinned to the helper). A failed connection to one is the model route, never "blocked" (a client that ignored the redirect has its own wording). */
+const MODEL_ROUTE_HOSTS: ReadonlySet<string> = new Set(["rovara-models", "metadata.google.internal", ...modelHostBlockList(builtinModelCatalog().rows, []).map(host => host.toLowerCase())]);
+const MODEL_ROUTE_SUFFIXES: readonly string[] = ["-aiplatform.googleapis.com", ...modelHostSuffixBlockList(builtinModelCatalog().rows).map(suffix => suffix.toLowerCase().replace(/^\./u, ""))];
+const isModelRoute = (host: string): boolean => MODEL_ROUTE_HOSTS.has(host) || MODEL_ROUTE_SUFFIXES.some(suffix => host === suffix || host.endsWith(suffix.startsWith("-") ? suffix : `.${suffix}`));
 /** Names that are this machine, not an outside service: never named (a database on one still counts as a database). */
 const LOCAL_HOSTS: ReadonlySet<string> = new Set(["localhost", "ip6-localhost", "host.docker.internal"]);
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/u;
@@ -132,17 +133,17 @@ const REACH_PATTERNS: ReadonlyArray<{ readonly pattern: RegExp; readonly host?: 
   // Node: getaddrinfo ENOTFOUND api.example.com / EAI_AGAIN db
   { pattern: new RegExp(`getaddrinfo (?:ENOTFOUND|EAI_AGAIN|EAI_NODATA|EAI_FAIL) ${HOST}`, "gu"), host: 1 },
   // Node: connect ECONNREFUSED 127.0.0.1:5432 / ::1:5432 / ETIMEDOUT / EHOSTUNREACH / ENETUNREACH
-  { pattern: new RegExp(`(?:ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|ECONNRESET) \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}\\b`, "gu"), host: 1, port: 2 },
+  { pattern: new RegExp(`(?:ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH) \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}\\b`, "gu"), host: 1, port: 2 },
   // Node error object: syscall: 'connect', address: '127.0.0.1', port: 5432
   { pattern: new RegExp(`syscall: 'connect',\\s*address: '([^'\\s]{1,253})',\\s*port: ${PORT}`, "gu"), host: 1, port: 2 },
   // Node error object of a failed lookup: code: 'ENOTFOUND', ... hostname: 'api.example.com'
-  { pattern: new RegExp(`ENOTFOUND'?,?[^\\n]*\\n?[^\\n]{0,80}hostname: '${HOST}'`, "gu"), host: 1 },
+  { pattern: new RegExp(`ENOTFOUND'?,?[^\\n]{0,200}\\n?[^\\n]{0,80}hostname: '${HOST}'`, "gu"), host: 1 },
   // undici: (attempted address: api.example.com:443, timeout: 10000ms)
   { pattern: new RegExp(`attempted address: \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}`, "gu"), host: 1, port: 2 },
   // Python pymongo and friends: db:27017: [Errno -2] Name or service not known / [Errno 111] Connection refused
   { pattern: new RegExp(`${HOST}:${PORT}: \\[Errno -?\\d+\\] (?:Connection refused|Name or service not known|Temporary failure in name resolution|Network is unreachable|No route to host|Connection timed out)`, "gu"), host: 1, port: 2 },
   // Python requests / urllib3: HTTPSConnectionPool(host='api.example.com', port=443): Max retries exceeded ... (the URL after it is never captured)
-  { pattern: new RegExp(`HTTPS?ConnectionPool\\(host='${HOST}', port=${PORT}\\)`, "gu"), host: 1, port: 2 },
+  { pattern: new RegExp(`HTTPS?ConnectionPool\\(host='${HOST}', port=${PORT}\\)[^\\n]{0,600}?(?:Failed to resolve|NameResolutionError|Name or service not known|Temporary failure in name resolution|Connection refused|Network is unreachable|No route to host|Failed to establish a new connection)`, "gu"), host: 1, port: 2 },
   // urllib3: Failed to resolve 'api.example.com'
   { pattern: new RegExp(`Failed to resolve '${HOST}'`, "gu"), host: 1 },
   // aiohttp: Cannot connect to host api.example.com:443 ssl:default
@@ -176,6 +177,8 @@ function cleanHost(raw: string | undefined, secrets: readonly string[]): string 
   if (host === "" || host.includes(":") || IPV4.test(host) || LOCAL_HOSTS.has(host) || host.endsWith(".localhost")) return undefined;
   // Redaction is judged on the name as the output wrote it AND lower-cased (a key shape is case-sensitive).
   if (!EVAL_BLOCKED_HOST.test(host) || host.includes("..") || redactText(written) !== written || redactText(host) !== host) return undefined;
+  // An opaque long label (a token) is not a host name.
+  if (host.split(".").some(label => label.length >= 32)) return undefined;
   if (secrets.some(secret => secret.length >= MIN_SECRET_CHARS && secretForms(secret).some(form => host.includes(form.toLowerCase())))) return undefined;
   return host;
 }
@@ -197,7 +200,7 @@ export function findBlockedReach(text: string, secrets: readonly string[] = []):
     found.sort((a, b) => a.at - b.at);
     for (const { reach } of found) {
       const raw = reach.host === undefined ? "" : normalHost(reach.host);
-      if (MODEL_ROUTE_HOSTS.has(raw) || raw.endsWith(MODEL_ROUTE_SUFFIX)) continue;
+      if (isModelRoute(raw)) continue;
       const host = cleanHost(reach.host, secrets);
       // A database is named by its port alone (its host is the project's own private name); anything else needs a host name that passed the shape.
       const item: EvalBlockedReach["items"][number] | undefined = reach.database || (reach.port !== undefined && DATABASE_PORTS.has(reach.port))
