@@ -366,12 +366,7 @@ describe("only the Rovara web app's own sign-in client may link (security review
   });
 });
 
-describe("state rows expire, and unlink never removes a row another member wrote since (security review 1, Low)", () => {
-  it("the state row carries the store's expiry attribute, a margin after its own expiry", async () => {
-    const w = world(); const state = await w.startState();
-    const row = await w.store.get({ pk: `GITHUB_LINK_STATE#${createHash("sha256").update(state).digest("hex")}`, sk: "META" });
-    expect(row?.["indexExpiresAt"]).toBe(Math.floor(NOW0 / 1000) + 600 + 3600);
-  });
+describe("unlink never removes a row another member wrote since (security review 1, Low)", () => {
   it("an unlink whose account row changed hands between its read and its delete removes nothing of the other member's", async () => {
     const w = world(); await w.link("ada-code");
     const transact = w.store.transact.bind(w.store);

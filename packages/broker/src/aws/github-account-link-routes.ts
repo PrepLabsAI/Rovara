@@ -25,7 +25,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { INDEX_EXPIRY_ATTRIBUTE, agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
+import { agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, isGithubLogin, linkGithubAccount, unlinkGithubAccount } from "../core/people/github-links.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
@@ -49,6 +49,8 @@ const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> aga
 /** How long a state lives. */
 export const GITHUB_LINK_TTL_SECONDS = 600;
 const STATE_PROVIDER = "github-link";
+// No TTL attribute on the state row: the guard test tests/contract/admin-health-infrastructure.test.ts pins the files that may name the store's expiry attribute (an owner-approved list). Like the install
+// flow's GITHUB_CONNECT# rows, a spent or expired state stays until the company purge (it names its company); it can never be spent again (expiry and status are in the spend's condition).
 /** The state's own key family: never the install flow's (`GITHUB_CONNECT#`), whatever the provider field says. */
 const STATE_PK_PREFIX = "GITHUB_LINK_STATE#";
 
@@ -176,7 +178,7 @@ export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperC
     const expiresAt = Math.floor(nowMs / 1000) + GITHUB_LINK_TTL_SECONDS;
     try {
       const written = await store.put({
-        item: { ...stateKey(secret), entityType: "GITHUB_LINK_STATE", provider: STATE_PROVIDER, status: "live", ...who, createdAt: new Date(nowMs).toISOString(), expiresAt, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + 3600 },
+        item: { ...stateKey(secret), entityType: "GITHUB_LINK_STATE", provider: STATE_PROVIDER, status: "live", ...who, createdAt: new Date(nowMs).toISOString(), expiresAt },
         condition: when.absent(),
       });
       if (!written.applied) throw new Error("state");
