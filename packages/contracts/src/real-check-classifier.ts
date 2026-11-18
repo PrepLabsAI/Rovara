@@ -431,6 +431,8 @@ export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unrea
   const { words, cleaned } = read;
   // A colon outside a quoted name is the legacy table form (`p:d.t`) or nothing GoogleSQL has: refused. A Cloud KMS key reference names a key in some project and the run's identity would call it: refused.
   if (cleaned.replace(/`[^`]*`/gu, "").includes(":") || /gcp-kms:/iu.test(sql)) return "write";
+  // Organization- and folder-wide views list every project's jobs (with their query text): not this connection's project alone.
+  if (/_BY_(?:ORGANIZATION|FOLDER)/iu.test(cleaned)) return "write";
   while (words.length > 0 && words[words.length - 1] === ";") words.pop();
   const first = words[0];
   if (first !== "SELECT" && first !== "WITH") return "write";
@@ -448,11 +450,19 @@ export function bigQueryStatementIsRead(sql: unknown): "read" | "write" | "unrea
   return "read";
 }
 
+/** Request headers a Google API call may carry. Anything else is refused: `X-Goog-User-Project` names the project that is billed and charged quota (the `userProject` query name is refused, so its header twin must be), and the rest (`X-Goog-Request-Params`, `X-Goog-FieldMask` and kin) are other ways to steer a call. */
+const GOOGLE_ALLOWED_HEADERS = new Set(["accept", "accept-encoding", "accept-language", "user-agent", "content-type", "content-length", "cache-control", "if-none-match", "range"]);
+/** A Google POST carries JSON (or nothing): a form or protobuf body is read another way by the server. */
+const GOOGLE_JSON_TYPE = /^application\/json\s*(?:;\s*charset=utf-8\s*)?$/iu;
+
 function classifyGoogle(request: RealCheckRequest, url: ParsedUrl, host: string, policy: RealCheckPolicy, limits: { requestBytes: number; bigQueryBytesBilled: number }): RealCheckVerdict {
   const decoded = url.segments.map((segment) => segment.decoded);
   const operation = labelOf(request.method, host, realCheckPathLabel(decoded));
   const { requestBytes } = limits;
   const { method } = request;
+  for (const name of Object.keys(request.headers ?? {})) if (!GOOGLE_ALLOWED_HEADERS.has(name.toLowerCase())) return refuse("not_allowed", operation);
+  const contentType = header(request.headers, "content-type");
+  if (contentType !== undefined && !GOOGLE_JSON_TYPE.test(contentType)) return refuse("not_allowed", operation);
   if (method === "PUT" || method === "PATCH" || method === "DELETE") return refuse("write", operation);
   if (method !== "GET" && method !== "HEAD" && method !== "POST") return refuse("not_allowed", operation);
   const rowMethod = method === "POST" ? "POST" : "GET";

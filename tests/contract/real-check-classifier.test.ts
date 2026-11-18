@@ -285,6 +285,16 @@ describe("Google APIs: every write shape is refused", () => {
     expect(reason(run("POST", bq("/routines"), { body: "{}" }))).toBe("write");
   });
 
+  it("a Google call carries only plain headers: a billing or steering header is refused, and a POST is JSON", () => {
+    for (const name of ["X-Goog-User-Project", "x-goog-user-project", "X-Goog-Request-Params", "X-Goog-FieldMask", "Authorization", "Cookie", "X-Custom"]) {
+      expect(reason(run("GET", gcs("/storage/v1/b/acme-staging-bucket"), { headers: { [name]: "acme-prod-1234" } })), name).toBe("not_allowed");
+      expect(reason(run("POST", bq("/queries"), { body: json({ query: "SELECT 1" }), headers: { [name]: "acme-prod-1234" } })), name).toBe("not_allowed");
+    }
+    expect(run("GET", gcs("/storage/v1/b/acme-staging-bucket"), { headers: { Accept: "application/json", "User-Agent": "x" } })).toMatchObject({ allow: true });
+    expect(run("POST", bq("/queries"), { body: json({ query: "SELECT 1" }), headers: { "Content-Type": "application/json; charset=utf-8" } })).toMatchObject({ allow: true });
+    for (const type of ["application/x-www-form-urlencoded", "application/x-protobuf", "text/plain", "application/json-seq", "multipart/related"]) expect(reason(run("POST", bq("/queries"), { body: json({ query: "SELECT 1" }), headers: { "content-type": type } })), type).toBe("not_allowed");
+  });
+
   it("a method override on a Google API is a write: the header, `$httpMethod`, `_method`", () => {
     expect(reason(run("GET", fs("/documents/users/alice"), { headers: { "X-HTTP-Method-Override": "DELETE" } }))).toBe("write");
     expect(reason(run("GET", fs("/documents/users/alice?$httpMethod=DELETE")))).toBe("write");
@@ -471,6 +481,10 @@ describe("BigQuery: a SELECT with a forced cap, never a write", () => {
     for (const sql of ["SELECT * FROM `acme-prod-1234`:sales.orders", "SELECT * FROM acme-prod-1234:sales.orders", "SELECT * FROM [acme-prod-1234:sales.orders]", "SELECT a ? b : c"]) expect(query(sql).allow, sql).toBe(false);
     expect(reason(query("SELECT * FROM `google.com:x`.d.t"))).toBe("not_allowed");
     expect(bigQueryProjectRefs("SELECT * FROM `acme-prod-1234:sales.orders`")).toEqual(["acme-prod-1234"]);
+  });
+
+  it("organization- and folder-wide INFORMATION_SCHEMA views are refused", () => {
+    for (const sql of ["SELECT * FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_ORGANIZATION", "SELECT * FROM acme.INFORMATION_SCHEMA.jobs_by_folder", "SELECT * FROM x.INFORMATION_SCHEMA.TABLE_STORAGE_BY_ORGANIZATION"]) expect(query(sql).allow, sql).toBe(false);
   });
 
   it("a call that reaches a Cloud KMS key is not a read: KEYS.* is no built-in namespace here and a key reference is refused", () => {
