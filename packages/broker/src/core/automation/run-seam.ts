@@ -55,6 +55,11 @@ export interface AutomatedRunResult {
 
 /** What the host fills in: how a run is actually started on this install (the task flow, a worker machine). */
 export interface AutomatedRunStarter {
+  /**
+   * L4-SR2 (closes #927 REVIEW-1 L2): a starter that really starts the setup agent's repair draft says so, here and nowhere else. A request that carries `setupRepair` is refused by the door (`startUnattendedRun`) before
+   * anything is held unless the starter declares this, so a starter written for agents or jobs can never start an ordinary task from a repair request's text. Absent or any other value: it is not one.
+   */
+  readonly startsSetupRepair?: true | undefined;
   start(request: AutomatedRunRequest): Promise<AutomatedRunResult>;
   /** The run an earlier start with this request id made, or undefined. */
   read(requestId: string): Promise<{ taskId: string } | undefined>;
@@ -91,6 +96,9 @@ export const UNATTENDED_EVENT_TEXT = "Do your job for this event.";
 /** What the owner is told when a run is refused for want of a cap. */
 export const NO_CAP_MESSAGE = "This install has no dollar cap for work that starts with no one present (its admission does not declare that it enforces a cost limit), so nothing is started on its own. Install an admission adapter that holds a limit and declares `enforcesCost: true`, then try again.";
 
+/** What the door says when the host's starter does not start a setup repair draft. Fixed words. */
+export const SETUP_REPAIR_NOT_STARTED = "This install does not start setup repair drafts on its own.";
+
 const OPEN_RUN_PARTITION = "UNATTENDED_RUN_OPEN";
 const RUN_ROW_DAYS = 62;
 const openRunKey = (companyId: string, requestId: string): DocumentKey => ({ pk: orgScoped(companyId, OPEN_RUN_PARTITION), sk: requestId });
@@ -114,6 +122,8 @@ export function capProblem(enforces: { dollars: boolean }, request: Pick<Automat
  */
 export async function startUnattendedRun(deps: UnattendedStartDeps, request: AutomatedRunRequest): Promise<AutomatedRunResult> {
   if (!(await automationIsOn(deps.automation))) throw agentXError("NOT_AVAILABLE_HERE", "automation is not switched on");
+  // A repair draft is started only by a starter that declares it (L4-SR2): every other starter refuses the request before it reads or holds anything.
+  if (request.setupRepair !== undefined && deps.starter.startsSetupRepair !== true) throw agentXError("NOT_AVAILABLE_HERE", SETUP_REPAIR_NOT_STARTED);
   const earlier = await deps.starter.read(request.requestId);
   if (earlier !== undefined) return { taskId: earlier.taskId, duplicate: true };
   const uncapped = capProblem(deps.enforces, request);

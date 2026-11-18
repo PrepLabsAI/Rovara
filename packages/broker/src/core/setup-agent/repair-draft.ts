@@ -4,28 +4,29 @@
 //   1. When the free re-check (recheck.ts) settles as "setup broken", and ONLY THEN, `startRepairDraft` decides whether to start ONE setup-agent run for that failure. It starts nothing unless ALL of these hold, each read
 //      now and each failing CLOSED (a throw, a missing answer or a malformed one is "no"):
 //        - the company's EFFECTIVE system-runs gate is on (L4-P2, owner DEC 254zzt: the operator's `CoreSystemRuns` ceiling AND the company's consent, `effectiveSystemRunsGate`). An absent gate is OFF: this file never
-//          starts anything on its own authority. A host that wires this hook must pass that gate; nothing hosted wires it yet (see the OFF NOTE below);
+//          starts anything on its own authority. The hosted host wires this hook and passes that gate (core-host/setup-repair.ts, L4-SR2); a host that does not pass it never starts a draft;
 //        - a person turned upkeep ON for the project (`UpkeepGate.enabled`: a page-only act, audited; this file only reads it);
 //        - a dollar cap is enforced on this install (the unattended door's `enforces.dollars`; the door itself refuses a model run without one);
 //        - the project's upkeep cap has room for the whole run (`UpkeepGate.roomCents` >= the run's budget). The gateway holds the real cap on every model call (the token carries the work origin "nightly", so the
 //          project's `upkeep_month` row applies, L4-E); this read only avoids starting a run the gateway would refuse;
-//        - the project is still at the revision that broke, no candidate waits for a decision, no setup run is going, and no automatic draft started in the last `REPAIR_COOLDOWN_MS`.
+//        - the project is still at the revision that broke, no automatic draft was ever started for that revision (`REPAIR_REV#`), no candidate waits for a decision, no setup run is going, and no automatic draft started in the last `REPAIR_COOLDOWN_MS`.
 //      One repair per failure: the claim row is keyed by the re-check, written only if absent, so a double call starts one run, and a failed draft is final (no loop).
 //   2. The run is started through THE one unattended door (`startUnattendedRun`: the switch, the cap, `Admission`, the host's starter), with the run's own limits (the setup agent's existing limits, about $4) and the
-//      origin "nightly" (the project pays; the gateway's upkeep cap applies). The host's starter starts the project's setup run as the project's system owner; one that does not know a `setupRepair` request refuses it.
+//      origin "nightly" (the project pays; the gateway's upkeep cap applies). The host's starter starts the project's setup run as the project's system owner; the door refuses a `setupRepair` request unless the starter declares `startsSetupRepair` (L4-SR2).
 //   3. `advanceRepairDraft` moves it on from the stored facts, safe to call from anywhere and any number of times: the run ended with a proposal Rovara itself finished (`proposed`, not partial) -> the candidate is stored
 //      by `confirmSetupAgent` (the SAME path a person's "Use this setup" takes: every citation re-read from the code host, the candidate stored but not the project's latest, its check started on a NEW workspace) ->
 //      the candidate's check passed -> `ready`: the project's maintainers see "Approve new setup", and the decision is the hosted approval gate's (risk-based approvers, a fresh sign-in, the digest) as for any setup.
 //      A run that failed, a proposal nothing could be used from, or a candidate whose check failed ends the draft as `failed`, in fixed words, and the failed candidate is removed. The manual "Fix setup" stays open.
 //
-// OFF NOTE (lead 4, owner DEC 254zzl/254zzt/254zzy): the AUTOMATIC path is OFF on every install. Nothing wires `TaskFlowDeps.afterSetupBroken` or calls `advanceRepairDraft`, the system starter refuses `repair_draft`
-// (`createSystemStarter` starts the two free kinds only) and the access rule does not accept a system owner for a `setup_agent` task. Turning it on needs ALL of: the starter taking this kind through `startUnattendedRun`
-// like the wiki refresh; a hosted starter that knows `setupRepair`; the access rule's step marks for the setup task; the audit record written BEFORE the run starts (here it is staged after); the `systemRuns` gate above.
-// Until then a person starts the fix ("Fix setup (uses your AI, up to $4)") and the same approval rule decides it.
+// L4-SR2 (lead 4, owner DEC 254zzl/254zzt/254zzy): the AUTOMATIC path is wired on a hosted install and is OFF until every one of its locks is open (the company's effective system-runs gate, the project's upkeep switch, an enforced cap
+// with room): core-host/setup-repair.ts supplies the hosted pieces (the hook on `TaskFlowDeps.afterSetupBroken`, the setup-run starter that starts as the project's system owner, the progress pass); the access rule
+// (core/system-runs/access.ts) accepts the system owner for a `setup_agent` task only with the marks. What this file adds to #927: the audit record is written BEFORE the run starts (a record that cannot be written starts
+// nothing); one automatic draft per (project, broken setup revision); the effective gate and the upkeep switch are read again on every move of a draft, and a draft whose gate went off stops (its run is cancelled, its own
+// candidate removed), so withdrawing consent or switching upkeep off ends it at the next pass; a run the gateway paused for the upkeep cap ends the draft and writes the admins' notice (N1).
 import { createHash } from "node:crypto";
 import {
-  ROVARA_CODE_AGENT_ID, SETUP_RUN_END_WORDS, change, effectiveSetupAgentLimits, systemOwnerIdOf, when,
-  type SetupDriftClass, type TransactItem,
+  ROVARA_CODE_AGENT_ID, SETUP_RUN_END_WORDS, SYSTEM_RUN_AUDIT, UpkeepPauseReasonSchema, change, effectiveSetupAgentLimits, systemOwnerIdOf, when,
+  type SetupDriftClass, type TransactItem, type UpkeepPauseReason,
 } from "@agentx/contracts";
 import { eventIdOf } from "../automatic-runs/cap.js";
 import { systemRunsGateSaysOn, type SystemRunsGate } from "../system-runs/consent.js";
@@ -38,8 +39,8 @@ import { expiryOf } from "./keys.js";
 import { advanceCurrentRecheck, readSetupRepairCard, type RecheckRow } from "./recheck.js";
 import { isRow, recheckRowKey, repairNoticeKey } from "./recheck-rows.js";
 import {
-  REPAIR_COOLDOWN_MS, REPAIR_GRACE_MINUTES, REPAIR_START_STALE_MS, REPAIR_WORDS, fixSetupLabel, repairCurrentKey, repairRowKey,
-  type RepairCurrentRow, type RepairReason, type RepairRow, type RepairState, type SetupRepairView,
+  REPAIR_COOLDOWN_MS, REPAIR_GRACE_MINUTES, REPAIR_START_STALE_MS, REPAIR_WORDS, fixSetupLabel, repairCurrentKey, repairRevisionKey, repairRowKey,
+  type RepairCurrentRow, type RepairReason, type RepairRevisionRow, type RepairRow, type RepairState, type SetupRepairView,
 } from "./repair-rows.js";
 
 export * from "./repair-rows.js";
@@ -60,10 +61,12 @@ export interface RepairDraftDeps extends SetupApplyDeps {
   upkeep?: UpkeepGate | undefined;
   /** The unattended door's dependencies (the switch, the cap declaration, `Admission`, the host's starter). Absent: nothing starts on its own. */
   run?: UnattendedStartDeps | undefined;
+  /** N1: tells the project's admins (once per month and reason) that the gateway paused nightly upkeep under a draft's run. Never throws. Absent: nobody is told (the draft still ends). */
+  onUpkeepPaused?: ((project: string, reason: UpkeepPauseReason) => Promise<void>) | undefined;
 }
 
 /** Why a draft was not started (nothing was written, nothing was spent). */
-export type RepairSkip = "not_broken" | "system_runs_off" | "upkeep_off" | "no_cap" | "no_room" | "busy" | "cooling_down" | "start_refused";
+export type RepairSkip = "not_broken" | "system_runs_off" | "upkeep_off" | "no_cap" | "no_room" | "busy" | "cooling_down" | "already_drafted" | "start_refused";
 export type RepairStart = { status: "started"; row: RepairRow } | { status: "exists"; row: RepairRow } | { status: "skipped"; why: RepairSkip };
 
 /** A draft whose run or check has not finished after this long is over (the run's own stale rule is shorter; this covers a proposal that can never be confirmed). */
@@ -87,6 +90,10 @@ async function readRepair(deps: Pick<RepairDraftDeps, "store" | "companyId">, pr
 async function readRecheck(deps: Pick<RepairDraftDeps, "store" | "companyId">, project: string, key: string): Promise<RecheckRow | undefined> {
   const stored = await deps.store.get(recheckRowKey(deps.companyId, project, key));
   return isRow(stored, deps.companyId, project, "SETUP_RECHECK") ? (stored as unknown as RecheckRow) : undefined;
+}
+async function readRevisionClaim(deps: Pick<RepairDraftDeps, "store" | "companyId">, project: string, revision: number): Promise<RepairRevisionRow | undefined> {
+  const stored = await deps.store.get(repairRevisionKey(deps.companyId, project, revision));
+  return isRow(stored, deps.companyId, project, "SETUP_REPAIR_REVISION") && stored?.["revision"] === revision && typeof stored["key"] === "string" ? (stored as unknown as RepairRevisionRow) : undefined;
 }
 async function readPointer(deps: Pick<RepairDraftDeps, "store" | "companyId">, project: string): Promise<RepairCurrentRow | undefined> {
   const stored = await deps.store.get(repairCurrentKey(deps.companyId, project));
@@ -122,6 +129,8 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
   if (door === undefined || door.enforces.dollars !== true) return { status: "skipped", why: "no_cap" };
   const latest = await deps.latest(project);
   if (latest === undefined || latest.revision !== recheck.setupRevision) return { status: "skipped", why: "not_broken" };
+  // ONE automatic draft per (project, broken revision): a failed or ended draft of this revision is not tried again at it (a person's "Fix setup" stays open), whatever re-check found it broken.
+  if ((await readRevisionClaim(deps, project, recheck.setupRevision)) !== undefined) return { status: "skipped", why: "already_drafted" };
   if ((await waitingSetupApply(deps.store, orgId, project)) !== undefined) return { status: "skipped", why: "busy" };
   const before = await readState(deps, project, latest.revision);
   if (before.view.status === "running") return { status: "skipped", why: "busy" };
@@ -137,18 +146,23 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
     state: "starting", budgetCents: limits.budgetCents, claimedAt: at,
   };
   const pointer: RepairCurrentRow = { entityType: "SETUP_REPAIR_CURRENT", orgId, project, key: recheckKey, startedAt: at };
+  const revisionClaim: RepairRevisionRow = { entityType: "SETUP_REPAIR_REVISION", orgId, project, revision: recheck.setupRevision, key: recheckKey, claimedAt: at };
   const claim = await deps.store.transact([
     putRow(repairRowKey(orgId, project, recheckKey), row.entityType, { ...row, ...expiry(deps) }),
+    // The broken revision's own claim, in the same transaction: two re-checks of one revision (or two calls at once) cannot both start a draft.
+    putRow(repairRevisionKey(orgId, project, recheck.setupRevision), revisionClaim.entityType, { ...revisionClaim, ...expiry(deps) }, when.absent()),
     // The pointer is written only while it is as read: two claims for different failures at once cannot both pass the cooldown, and neither can wipe the other's pointer.
     putRow(repairCurrentKey(orgId, project), pointer.entityType, { ...pointer, ...expiry(deps) }, previous === undefined ? when.absent() : when.and(when.eq("key", previous.key), when.eq("startedAt", previous.startedAt))),
   ]);
   if (!claim.applied) {
     const other = await readRepair(deps, project, recheckKey);
-    return other === undefined ? { status: "skipped", why: "busy" } : { status: "exists", row: other };
+    if (other !== undefined) return { status: "exists", row: other };
+    return (await readRevisionClaim(deps, project, recheck.setupRevision)) !== undefined ? { status: "skipped", why: "already_drafted" } : { status: "skipped", why: "busy" };
   }
   const giveBack = async (): Promise<void> => {
     // The claim and the pointer go back as they were: nothing started, nothing was spent, and a later call may try again. The pointer is restored only while it is still this claim's own.
     await deps.store.transact([{ kind: "delete", key: repairRowKey(orgId, project, recheckKey), condition: when.eq("state", "starting") }]).catch(() => undefined);
+    await deps.store.transact([{ kind: "delete", key: repairRevisionKey(orgId, project, recheck.setupRevision), condition: when.eq("key", recheckKey) }]).catch(() => undefined);
     const mine = when.eq("key", recheckKey);
     const restore: TransactItem = previous === undefined ? { kind: "delete", key: repairCurrentKey(orgId, project), condition: mine } : putRow(repairCurrentKey(orgId, project), "SETUP_REPAIR_CURRENT", { ...previous, ...expiry(deps) }, mine);
     await deps.store.transact([restore]).catch(() => undefined);
@@ -159,6 +173,15 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
     origin: "nightly", limits: { maxRunUsd: limits.budgetCents / 100, maxMinutes: limits.wallClockMin + REPAIR_GRACE_MINUTES },
     setupRepair: { limits, seenTaskId: before.pointer?.taskId },
   };
+  // THE AUDIT RECORD FIRST (closes #927 REVIEW-1 L1): Rovara, as the project's system owner, says it is about to start a repair draft, with a fixed reason and the run's own request id. A record that cannot be written
+  // starts nothing and gives the claim back. If the start then does not happen, `system_run.not_started` says so (best effort; the refusal stands either way).
+  try {
+    await deps.flow.audit.record(requestedAudit(deps, row));
+  } catch (error) {
+    logOf(deps, { event: "setup_repair.audit_unavailable", error: errorName(error) });
+    await giveBack();
+    return { status: "skipped", why: "start_refused" };
+  }
   let taskId: string;
   try {
     taskId = (await startUnattendedRun(door, request)).taskId;
@@ -168,6 +191,7 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
     if (made === undefined) {
       logOf(deps, { event: "setup_repair.start_refused", code: errorCode(error), error: errorName(error) });
       await giveBack();
+      await deps.flow.audit.record(notStartedAudit(deps, row, errorCode(error))).catch(() => undefined);
       return { status: "skipped", why: "start_refused" };
     }
     taskId = made.taskId;
@@ -175,14 +199,19 @@ export async function startRepairDraft(deps: RepairDraftDeps, project: string, r
   const started = { ...row, state: "drafting" as const, taskId, startedAt: isoOf(deps) };
   await deps.store.transact([
     { kind: "update", key: repairRowKey(orgId, project, recheckKey), ops: [change.set("state", "drafting"), change.set("taskId", taskId), change.set("startedAt", started.startedAt)], condition: when.eq("state", "starting") },
-    ...startedAudit(deps, row),
   ]);
   return { status: "started", row: started };
 }
 
-/** The audit event of a draft whose run really started (Rovara is the actor; the person who turned upkeep on is the project's own audit). Staged with the move to `drafting`, so a claim given back leaves no event. */
-const startedAudit = (deps: RepairDraftDeps, row: Pick<RepairRow, "project" | "key" | "budgetCents">): readonly TransactItem[] =>
-  deps.flow.audit.stage({ eventId: eventIdOf("setup-repair-started", deps.companyId, row.project, row.key), companyId: deps.companyId, at: isoOf(deps), actor: { type: "system", id: "rovara" }, action: "setup_repair.started", subject: { type: "project", id: row.project }, details: { budgetCents: row.budgetCents } });
+/** The audit event written BEFORE a repair draft's run starts (the same action as every system start: "who did it" is one read; Rovara's system owner is the actor, the reason a fixed code). */
+const requestedAudit = (deps: RepairDraftDeps, row: Pick<RepairRow, "project" | "key" | "budgetCents" | "runRequestId">) => ({
+  eventId: eventIdOf("system-run-started", deps.companyId, row.project, row.runRequestId), companyId: deps.companyId, at: isoOf(deps), actor: { type: "system" as const, id: systemOwnerIdOf(deps.companyId, row.project) },
+  action: SYSTEM_RUN_AUDIT.requested, subject: { type: "project" as const, id: row.project }, details: { kind: "repair_draft", reason: "check_failed", requestId: row.runRequestId, budgetCents: row.budgetCents },
+});
+const notStartedAudit = (deps: RepairDraftDeps, row: Pick<RepairRow, "project" | "runRequestId">, code: string) => ({
+  eventId: eventIdOf("system-run-not-started", deps.companyId, row.project, row.runRequestId), companyId: deps.companyId, at: isoOf(deps), actor: { type: "system" as const, id: systemOwnerIdOf(deps.companyId, row.project) },
+  action: SYSTEM_RUN_AUDIT.notStarted, subject: { type: "project" as const, id: row.project }, details: { kind: "repair_draft", requestId: row.runRequestId, code: code.slice(0, 40) },
+});
 
 /** The hook the host puts on `TaskFlowDeps.afterSetupBroken`: one draft per failure, only where the rules above allow it. */
 export function repairDraftHook(deps: RepairDraftDeps): (project: string, recheckKey: string) => Promise<void> {
@@ -207,6 +236,16 @@ export async function advanceRepairDraft(deps: RepairDraftDeps, project: string)
   return started.status === "skipped" ? current : started.row;
 }
 
+/**
+ * The progress pass's step for one project: moves a draft that is IN FLIGHT on (or stops it where a lock went off) and answers it; a project with none, or whose draft is over, answers undefined and nothing else
+ * is read or started (unlike `advanceRepairDraft`, it never advances a re-check and never starts a draft: a project that is not being repaired costs one read).
+ */
+export async function advanceInFlightRepairDraft(deps: RepairDraftDeps, project: string): Promise<RepairRow | undefined> {
+  const pointer = await readPointer(deps, project);
+  const current = pointer === undefined ? undefined : await readRepair(deps, project, pointer.key);
+  return current === undefined || TERMINAL.has(current.state) ? undefined : progress(deps, project, current);
+}
+
 async function move(deps: RepairDraftDeps, row: RepairRow, from: RepairState, to: { state: RepairState; reason?: RepairReason; stop?: string }, audit?: string): Promise<RepairRow> {
   const orgId = deps.companyId;
   const at = isoOf(deps);
@@ -221,9 +260,32 @@ async function move(deps: RepairDraftDeps, row: RepairRow, from: RepairState, to
   return { ...row, ...to, ...(TERMINAL.has(to.state) ? { decidedAt: at } : {}) };
 }
 
+/**
+ * Whether the locks that let a draft go on are still open, read NOW (closes #927 REVIEW-1 L3): the company's effective system-runs gate (the operator's ceiling AND the company's consent) and the project's upkeep
+ * switch. Every doubt (a throw, an absent gate, an answer that is not exactly `true`) is "no". Read before every move of a draft that is not finished and not waiting for a person.
+ */
+async function locksOpen(deps: RepairDraftDeps, project: string): Promise<boolean> {
+  if (deps.systemRuns === undefined || !(await systemRunsGateSaysOn(deps.systemRuns))) return false;
+  return await upkeepOn(deps, project);
+}
+
+/**
+ * A draft whose lock went off stops: its run is cancelled (a running setup run loses its standing at the access rule's next step anyway; this ends it now), its own candidate is removed (by its request id, never a
+ * person's) and the draft ends as `withdrawn`, in fixed words. Nothing is approved. The manual "Fix setup" stays open.
+ */
+async function stopWithdrawn(deps: RepairDraftDeps, project: string, row: RepairRow): Promise<RepairRow> {
+  const found = row.taskId !== undefined ? { taskId: row.taskId } : await deps.run?.starter.read(row.runRequestId).catch(() => undefined);
+  if (found !== undefined && (row.state === "starting" || row.state === "drafting")) await deps.run?.tasks?.cancel(found.taskId).catch((error: unknown) => logOf(deps, { event: "setup_repair.cancel_failed", error: errorName(error) }));
+  if (row.state === "checking") await discardSetupApply(deps, project, systemOwnerIdOf(deps.companyId, project), row.confirmRequestId);
+  if (row.state === "starting") await deps.flow.audit.record(notStartedAudit(deps, row, "WITHDRAWN")).catch(() => undefined);
+  return move(deps, row, row.state, { state: "ended", reason: "withdrawn" }, "stopped");
+}
+
 async function progress(deps: RepairDraftDeps, project: string, row: RepairRow): Promise<RepairRow> {
   try {
     const age = deps.now() - Date.parse(row.claimedAt);
+    // A draft that is going on (not finished, not waiting for a person) goes on only while its locks are open NOW.
+    if ((row.state === "starting" || row.state === "drafting" || row.state === "checking") && !(await locksOpen(deps, project))) return await stopWithdrawn(deps, project, row);
     switch (row.state) {
       case "starting": return await recoverStart(deps, row, age);
       case "drafting": return age > ABANDON_MS ? move(deps, row, "drafting", { state: "failed", reason: "run_failed" }, "failed") : await drafting(deps, project, row);
@@ -242,11 +304,13 @@ async function progress(deps: RepairDraftDeps, project: string, row: RepairRow):
 async function recoverStart(deps: RepairDraftDeps, row: RepairRow, age: number): Promise<RepairRow> {
   const made = await deps.run?.starter.read(row.runRequestId).catch(() => undefined);
   if (made !== undefined) {
-    const result = await deps.store.transact([{ kind: "update", key: repairRowKey(deps.companyId, row.project, row.key), ops: [change.set("state", "drafting"), change.set("taskId", made.taskId), change.set("startedAt", isoOf(deps))], condition: when.eq("state", "starting") }, ...startedAudit(deps, row)]);
+    const result = await deps.store.transact([{ kind: "update", key: repairRowKey(deps.companyId, row.project, row.key), ops: [change.set("state", "drafting"), change.set("taskId", made.taskId), change.set("startedAt", isoOf(deps))], condition: when.eq("state", "starting") }]);
     return result.applied ? { ...row, state: "drafting", taskId: made.taskId } : ((await readRepair(deps, row.project, row.key)) ?? row);
   }
   if (age <= REPAIR_START_STALE_MS) return row;
+  await deps.flow.audit.record(notStartedAudit(deps, row, "NEVER_STARTED")).catch(() => undefined);
   await deps.store.transact([{ kind: "delete", key: repairRowKey(deps.companyId, row.project, row.key), condition: when.eq("state", "starting") }]).catch(() => undefined);
+  await deps.store.transact([{ kind: "delete", key: repairRevisionKey(deps.companyId, row.project, row.setupRevision), condition: when.eq("key", row.key) }]).catch(() => undefined);
   await deps.store.transact([{ kind: "delete", key: repairCurrentKey(deps.companyId, row.project), condition: when.eq("key", row.key) }]).catch(() => undefined);
   return row;
 }
@@ -260,6 +324,13 @@ async function drafting(deps: RepairDraftDeps, project: string, row: RepairRow):
   // The run must be THIS draft's own: a pointer that names another task is another run (a person's), never confirmed here.
   if (pointer === undefined || pointer.taskId !== row.taskId || row.taskId === undefined) return move(deps, row, "drafting", { state: "ended", reason: "superseded" });
   if (view.status === "running") return row;
+  // The gateway paused nightly upkeep under this run (HTTP 422 `upkeep_paused`, read by the worker from the gateway's fixed sentence): the draft stops here, no retry, and the project's admins get the ONE notice per
+  // month and reason (N1). Only this unattended draft takes the word; a person's run never carries the origin that is counted against the upkeep cap.
+  const paused = UpkeepPauseReasonSchema.safeParse(view.summary?.pause);
+  if (paused.success) {
+    await deps.onUpkeepPaused?.(project, paused.data).catch((error: unknown) => logOf(deps, { event: "setup_repair.pause_notice_failed", error: errorName(error) }));
+    return move(deps, row, "drafting", { state: "failed", reason: "upkeep_paused" }, "failed");
+  }
   // Only a run that finished by itself with a whole proposal is confirmed. A limit stop (a partial proposal) or a failed run is a failed draft, said in fixed words.
   if (view.status !== "ready" || view.proposal === undefined || view.stop !== "proposed" || view.summary?.partial === true) {
     return move(deps, row, "drafting", { state: "failed", reason: "run_failed", ...(view.stop !== undefined && SAFE_STOPS.has(view.stop) ? { stop: view.stop } : {}) }, "failed");
@@ -322,7 +393,7 @@ export async function readRepairView(deps: Pick<RepairDraftDeps, "store" | "comp
   const classes: SetupDriftClass[] = base.classes;
   const noFix = (failure?: RepairReason): SetupRepairView => ({
     title: "Setup needs repair", state: "no_fix", classes, at: base.at, actions: manual,
-    body: failure === "run_failed" || failure === "no_usable_fix" || failure === "check_failed" ? `${base.body} ${REPAIR_WORDS.failed[failure]}` : base.body, ...(failure === undefined ? {} : { failure }),
+    body: failure === "run_failed" || failure === "no_usable_fix" || failure === "check_failed" || failure === "upkeep_paused" ? `${base.body} ${REPAIR_WORDS.failed[failure]}` : failure === "withdrawn" ? `${base.body} ${REPAIR_WORDS.withdrawn}` : base.body, ...(failure === undefined ? {} : { failure }),
   });
   try {
     const notice = await deps.store.get(repairNoticeKey(deps.companyId, project));
@@ -331,6 +402,7 @@ export async function readRepairView(deps: Pick<RepairDraftDeps, "store" | "comp
     const repair = key === undefined ? undefined : await readRepair(deps, project, key);
     if (repair === undefined) return noFix();
     if (repair.state === "failed") return noFix(repair.reason);
+    if (repair.state === "ended" && repair.reason === "withdrawn") return noFix("withdrawn");
     if (repair.state === "starting" || repair.state === "drafting" || repair.state === "checking") {
       return { title: "Setup needs repair", state: "drafting", classes, at: base.at, body: `${base.body} ${REPAIR_WORDS.drafting}`, actions: [{ id: "edit_commands", label: "Edit commands myself" }] };
     }

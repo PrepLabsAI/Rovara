@@ -47,6 +47,7 @@ import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
+import { setupAgentKey } from "../core/setup-agent/keys.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -57,9 +58,11 @@ import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
+import { createHostedSetupRepair } from "../core-host/setup-repair.js";
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
+import { upkeepIsOn } from "../core/upkeep/settings.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { listProjectMembers } from "./admin-actions.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
@@ -72,7 +75,7 @@ import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { mayUseProject } from "../developer/task-project-access.js";
-import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type WikiRefreshMark } from "../core/system-runs/access.js";
+import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
@@ -167,6 +170,11 @@ export interface BrokerCoreRootInputs {
    * gateway configured) each company chooses its agents' models on the web page from that list; without it every core step runs on ROVARA_CORE_AGENT_MODEL, exactly as before.
    */
   offeredModels?: OfferedModelsReader;
+  /**
+   * L4-SR2: whole cents of a project's monthly upkeep cap that are still free, as the model gateway says now (Cloud's `upkeep_month` row). The automatic repair draft starts only with room for its whole run: without this reader
+   * (or when it answers undefined or throws) there is no room, so no draft starts on its own and the manual "Fix setup" stays. The gateway holds the real cap on every call either way.
+   */
+  upkeepRoomCents?: (companyId: OrgId, project: string) => Promise<number | undefined>;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -332,12 +340,21 @@ export function hostedTaskAccess(inputs: {
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
   /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
   systemRunsOn?: () => boolean | Promise<boolean>;
+  /** L4-SR2: whether a project's own upkeep switch is on, read now (a repair draft is accepted only while it is). Absent: off. */
+  upkeepOn?: (project: string) => boolean | Promise<boolean>;
 }): TaskAccess {
   // The gate may read the company's consent (async): it is settled once per decision, and anything but an explicit true is off (a gate that throws is off).
   const settledOn = async (gate: (() => boolean | Promise<boolean>) | undefined): Promise<(() => boolean) | undefined> => {
     if (gate === undefined) return undefined;
     let on = false;
     try { on = (await gate()) === true; } catch { on = false; }
+    return () => on;
+  };
+  // The project's upkeep switch, settled once per decision; anything but an explicit true (a throw included) is off.
+  const settledUpkeep = async (project: string): Promise<(() => boolean) | undefined> => {
+    if (inputs.upkeepOn === undefined) return undefined;
+    let on = false;
+    try { on = (await inputs.upkeepOn(project)) === true; } catch { on = false; }
     return () => on;
   };
   const liveMember = async (personId: string) => {
@@ -362,7 +379,7 @@ export function hostedTaskAccess(inputs: {
   return {
     async checkStart(principal, project, purpose, origin) {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
-      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn) }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
+      if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), upkeepOn: purpose === "setup_agent" ? await settledUpkeep(project) : undefined }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
       return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
@@ -390,7 +407,13 @@ export function hostedTaskAccess(inputs: {
           const pointer = await readWikiBuildPointer(store, inputs.companyId, task.project).catch(() => undefined);
           if (pointer !== undefined) wikiRefreshMark = { taskId: pointer.taskId, unattended: pointer.unattended === true, requestedBy: pointer.requestedBy };
         }
-        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), wikiRefreshMark }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
+        // A repair draft's mark: the project's setup pointer (read only for a setup purpose; `readSetupAgentPointer` checks company and project), and the project's upkeep switch, read now.
+        let setupRepairMark: SetupRepairMark | undefined;
+        if (store !== undefined && stored?.["purpose"] === "setup_agent") {
+          const pointer = await store.get(setupAgentKey(inputs.companyId, task.project)).catch(() => undefined);
+          if (pointer?.["entityType"] === "SETUP_AGENT" && pointer["orgId"] === inputs.companyId && pointer["project"] === task.project && typeof pointer["taskId"] === "string" && typeof pointer["requestedBy"] === "string") setupRepairMark = { taskId: pointer["taskId"], requestedBy: pointer["requestedBy"] };
+        }
+        return systemStepVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), wikiRefreshMark, setupRepairMark, upkeepOn: stored?.["purpose"] === "setup_agent" ? await settledUpkeep(task.project) : undefined }, task, stored).allowed ? { allowed: true } : { allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED };
       }
       if ((await liveMember(task.developerId)) === undefined) return { allowed: false, message: NOT_A_MEMBER_HERE };
       // A setup run (the stored task says so) runs on the setup run's rule: an owner or admin of the company, or the project's administrator, read now. Any other task: the grant.
@@ -599,7 +622,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
         wikiBuildEnded: wikiBuildEndedHook({ store: registry.require("storage"), companyId, now: () => now().getTime() }) },
-      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(), people: {
+      access: hostedTaskAccess({ membershipOf, projectGrant, companyId, storage: async () => registry.require("storage"), setupRunStanding, systemRunsOn: () => effectiveSystemRunsGateOf(systemRunsFlag.value, companyId, registry.require("storage")).enabled(),
+        // L4-SR2: a repair draft is accepted only while the project's own upkeep switch is on (read now, at the start and at every step).
+        upkeepOn: (project) => upkeepIsOn({ store: registry.require("storage"), companyId }, project), people: {
         documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime(),
         ...(inputs.checkTaskPerson === undefined ? {} : { checkTaskPerson: inputs.checkTaskPerson }),
       } }),
@@ -650,6 +675,17 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
+        // L4-SR2: the automatic repair draft, only where the ceiling covers the company (nothing is built otherwise). Its start is behind the effective gate, the project's upkeep switch, an enforced cap with room and the access rule's marks.
+        const repair = switchCovers(systemRunsFlag.value, companyId)
+          ? createHostedSetupRepair({
+            flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured,
+            readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
+              .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
+            ...(inputs.upkeepRoomCents === undefined ? {} : { room: (project: string) => inputs.upkeepRoomCents!(companyId, project) }),
+            onUpkeepPaused: (scope, reason) => upkeep.pauses.onRunPaused(scope, reason), log,
+          })
+          : undefined;
+        if (repair !== undefined) flow.deps.afterSetupBroken = repair.hook;
         const systemRuns = createHostedSystemRuns({
           flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
           enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
@@ -659,7 +695,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         return {
           ...(inputs.services?.(companyId, flow, registry, { ...wiring, upkeep: { administers: upkeep.administers } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
-          ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log }) }),
+          ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log, repairs: repair }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
