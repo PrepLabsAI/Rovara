@@ -63,6 +63,7 @@ import type { ChatThreads } from "../core-host/chat-threads.js";
 import { projectPageUrl } from "../core/decisions/open-path.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
+import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
@@ -783,7 +784,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     });
     const deployedCallerOf = deployedCallerFromMembership(membershipOf);
     const chatThreads = inputs.chatThreads;
-    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
+    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
+      // L4-U5d: a later message in that thread is input for the task (one line here; the rule and the routing are core-host/chat-thread-input.ts).
+      chatThreads === undefined ? undefined : (deployed, input) => addChatThreadInput({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
@@ -845,6 +848,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const entry = coreTasks;
     coreTasks = {
       route: (request, caller) => entry.route(request, caller),
+      // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
+      ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
+      ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
