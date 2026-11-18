@@ -5,7 +5,7 @@
 // contract's is "not_available", and `evalSourcesFromDelivery` then gives nothing (the eval reads "not connected", zero calls). The cache answers only for the exact key the broker read
 // (another key is a miss) and never writes: base rounds are not saved from a worker through this route. Nothing here logs, stores or echoes the answer.
 import {
-  EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, evalBaseCacheKey,
+  EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, EvalStandInDescriptorSchema, evalBaseCacheKey,
   type BaseScoreCache, type EvalEnvironment, type EvalPlanDelivery, type EvalSpendApproval, type EvalStandInDescriptor,
 } from "@agentx/contracts";
 
@@ -52,8 +52,12 @@ export async function fetchEvalPlanDelivery(input: EvalPlanDeliveryRequest): Pro
     if (text === undefined) return NOT_AVAILABLE;
     const reply: unknown = JSON.parse(text);
     if (typeof reply !== "object" || reply === null || Array.isArray(reply)) return NOT_AVAILABLE;
-    const answer = EvalPlanDeliverySchema.safeParse(Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")));
+    // L4-EINT (review L1): the stand-in descriptor is optional and parsed on its own, so a descriptor this worker cannot read (a newer broker's) is dropped, never a reason to lose the plan (version skew).
+    const { standIns: rawStandIns, ...rest } = Object.fromEntries(Object.entries(reply).filter(([key]) => key !== "requestId")) as Record<string, unknown>;
+    const answer = EvalPlanDeliverySchema.safeParse(rest);
     if (!answer.success || Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) return NOT_AVAILABLE;
+    const descriptor = rawStandIns === undefined ? undefined : EvalStandInDescriptorSchema.safeParse(rawStandIns);
+    if (answer.data.status === "ready" && descriptor?.success === true) return { ...answer.data, standIns: descriptor.data };
     return answer.data;
   } catch {
     return NOT_AVAILABLE;

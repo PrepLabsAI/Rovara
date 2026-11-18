@@ -46,6 +46,7 @@ const call = async (url, init) => { try { const r = await fetch(url, init); retu
   out.reach = { internet: await reach("1.1.1.1", 443), metadata: await reach("169.254.169.254", 80) };
   out.lookup = { vendor: await dns.lookup("api.vendor.test", { family: 4 }).then((r) => r.address, () => "error"), publicName: await dns.lookup("example.com", { family: 4 }).then((r) => r.address, () => "error") };
   out.keyInCheckout = fs.readdirSync("/workspace", { recursive: true }).filter((f) => typeof f === "string" && /key|\\.pem$/i.test(f) && !/ca\\.pem$|ca\\.crt$|ca-cert/i.test(f));
+  out.envKey = Object.values(process.env).some((v) => typeof v === "string" && v.includes("PRIVATE KEY"));
   out.keyText = fs.readdirSync("/workspace", { recursive: true }).filter((f) => typeof f === "string" && f.endsWith(".pem")).map((f) => fs.readFileSync("/workspace/" + f, "utf8")).join("\\n");
   fs.writeFileSync("/workspace/${REPORT}", JSON.stringify(out));
 })();
@@ -105,7 +106,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     containers: (await docker("ps", "-a", "--filter", `label=rovara.run-network.workspace=${WORKSPACE}`, "--format", "{{.Names}}")).stdout.trim(),
     networks: (await docker("network", "ls", "--filter", `label=rovara.run-network.workspace=${WORKSPACE}`, "--format", "{{.Name}}")).stdout.trim(),
   });
-  type Report = { env: { hasCa: boolean; caPath: string }; calls: Record<string, { status?: number; label?: string | null; cls?: string | null; body?: string; error?: string }>; curl: string; reach: Record<string, string>; lookup: Record<string, string>; keyText: string };
+  type Report = { envKey: boolean; keyInCheckout: string[]; env: { hasCa: boolean; caPath: string }; calls: Record<string, { status?: number; label?: string | null; cls?: string | null; body?: string; error?: string }>; curl: string; reach: Record<string, string>; lookup: Record<string, string>; keyText: string };
 
   it("answers an https vendor name from the run's authority, names nothing else reachable, keeps the key out of the box, gives both sides the same bytes, and leaves nothing behind", async () => {
     const round = new EvalStandInRound({ workspaceId: WORKSPACE_ID, operationId: OPERATION_ID, plan: [{ host: "api.vendor.test" }],
@@ -138,6 +139,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(report.lookup["publicName"]).toMatch(/^172\.30\.\d+\.47$/u);
       // SI-3: only the PUBLIC certificate is in the box.
       expect(report.keyText).not.toContain("PRIVATE KEY");
+      expect(report.envKey).toBe(false);
+      expect(report.keyInCheckout).toEqual([]);
     }
     // SI-4: the same request got the same bytes on both sides, and the book counted one recorded answer and the made-up ones once each.
     expect(reports[1]!.calls["madeUp"]!.body).toBe(reports[0]!.calls["madeUp"]!.body);

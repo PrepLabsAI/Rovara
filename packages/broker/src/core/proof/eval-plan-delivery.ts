@@ -138,10 +138,10 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
     const answerWith = (env: typeof environment, stand: typeof standIns = standIns) => EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline, ...(env === undefined ? {} : { environment: env }), ...(stand === undefined ? {} : { standIns: stand }) });
     let answer = answerWith(environment);
     if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
-    // An environment that makes the answer too big is dropped (the eval runs on the bare image), never a reason to withhold the plan.
-    if (environment !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_environment_invalid"); answer = answerWith(undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
     // L4-EINT: a stand-in descriptor that makes the answer too big is dropped too (the eval runs without stand-ins), never a reason to withhold the plan.
     if (standIns !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_stand_ins_invalid"); answer = answerWith(environment, undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
+    // An environment that makes the answer too big is dropped (the eval runs on the bare image), never a reason to withhold the plan.
+    if (environment !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_environment_invalid"); answer = answerWith(undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
     if (Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_plan_oversize"); return NOT_AVAILABLE; }
     return answer.data;
   } catch {

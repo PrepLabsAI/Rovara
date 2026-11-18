@@ -81,6 +81,19 @@ describe("a repository cannot extend the list", () => {
   });
 });
 
+describe("the planner leaves a telemetry host out even when handed one past the schema", () => {
+  it("a hand-made descriptor that names a telemetry host does not put it in the plan (defence beside the schema)", async () => {
+    const root = await mkdtemp(join(process.env["TMPDIR"] ?? process.cwd(), "telemetry-plan2-"));
+    try {
+      const planned = await planEvalStandInsFromCheckout({
+        descriptor: { version: 1, hosts: [{ name: "o1.ingest.sentry.io" }, { name: "api.example.test" }] } as never, checkoutRoot: root,
+        workspaceId: "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11", operationId: "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f50",
+      });
+      expect(planned?.round.plan.map((entry) => entry.host)).toEqual(["api.example.test"]);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+});
+
 describe("the stand-in server answers telemetry with OK and counts no gap", () => {
   const servers: EvalStandInServers[] = [];
   afterEach(() => { for (const server of servers.splice(0)) { server.http.closeAllConnections(); server.http.close(); } });

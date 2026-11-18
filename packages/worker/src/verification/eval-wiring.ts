@@ -191,14 +191,14 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
   // L4-EINT: the stand-in set of this check, prepared ONCE from the base commit (the version needs it before the first run, the runs need it after). Off unless the switch is "1" and the host asked for it.
   const standInsOn = host.standIns !== undefined && evalStandInsOn(host.environment);
   let prepared: Promise<PreparedEvalStandIns | undefined> | undefined;
-  const prepare = (): Promise<PreparedEvalStandIns | undefined> => {
+  const prepare = (stop?: AbortSignal): Promise<PreparedEvalStandIns | undefined> => {
     if (!standInsOn) return Promise.resolve(undefined);
     return prepared ??= (async () => {
       const check = pinnedEvalFreshCheck(await deliveredPlan());
       if (check === undefined) return undefined;
       return await prepareEvalStandIns({
         descriptor: await deliveredStandIns().catch(() => undefined), dependencies: host.standIns?.dependencies, repositoryDirectory: check.repository.directory, baseCommit: check.repository.baseCommit,
-        scratchDir: check.round.scratchDir, workspaceId: invocation.workspaceId ?? "", operationId: invocation.operationId, signal: AbortSignal.timeout(120_000),
+        scratchDir: check.round.scratchDir, workspaceId: invocation.workspaceId ?? "", operationId: invocation.operationId, signal: stop === undefined ? AbortSignal.timeout(120_000) : AbortSignal.any([stop, AbortSignal.timeout(120_000)]),
       });
     })().catch(() => undefined);
   };
@@ -220,7 +220,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
       } finally { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); }
       // L4-EVS: the environment of this plan's ask (an unreadable one is no environment: the bare image, as before).
       const evalEnvironment = await deliveredEnvironment().catch(() => undefined);
-      const stand = await prepare();
+      const stand = await prepare(input.signal);
       const services = (() => { try { return host.services?.({ side: input.side, prepared: stand }); } catch { return undefined; } })();
       const config: FreshEvalSandboxConfig = {
         ...(evalEnvironment === undefined ? {} : { evalEnvironment }),
@@ -232,6 +232,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
         ...(services === undefined ? {} : { services }), ...(evalSealedDnsOn(host.environment) ? {} : { sealedDns: false }),
         // L4-EINT: the outside-HTTP stand-in round (one per check: both sides, every re-ask and the second look share its answer book).
         ...(stand?.round === undefined ? {} : { standIns: { round: stand.round } }),
+        ...(standInsOn ? { reportStandInDatabases: true } : {}),
       };
       pinned = { row: check.rowId, path: evalModelPathPattern(check.rowId, check.model) };
       return await (host.make ?? createFreshEvalSandbox)(config).run(input);

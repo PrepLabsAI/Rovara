@@ -336,6 +336,11 @@ export interface FreshEvalSandboxConfig {
    * catch-all (never stop). The ONE `round` is shared by both sides and every re-ask (one answer book). The box trusts the round's authority through environment variables only. `start` is a test seam (default: `startEvalStandIns`).
    */
   readonly standIns?: { readonly round: EvalStandInRound; readonly start?: typeof startEvalStandIns | undefined } | undefined;
+  /**
+   * L4-EINT (review M1): true only when the operator's stand-in switch is on. Then the run names the databases it was stood in for (and the PR says "Ran against stand-ins for Postgres"). Absent: a services round reports
+   * nothing of the kind, byte for byte as before the switch existed (those services are real software, not stand-ins, when the switch is off).
+   */
+  readonly reportStandInDatabases?: boolean | undefined;
 }
 
 const configProblem = (config: FreshEvalSandboxConfig): boolean => {
@@ -359,6 +364,7 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
     if (c.installNetwork !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(c.installNetwork)) return true;
     if (c.services !== undefined && typeof c.services?.start !== "function") return true;
     if (c.sealedDns !== undefined && typeof c.sealedDns !== "boolean") return true;
+    if (c.reportStandInDatabases !== undefined && typeof c.reportStandInDatabases !== "boolean") return true;
     return false;
   } catch { return true; }
 };
@@ -908,7 +914,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         }
         // 8. L4-E56: the stand-in's summary, read while the helper is still up and after the sandbox's last exit (the helper writes it before it sends each answer). An unreadable one says nothing, so the run counts as having hit a gap.
         // L4-EINT: what this run was stood in for: databases by engine (the services' own ports), planned outside hosts, and the fixed telemetry entries answered `OK`. A database-only round reports no gap and empty counts.
-        const databases = [...new Set((servicesRun?.started ?? []).flatMap((entry) => entry.ports.map((port) => evalStandInEngineOfPort(port))).filter((engine): engine is NonNullable<typeof engine> => engine !== undefined))];
+        const databases = config.reportStandInDatabases !== true ? [] : [...new Set((servicesRun?.started ?? []).flatMap((entry) => entry.ports.map((port) => evalStandInEngineOfPort(port))).filter((engine): engine is NonNullable<typeof engine> => engine !== undefined))];
         const absorbed = config.standIns === undefined || standIn === undefined ? undefined : config.standIns.round.absorb(await standIn.summary().catch(() => undefined));
         const standInResult: EvalStandInRunReport | undefined = absorbed !== undefined && config.standIns !== undefined
           ? { ...absorbed, telemetry: config.standIns.round.telemetry(), hosts: config.standIns.round.plannedHosts(), databases }

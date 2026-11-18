@@ -114,6 +114,21 @@ export async function planEvalStandIns(input: {
 
 // ---- the whole preparation of one eval check: the round, the seed files and the version
 
+/**
+ * The path of a seed inside ONE repository's checkout, from its workspace-relative path: the first `k` folders (k = 0 to 4) must be the last `k` folders of the repository's own directory on the worker, the rest is the path in the
+ * checkout (never empty, never `..`). Undefined when the seed is not this repository's. Pure.
+ */
+export function seedPathInRepository(fixturePath: string, repositoryDirectory: string): string | undefined {
+  const parts = fixturePath.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.length === 0 || parts.includes("..")) return undefined;
+  const folders = repositoryDirectory.split("/").filter((part) => part !== "");
+  for (let k = Math.min(4, parts.length - 1); k >= 0; k -= 1) {
+    const prefix = parts.slice(0, k);
+    if (k === 0 || (folders.length >= k && prefix.every((part, i) => folders[folders.length - k + i] === part))) return parts.slice(k).join("/");
+  }
+  return undefined;
+}
+
 export interface PreparedEvalStandIns {
   /** The outside-HTTP round (absent: no host and no recording, or no descriptor). */
   readonly round?: EvalStandInRound | undefined;
@@ -152,7 +167,11 @@ export async function prepareEvalStandIns(input: {
       for (const seed of plan.seeds) {
         if (!("fixturePath" in seed)) continue;
         try {
-          const bytes = await readSeedFile({ rootPath: checkout, repositoryPaths: [checkout], hiddenPaths: [], fixturePath: seed.fixturePath, family: plan.family });
+          // A seed's path is WORKSPACE-relative (`<repository path>/<file>`); the checkout is this one repository. The seed belongs to this repository only when the path's folder prefix is the end of the repository's own directory
+          // (so a file of another repository is never read from this tree); the rest is the path inside the checkout.
+          const inside = seedPathInRepository(seed.fixturePath, input.repositoryDirectory);
+          if (inside === undefined) continue;
+          const bytes = await readSeedFile({ rootPath: checkout, repositoryPaths: [checkout], hiddenPaths: [], fixturePath: inside, family: plan.family });
           // An approved plan names the content its approval bound: a file that differs is not loaded.
           if (seed.sha256 !== undefined && seed.sha256 !== seedFileDigest(bytes)) continue;
           files.push(bytes); seedDigests.push(seedFileDigest(bytes));

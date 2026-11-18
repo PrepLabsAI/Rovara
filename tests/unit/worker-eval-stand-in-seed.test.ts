@@ -4,7 +4,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { seedFileDigest } from "../../packages/worker/src/service-seed-file.js";
-import { evalDatabaseSeed, prepareEvalStandIns } from "../../packages/worker/src/eval-stand-in-plan.js";
+import { evalDatabaseSeed, prepareEvalStandIns, seedPathInRepository } from "../../packages/worker/src/eval-stand-in-plan.js";
 import { EVAL_SERVICES_FAILURE_SENTENCE, type EvalServicesStarted } from "../../packages/worker/src/verification/eval-services.js";
 
 const WORKSPACE = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
@@ -35,6 +35,20 @@ describe("the seed files and the version come from the BASE commit, once", () =>
     const changed = await prepare(await repo(`${SEED}INSERT INTO creators VALUES (2, 'b');\n`), [plan()]);
     expect(changed.version).not.toBe(first.version);
     expect(seedFileDigest(changed.seeds.get("db")![0]!)).not.toBe(seedFileDigest(first.seeds.get("db")![0]!));
+  });
+
+  it("review M2: a seed path is WORKSPACE-relative (`<repository folder>/<file>`) and is read from this one repository's checkout; another repository's seed is not read from this tree", async () => {
+    const root = await repo();
+    const folder = root.split("/").at(-1)!;
+    const real = await prepare(root, [plan({ seeds: [{ fixturePath: `${folder}/seeds/dev.sql` }] })]);
+    expect(real.seeds.get("db")!.map((bytes) => bytes.toString("utf8"))).toEqual([SEED]);
+    // The same file name under another repository's folder is not this repository's.
+    expect((await prepare(root, [plan({ seeds: [{ fixturePath: "other-repo/seeds/dev.sql" }] })])).seeds.size).toBe(0);
+    expect(seedPathInRepository("web/db/seed.sql", "/work/ws/web")).toBe("db/seed.sql");
+    expect(seedPathInRepository("ws/web/db/seed.sql", "/work/ws/web")).toBe("db/seed.sql");
+    expect(seedPathInRepository("seeds/dev.sql", "/work/ws/web")).toBe("seeds/dev.sql");
+    expect(seedPathInRepository("../x.sql", "/work/ws/web")).toBeUndefined();
+    expect(seedPathInRepository("", "/work/ws/web")).toBeUndefined();
   });
 
   it("an approved plan's sha256 must match the file; a file that is missing, a link or outside is no seed (on both sides alike); a plan with no local service has no version", async () => {
