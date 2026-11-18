@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { LEARNED_CONTEXT_FEATURE, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
+import { LEARNED_CONTEXT_FEATURE, ROVARA_CODE_AGENT_ID, WorkflowSnapshotSchema, change, companyScoped, createCandidateManifest, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, runCostKey, sessionBindingKey, type OrgId, type WorkerMachines, type StoredDocument, type WorkerInvocation } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { createCoreDispatchHost } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
@@ -17,6 +17,7 @@ import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-
 import { lessonRecord } from "../unit/lessons/lesson-helpers.js";
 import { createDispatcherLearned } from "../../packages/broker/src/aws/worker-machines/dispatcher-lessons.js";
 import { createTeamRecord } from "../../packages/broker/src/team-record/record.js";
+import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { blockedReview, code, parserId, report, PARSER, TOKEN, tokenId } from "../support/task-actions-world.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -236,6 +237,29 @@ it("refuses the entire company's runtime when the gateway has no task signer", a
   const h = await world({ noSigner: true });
   await expect(h.root.app.runtimeFor(A)).rejects.toMatchObject({ name: "GatewayTaskTokensMissing" });
   expect((await h.w.store.query({ pk: `ORG#${A}#TASKS` })).items).toEqual([]);
+});
+
+it("wires hosted close cost, session bindings and after-merge independently for each company", async () => {
+  const h = await world();
+  const sessionId = "ses_11111111111111111111";
+  const closedAt = "2026-11-18T12:00:00.000Z";
+  for (const companyId of [A, B]) {
+    const issueId = companyId === A ? "LIN-A" : "LIN-B";
+    await h.w.store.put({ item: { ...sessionBindingKey(companyId, sessionId, "linear_issue"), entityType: "AGENT_SESSION_BINDING", orgId: companyId, sessionId, binding: { kind: "linear_issue", issueId, url: `https://linear.app/acme/issue/${issueId}` } } });
+    const taskId = randomUUID();
+    await h.w.store.put({ item: { ...taskKey(taskId), taskId, companyId, project: "payments" } });
+    await h.w.store.put({ item: { pk: costPartition(companyId, taskId), sk: "TOTAL", taskId, currency: "USD", micros: 2_500_000, unpricedEntries: 0 } });
+    const runtime = await h.root.app.runtimeFor(companyId);
+    expect(runtime.services["after-merge"]).toMatchObject({ companyId });
+    expect(await runtime.flow.deps.sessionBindings!.read(companyId, sessionId)).toMatchObject([{ kind: "linear_issue", issueId }]);
+    await runtime.flow.deps.onTaskClosed!({ taskId, project: "payments", workflow: { path: "FULL" } } as never, closedAt);
+    expect(await h.w.store.get(runCostKey(companyId, "payments", ROVARA_CODE_AGENT_ID, "FULL", closedAt, taskId))).toMatchObject({ entityType: "RUN_COST", orgId: companyId, costUsd: 2.5 });
+  }
+  const a = await h.root.app.runtimeFor(A);
+  const b = await h.root.app.runtimeFor(B);
+  expect(await a.flow.deps.sessionBindings!.read(A, sessionId)).toMatchObject([{ issueId: "LIN-A" }]);
+  expect(await a.flow.deps.sessionBindings!.read(B, sessionId)).toMatchObject([{ issueId: "LIN-A" }]);
+  expect(a.services["after-merge"]).not.toBe(b.services["after-merge"]);
 });
 
 it("applies FR-018 from the company's catalog and reads the broker's live workspace setting before every start", async () => {
