@@ -271,8 +271,13 @@ async function retryRecheck(deps: TaskFlowDeps, project: string, definition: Pro
   const orgId = deps.companyId;
   const auto = automaticDeps(deps);
   const claimId = claimIdOf(row.key, 2);
-  const claim = await claimAutomaticRun(auto, { orgId, project, requestId: claimId, job: "scheduled_check" });
   const at = iso(deps);
+  // The company's system runs were switched OFF after the first attempt began: nothing more is started by itself. The re-check ends unclear (it never blocks) and the task page says it could not be made.
+  if (deps.systemRuns?.enabled() === false) {
+    await deps.store.transact([{ kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("state", "unclear"), change.set("decidedAt", at)], condition: still }]);
+    return readRecheck(deps, project, row.key);
+  }
+  const claim = await claimAutomaticRun(auto, { orgId, project, requestId: claimId, job: "scheduled_check" });
   if (!claim.claimed) {
     await deps.store.transact([{ kind: "update", key: recheckRowKey(orgId, project, row.key), ops: [change.set("state", "unclear"), change.set("decidedAt", at)], condition: still }]);
     return readRecheck(deps, project, row.key);
@@ -322,7 +327,7 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
     // Never over a mark of a newer setup (an approval writes its own candidate's check), and never for a revision that is no longer the project's.
     if (typeof seen?.revision === "number" && seen.revision > row.check.revision) return;
     if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision) return;
-    if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) <= Date.parse(row.check.startedAt))) return;
+    if (typeof seen?.workspaceId === "string" && !(Date.parse(String(seen.startedAt)) < Date.parse(row.check.startedAt))) return;
     await deps.store.update({ key, ops: [change.set("setupCheck", { ...row.check })], condition: seen?.workspaceId === undefined ? when.notExists("setupCheck") : when.eq(["setupCheck", "workspaceId"], seen.workspaceId) });
   } catch (error) {
     log(deps, { event: "setup_drift.mark_failed", error: errorName(error) });
