@@ -8,7 +8,7 @@
 //     rate is counted from these (merged tasks of the window that were not reverted, over merged tasks of the window).
 // Every row is under the company's own partition AND the project (`companyScoped`), written only for the company this sink was built for, and read back only through the same keys. A row carries its own
 // `keepUntil` (checked by the reader, so no row is read past it whether or not the store has swept it) and, where the store names a time-to-live attribute, that attribute too (the store's own, never a name written here).
-// Erase: a person's id is never in a row, so a person erase has nothing to remove; a project or company purge removes the partitions as it does every other project-keyed row.
+// Erase: a person's id is never in a row, so a person erase has nothing to remove; the company purge removes the partitions (the ORG# prefix); there is no project purge for any lesson partition, and rows expire after 60 days.
 import { companyScoped, type DocumentStore, type OrgId } from "@agentx/contracts";
 
 const DAY = 86_400_000;
@@ -88,7 +88,7 @@ export function documentMeasureSink(store: Pick<DocumentStore, "put" | "ttlAttri
       await Promise.race([write(), new Promise<void>((resolve) => { timer = setTimeout(resolve, MEASURE_WRITE_MS); timer.unref?.(); })]);
     } catch { /* a measurement is information only: it never fails a load */ } finally { if (timer !== undefined) clearTimeout(timer); }
   };
-  const mine = (input: { workspaceId: string; project: string; taskId: string }): boolean => input.workspaceId === companyId && NAME.test(input.project) && ID.test(input.taskId.replace(/-/gu, "_"));
+  const mine = (input: { workspaceId: string; project: string; taskId: string; at: number }): boolean => Number.isFinite(input.at) && input.at > 0 && input.workspaceId === companyId && NAME.test(input.project) && ID.test(input.taskId.replace(/-/gu, "_"));
   const keep = MEASURE_KEEP_MS / 1000;
   return {
     async load(measure) {
@@ -147,6 +147,8 @@ export interface LessonMeasure {
   meanFitLoaded: number | null;
   meanFitLeftOut: number | null;
   cleanMerge: { merged: number; reverted: number; clean: number; rate: number | null };
+  /** Nothing in Code calls the revert detector yet, so `cleanMerge.reverted` is 0 whatever happened: the rate is "merged and not known to be reverted". Change this word when a producer is wired. */
+  revertDetection: "not_wired";
   /** Some input was cut by the total limit or the deadline: the answer is for what was read. */
   truncated: boolean;
   /** Rows that were not shaped as a row of this module (they are left out, never guessed from). */
@@ -249,6 +251,6 @@ export async function readLessonMeasure(store: Pick<DocumentStore, "query">, inp
     project: input.project, windowDays, floor: MEASURE_FIT_FLOOR, loads, lessonsInUse, loadedLessons, loadedBelowFloor: loadedBelow, loadsWithBelowFloor: loadsWithBelow, loadedNoMatch: noMatch, meanWordsLoaded: loadedLessons === 0 ? null : Math.round((wordsLoaded / loadedLessons) * 1000) / 1000, meanWordsLeftOut: leftCount === 0 ? null : Math.round((wordsLeft / leftCount) * 1000) / 1000, loadsCapBound: capBound,
     leftOutAtOrAboveFloor: leftOutAbove, meanFitLoaded: loadedLessons === 0 ? null : Math.round((fitLoaded / loadedLessons) * 1000) / 1000, meanFitLeftOut: leftCount === 0 ? null : Math.round((fitLeft / leftCount) * 1000) / 1000,
     cleanMerge: { merged: merged.size, reverted: revertedOfMerged, clean, rate: merged.size === 0 ? null : Math.round((clean / merged.size) * 1000) / 1000 },
-    truncated, unreadable,
+    revertDetection: "not_wired", truncated, unreadable,
   };
 }

@@ -367,11 +367,12 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
     try {
       const sample = (id: string): FitSample => { const ranked = selected.ranking.find((entry) => entry.id === id)!; return { id, fit: ranked.fit, score: ranked.score, words: ranked.words, cos: ranked.cos ?? null }; };
       const picked = new Set(entries.map((entry) => entry.id));
-      await deps.measure.load({
+      // Not waited for: the measurement never holds a step's dispatch (a slow store could push a near-deadline load past the dispatcher's 2.5 s). The sink never throws and bounds its own write.
+      void deps.measure.load({
         workspaceId: key.workspaceId, project: key.project, taskId: request.taskId, stage, round: request.round, at: now, budgetLessons: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }).lessons,
         activeCount: active.length, eligibleCount: selected.ranking.length,
         loaded: entries.map((entry) => sample(entry.id)), leftOut: selected.ranking.filter((entry) => !picked.has(entry.id)).slice(0, MEASURE_LEFT_OUT).map((entry) => sample(entry.id)),
-      });
+      }).catch(() => deps.metrics?.count("learning_measure_failed"));
     } catch { deps.metrics?.count("learning_measure_failed"); }
   }
   // `loaded` is counted when the worker reports the lesson reached the prompt (applyLoadReport), not here: a lesson the worker dropped was never loaded.

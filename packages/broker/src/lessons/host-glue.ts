@@ -265,8 +265,10 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     if (!enabled()) return;
     const task = await ownTask(taskId).catch(() => undefined);
     if (task === undefined) return;
-    // Phase 0 (measure only): the revert is one row of the project's clean-merge count (`measure.ts`); the sink never throws.
-    await runtime.load.measure?.reverted({ workspaceId: companyId, project: task.project, taskId: task.taskId, at: now() });
+    // Phase 0 (measure only): the revert is one row of the project's clean-merge count (`measure.ts`), under the same rule as the merged row (the project's mode reflects); the sink never throws.
+    try {
+      if (modeAllows((await resolveLearning(runtime.settings, companyId, task.project)).mode, "reflect")) await runtime.load.measure?.reverted({ workspaceId: companyId, project: task.project, taskId: task.taskId, at: now() });
+    } catch { /* information only */ }
     try { await (await sender()).send({ orgId: companyId, taskId, outcome: "reverted", requestId: randomUUID() }); } catch { log("revert_not_queued"); }
   }
 

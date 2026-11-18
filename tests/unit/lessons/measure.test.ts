@@ -4,7 +4,7 @@ import { companyScoped, type OrgId } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
 import {
-  MEASURE_FIT_FLOOR, MEASURE_KEEP_MS, MEASURE_LEFT_OUT, documentMeasureSink, fitPk, mergePk, readLessonMeasure, type LoadMeasure, type MeasureSink,
+  MEASURE_FIT_FLOOR, MEASURE_KEEP_MS, MEASURE_LEFT_OUT, MEASURE_WRITE_MS, documentMeasureSink, fitPk, mergePk, readLessonMeasure, type LoadMeasure, type MeasureSink,
 } from "../../../packages/broker/src/lessons/measure.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
@@ -13,7 +13,7 @@ import { Audit, Clock, MemoryVectors, PROJECT, WS, allowAllAccess, embedder, les
 
 const A = WS as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
-const TTL = "expiresAt";
+const TTL = "ttlSeconds";
 const SECRET_INTENT = "Rotate the Zephyr billing credentials for Acme customer 4411";
 const SECRET_TITLE = "Never email Priya the Zephyr invoices";
 
@@ -41,7 +41,9 @@ async function world(sinkOf?: (documents: MemoryDocumentStore, clock: Clock) => 
   return { deps, clock, documents, store, vectors };
 }
 
-const fitRows = async (documents: MemoryDocumentStore, company: string = WS, project: string = PROJECT) => (await documents.query({ pk: fitPk(company, project) })).items;
+/** The measurement is not waited for by the load, so let it settle before reading. */
+const settle = async (): Promise<void> => { for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const fitRows = async (documents: MemoryDocumentStore, company: string = WS, project: string = PROJECT) => { await settle(); return (await documents.query({ pk: fitPk(company, project) })).items; };
 
 describe("phase 0: loads are identical with and without the measurement (golden)", () => {
   it("the context, the manifest and the stored manifests are byte-identical", async () => {
@@ -68,7 +70,7 @@ describe("phase 0: loads are identical with and without the measurement (golden)
       expect(JSON.stringify(await loadLessonsForStage(broken.deps, request()))).toBe(JSON.stringify(base));
     }
     // A store whose put fails: the document sink swallows it.
-    const failing = await world((documents, clock) => documentMeasureSink({ ttlAttribute: documents.ttlAttribute, put: async () => { throw new Error("put down"); } }, A, clock.now));
+    const failing = await world((documents, clock) => documentMeasureSink({ ...(documents.ttlAttribute === undefined ? {} : { ttlAttribute: documents.ttlAttribute }), put: async () => { throw new Error("put down"); } }, A, clock.now));
     expect(JSON.stringify(await loadLessonsForStage(failing.deps, request()))).toBe(JSON.stringify(base));
   });
 
@@ -91,7 +93,7 @@ describe("phase 0: what a load records", () => {
     const result = await loadLessonsForStage(w.deps, request());
     const [row] = await fitRows(w.documents);
     expect(row).toMatchObject({ entityType: "LESSON_FIT", project: PROJECT, taskId: "task-1", stage: "IMPLEMENT", round: 1, budgetLessons: 5, activeCount: 12, eligibleCount: 12, floor: MEASURE_FIT_FLOOR });
-    const loaded = row!["loaded"] as Array<{ id: string; fit: number; score: number }>;
+    const loaded = row!["loaded"] as Array<{ id: string; fit: number; score: number; words: number }>;
     const left = row!["leftOut"] as Array<{ id: string; fit: number; score: number }>;
     // The ids and the order are the load's own (the manifest's), and the left-out are the next in rank, never one that was loaded.
     expect(loaded.map((s) => s.id)).toEqual(result.manifest.lessons.map((e) => e.id));
@@ -264,5 +266,57 @@ describe("phase 0: what the read says", () => {
     const failing = await readLessonMeasure({ query: async () => { throw new Error("down"); } }, { companyId: A, project: "payments", now: T });
     expect(failing.truncated).toBe(true);
     expect(companyScoped(A, "LESSON_FIT#payments")).toBe(fitPk(A, "payments"));
+  });
+});
+
+describe("phase 0: the measurement never holds a load, and its remaining guards", () => {
+  it("a put that never answers does not hold the load: it returns at once with the same result as a plain load", async () => {
+    const plain = await world(undefined);
+    const base = await loadLessonsForStage(plain.deps, request());
+    const hanging = await world((documents, clock) => documentMeasureSink({ ...(documents.ttlAttribute === undefined ? {} : { ttlAttribute: documents.ttlAttribute }), put: () => new Promise(() => undefined) }, A, clock.now));
+    const started = Date.now();
+    const result = await loadLessonsForStage(hanging.deps, request());
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(JSON.stringify(result)).toBe(JSON.stringify(base));
+  });
+
+  it("the sink's own write waits at most its limit for a store that hangs", async () => {
+    const sink = documentMeasureSink({ put: () => new Promise(() => undefined) }, A, () => 1_800_000_000_000);
+    const started = Date.now();
+    await sink.merged({ workspaceId: WS, project: PROJECT, taskId: "task-1", at: 1_800_000_000_000 });
+    expect(Date.now() - started).toBeLessThan(MEASURE_WRITE_MS + 400);
+  });
+
+  it("a row carries only the closed list of fields, and only the store's own TTL attribute besides", async () => {
+    const noTtl = new MemoryDocumentStore({});
+    await documentMeasureSink(noTtl, A, () => 1_800_000_000_000).merged({ workspaceId: WS, project: PROJECT, taskId: "task-1", at: 1_800_000_000_000 });
+    const [row] = (await noTtl.query({ pk: mergePk(WS, PROJECT) })).items;
+    expect(Object.keys(row!).sort()).toEqual(["at", "entityType", "keepUntil", "kind", "pk", "project", "sk", "taskId"]);
+    const withTtl = db(() => 1_800_000_000_000);
+    await documentMeasureSink(withTtl, A, () => 1_800_000_000_000).merged({ workspaceId: WS, project: PROJECT, taskId: "task-1", at: 1_800_000_000_000 });
+    expect(Object.keys((await withTtl.query({ pk: mergePk(WS, PROJECT) })).items[0]!).sort()).toEqual(["at", "entityType", "keepUntil", "kind", "pk", "project", "sk", "taskId", TTL]);
+  });
+
+  it("a time that is not a finite number writes nothing", async () => {
+    const documents = db(() => 1_800_000_000_000);
+    const sink = documentMeasureSink(documents, A, () => 1_800_000_000_000);
+    for (const at of [Number.NaN, 0, -5, Number.POSITIVE_INFINITY]) {
+      await sink.merged({ workspaceId: WS, project: PROJECT, taskId: "task-1", at });
+      await sink.reverted({ workspaceId: WS, project: PROJECT, taskId: "task-1", at });
+      await sink.load({ workspaceId: WS, project: PROJECT, taskId: "task-1", stage: "PLAN", round: 1, at, budgetLessons: 5, activeCount: 1, eligibleCount: 1, loaded: [], leftOut: [] });
+    }
+    expect((await documents.query({ pk: mergePk(WS, PROJECT) })).items).toEqual([]);
+    expect(await fitRows(documents)).toEqual([]);
+  });
+
+  it("the reader re-checks the partition and the project of every row, even from a store that answers with another partition's rows", async () => {
+    const T = 1_800_000_000_000;
+    const fit = (company: string, project: string) => ({ pk: fitPk(company, "payments"), sk: "L#1", entityType: "LESSON_FIT", project, at: T - 10, keepUntil: T + 1000, budgetLessons: 5, activeCount: 4, eligibleCount: 4, loaded: [{ id: "les_a0001", fit: 0.9, score: 0.9, words: 1, cos: null }], leftOut: [] });
+    const merge = (company: string, project: string, taskId: string) => ({ pk: mergePk(company, "payments"), sk: `M#${taskId}`, entityType: "LESSON_MERGE", kind: "merged", project, taskId, at: T - 10, keepUntil: T + 1000 });
+    const rows = [fit(B, "payments"), fit(A, "billing"), merge(B, "payments", "task-b"), merge(A, "billing", "task-c")];
+    const store = { query: async () => ({ items: rows as never }) };
+    const read = await readLessonMeasure(store, { companyId: A, project: "payments", now: T });
+    expect(read).toMatchObject({ loads: 0, cleanMerge: { merged: 0 }, revertDetection: "not_wired" });
+    expect(read.unreadable).toBeGreaterThanOrEqual(2);
   });
 });

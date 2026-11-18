@@ -771,6 +771,8 @@ describe("lessons phase 0: the measurement read (GET lessons/measure)", () => {
     await put(w, companyId, approved(companyId, `les_${companyId === A ? "aaaa" : "bbbb"}1111`));
     const lessons = w.lessons.get(companyId)!;
     await lessons.host.learnedFor({ workspaceId: w.spaces.get(companyId)!, operationId: `op-${companyId}`, workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
+    // The measurement is not waited for by the load: let it settle.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
   }
 
   it("a project admin and a company admin read the numbers; a contributor is refused, an outsider is told nothing, a script token never reads", async () => {
