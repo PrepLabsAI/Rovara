@@ -507,6 +507,21 @@ export const PasskeyCredentialIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}
 /** The caller's own passkeys: when each was added and last used. Needs a live session, not a fresh step-up. */
 export const ListPasskeysRequestSchema = z.object({ kind: z.literal("list-passkeys"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema }).strict();
 export type ListPasskeysRequest = z.infer<typeof ListPasskeysRequestSchema>;
+/**
+ * L4-MF4: the caller's own sign-in factors for the web account page: the confirmation email, already MASKED by the sign-in Lambda (the broker never holds the full address), and the
+ * passkeys (opaque credential id and times only: never a key, a counter or a transport). A live session is enough. The request cannot name a second person (strict): the caller is the
+ * developer id and session id of their verified token.
+ */
+export const ListSignInFactorsRequestSchema = z.object({ kind: z.literal("list-sign-in-factors"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema }).strict();
+export type ListSignInFactorsRequest = z.infer<typeof ListSignInFactorsRequestSchema>;
+/** A masked address as `maskedEmail` makes it: one character, three stars, then the domain ("m***@example.com"). Anything else (a full address, a longer local part) does not match. */
+export const MaskedFactorEmailSchema = z.string().max(254).regex(/^[^\s@]\*\*\*@[^\s@]+$/u);
+/** What the broker answers, and the shape it reads the Lambda's reply into (anything beyond it is dropped). */
+export const SignInFactorsAnswerSchema = z.object({
+  factorEmail: MaskedFactorEmailSchema.optional(),
+  passkeys: z.array(z.object({ credentialId: PasskeyCredentialIdSchema, createdAt: z.iso.datetime(), lastUsedAt: z.iso.datetime().optional() })).max(DEVELOPER_PASSKEYS_MAX),
+});
+export type SignInFactorsAnswer = z.infer<typeof SignInFactorsAnswerSchema>;
 /** Removes one of the caller's own passkeys. Needs a fresh step-up. */
 export const RemovePasskeyRequestSchema = z.object({ kind: z.literal("remove-passkey"), developerId: DeveloperIdSchema, sessionId: SessionIdSchema, credentialId: PasskeyCredentialIdSchema }).strict();
 export type RemovePasskeyRequest = z.infer<typeof RemovePasskeyRequestSchema>;
@@ -525,6 +540,7 @@ export type SetFactorEmailRequest = z.infer<typeof SetFactorEmailRequestSchema>;
  * `conflict`: the factor email changed meanwhile. Each carries fixed words only.
  */
 export type DeveloperFactorRefusal = { ok: false; error: "reauth" | "signed_out" | "forbidden" | "not_found" | "not_set_up" | "notice_failed" | "conflict" | "invalid_request" | "unavailable"; message: string };
+export type ListSignInFactorsResponse = ({ ok: true } & SignInFactorsAnswer) | DeveloperFactorRefusal;
 export type ListPasskeysResponse = { ok: true; passkeys: Array<{ credentialId: string; createdAt: string; lastUsedAt?: string }> } | DeveloperFactorRefusal;
 export type RemovePasskeyResponse = { ok: true } | DeveloperFactorRefusal;
 export type RemovePersonPasskeysResponse = { ok: true; removed: number; notified: boolean } | DeveloperFactorRefusal;

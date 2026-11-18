@@ -35,7 +35,7 @@ import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
 import { createCiWaitLines, createMergeOrderLines, createTaskRepositoryEdgesSeam } from "../../core/merge/repository-edges.js";
-import { createAsk } from "../../core/sessions/ask.js";
+import { createAsk } from "../../core/sessions/ask.js"; import { withLocalAnswers } from "./project-answers.js"; import { withLocalStartSuggest } from "./project-start-suggest.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { createLocalAskModel } from "../ask-model.js";
 import { createLocalDiagnosisModel } from "../diagnosis-model.js";
@@ -88,6 +88,11 @@ import { createLocalScriptTokens, type LocalScriptTokens } from "./script-tokens
 import { createLocalPlaybook } from "./playbook.js";
 import { createLocalSetupAgent, setupDecisionSubjects, type LocalSetupAgent } from "./setup-agent.js";
 import { createLocalWikiMap } from "./wiki-map.js";
+import { createLocalWikiBuild } from "./wiki-build.js";
+import { createLocalUpkeep } from "./upkeep.js";
+import { codeHostForRecord } from "../../plugins/routing.js";
+import { createWikiBuildStarter } from "../../core/wiki-build/starter.js";
+import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
 import { LOCAL_SECRET_ENV, createLocalConnections } from "./connections.js";
 import { createLocalBrowserEvidence, type LocalBrowserEvidence } from "./browser-evidence-settings.js";
 import { createBrowserEvidenceSignIn } from "../../core/proof/browser-evidence-sign-in.js";
@@ -100,6 +105,9 @@ import { withStartFenceExtras } from "../../core/task-flow/start-fence.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
+import { createTaskLogHooks } from "../../core/task-log/hooks.js";
+import { planSummarySourceOf } from "../../core/task-log/plan-summary-source.js";
+import type { PlanSummaryFacts } from "../../core/task-log/milestones.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { createLocalAutomation, type LocalAutomation } from "./automation.js";
 import { createLocalAfterMerge } from "./after-merge.js";
@@ -111,6 +119,7 @@ import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
 import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
 export { TASK_FLOW_INDEXES };
@@ -351,6 +360,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const timeline = sessionTimeline();
   // The milestone hook: rows and session lines in the change's transaction, delivered after the commit to the handlers an adapter registered (`app.milestones.register`); none by default.
   const milestones = createLocalMilestones({ store, now: () => clock().getTime(), log: (event, fields) => log({ component: "milestones", event, ...fields }) });
+  // The task log (`core/task-log`): what the answers, the questions and the decisions write in their own transactions is told, once committed, to the surfaces that draw it (the ticket's thread).
+  const taskLog = createTaskLogHooks((event, fields) => log({ component: "task_log", event, ...fields }));
+  // The plan's summary for the log is read through the decision gate, which is made after the intake it serves: bound here, filled in when the gate exists.
+  let planSummary: ((orgId: OrgId, taskId: string) => Promise<PlanSummaryFacts | undefined>) | undefined; // eslint-disable-line prefer-const -- assigned once the decision gate exists, below
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
   // What the model proxy meters. A call of a task is recorded in the task's cost ledger (the Metering port prices it, the ledger keeps it once), so the ledger is what the task has spent: the next step's budget, the plan page,
@@ -375,7 +388,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const testEnvironment = createLocalTestEnvironment({
     store, companyId, now: () => clock().getTime(), audit: registry.require("audit-sink"), log,
     gate: () => gate,
-    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(options.testServiceImages !== undefined && path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
+    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
     // Where the owner approves service images, the page opens in a NEW page session: an approval needs one opened in the last ten minutes (the same rule as making a script token).
     // What this computer does not do yet, said on the page instead of left for the owner to find out.
     extraLines: async () => [
@@ -476,6 +489,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // The ticket a task started from: a pull request's description says which issue it fixes.
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
+    taskLog,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
     // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
     flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
@@ -495,7 +509,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Tickets that ask for work (the project's intake rule, the poll, the owner's list) and the write-back to the ticket a task started from. It registers its milestone handler now, before any milestone is written.
-  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log });
+  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log, taskLog, planSummaryOf: (orgId, taskId) => (planSummary === undefined ? Promise.resolve(undefined) : planSummary(orgId, taskId)) });
 
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
@@ -594,6 +608,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const gate = decisions.gate;
+  planSummary = planSummarySourceOf({ store, artifacts: blobs, gate });
   const designPageActions = designReview.pageActions({ gate, owner });
   const decisionActions = decisions.actions;
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
@@ -604,6 +619,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER, milestones: channelMilestonesOn,
       log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
     }));
+    // What is answered or decided elsewhere (the web page, a ticket) is told to the thread as one line; what was said in the thread is not said back (`core/channel/log-mirror.ts`).
+    taskLog.subscribe(taskLogThreadMirror({ store, registry, now: () => clock().getTime(), enabled: channelMilestonesOn, log: (event, fields) => log({ component: "channel_thread", event, ...fields }) }));
   }
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
@@ -626,6 +643,21 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   // Wiki W0: the free file map of a project (listings through the code host; no model, nothing stored).
   const wikiMap = createLocalWikiMap({ flow: flow.deps, registry, companyId, now: () => clock().getTime(), log });
+  // Wiki W4: the wiki build controls (Build, Stop, Continue, Refresh now, the agents switch, Delete wiki). The task flow's wiki build starter is the one seam left to fill (`starter`).
+  const wikiBuildControls = createLocalWikiBuild({ flow: flow.deps, wikiMap, owner, companyId, now: () => clock().getTime(), modelAccessConfigured: async () => (await chosen()) !== undefined, starter: createWikiBuildStarter });
+  // Lead 4 N1: the nightly upkeep switch (owner only; recorded here, and nothing AI-spending starts on a laptop by itself).
+  const upkeepSwitch = createLocalUpkeep({ flow: flow.deps, owner, companyId, audit: registry.require("audit-sink"), now: () => clock().getTime() });
+  // The worker's wiki build callback (the owner's standing, the project's own code host read for the citation re-read, this install's wiki store as the page sink) and the end hook for the build record.
+  // An embedding product may supply its own (`options.wikiBuild`).
+  const wikiBuildCallback = options.wikiBuild ?? wikiBuildCallbackWiring({
+    store: flow.deps.store, companyId, now: () => clock().getTime(),
+    standing: async (personId) => ({ access: personId === owner.personId ? "manage" : "none" }),
+    readFor: (project) => projectCitationReader({
+      projects: flow.deps.projects,
+      fileAt: (repository, path, commit, read) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }).fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, read),
+    }, project),
+  });
+  flow.deps.wikiBuildEnded = wikiBuildEndedHook({ store: flow.deps.store, companyId, now: () => clock().getTime() });
   const comments = createLocalComments({ flow: flow.deps, registry, companyId, owner, decisions: decisionActions, lessons, now: () => clock().getTime(), ...(options.commentThreadsPerPoll === undefined ? {} : { threadsPerPoll: options.commentThreadsPerPoll }), pauseUntil: (until) => tracking.pauseUntil(until), paused: () => tracking.pausedUntil(), log });
 
   // script tokens. The creator is asked of the identity port by Rovara id; the audit steps are the registry's sink's.
@@ -665,6 +697,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...(browserEvidence === undefined ? {} : { browserEvidence: (input: Parameters<LocalBrowserEvidence["action"]>[0], context: { fresh: boolean }) => browserEvidence.action(input, context) }),
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       approveServiceImage: (input) => testEnvironment.approveServiceImage(input), removeServiceImage: (input) => testEnvironment.removeServiceImage(input),
+      setTestEnvironmentMachine: (input) => testEnvironment.setMachineSize(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
@@ -704,7 +737,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   };
   browserSuggestion.current = (project) => setupAgent.browserEvidenceSuggestion(project);
   const callbackHandler = createCallbackService({
-    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}), ...(options.wikiBuild === undefined ? {} : { wikiBuild: options.wikiBuild }),
+    flow: flow.deps, blobs, grants, e2e: { records: roundRecords }, contextSources: connections.runtime, onEvents: (operation, events) => lessons.onEvents(operation, events), ...(setupAgent.enabled ? { setupAgent: setupAgent.callback } : {}), wikiBuild: wikiBuildCallback,
     // The saved sign-in is read only for a run whose recipe has one, from the company's own secret path (`browser-evidence-sign-in-callback.ts`).
     ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the
@@ -725,7 +758,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
   const sessionRoutes = createSessionRoutes({ flow, blobs, companyId, secondReview, ask, refresh: (orgId, sessionId) => sessionService.refresh(orgId, sessionId), origin: options.origin ?? (() => "http://127.0.0.1") });
   const lessonRoutes = createLessonRoutes({ lessons, flow: flow.deps });
-  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
+  const routes = async (request: BrokerRequest, caller: TaskCaller): Promise<BrokerResponse | undefined> => (await automation.routes(request)) ?? (await sessionRoutes(request, caller)) ?? (await scriptTokens.routes(request)) ?? (await connections.routes(request, caller)) ?? (await chat.routes(request)) ?? (await setupAgent.routes(request, caller)) ?? (await wikiMap.routes(request, caller)) ?? (await wikiBuildControls.routes(request, caller)) ?? (await upkeepSwitch.routes(request, caller)) ?? (await testEnvironment.routes(request, caller)) ?? (await lessonRoutes(request, caller)) ?? (await intake.routes(request, caller)) ?? (await howWeWork.routes(request)) ?? (await browserEvidence?.routes(request)) ?? ownerRoutes(request, caller);
 
   const projector = await sessionService.start().catch((error: unknown) => { log({ event: "local_app.projector_failed", error: error instanceof Error ? error.name : "unknown" }); return undefined; });
 
@@ -751,6 +784,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await comments.poll().catch(logFailure("local_app.comments_failed"));
     // The tickets that ask for work are read through the trackers the registry holds; a source that is not due costs nothing.
     await intake.poll().catch(logFailure("local_app.intake_failed"));
+    // A ticket thread whose root was edited a moment before something new landed is brought up to date.
+    await intake.flushThreads().catch(logFailure("local_app.ticket_threads_failed"));
   };
   // The after-merge watcher's pass: windows that ended close, and a report that could not be sent goes out again. It reads and writes nothing for a project whose own setting is off, and has its own timer: the code host is
   // asked over the network, so neither the dispatch nor the pull request reads wait for it.
@@ -816,7 +851,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   return {
     flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation, browserEvidence, afterMerge,
-    routes: (request, caller) => routes(request, caller),
+    // Lead 4 J3: the start box's path suggestion (POST /v1/app/projects/{p}/code/suggest), in front of the owner's routes.
+    routes: withLocalStartSuggest({ flow: flow.deps, now: () => clock().getTime(), log, ask: { choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) } }, withLocalAnswers({ flow: flow.deps, registry, store, companyId, now: () => clock().getTime(), log, ask: { choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) }, prices: modelPrices }, (request, caller) => routes(request, caller))),
     callbacks: callbackHandler,
     tick,
     async stop() {

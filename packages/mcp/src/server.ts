@@ -26,16 +26,16 @@ const CONFIRM_SCHEMA = { type: "object" as const, properties: { confirm: { type:
 /** Redacted first, then cut, so a cut never leaves part of a secret that redaction would miss. */
 const safeText = (text: string, limit: number): string => redactText(text).slice(0, limit);
 
-function capped(value: unknown): unknown {
-  if (typeof value === "string") return value.slice(0, LONGEST_STRING);
-  if (Array.isArray(value)) return value.slice(0, MOST_ITEMS).map(capped);
-  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, capped(child)]));
+function capped(value: unknown, stringLimit = LONGEST_STRING): unknown {
+  if (typeof value === "string") return value.slice(0, stringLimit);
+  if (Array.isArray(value)) return value.slice(0, MOST_ITEMS).map((entry) => capped(entry, stringLimit));
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, capped(child, stringLimit)]));
   return value;
 }
 
 /** FR-029: what a successful tool returns, redacted and capped. */
-function safeStructured(value: Record<string, unknown>): Record<string, unknown> {
-  return capped(redactSecrets(value)) as Record<string, unknown>;
+function safeStructured(value: Record<string, unknown>, stringLimit = LONGEST_STRING): Record<string, unknown> {
+  return capped(redactSecrets(value), stringLimit) as Record<string, unknown>;
 }
 
 const withoutFullStop = (text: string) => text.replace(/\.+$/, "");
@@ -126,7 +126,7 @@ export function createAgentXMcpServer(options: {
         const notice = admin ? await context.adminSignInNotice?.() : undefined;
         // First, so the length cap never cuts it off a long result.
         const text = notice === undefined ? result.text : `${notice} ${result.text}`;
-        return { content: [{ type: "text" as const, text: safeText(text, LONGEST_TEXT) }], structuredContent: safeStructured(result.structured) };
+        return { content: [{ type: "text" as const, text: safeText(text, LONGEST_TEXT) }], structuredContent: safeStructured(result.structured, tool.name === "wiki_read" ? 8192 : tool.name === "wiki_list" ? 4096 : LONGEST_STRING) };
       } catch (error) {
         const failure = error instanceof ToolError ? error : new ToolError("CONTROL_PLANE_UNAVAILABLE", "the AgentX MCP server hit an unexpected problem");
         // The code and tool only: never the message, which can quote the developer's text.

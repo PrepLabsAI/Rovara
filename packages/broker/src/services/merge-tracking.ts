@@ -18,18 +18,21 @@
 // Nothing here names a provider; the code host is whatever the repository's record names, and a host that cannot read a merge (`mergeObservation`) is simply never seen merged.
 import {
   IMPLICIT_COMPANY_ID, OrgIdSchema, companyScoped, blockWorkflow, INDEX_EXPIRY_ATTRIBUTE, TRACKING_GATE_SECONDS, TRACKING_HEARTBEAT_MINUTES, change, hostRateLimitRetryAt, observeWorkflowPullRequest, queryAll, when,
-  type OrgId, type ReadBudget, type RegistryView, type TransactItem,
+  type OrgId, type ReadBudget, type RegistryView, type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { SWEEP_INTERVAL_MS, type MergeRecoveryResult } from "../core/merge/budget.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import { changeRequestRef } from "../core/merge/host-port.js";
 import { storeLinkedChangeRequests } from "../core/merge/linked.js";
 import { mergedMilestoneItems, mergedStateItems } from "../core/merge/merged.js";
+import { setupUpdateOfferItems } from "../core/setup-agent/plan-update.js";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import { reconcileTrackingTask, type MergeTrackingDependencies, type TrackingReconcileDependencies } from "../core/merge/merge-tracking.js";
 import type { MergePeople } from "../core/merge/people.js";
 import { outOfOrderMilestoneItems } from "../core/merge/order-watch.js";
 import { registryRepositoryResolver } from "../core/merge/resolver.js";
+import type { SummaryCheckSource } from "../core/merge/summary-check.js";
+import { createPullRequestVerdictSource } from "../core/build-step/pull-request-verdict.js";
 import type { CodeMilestones, CodeSettingsReader, HumanEditSink, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
@@ -43,6 +46,7 @@ import { readTask } from "../core/task-flow/reads.js";
 import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
 import { recordedHeadOf } from "../core/build-step/head-check.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
+import { flowWorkEventItems } from "../core/work-events/flow-events.js";
 
 /** The first wait after a pass, and the wait the quiet rows grow to. */
 export const TRACKING_POLL_MS = TRACKING_GATE_SECONDS * 1_000;
@@ -148,6 +152,11 @@ export interface MergeTrackingServiceOptions {
   /** Retained by a short-lived pass composer, per company; never stored or shared between companies. */
   scan?: { cursor: string | undefined; complete?: boolean };
   ciMode?: MergeTrackingDependencies["ciMode"];
+  /**
+   * TE-B4: the one "Rovara" Check on each head. The host decides whether it is written and where it points (`enabled`, `facts`, `detailsUrl`, `personName`); the service adds the verdict: unless the host gives its own `verdict`, the
+   * Check's title and text carry the same verdict sentence as the pull request's description (`createPullRequestVerdictSource`, L4-PRP). Absent: no Check is written, as before.
+   */
+  summaryCheck?: SummaryCheckSource;
   /** MR3b: the dependency facts between a task's repositories (`createRepositoryEdgesSeam`). Absent: a pull request merged out of order is not warned about, and no pull request is held for the order. */
   repositoryEdges?: ((task: MergeTask) => unknown) | undefined;
   /** L4-LM1c: told when a pass sees a head a person pushed (learning from people's edits to Rovara's pull requests). Absent: nothing is told. */
@@ -197,6 +206,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     return givenResolver(project, revision, repositoryId, companyId);
   };
 
+  const verdictSource = createPullRequestVerdictSource(flow);
   const base: MergeTrackingDependencies = {
     store, now,
     ...(options.ciMode === undefined ? {} : { ciMode: options.ciMode }),
@@ -210,6 +220,11 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     // A small change that grew to risky stays a draft until a person keeps it and the risky reviews pass.
     readyHold: (task, current) => scopeHoldOf(flow, task, current),
     ...(options.repositoryEdges === undefined ? {} : { repositoryEdges: options.repositoryEdges }),
+    // Slice A4: a change this pass makes to the workflow writes its work events in the same transaction, when the flow writes them (the same switch as the flow's own).
+    ...(flow.workEvents === true ? { workEvents: (task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number) => flowWorkEventItems({ enabled: true, orgId: task.orgId, project: task.project, before, after, room }) } : {}),
+    // L4-PRP: the verdict of a pull request, the words of its description: for the Check (when the host asks for one) and for the "ready for review" line.
+    verdict: verdictSource,
+    ...(options.summaryCheck === undefined ? {} : { summaryCheck: { ...options.summaryCheck, verdict: options.summaryCheck.verdict ?? verdictSource } }),
     ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
     log: (event, fields) => log({ component: "merge_tracking", event, ...fields }),
   };
@@ -248,6 +263,8 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       const items: TransactItem[] = [
         workflowUpdateItem(taskId, next, workflow.revision, workflow),
         ...await mergedMilestoneItems({ milestones, bindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) } }, task, workflow, next, at),
+        // L4-SC (DEC 254z c): a merged plan's setup change leaves ONE "Update setup" offer, in the merge's own transaction. Never blocks the merge: a plan that cannot be read adds nothing.
+        ...await setupUpdateOfferItems(flow, task, workflow, next, at).catch((): TransactItem[] => []),
         ...await mergedStateItems({ store, timeline, audit: flow.audit, log: (event, fields) => log({ component: "merge_tracking", event, ...fields }) }, task, workflow, next, at,
           state === "MERGED" ? [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, ...(details.mergedBy === undefined ? {} : { mergedBy: details.mergedBy }), ...(details.mergeRevision === undefined ? {} : { mergeCommit: details.mergeRevision }) }] : []),
       ];

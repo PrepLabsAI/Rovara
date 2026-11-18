@@ -325,6 +325,8 @@ const eventData = {
     baseBranch: z.string().min(1).max(255).optional(),
     draft: z.boolean().optional(),
     action: z.enum(["opened", "updated", "replaced", "closed", "reopened"]).optional(),
+    /** L4-PRP: the pull request's verdict heading (fixed words and counts, the description's own: `Verified · Low risk · nothing extra to check`), said under the title. */
+    verdict: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}<>@[\]`*_~#|!]*$/u).optional(),
   }).strict(),
   /**
    * The request finished; everything it said came before as `message` events. `text` is an optional closing line.

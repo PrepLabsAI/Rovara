@@ -13,8 +13,8 @@ export interface SlackWebClient {
   postMessage(channel: string, threadTs: string | undefined, text: string, options?: { blocks?: unknown[]; signal?: AbortSignal }): Promise<string | undefined>;
   /** A message only `user` sees, in the thread. */
   postEphemeral(channel: string, threadTs: string, user: string, text: string): Promise<void>;
-  /** Edits the bot's own message. */
-  update(channel: string, ts: string, text: string): Promise<void>;
+  /** Edits the bot's own message (with `blocks` when given). */
+  update(channel: string, ts: string, text: string, options?: { blocks?: unknown[] }): Promise<void>;
   /** Removes the bot's own message. */
   delete(channel: string, ts: string): Promise<void>;
   /** A member's profile, for their display name; needs the optional users:read scope. */
@@ -45,8 +45,8 @@ export function createSlackWebClient(options: { token: () => Promise<string>; fe
       await post("chat.postEphemeral", { channel, thread_ts: threadTs, user, text }, AbortSignal.timeout(10_000));
     },
     // An edit that Slack does not answer is given up, never left waiting.
-    async update(channel, ts, text) {
-      await post("chat.update", { channel, ts, text }, AbortSignal.timeout(10_000));
+    async update(channel, ts, text, extra = {}) {
+      await post("chat.update", { channel, ts, text, ...(extra.blocks === undefined ? {} : { blocks: extra.blocks }) }, AbortSignal.timeout(10_000));
     },
     async delete(channel, ts) {
       await post("chat.delete", { channel, ts });

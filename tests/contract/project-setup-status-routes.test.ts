@@ -820,5 +820,11 @@ describe("what did not change", () => {
 // those 6 rows still gives 0a31f2f4...).
 // Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
-// L4-GH (rule D): and for the 4 new /v1/dev/me/github* rows (GET, DELETE, POST link, POST link/claim; all added, none changed; removing exactly those 4 rows still gives 8e72149c...).
-const EXISTING_ROUTES_DIGEST = "ce7a23d018780ae9336ef783c14450ba04080ac9678fe8fca014103f879fdfb3";
+// Batch 14 (rule D): and for 4 new rows: GET/POST /v1/dev/projects/{project}/machine-size (tasks:read / full; #882/#901) and GET /v1/dev/tasks/{taskId}/people/candidates,
+// POST /v1/dev/tasks/{taskId}/people/add (tasks:act; #888). All added, none changed: removing exactly those 4 rows still gives 8e72149c....
+// L4-MF4 (rule D): re-pinned for the one new row GET /v1/dev/me/sign-in-factors (full; added, none changed; removing exactly that row still gives 8e72149c...).
+// Rule D (proof list): and for one new row (GET /v1/dev/tasks/{taskId}/evidence tasks:read, Cloud's Proof tab; added, none changed; removing exactly that row still gives 8e72149c...).
+// Batch 14 combined (rule D): those two rows plus #960's GET /v1/dev/projects/{project}/lessons/measure (full). All 3 added, none changed: removing exactly those 3 rows
+// still gives 425c010b... (the batch-14 table above).
+// L4-GH (rule D): and for the 4 new /v1/dev/me/github* rows (GET, DELETE, POST link, POST link/claim; all added, none changed). Re-pinned after code/next 250282ac2 was merged in: the merge only combined both sides' added rows.
+const EXISTING_ROUTES_DIGEST = "eaf715d5bee81d1af824ec9dcb56e36d167f9218cee3a14e1e5419d21b6b3a20";

@@ -12,6 +12,8 @@ import { resolveLearning, setLearnedLessonsGate } from "../../packages/broker/sr
 import { localLessonsEnabled } from "../../packages/broker/src/lessons/switch.js";
 import { newRepoFileState } from "../../packages/broker/src/lessons/repo-file-state.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { mergeCommitIndexStep } from "../../packages/broker/src/core/proof/revert/merge-commit-index.js";
+import { linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { NO_REASON_TEXT, buildTaskReflectSubject } from "../../packages/broker/src/lessons/task-subject.js";
 import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milestones/milestones.js";
@@ -62,7 +64,7 @@ function identityWithAnn(): IdentityProvider {
   };
 }
 
-async function world(options: { identity?: IdentityProvider; defaultSwitch?: boolean; codeHost?: boolean; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
+async function world(options: { identity?: IdentityProvider; defaultSwitch?: boolean; codeHost?: boolean; codeHostObject?: unknown; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
   const h = createHarness({ audit: "recording" });
   await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPOSITORY }] });
   const owner = localOwnerPrincipal({ companyId: COMPANY });
@@ -70,7 +72,7 @@ async function world(options: { identity?: IdentityProvider; defaultSwitch?: boo
   registry.register("storage", "memory", h.store, { isDefault: true });
   registry.register("queue", "memory", h.queues, { isDefault: true });
   // The one repository of the project is private as far as its host says, so the pull request names the lessons it used.
-  if (options.codeHost !== false) registry.register("code-host", "github", (options.host ?? { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) }) as never, { isDefault: true });
+  if (options.codeHost !== false) registry.register("code-host", "github", (options.host ?? options.codeHostObject ?? { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) }) as never, { isDefault: true });
   const handlers: CodeMilestoneHandler[] = [];
   let enabled = options.enabled ?? true;
   const prompts: string[] = [];
@@ -728,6 +730,80 @@ describe("lessons for local coding tools on a laptop (decision 46b)", () => {
     // With lessons switched off for the install, a tool is told so, in one sentence.
     w.setEnabled(false);
     expect(await ask(w, {})).toMatchObject({ status: 200, body: { status: "off", reason: "install_switch" } });
+  });
+});
+
+
+describe("revert detection on a laptop (lane L4-LM1b): the lessons timer runs the revert watch", () => {
+  const MERGE = "1".repeat(40);
+  const REVERT = "2".repeat(40);
+  const PR_URL = "https://github.com/example/demo/pull/7";
+  /** A code host that shows one pushed revert commit of the merged pull request, authored and committed by a person who can write. */
+  function revertingHost(calls: string[]) {
+    return {
+      kind: "github", provider: "github",
+      repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", defaultBranch: "main", private: true }),
+      recentCommits: async (_repository: unknown, branch: string) => { calls.push(`recent:${branch}`); return { complete: true, commits: [{ sha: REVERT, message: `Revert "Add retry"\n\nThis reverts commit ${MERGE}.`, parents: 1, verified: true, author: { login: "owner-gh", hostUserId: "5" }, committer: { login: "owner-gh", hostUserId: "5" } }] }; },
+      standing: async () => ({ permission: "write", accountType: "person" }),
+      commitChanges: async () => ({ files: [{ path: "src/retry.ts", status: "modified", additions: 1, deletions: 1 }], complete: true, parents: [] }),
+    };
+  }
+  /** The state the real flow leaves for a merged Rovara pull request: the task's record (core shape: `companyId`), its link, and the merge commit's index row. */
+  async function merged(w: World): Promise<void> {
+    await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "pullRequests"], [{ repositoryId: "demo", number: 7, url: PR_URL, state: "MERGED", headSha: "a".repeat(40) }])] });
+    await w.h.store.transact([
+      linkedChangeRequestStep({ hostKind: "github", repositoryAddress: REPOSITORY, changeRequestId: "7", repositoryId: "demo", number: 7, url: PR_URL, taskId: w.taskId, workspaceId: w.workspaceId, candidateDigest: "c".repeat(64), createdAt: new Date(w.h.clock.now).toISOString() })!,
+      mergeCommitIndexStep({ orgId: COMPANY, repositoryFullName: "example/demo", repositoryId: "demo", number: 7, url: PR_URL, taskId: w.taskId, mergeCommit: MERGE, now: new Date(w.h.clock.now).toISOString() })!,
+    ]);
+  }
+  const loadedBy = async (w: World, id: string, paths: string[]) => {
+    await put(w, active({ id, scope: { paths } }));
+    await w.lessons.runtime.store.putManifest({ taskId: w.taskId, workspaceId: COMPANY, project: "payments", stage: "IMPLEMENT", round: 1, setVersion: 1, memory: "live", at: 1, bytes: 10, lessons: [{ id, version: 1, score: 0.5, why: "scope", citation: "valid" }] });
+  };
+
+  it("finds the revert of a merged task (the core's record shape), records it once, counts it, and flags only the lesson whose area holds the reverted file, changing no lesson", async () => {
+    const calls: string[] = [];
+    const w = await world({ codeHostObject: revertingHost(calls) });
+    await merged(w);
+    await loadedBy(w, "les_aaaa1111", ["src/**"]);
+    await loadedBy(w, "les_bbbb2222", ["docs/**"]);
+    const before = JSON.stringify(await w.lessons.runtime.store.get(w.key, "les_aaaa1111"));
+    await w.lessons.tick();
+    expect(calls).toEqual(["recent:main"]);
+    const rows = (await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ entityType: "TASK_REVERT", taskId: w.taskId, via: REVERT, reverter: "owner-gh" });
+    expect((await w.h.store.query({ pk: companyScoped(COMPANY, "LESSON_MERGE#payments") })).items.map((row) => row["kind"])).toEqual(["reverted"]);
+    expect((await w.h.store.query({ pk: companyScoped(COMPANY, "LESSON_QUESTION#payments") })).items.map((row) => row["lessonId"])).toEqual(["les_aaaa1111"]);
+    expect(JSON.stringify(await w.lessons.runtime.store.get(w.key, "les_aaaa1111"))).toBe(before);
+    // A second tick inside five minutes does not ask the host again; one after five minutes does, and finds nothing new (the cursor, and the one record per revert).
+    await w.lessons.tick();
+    expect(calls).toHaveLength(1);
+    w.h.clock.now += 5 * 60_000 + 1;
+    await w.lessons.tick();
+    expect(calls).toHaveLength(2);
+    expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toHaveLength(1);
+    expect((await w.h.store.query({ pk: companyScoped(COMPANY, "LESSON_QUESTION#payments") })).items).toHaveLength(1);
+  });
+
+  it("with the lessons switch off the watch does not run and asks the host nothing", async () => {
+    const calls: string[] = [];
+    const w = await world({ codeHostObject: revertingHost(calls), enabled: false });
+    await merged(w);
+    await w.lessons.tick();
+    expect(calls).toEqual([]);
+    expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toEqual([]);
+  });
+
+  it("a revert of a commit this install did not merge records nothing", async () => {
+    const calls: string[] = [];
+    const host = revertingHost(calls);
+    host.recentCommits = async () => { calls.push("recent:main"); return { complete: true, commits: [{ sha: REVERT, message: `Revert "Other"\n\nThis reverts commit ${"4".repeat(40)}.`, parents: 1, verified: true, author: { login: "owner-gh", hostUserId: "5" }, committer: { login: "owner-gh", hostUserId: "5" } }] }; };
+    const w = await world({ codeHostObject: host });
+    await merged(w);
+    await w.lessons.tick();
+    expect(calls).toEqual(["recent:main"]);
+    expect((await w.h.store.query({ pk: `DEVTASK#${w.taskId}`, sk: { op: "beginsWith", prefix: "REVERT#" } })).items).toEqual([]);
   });
 });
 

@@ -17,6 +17,8 @@ import { listTasks, readTask, workspaceOperations } from "../../core/task-flow/r
 import { costLine, type CostLedger } from "../../core/cost/ledger.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
+import { createFeatureStore, type FeatureStoreDeps } from "../../core/report/feature-store.js";
+import { planFeatureChoices, readPlanFeature } from "../../core/report/plan-feature.js";
 import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
 import { planEvidencePointer } from "../../core/plan/store.js";
@@ -67,6 +69,18 @@ export function approvalOfferOf(taskId: string, workflow: WorkflowSnapshot): App
 const commentKey = (taskId: string, at: string, id: string) => ({ pk: `DEVTASK#${taskId}`, sk: `PAGE_COMMENT#${at}#${id}` });
 
 const KIND: Record<WorkflowArtifact["type"], PlanVersionView["kind"] | undefined> = { requirements: "requirements", design: "design", plan: "coding plan", test_plan: undefined, review_report: undefined, answer: undefined };
+
+/** Lead 4 PCF: the feature store of this install (one company, one owner). */
+const featureDepsOf = (deps: Pick<PageDataDeps, "flow" | "companyId">): FeatureStoreDeps => ({ store: deps.flow.store, companyId: deps.companyId, audit: deps.flow.audit, now: () => (deps.flow.now?.() ?? new Date()).getTime() });
+
+/** The feature line of a waiting coding plan, with the open features to pick from. The install's owner is the starter, a maintainer and the company owner at once, so they may change it and may make a feature. A read that fails shows nothing. */
+async function planFeatureOfPage(deps: Pick<PageDataDeps, "flow" | "companyId">, task: TaskRecord): Promise<PlanPageView["feature"] | undefined> {
+  const feature = featureDepsOf(deps);
+  const read = await readPlanFeature(feature, task, { mayFile: true, manager: true, admin: true });
+  if (read === undefined) return undefined;
+  const choices = read.canChange ? await planFeatureChoices(feature).catch(() => []) : [];
+  return { line: read.line, featureId: read.feature?.id ?? null, canChange: read.canChange, choices };
+}
 
 export interface PageDataDeps {
   flow: TaskFlowDeps;
@@ -232,6 +246,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
       const unreadable = latest?.format === "structured" && versions.find((version) => version.current)?.content.format === "markdown";
       const approval = unreadable ? undefined : approvalOfferOf(taskId, workflow);
       const breakdown = await breakdownOf(deps.flow, task, workflow);
+      const feature = approval !== undefined && waitingType === "plan" ? await planFeatureOfPage(deps, task) : undefined;
       // A pull request whose head is no longer the one Rovara checked says so here (the stop-gap until merge tracking runs on a timer).
       const outside = new Map((await checkPullRequestHeads(deps.flow, task).catch(() => [])).filter((entry) => entry.changedOutside).map((entry) => [`${entry.repository}#${String(entry.number)}`, true]));
       return {
@@ -239,7 +254,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
         checks: (workflow.checkPolicy?.proposed ?? []).map((check) => ({ label: check.label, status: "proposed" as const })),
         findings: [],
         pullRequests: (workflow.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state.toLowerCase(), ...(outside.has(`${pullRequest.repositoryId}#${String(pullRequest.number)}`) ? { note: CHANGED_OUTSIDE_NOTE } : {}) })),
-        comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }), ...(breakdown === undefined ? {} : { breakdown }),
+        comments: await commentsOf(taskId), ...(approval === undefined ? {} : { approval }), ...(feature === undefined ? {} : { feature }), ...(breakdown === undefined ? {} : { breakdown }),
         ...(workflow.critique === undefined ? {} : { critique: critiqueLines(workflow.critique, task.project) }),
         // A design that went through no review says so beside the design itself, so nobody takes it for a reviewed one.
         ...(designNotRunLine(workflow.designReview) === undefined ? {} : { designNote: designNotRunLine(workflow.designReview)! }),
@@ -294,7 +309,7 @@ export function createLocalPageData(deps: PageDataDeps): LocalPageData {
 }
 
 /** The writes of the pages that the decision gate does not own: a comment on a plan, and the lessons (none here yet). */
-export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "modelSelection" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "lessonLocalToolsAction" | "retry" | "answerQuestions" | "attachThread" | "secondReview" | "diagnose" | "modelSelection" | "acknowledgeSecondReview"> {
+export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "companyId" | "owner" | "comments" | "secondReview" | "modelSelection" | "diagnosis" | "lessons"> & { designAnswers?: (input: { taskId: string; revision: number; answers: Array<{ questionId: string; optionId?: string; text?: string }> }) => Promise<LocalActionResult> }): Pick<LocalPageActions, "addComment" | "lessonAction" | "lessonRepoAction" | "lessonLocalToolsAction" | "retry" | "answerQuestions" | "attachThread" | "planFeature" | "secondReview" | "diagnose" | "modelSelection" | "acknowledgeSecondReview"> {
   return {
     async diagnose(input): Promise<LocalActionResult> {
       return deps.diagnosis === undefined ? { ok: false, reason: "not_found", message: "That is no longer there." } : deps.diagnosis.diagnose(input);
@@ -359,6 +374,20 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
         return { ok: false, reason: "refused", message: error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "That could not be run again." };
       }
       return { ok: true, message: "Rovara is running that step again." };
+    },
+    async planFeature(input): Promise<LocalActionResult> {
+      const task = await readTask(deps.flow, input.taskId);
+      const workflow = task?.workflow;
+      // Only a coding plan that waits for the owner, in this company.
+      if (task === undefined || task.companyId !== deps.companyId || workflow === undefined || task.closedAt !== undefined || workflow.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING" || currentDocumentType(workflow) !== "plan") return { ok: false, reason: "not_found", message: "That is no longer there." };
+      if (workflow.revision !== input.revision) return { ok: false, reason: "stale", message: "This changed since you read it. Read the latest and try again." };
+      try {
+        // The install's owner is a maintainer too: their filing is `moved`, the highest rule, so it can be changed again.
+        await createFeatureStore(featureDepsOf(deps)).setTaskFeature({ taskId: input.taskId, project: task.project, featureId: input.featureId, source: "moved" }, { type: "person", id: deps.owner.personId });
+      } catch (error) {
+        return { ok: false, reason: "refused", message: error instanceof Error ? error.message.replace(/^[A-Z_]+: /u, "") : "The feature could not be saved." };
+      }
+      return { ok: true, message: "The feature is saved." };
     },
     async attachThread(input): Promise<LocalActionResult> {
       const task = await readTask(deps.flow, input.taskId);

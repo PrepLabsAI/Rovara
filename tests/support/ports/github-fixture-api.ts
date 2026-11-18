@@ -57,6 +57,13 @@ export class GitHubFixtureApi {
    */
   readonly deploymentReads: { rows?: Array<{ id: number; sha?: string; environment: string; statuses: Array<{ state: string; environment?: string }> }>; next?: boolean; statusHttp?: number | undefined; listHttp?: number | undefined; listHeaders?: Record<string, string> | undefined; listMessage?: string | undefined } = {};
 
+  /**
+   * Lane L4-LM1b: how the commit listing (`GET /repos/../commits?sha=<branch>&per_page=<n>`) answers: the raw rows as GitHub shapes them, a "next" link, or an HTTP status (with headers and a message, for a rate limit).
+   * Every request is also kept in `recentCommitRequests` (the query as asked).
+   */
+  readonly recentCommits: { rows?: unknown[]; next?: boolean; http?: number | undefined; headers?: Record<string, string> | undefined; message?: string | undefined } = {};
+  readonly recentCommitRequests: Array<{ sha: string | null; perPage: string | null }> = [];
+
   private deploymentRows(sha: string): Array<{ id: number; sha: string; environment: string; statuses: Array<{ state: string; environment?: string }> }> {
     if (this.deploymentReads.rows !== undefined) return this.deploymentReads.rows.map((row) => ({ ...row, sha: row.sha ?? sha }));
     return this.model.deploymentStates(sha).map((entry, index) => ({ id: 1_000 + index, sha, environment: entry.environment, statuses: [{ state: entry.state === "in_progress" ? "in_progress" : entry.state }] }));
@@ -273,6 +280,11 @@ export class GitHubFixtureApi {
       return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size),
         author: "rawAuthor" in this.commitReads ? this.commitReads.rawAuthor : accountJson(identity?.author), committer: identity?.webFlow === true ? { login: "web-flow", id: 19864447, type: "User" } : accountJson(identity?.committer) },
         all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
+    }
+    if (method === "GET" && path === `${ROOT}/commits`) {
+      this.recentCommitRequests.push({ sha: url.searchParams.get("sha"), perPage: url.searchParams.get("per_page") });
+      if (this.recentCommits.http !== undefined) return json(this.recentCommits.http, { message: this.recentCommits.message ?? "Resource not accessible by integration" }, this.recentCommits.headers ?? {});
+      return json(200, this.recentCommits.rows ?? [], this.recentCommits.next === true ? { link: `<${API}${ROOT}/commits?sha=main&per_page=50&page=2>; rel="next"` } : {});
     }
     if (method === "GET" && path === `${ROOT}/deployments`) {
       if (this.deploymentReads.listHttp !== undefined) return json(this.deploymentReads.listHttp, { message: this.deploymentReads.listMessage ?? "Resource not accessible by integration" }, this.deploymentReads.listHeaders ?? {});

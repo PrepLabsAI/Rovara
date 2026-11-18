@@ -8,7 +8,7 @@
 //  - `events.normalise` (`events.ts`) exists only when the adapter is given the install's webhook secret; without one it verifies nothing and offers no normaliser.
 // The client holds the rest (see the rules on `GitHubCodeHostProvider`): tenant binding, least-privilege tokens, no redirects.
 import {
-  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, DeploymentStatusReadSchema, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
+  agentXError, hostRateLimitRetryAt, ChangeRequestInputSchema, DeploymentStatusReadSchema, RecentCommitsReadSchema, type RecentCommitsRead, ChangeRequestUpdateSchema, CommitFilesInputSchema, HostScopeSchema,
   type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type CodeOwnersRead, type CommitChanges, type CompareChanges, type PageBudget, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled, type ChangeRequestRef,
   type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type GitAccess, type GitCredential, type HostAccount, type HostScope,
   type HostCommentsPage, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type ReadBudget, type RepositoryIdentity, type RepositoryRef, type SummaryCheckPost,
@@ -17,7 +17,8 @@ import { parseGitHubRepository } from "../../../github-app.js";
 import { githubCodeHostEvents } from "./events.js";
 import { readCodeOwnersFile } from "../code-owners-file.js";
 import { accountKindOf, commitIdentityOf, detailsOf, feedbackOf, fileOf, mergeResultOf, pullRequestNumber, refOf, replyTargetOf, statusOf } from "./mapping.js";
-import { entryAt, fileTrees, instructionList } from "./file-details.js";
+import type { SetupFilesRead } from "@agentx/contracts";
+import { entryAt, fileTrees, instructionList, setupFileList } from "./file-details.js";
 import { type GitHubCodeHostProvider } from "./provider.js";
 
 export const GITHUB_HOST_KIND = "github";
@@ -70,6 +71,7 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
   const pathKindOfProvider = typeof provider.getPathKindAtCommit === "function" ? provider.getPathKindAtCommit.bind(provider) : undefined;
   const commitChangesOfProvider = typeof provider.getCommitChanges === "function" ? provider.getCommitChanges.bind(provider) : undefined;
   const compareChangesOfProvider = typeof provider.getCompareChanges === "function" ? provider.getCompareChanges.bind(provider) : undefined;
+  const recentCommitsOfProvider = typeof provider.listRecentCommits === "function" ? provider.listRecentCommits.bind(provider) : undefined;
   const deploymentStatusesOfProvider = typeof provider.getDeploymentStatuses === "function" ? provider.getDeploymentStatuses.bind(provider) : undefined;
   const commitFilesOfProvider = typeof provider.commitFilesToBranch === "function" ? provider.commitFilesToBranch.bind(provider) : undefined;
   const findPullRequestOfProvider = typeof provider.findLessonsPullRequest === "function" ? provider.findLessonsPullRequest.bind(provider) : undefined;
@@ -163,6 +165,23 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
         const read = await deploymentStatusesOfProvider(repository.url, revision, checkedScope(scope), budget === undefined ? undefined : () => budget.beforeRequest());
         const checked = DeploymentStatusReadSchema.safeParse(read);
         if (!checked.success) throw agentXError("RUNTIME_UNAVAILABLE", "the host's deployment answer cannot be read");
+        return checked.data;
+      },
+    }),
+
+    // Lane L4-LM1b (revert detection): the newest commits of a branch, one request. Only where the client can read them. The answer is checked against the port's schema (an entry it does not name is refused, never passed on).
+    ...(recentCommitsOfProvider === undefined ? {} : {
+      async recentCommits(repository: RepositoryRef, branch: string, scope: HostScope, readOptions: { max: number }, budget?: PageBudget): Promise<RecentCommitsRead> {
+        const read = await recentCommitsOfProvider(repository.url, branch, readOptions.max, checkedScope(scope), budget === undefined ? undefined : () => budget.beforeRequest());
+        const checked = RecentCommitsReadSchema.safeParse({
+          commits: read.commits.map((commit) => ({
+            sha: commit.sha, message: commit.message, parents: commit.parents, verified: commit.verified,
+            ...(commit.author === undefined ? {} : { author: { login: commit.author.login, ...(commit.author.id === undefined ? {} : { hostUserId: commit.author.id }) }, authorIsBot: commit.author.isBot }),
+            ...(commit.committer === undefined ? {} : { committer: { login: commit.committer.login, ...(commit.committer.id === undefined ? {} : { hostUserId: commit.committer.id }) }, ...(commit.committer.isWebFlow ? { webFlow: true } : {}) }),
+          })),
+          complete: read.complete,
+        });
+        if (!checked.success) throw agentXError("RUNTIME_UNAVAILABLE", "the host's commit listing cannot be read");
         return checked.data;
       },
     }),
@@ -300,6 +319,15 @@ export function githubCodeHost(provider: GitHubCodeHostProvider, options: GitHub
         const max = readOptions?.max ?? 500;
         if (!Number.isSafeInteger(max) || max < 0) throw agentXError("CONFIG_INVALID", "instruction file limit is invalid");
         return instructionList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions)), max);
+      },
+    }),
+
+    // L4-DR (DEC 254z c): the watched setup files and their content ids, from the same company-bound, cached tree read as `instructionFiles`.
+    ...(provider.listTreeAtCommit === undefined ? {} : {
+      async setupFileVersions(repository: RepositoryRef, revision: string, scope: HostScope, readOptions: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead> {
+        const checked = checkedScope(scope);
+        if (!Number.isSafeInteger(readOptions.max) || readOptions.max < 0) throw agentXError("CONFIG_INVALID", "setup file limit is invalid");
+        return setupFileList(await fileDetailsRead(() => readTree(repository.url, revision, checked, readOptions.timeoutMs === undefined ? undefined : { timeoutMs: readOptions.timeoutMs })), readOptions);
       },
     }),
 

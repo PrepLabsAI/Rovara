@@ -11,11 +11,13 @@ import { createHash } from "node:crypto";
 import { LOCAL_OWNER_PROVIDER } from "../../ports/policy-defaults.js";
 import {
   IMPLICIT_COMPANY_ID, WorkflowDecisionRequestSchema, WorkflowSnapshotSchema, WorkflowTransitionError, change, decideWorkflow, when,
-  type DecisionRisk, type DocumentKey, type DocumentStore, type PolicySubject, type Principal, type TransactItem, type WorkflowArtifact, type WorkflowSnapshot,
+  type DecisionRisk, type DocumentKey, type DocumentStore, type OrgId, type PolicySubject, type Principal, type TransactItem, type WorkflowArtifact, type WorkflowOwnerAuthority, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { WORKFLOW_BREAKDOWN_REFUSALS } from "../../developer/workflow-actions.js";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "./approval-gate.js";
 import { workflowWriteOps } from "../task-flow/flow-guard.js";
+import { approvalEntryOf, surfaceOfMethod } from "../task-log/entries.js";
+import { taskLogItems } from "../task-log/store.js";
 
 export const WORKFLOW_DOCUMENT_KIND = "workflow-document";
 /** What a refused decision says when the structured plan it names cannot be read back. */
@@ -73,6 +75,12 @@ export interface WorkflowSubjectOptions {
   ownerProvider?: string;
   /** The id the engine knows a person by. Default: the local owner decides as the task's owner (a one-developer install owns every task). */
   actorFor?: (approver: Principal, workflow: WorkflowSnapshot) => { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" } | undefined;
+  /**
+   * A host with co-owners (web task channel C6): who the engine records as deciding, read LIVE for each verified approver, with what the engine checks the actor against (`authority`, the owners now) and
+   * the steps that fence the decision's transaction against a change of who may act (`items`, the People revision). Undefined: that person is not an owner now, so the decision is refused. Given: it
+   * decides who the owner is and `actorFor` is not used; a throw refuses the decision. Absent: `actorFor`.
+   */
+  ownerActing?: (approver: Principal, task: Record<string, unknown>, workflow: WorkflowSnapshot) => Promise<{ actorId: string; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
 }
 
 /** The document type waiting for a decision, by the engine's own rule. */
@@ -144,9 +152,24 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
     async apply(loaded, attempt, approvers, at): Promise<AppliedDecision> {
       const { task, workflow } = loaded.state as { task: Record<string, unknown>; workflow: WorkflowSnapshot };
       // The engine knows one decider: every approver who proved themselves must be someone it accepts, and the first is recorded.
-      const actors = approvers.map((entry) => actorFor(entry, workflow));
-      const actor = actors[0];
-      if (actor === undefined || actors.some((entry) => entry === undefined)) throw new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
+      const notTheApprover = () => new SubjectRefusal("not_the_approver", "That person cannot decide this task.");
+      type Actor = { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" };
+      let actors: Array<{ actor: Actor; authority?: WorkflowOwnerAuthority; items?: readonly TransactItem[] } | undefined>;
+      if (options.ownerActing === undefined) actors = approvers.map((entry) => { const found = actorFor(entry, workflow); return found === undefined ? undefined : { actor: found }; });
+      else {
+        const ownerActing = options.ownerActing;
+        try {
+          actors = await Promise.all(approvers.map(async (entry) => {
+            const acting = await ownerActing(entry, task, workflow);
+            return acting === undefined ? undefined : { actor: { actorId: acting.actorId, role: "TASK_OWNER" as const }, ...(acting.authority === undefined ? {} : { authority: acting.authority }), ...(acting.items === undefined ? {} : { items: acting.items }) };
+          }));
+        } catch {
+          throw notTheApprover();
+        }
+      }
+      const first = actors[0];
+      if (first === undefined || actors.some((entry) => entry === undefined)) throw notTheApprover();
+      const actor = first.actor;
       const approver = approvers[0]!;
       await options.checkDecision?.({ task, workflow, attempt });
       const given = (attempt.details ?? {}) as WorkflowDecisionDetails;
@@ -191,7 +214,7 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       let after: WorkflowSnapshot;
       try {
         after = decideWorkflow(workflow, request.data, actor, {
-          now: at, allowedSkipStages: [], ...(details.via === undefined ? {} : { via: details.via }),
+          now: at, allowedSkipStages: [], ...(first.authority === undefined ? {} : { authority: first.authority }), ...(details.via === undefined ? {} : { via: details.via }),
           ...(details.planDecisions === undefined ? {} : { decisions: details.planDecisions }),
           ...(workBreakdownDigest === undefined ? {} : { workBreakdownDigest }),
           ...(details.noChangeNeeded === undefined ? {} : { noChangeNeeded: details.noChangeNeeded as never }),
@@ -203,10 +226,26 @@ export function createWorkflowDocumentSubject(options: WorkflowSubjectOptions): 
       // The engine answers an unchanged snapshot for a repeat of a decision it already holds; nothing is left to write.
       if (after.revision === workflow.revision) throw new SubjectRefusal("invalid_outcome", "The workflow already holds this decision.");
       const taskId = loaded.request.subject.id;
-      const extra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
+      const decidedExtra = options.onDecided === undefined ? [] : await options.onDecided({ taskId, task, before: workflow, after, attempt, approver, at, risk: loaded.request.risk });
+      // The live access fences of every approver the engine accepted (the People revision): a change of who may act between the check and the commit refuses the decision.
+      const fences = new Map<string, TransactItem>();
+      for (const item of actors.flatMap((entry) => entry?.items ?? [])) fences.set(JSON.stringify(item), item);
+      const extra = [...decidedExtra, ...fences.values()];
+      // The decision is in the task log in the same transaction: what was decided on (its code), who decided and from where. The approver is the one the Approvers seam verified, and the surface is the
+      // method the proof came through, never a field of the request.
+      const taskOrg = task["orgId"] ?? task["companyId"];
+      // The log never stands in the way of the decision: an entry that cannot be made is left out.
+      let logged: TransactItem[];
+      try {
+        const entry = typeof taskOrg !== "string" ? undefined : approvalEntryOf({
+          requestId: attempt.requestId, at, what: currentDocumentType(workflow), outcome: attempt.outcome === "approve" ? "approved" : attempt.outcome === "reject" ? "rejected" : "changes_requested",
+          artifactDigest: attempt.seen.artifactDigest, revision: attempt.seen.revision, by: approver.displayName ?? "A team member", surface: surfaceOfMethod(attempt.credentials[0]?.method),
+        });
+        logged = entry === undefined ? [] : taskLogItems({ orgId: taskOrg as OrgId, taskId, entries: [entry] });
+      } catch { logged = []; }
       return {
         ops: [...workflowWriteOps(workflow, after).ops, change.set("updatedAt", at)],
-        extra,
+        extra: [...extra, ...logged],
         result: { workflow: after },
       };
     },

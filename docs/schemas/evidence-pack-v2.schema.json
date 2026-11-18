@@ -361,6 +361,101 @@
                   "maxLength": 500,
                   "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
                 }
+              },
+              "failureCauses": {
+                "maxItems": 50,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "testId": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500,
+                      "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                    },
+                    "cause": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "change"
+                            },
+                            "paths": {
+                              "minItems": 1,
+                              "maxItems": 3,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^[^\\p{Cc}\\p{Cf}]*$"
+                              }
+                            },
+                            "pathsCount": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 5000
+                            },
+                            "commit": {
+                              "type": "string",
+                              "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"
+                            },
+                            "basis": {
+                              "minItems": 1,
+                              "maxItems": 2,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "named_in_failure",
+                                  "own_test_file"
+                                ]
+                              }
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "paths",
+                            "pathsCount",
+                            "basis"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "const": "unknown"
+                            },
+                            "reason": {
+                              "type": "string",
+                              "enum": [
+                                "no_failure_details",
+                                "no_changed_file_named",
+                                "weak_evidence",
+                                "several_changes"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "reason"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "testId",
+                    "cause"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -1913,6 +2008,26 @@
                 "type": "string",
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "approvedAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+              },
+              "mockSpecResult": {
+                "type": "string",
+                "enum": [
+                  "matches",
+                  "mismatch",
+                  "no_spec"
+                ]
+              },
+              "mockSpecVendor": {
+                "type": "string",
+                "enum": [
+                  "stripe",
+                  "github"
+                ]
               },
               "madeUpAnswers": {
                 "type": "integer",

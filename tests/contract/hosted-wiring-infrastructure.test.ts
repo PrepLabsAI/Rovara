@@ -70,9 +70,18 @@ describe("(a) step-up email through SES", () => {
       Condition: { StringEquals: { "ses:FromAddress": { Ref: "StepUpEmailSender" } } },
     }]);
     expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toEqual({ Ref: "StepUpEmailSender" });
-    // No other role in the stack may send email.
-    const others = ofType(named, "AWS::IAM::Policy").flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement).filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")));
-    expect(others).toHaveLength(1);
+    // No other role in the stack may send email, except the attention email's own sender (DEC 254zx, #907): one ses:SendEmail on its own CoreAttentionEmailSender identity, From
+    // pinned, in its own policy that exists only while CoreAttentionEmail is on (core-engine-infrastructure.test.ts pins the rest of it).
+    const sesByPolicy = ofType(named, "AWS::IAM::Policy").flatMap(([id, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
+      .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))).map((statement) => ({ id, statement })));
+    expect(sesByPolicy).toHaveLength(2);
+    const attention = sesByPolicy.filter(({ id }) => id.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy"));
+    expect(attention.map(({ statement }) => statement)).toEqual([{
+      Action: "ses:SendEmail", Effect: "Allow",
+      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "CoreAttentionEmailSender" }]] },
+      Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
+      Sid: "AttentionEmailSend",
+    }]);
     expect(JSON.stringify(legacy)).not.toContain("ses:");
     expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
   });

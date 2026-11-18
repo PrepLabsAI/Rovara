@@ -3,7 +3,7 @@
 // The cache is keyed by company AND project, so one project's map (or one company's) can never answer for another. A kept map is served only while the project still names the same repositories (a
 // repository added or removed makes it stale at once), and only for `ttlMs`. A second request for the same project while a map is being made joins it, and a map made less than `reuseMs` ago is
 // handed back instead of asking the code host again, so a button pressed twice costs one pass.
-import type { HostScope, OrgId, WikiFileMap } from "@agentx/contracts";
+import { agentXError, type HostScope, type OrgId, type WikiFileMap } from "@agentx/contracts";
 import { computeWikiFileMap, type FileMapDeps, type FileMapRepository } from "./file-map.js";
 
 export const WIKI_MAP_TTL_MS = 10 * 60_000;
@@ -19,6 +19,11 @@ export interface WikiMapService {
   /** Makes (or, within `reuseMs`, reuses) the map. */
   make(companyId: OrgId, project: string, repositories: readonly FileMapRepository[], scope: HostScope): Promise<WikiFileMap>;
 }
+
+// Like W0's cache, map admission is local to this broker process. Separate
+// service instances still compete for one company's two slots.
+const MAPS_PER_COMPANY = 2;
+const activeMaps = new Map<OrgId, number>();
 
 interface Kept { at: number; urls: string; map: WikiFileMap }
 
@@ -44,13 +49,21 @@ export function createWikiMapService(options: { now: () => number; ttlMs?: numbe
       if (fresh(existing, urls, reuseMs)) return existing.map;
       const joined = running.get(`${key}\u0000${urls}`);
       if (joined !== undefined) return joined;
+      const active = activeMaps.get(companyId) ?? 0;
+      if (active >= MAPS_PER_COMPANY) throw agentXError("WORKSPACE_BUSY", "Two file maps are already running for this company. Try again shortly.");
+      activeMaps.set(companyId, active + 1);
       const deps: FileMapDeps = { scope, now: options.now, ...(options.log === undefined ? {} : { log: options.log }) };
       const work = computeWikiFileMap({ project, repositories }, deps).then((map) => {
         kept.delete(key);
         kept.set(key, { at: options.now(), urls, map });
         while (kept.size > max) kept.delete(kept.keys().next().value!);
         return map;
-      }).finally(() => { running.delete(`${key}\u0000${urls}`); });
+      }).finally(() => {
+        running.delete(`${key}\u0000${urls}`);
+        const left = (activeMaps.get(companyId) ?? 1) - 1;
+        if (left === 0) activeMaps.delete(companyId);
+        else activeMaps.set(companyId, left);
+      });
       running.set(`${key}\u0000${urls}`, work);
       return work;
     },

@@ -90,6 +90,8 @@ export interface PlanPageView {
   comments: CommentView[];
   /** Present while the plan waits for the owner. */
   approval?: ApprovalOffer;
+  /** Lead 4 PCF: the task's feature as one line while a coding plan waits, and (for the owner, who may change it) the open features to pick from. The line is Rovara's words (`core/report/plan-feature.ts`); a name in `choices` is a person's: draw it as untrusted. */
+  feature?: { line: string; featureId: string | null; canChange: boolean; choices: Array<{ id: string; name: string }> };
   /** Rovara's ask, the merge state and any questions (lane L12). */
   attention?: AttentionView;
   /** What a second model made of the coding plan (the plan check), one line each, in Rovara's fixed words; the points are the second model's text and are drawn as untrusted. Absent: the plan was not checked. */
@@ -188,6 +190,15 @@ export interface ProofRowView {
   detail?: string;
 }
 
+/** One failing test line: its id and the words for its cause, both already plain text. */
+export interface ProofFailureView { test: string; cause: string }
+export interface ProofFailuresView {
+  /** The failed checks that have causes, in the pack's order, each with its failing tests (ten tests across all checks). */
+  checks: Array<{ check: string; tests: ProofFailureView[] }>;
+  /** Failing tests with a cause that are not listed, over all checks. */
+  more: number;
+}
+
 export interface ProofReportView {
   taskId: string;
   title: string;
@@ -196,6 +207,11 @@ export interface ProofReportView {
   rows: ProofRowView[];
   /** TE-H1: the before and after screenshots of the changed pages (visual evidence only), each picture served by `readEvidenceImage` behind the page session. Absent: none were taken for this code. */
   browserEvidence?: BrowserEvidencePanel;
+  /**
+   * TE-A6 (DEC 254zzf): the failing tests of the failed checks, each with the change that most likely broke it or "unknown" (the evidence pack's `failureCauses`, made plain text by the broker). At most ten tests in all, the rest counted
+   * in `more`. Absent when no failed check carries causes: the report and the page are then exactly what they were.
+   */
+  failures?: ProofFailuresView;
   /** One line: what the task cost, when the metering seam knows. */
   cost?: string;
   pullRequests: Array<{ url: string; number: number; state: string }>;
@@ -242,6 +258,8 @@ export interface TestEnvironmentPageView {
   extra?: string[];
   /** The machine size card (switch `ROVARA_MACHINE_SIZE`, see `core/test-env/machine-size.ts`), one plain line each. Absent while the switch is off. */
   machine?: string[];
+  machineChoices?: readonly { id: string; label: string }[];
+  machineChoice?: string;
   /** Test services on a laptop (Code): the images that may run, and the ones this project asks for. Absent when the install uses a signed catalog or test services are off. */
   serviceImages?: ServiceImagesPageView;
 }
@@ -562,6 +580,8 @@ export interface LocalPageActions {
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */
   attachThread?(input: { taskId: string; revision: number; repository: string; number: number }): Promise<LocalActionResult>;
+  /** Lead 4 PCF: "Change" and "No feature" on a waiting coding plan (`featureId` null: No feature). `revision` is the one the owner was looking at. Absent: the page offers no control. */
+  planFeature?(input: { taskId: string; revision: number; featureId: string | null }): Promise<LocalActionResult>;
   /** Design review: a choice at the cost hold, through the approval gate. The proof is the page's (a signed local-session proof). */
   designChoice?(input: { taskId: string; choice: "run_unpriced" | "raise_cap" | "lower_tier" | "skip"; approval: ApprovalOffer; proof: ApprovalProof }): Promise<LocalActionResult>;
   /** Design review: picks a paused review up again. */
@@ -581,6 +601,8 @@ export interface LocalPageActions {
   approveServiceImage?(input: { project: string; requested: string }): Promise<LocalActionResult>;
   /** Forgets an approved service image. */
   removeServiceImage?(input: { project: string; reference: string }): Promise<LocalActionResult>;
+  /** Records a test machine size from the project's fresh local page session. */
+  setTestEnvironmentMachine?(input: { project: string; rowId: string }): Promise<LocalActionResult>;
   /** The owner's acts on the automation page: turn a trigger on (with their proof), off, decide a chain's gate (with their proof), stop a run. */
   automation?(input: AutomationPageAction): Promise<LocalActionResult>;
   /** A change of the per-step model setting. Refused (with its fixed words) when the owner may not, the page was not opened lately, or the setting moved. */

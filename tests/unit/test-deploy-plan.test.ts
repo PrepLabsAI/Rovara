@@ -829,6 +829,8 @@ describe("the control-plane-code unit", () => {
     entries.delete("packages/cli/src/init/ui/setup-lambda.ts");
     // The automatic renewal's Lambda exists only where agentx:autoRequalify is on and is added by the requalify-infra unit; AR-5 registers its code unit here.
     entries.delete("packages/broker/src/aws/runtime-requalify-handler.ts");
+    // The attention email sender (#907) exists only while CoreAttentionEmail is on; it is in CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED.
+    entries.delete("packages/broker/src/aws/attention-email-sender.ts");
     expect([...entries].sort()).toEqual(Object.values(CONTROL_PLANE_LAMBDAS).map((lambda) => lambda.entry).sort());
   });
 

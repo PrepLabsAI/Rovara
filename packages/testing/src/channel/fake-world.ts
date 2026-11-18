@@ -20,7 +20,7 @@ export interface FakeChannelWorldOptions {
 function textOf(event: ChannelEvent): string {
   switch (event.type) {
     case "ack": return "";
-    case "pr": return `${event.data.title} ${event.data.url}`;
+    case "pr": return `${event.data.title} ${event.data.url}${event.data.verdict === undefined ? "" : ` ${event.data.verdict}`}`;
     case "done": return event.data.text ?? "";
     case "link_required": return event.data.linkUrl;
     case "direct": return event.data.text;

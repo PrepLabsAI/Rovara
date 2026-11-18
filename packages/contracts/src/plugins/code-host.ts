@@ -430,6 +430,8 @@ export type CommitFilesInput = z.infer<typeof CommitFilesInputSchema>;
 /** `changed` is false when every file already held the content asked for. */
 export const CommitFilesResultSchema = z.object({ revision: RevisionSchema, changed: z.boolean() }).strict();
 export type CommitFilesResult = z.infer<typeof CommitFilesResultSchema>;
+/** L4-DR: the files a tree read kept, by path and content id, and whether the list is whole. */
+export interface SetupFilesRead { files: Array<{ path: string; id: string }>; complete: boolean }
 /** What a path is at a revision: a file, a directory, a symbolic link (never written to), or nothing. */
 export type PathKind = "file" | "dir" | "symlink" | "none";
 
@@ -472,6 +474,28 @@ export const DeploymentStatusReadSchema = z.object({
   complete: z.boolean(),
 }).strict();
 export type DeploymentStatusRead = z.infer<typeof DeploymentStatusReadSchema>;
+
+/** The most commits one `recentCommits` read answers, and the most characters of a commit message it keeps (a revert's subject and its "This reverts commit" line are at the top). */
+export const RECENT_COMMITS_MAX = 100;
+export const RECENT_COMMIT_MESSAGE_MAX = 4_000;
+/**
+ * One commit of a branch as the host shows it (lane L4-LM1b, revert detection): enough to tell a git revert and to prove who stands behind it. `parents` is the NUMBER of parents (a merge commit never counts as a revert).
+ * `webFlow` is the host's own web committer (squash and web edits), set by the adapter from the host's account id and never from a login or the message. The message is untrusted text.
+ */
+export const RecentCommitSchema = z.object({
+  sha: RevisionSchema,
+  message: z.string().max(RECENT_COMMIT_MESSAGE_MAX),
+  parents: z.number().int().min(0).max(100),
+  verified: z.boolean(),
+  author: HostAccountSchema.optional(),
+  committer: HostAccountSchema.optional(),
+  webFlow: z.boolean().optional(),
+  authorIsBot: z.boolean().optional(),
+}).strict();
+export type RecentCommit = z.infer<typeof RecentCommitSchema>;
+/** What `CodeHost.recentCommits` answers: the newest commits of one branch, newest first, and whether that is every commit asked for (`complete` false when the host cut the list or an entry was unusable). */
+export const RecentCommitsReadSchema = z.object({ commits: z.array(RecentCommitSchema).max(RECENT_COMMITS_MAX), complete: z.boolean() }).strict();
+export type RecentCommitsRead = z.infer<typeof RecentCommitsReadSchema>;
 
 const EventBase = { eventId: ExternalIdSchema, host: PluginKindSchema, occurredAt: ISO_TIME.optional() } as const;
 /**
@@ -606,6 +630,17 @@ export interface CodeHost {
    * hears of deploys by event only; a host that cannot answer THROWS (a refused read is never "no deployments").
    */
   deploymentStatuses?(repository: RepositoryRef, revision: string, scope: HostScope, budget?: PageBudget): Promise<DeploymentStatusRead>;
+  /**
+   * L4-DR (DEC 254z c, optional, add-only, read-only): the files at `revision` (a full commit id) whose path `match` accepts, each with its CONTENT ID (the host's own object id of the file; never the content), from one tree
+   * read. `complete` is false when the host cut the listing or `max` was reached: the answer is then NOT the whole set. Directories, submodules and entries of an unknown kind are never listed. A host that cannot answer THROWS
+   * (a refused read is never an empty list). The setup snapshot and the drift check read through it; a host without it leaves drift "not checked".
+   */
+  setupFileVersions?(repository: RepositoryRef, revision: string, scope: HostScope, options: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead>;
+  /**
+   * Lane L4-LM1b (revert detection, add-only, optional, read-only): the newest `max` (1 to RECENT_COMMITS_MAX) commits of `branch`, newest first, from ONE request, with what a revert check needs (message, parent count, verification, author and committer
+   * accounts). `budget`, when given, is called before the request. A host that cannot answer THROWS (a refused read is never "no commits"). A host without it is never watched for reverts by polling.
+   */
+  recentCommits?(repository: RepositoryRef, branch: string, scope: HostScope, options: { max: number }, budget?: PageBudget): Promise<RecentCommitsRead>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.

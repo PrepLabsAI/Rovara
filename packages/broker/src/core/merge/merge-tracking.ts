@@ -13,6 +13,7 @@ import {
   TRACKING_REQUESTS_BASE,
   TRACKING_REQUESTS_PER_EXTRA_PR,
   CI_STATE_WORDS,
+  CodeMilestoneSchema,
   agentXError,
   codeMilestoneKey,
   mergeTrackingDecisionDigest,
@@ -43,7 +44,7 @@ import {
 import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
-import { ownCheckSourceOf, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
+import { ownCheckSourceOf, readVerdict, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
 import { ciFixComment, postCiFixComment } from "./pr-comments.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
@@ -166,6 +167,11 @@ export interface MergeTrackingDependencies {
    * written when it changed (summary-check.ts), and a task Rovara stops following has its in-progress Check finished as neutral.
    */
   summaryCheck?: SummaryCheckSource;
+  /**
+   * L4-PRP: the pull request's verdict (the words of its description), asked once when Rovara marks it ready for review: the "ready for review" line on the task's timeline, in the chat and in the ticket then says the verdict's heading.
+   * Independent of the Check's gate. Absent, or a read that fails or takes over two seconds: the line is what it was.
+   */
+  verdict?: SummaryCheckSource["verdict"];
   /** Whether the task's draft must stay a draft (a small change that grew to risky, not yet kept by a person or not yet reviewed at risky). Absent: nothing holds it. */
   readyHold?(task: TrackedTask, current: { repositoryId: string; headSha: string }): Promise<boolean>;
   /** The org's autonomy for Rovara Code, for the deciders; `prepare` when not given. */
@@ -189,6 +195,8 @@ export interface MergeTrackingDependencies {
   log?(event: string, fields: Record<string, unknown>): void;
   /** The write of the task's next workflow snapshot, guarded by the revision read. The task-flow lane owns the record, so it can say how it is written; the default is `workflowUpdateItem`. */
   workflowWrite?(taskId: string, next: WorkflowSnapshot, expectedRevision: number): TransactItem;
+  /** Slice A4: the work events of a workflow change this pass makes (a fix started, the pull request closed), for the same transaction. Absent: none. Never throws into the pass (the service gives `flowWorkEventItems`, which never throws). */
+  workEvents?(task: { taskId: string; orgId: OrgId; project: string }, before: WorkflowSnapshot, after: WorkflowSnapshot, room: number): TransactItem[];
   /** Turns a decider's dispatch request into the row the task-flow core runs (default: its `dispatchRowItem`). */
   dispatchRow?(request: { companyId: OrgId; taskId: string; kind: MergeDispatchKind; workflowRevision: number; at: string }, now: string): TransactItem;
   /** Hooks at the end of a pass (the track record, the reviewers' reminders): best effort, outside the merge core. */
@@ -935,11 +943,15 @@ async function trackOne(
       for (const requested of action.milestones) items.push(...deps.milestones.items(requested.milestone, requested.n, { definitionVersion: action.workflow.definitionVersion }));
     }
     if (justReady) {
+      const read = await readVerdict(deps.verdict, { task, repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: status.headRevision });
       const index = Math.max(0, (task.workflow.pullRequests ?? []).findIndex((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number));
+      const readyText = `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`;
+      // The heading (fixed words and counts) goes in only when the milestone's own schema takes it, so words can never stop a pull request from being marked ready.
+      const heading = read !== undefined && CodeMilestoneSchema.shape.verdict.safeParse(read.heading).success && `${readyText} ${read.heading}.`.length <= 500 ? read.heading : undefined;
       items.push(...deps.milestones.items({
         kind: "pr_ready", orgId: task.orgId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: stamp,
-        text: `Rovara marked ${inertLine(pullRequest.repositoryId)} pull request ${String(pullRequest.number)} ready for review.${ci.ci === "none" || ci.ci === "unreadable" ? ` ${CI_STATE_WORDS[ci.ci]}.` : ""}${markedAnyway ? " It was held for its change proof and a person marked it ready anyway." : ""}`,
-        pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
+        text: heading === undefined ? readyText : `${readyText} ${heading}.`,
+        ...(heading === undefined ? {} : { verdict: heading }), pullRequests: [{ repository: pullRequest.repositoryId, number: pullRequest.number, url: pullRequest.url }],
       }, index, { definitionVersion: task.workflow.definitionVersion }));
     }
     items.push(...approvedItems(stamp));
@@ -949,6 +961,8 @@ async function trackOne(
         at: stamp, text: merged.headByRovara ? PUSH_WAS_MINE_MESSAGE : SOMEONE_ELSE_PUSHED_MESSAGE,
       }));
     }
+    // Slice A4: the work events of the workflow change, appended LAST so the room they are given is what is really left in the transaction (an event is never the reason a pass is refused).
+    if (action !== undefined) { try { items.push(...(deps.workEvents?.(task, task.workflow, action.workflow, 100 - items.length) ?? [])); } catch { /* an event is never the reason a pass fails */ } }
     // A write that lost a race (the version, the workflow's revision) is a failed condition, not a fault: read again and try again.
     const committed = await deps.store.transact(items).catch((error: unknown) => {
       // A transaction that lost its race with another writer after the store's own retries is the same as a failed condition.

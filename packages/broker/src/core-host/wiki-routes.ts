@@ -1,6 +1,7 @@
 // Lead 4 W2 (DEC 254zh/254zi): the project wiki's READ routes on the deployed developer API, for Cloud's Wiki tab, AS the signed-in person:
 //
 //   GET /v1/app/projects/{project}/wiki                           the page index and the last build's state
+//   GET /v1/app/projects/{project}/wiki/search?q=                  bounded title, summary and page-text results
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}            one page: prose, claims (never their quotes), notes (pending ones marked), how many open "Mark wrong" flags
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}/sources    the files and lines the page cites, at their commits (never their quotes)
 //
@@ -9,18 +10,19 @@
 //    the project's (`wikiPartition`). No route reads across projects or companies; there is no company-wide wiki read.
 //  - Who reads: any project role. A live owner or admin of the company, or a person with a grant on the project (the setup run's `lifecycleAccess` standing: `manage` or `view`). Anyone
 //    else, a project the company does not have, a malformed name and another company's project all get the same 404 "project not found". A missing page is its own fixed 404.
-//  - A script token never reaches these routes (the dev routes refuse it before this file; the MCP `wiki` permission is M1's). Nothing here writes.
+//  - The dev routes admit a script token only with the dedicated `wiki` permission and this project in its scope. Nothing here writes.
 //  - A repository no longer in the project (removed, whichever path removed it) has its pages and every cross-repo page naming it deleted before the read (`pruneRepositories`).
 //  - People never see a stored quote, a flag's author or reason, or a claim id's text beyond the claim: the answers are built field by field and parsed with the contract's strict schemas.
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a store fault is a fixed 503.
 import {
-  WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, WikiIndexResponseSchema, WikiPageIdSchema, WikiPageResponseSchema, WikiProjectSchema, WikiSourcesResponseSchema,
-  AgentXError, agentXError, type DocumentStore, type OrgId, type WikiIndexResponse, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
+  WIKI_LIMITS, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, WikiIndexResponseSchema, WikiPageIdSchema, WikiPageResponseSchema, WikiProjectSchema, WikiSearchResponseSchema, WikiSourcesResponseSchema,
+  AgentXError, agentXError, redactText, stripHiddenCharacters, type DocumentStore, type OrgId, type WikiIndexResponse, type WikiPageResponse, type WikiSourcesResponse, type WikiStore,
 } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { WIKI_FORMER_MEMBER, createWikiStore } from "../core/wiki/store.js";
 import type { SetupRunStanding } from "./setup-run-routes.js";
 import { companyProjects } from "./lessons.js";
+import { wikiAgentSwitchIsOn } from "../core/wiki/agent-context.js";
 
 /** How a note's author is named when they have no name now (gone, erased, or unreadable). */
 export const WIKI_FORMER_MEMBER_NAME = "a former member";
@@ -47,7 +49,9 @@ export interface HostedWikiInput {
   now: () => number;
 }
 
-const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/pages\/([^/]+)(\/sources)?)?$/u;
+const WIKI_PATH = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/(?:search|pages\/([^/]+)(\/sources)?))?$/u;
+const WIKI_SEARCH_SCAN_MAX = WIKI_LIMITS.pagesPerProject;
+const WIKI_SEARCH_BATCH_SIZE = 10;
 
 /** Whether this method and path is one of the wiki reads. */
 export function isWikiPath(path: string, method: string): boolean {
@@ -82,7 +86,8 @@ export async function routeHostedWiki(input: HostedWikiInput): Promise<BrokerRes
     const store = createWikiStore({ store: input.store, companyId: input.companyId, now: input.now });
     // A repository removed from the project leaves nothing behind: its pages, and every cross-repo page naming it, go before anything is read.
     await guarded(async () => await store.pruneRepositories(project, repositories));
-    if (match[2] === undefined) return json(200, await indexAnswer(store, project));
+    if (match[2] === undefined && input.path.endsWith("/search")) return json(200, await searchAnswer(input, store, project));
+    if (match[2] === undefined) return json(200, await indexAnswer(input, store, project));
     let pageId: string;
     try { pageId = decodeURIComponent(match[2]); } catch { throw pageNotFound(); }
     if (!WikiPageIdSchema.safeParse(pageId).success) throw pageNotFound();
@@ -99,12 +104,43 @@ async function guarded<T>(read: () => Promise<T>): Promise<T> {
   try { return await read(); } catch { throw unavailable(); }
 }
 
-async function indexAnswer(store: WikiStore, project: string): Promise<WikiIndexResponse> {
+async function indexAnswer(input: HostedWikiInput, store: WikiStore, project: string): Promise<WikiIndexResponse> {
   const [pages, last] = await guarded(async () => await Promise.all([store.readIndex(project), store.lastBuild(project)]));
   return WikiIndexResponseSchema.parse({
-    project, state: pages.length === 0 ? "empty" : "ready", pages,
+    project, state: pages.length === 0 ? "empty" : "ready", agentsEnabled: await wikiAgentSwitchIsOn({ store: input.store, companyId: input.companyId, now: input.now }, project), pages,
     ...(last === undefined ? {} : { lastBuild: { buildId: last.buildId, kind: last.kind, state: last.state, startedAt: last.startedAt, ...(last.endedAt === undefined ? {} : { endedAt: last.endedAt }), ...(last.stopReason === undefined ? {} : { stopReason: last.stopReason }) } }),
   });
+}
+
+async function searchAnswer(input: HostedWikiInput, store: WikiStore, project: string) {
+  let query: string | null;
+  try { query = new URL(input.request.path, "https://agentx.invalid").searchParams.get("q"); } catch { query = null; }
+  if (query === null || query.trim().length === 0 || query.length > 80 || /[\p{Cc}\p{Cf}]/u.test(query)) throw agentXError("CONFIG_INVALID", "the request is not valid");
+  const needle = new RegExp(query.trim().replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "iu");
+  const pages = (await guarded(async () => await store.readIndex(project))).slice(0, WIKI_SEARCH_SCAN_MAX);
+  const results: Array<{ pageId: string; title: string; summary: string; snippet: string }> = [];
+  for (let start = 0; start < pages.length && results.length < 20; start += WIKI_SEARCH_BATCH_SIZE) {
+    const batch = await guarded(async () => await Promise.all(pages.slice(start, start + WIKI_SEARCH_BATCH_SIZE).map((entry) => store.readPageBody(project, entry.pageId))));
+    for (let index = 0; index < batch.length; index += 1) {
+      const body = batch[index];
+      if (body === undefined) continue;
+      const entry = pages[start + index]!;
+      const text = [body.title, body.summary, ...body.blocks.map((block) => block.kind === "diagram" ? block.mermaid : block.text)].join("\n");
+      const match = needle.exec(text);
+      if (match === null) continue;
+      results.push({ pageId: entry.pageId, title: entry.title, summary: entry.summary, snippet: snippetAround(text, match.index, match[0].length) });
+      if (results.length === 20) break;
+    }
+  }
+  return WikiSearchResponseSchema.parse({ project, query: query.trim(), results, trustLine: WIKI_TRUST_LINE });
+}
+
+function snippetAround(text: string, at: number, length: number): string {
+  const start = Math.max(0, at - 59);
+  const end = Math.min(text.length, at + length + 99);
+  const raw = `${start > 0 ? "…" : ""}${text.slice(start, end)}${end < text.length ? "…" : ""}`;
+  const plain = stripHiddenCharacters(redactText(raw)).text;
+  return Array.from(plain).slice(0, 240).join("");
 }
 
 async function pageAnswer(input: HostedWikiInput, store: WikiStore, project: string, pageId: string): Promise<WikiPageResponse | undefined> {

@@ -1,7 +1,7 @@
 import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  SLACK_OIDC_ISSUER,
+  DeveloperSignInMethodSchema, IMPLICIT_COMPANY_ID, OrgIdSchema, SLACK_OIDC_ISSUER,
   SlackChannelIdSchema,
   SlackUserIdSchema,
   TaskPersonProofRequestSchema,
@@ -18,7 +18,7 @@ import { ownerKeyForSubject } from "../aws/lambda.js";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRecord } from "./task-records.js";
 import type { DeveloperRecord } from "./store.js";
-import { TASK_PERSON_UNNAMED, isSlackTaskPerson, parseTaskPersonIdentity } from "./task-person-rows.js";
+import { TASK_PERSON_UNNAMED, isSlackTaskPerson, parseTaskPersonIdentity, taskPersonKindOf } from "./task-person-rows.js";
 
 export interface TaskPersonIdentity {
   developerId: string;
@@ -31,7 +31,7 @@ export interface TaskPersonIdentity {
 
 export type ProjectAccessSubject = Pick<DeveloperCaller, "developerId" | "slackUserId">;
 
-export interface TaskPersonIdentityDependencies {
+export interface TaskPersonIdentityDependencies extends TaskPersonWebProofReaders {
   workspace?: SlackWorkspaceScope;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
@@ -88,22 +88,48 @@ async function getItem(deps: TaskPersonIdentityDependencies, pk: string, sk: str
 /** DEC 254n (2): the record-backed methods. A GitHub person is checked exactly as an OIDC person is: their own sign-in record, its Slack link and the same Slack proof. */
 const recordMethod = (method: unknown): method is "oidc" | "github" => method === "oidc" || method === "github";
 
+/** C2 (plan 4.1, decisions D1, D3): the live reads of the web proof. Never asked for a `slack` identity. */
+export interface TaskPersonWebProofReaders {
+  /**
+   * Rule 3: the person's live company membership (`COMPANY_MEMBER#<developerId>`), read on every check. Undefined: none, or revoked.
+   * A throw: unreadable. Absent: every `web` identity is unavailable (a refusal).
+   */
+  companyMembership?(developerId: string): Promise<{ companyId: string } | undefined>;
+  /**
+   * Rule 4: whether the person holds a live `developer` or `administrator` grant on the task's project in the task's company (`access: "granted"`;
+   * channel-only access never counts). False: a proven absence. A throw: unreadable, unknown project, or tasks turned off. Absent: every `web` identity is unavailable.
+   */
+  projectGrant?(developerId: string, project: string, companyId: string): Promise<boolean>;
+  /**
+   * Set only when the caller could not build the Slack parts (no Slack on the install, or no Slack workspace for the task): a `slack` identity's
+   * check then throws exactly this error, as it did before C2, and only a `web` identity can still be proven (D2).
+   */
+  slackUnavailable?: Error;
+  /**
+   * C4 (plan 4.2 "Add a person from the web"): the developer ids holding a grant on the project (its PROJECT_MEMBERS# rows), at most `limit` of them
+   * (`complete` false when there are more). Each id is only a lead: every one is proved live before it is offered or registered. A throw: unreadable.
+   */
+  projectMemberIds?(project: string, limit: number): Promise<{ ids: readonly string[]; complete: boolean }>;
+}
+
 async function currentTask(deps: TaskPersonIdentityDependencies, taskId: string): Promise<DeveloperTaskRecord> {
   if (!UUID.test(taskId)) return refuse();
   const item = await getItem(deps, taskPk(taskId), "META");
+  // C2: a task started with any built-in sign-in method (GitHub, Cloud, SAML too) has a task person; before, only Slack and OIDC did.
   if (item?.pk !== taskPk(taskId) || item.sk !== "META" || item.entityType !== "DEVELOPER_TASK" || item.taskId !== taskId
-    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || (item.provider !== "slack" && !recordMethod(item.provider))) return refuse();
+    || typeof item.project !== "string" || !HEX64.test(String(item.developerId)) || !DeveloperSignInMethodSchema.safeParse(item.provider).success) return refuse();
   return item as unknown as DeveloperTaskRecord;
 }
 
-const parsedIdentity = parseTaskPersonIdentity;
+/** The task's company, the way every stored record names it (`slackRecordScope`, `recordInCompany`): absent is the implicit company; anything malformed refuses. */
+function taskCompanyId(task: DeveloperTaskRecord): string {
+  const row = task as unknown as { companyId?: unknown; orgId?: unknown };
+  if (row.companyId === null || row.orgId === null) return refuse();
+  const company = OrgIdSchema.safeParse(row.companyId ?? row.orgId ?? IMPLICIT_COMPANY_ID);
+  return company.success ? company.data : refuse();
+}
 
-/**
- * C1: the web proof (plan 4.1 rule, decision D1) is not built yet, so a `web` identity is always unavailable, which every caller
- * turns into a refusal. It makes no Slack call (a registry person makes no further read; an unlinked OIDC creator costs the one
- * sign-in record read that builds its identity). C2 replaces this with the web proof.
- */
-const webIdentityUnavailable = (): never => unavailable();
+const parsedIdentity = parseTaskPersonIdentity;
 
 async function registryByPerson(deps: TaskPersonIdentityDependencies, taskId: string, personId: string): Promise<TaskPersonIdentity> {
   if (!UUID.test(personId)) return refuse();
@@ -291,6 +317,61 @@ export async function registerTaskChannelPeople(
   return identities;
 }
 
+/**
+ * C2, plan 4.1 rules 1 and 2 for a `web` identity: the developer id being proven is the one its own sign-in subject names (checked before any
+ * read), and `DEVELOPER#<id>/META` exists, is not revoked, and its method, issuer and subject match the registered row. This is the OIDC rule
+ * below minus the Slack-id equality: a sign-in may link a Slack account later, and the identity stays `web` (its kind is fixed at registration).
+ */
+async function webIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {
+  if (identity.slackUserId !== undefined || identity.method === "slack" || identity.issuer === SLACK_OIDC_ISSUER) return refuse();
+  // Rule 1: the id comes only from the verified caller or the task's own stored rows, and it must be this sign-in's own id.
+  if (identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
+  let record: DeveloperRecord | undefined;
+  try {
+    record = await deps.developerRecord(identity.developerId);
+  } catch {
+    return unavailable();
+  }
+  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== identity.method || record.developerId !== identity.developerId
+    || record.issuer !== identity.issuer || record.subject !== identity.subject || ownerKeyForSubject(record.issuer, record.subject) !== record.developerId) return refuse();
+  return record.revoked ? "ineligible" : "current";
+}
+
+/**
+ * C2, the web proof (plan 4.1, decisions D1, D3): rules 1 and 2 (`webIdentityStatus`), then rule 3, live membership in the TASK'S company, and rule 4,
+ * a live developer or administrator grant on the task's project. Every rule is read live on every check and makes no Slack call. `present`
+ * (the stand-in for `channelMember`) is rules 3 and 4. A proven loss is `eligible: false` (reconciled like a Slack departure); anything unreadable throws.
+ */
+async function qualifyWeb(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  identity: TaskPersonIdentity,
+): Promise<{ eligible: boolean; present: boolean }> {
+  // Without the live membership and grant reads there is no web proof: unavailable, before any read.
+  if (typeof deps.companyMembership !== "function" || typeof deps.projectGrant !== "function") return unavailable();
+  const companyId = taskCompanyId(task);
+  const status = await webIdentityStatus(deps, identity);
+  if (status === "ineligible") return { eligible: false, present: false };
+  let membership: { companyId: string } | undefined;
+  try {
+    membership = await deps.companyMembership(identity.developerId);
+  } catch {
+    return unavailable();
+  }
+  if (membership !== undefined && (typeof membership !== "object" || membership === null || typeof membership.companyId !== "string")) return unavailable();
+  // Rule 3: a member of another company (even one with a same-named project) is never eligible here.
+  if (membership?.companyId !== companyId) return { eligible: false, present: false };
+  let granted: unknown;
+  try {
+    granted = await deps.projectGrant(identity.developerId, task.project, companyId);
+  } catch {
+    return unavailable();
+  }
+  if (typeof granted !== "boolean") return unavailable();
+  // Rule 4: channel-only access never applies to a web identity; only a grant does.
+  return granted ? { eligible: true, present: true } : { eligible: false, present: false };
+}
+
 async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {
   if (identity.method === "slack") {
     if (identity.slackUserId === undefined || identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId
@@ -345,10 +426,10 @@ export async function checkTaskPersonIdentity(
       if (!SlackUserIdSchema.safeParse(stored.slackUserId).success || developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {
-      // A record-backed task creator (oidc or github, DEC 254n 2): linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
-      const method = stored.provider;
-      if (!recordMethod(method)) return refuse();
-      const linked = stored.slackUserId !== undefined;
+      // A record-backed task creator: oidc linked to Slack when the task stored a Slack user id (as before), else a `web` identity (C1, plan 3 item 3).
+      // DEC 254n (2): a GitHub creator is record-backed like an OIDC one, so a GitHub task that stored a Slack user id is a Slack-linked (`slack`) identity checked
+      // through Slack, exactly as on code/next. C2: a Cloud or SAML task creator is always a `web` identity of its own method; a Slack id on such a task is not a link.
+      const linked = recordMethod(stored.provider) && stored.slackUserId !== undefined;
       if (linked && !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
       let record: DeveloperRecord | undefined;
       try {
@@ -356,25 +437,35 @@ export async function checkTaskPersonIdentity(
       } catch {
         return unavailable();
       }
-      if (record === undefined || record.provider !== method || record.developerId !== developerId || typeof record.issuer !== "string"
+      if (record === undefined || record.provider !== stored.provider || record.developerId !== developerId || typeof record.issuer !== "string"
         || typeof record.subject !== "string" || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
       if (linked) {
         if (!SlackUserIdSchema.safeParse(record.slackUserId).success) return refuse();
         identity = {
           developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
-          method, issuer: record.issuer, subject: record.subject,
+          method: stored.provider, issuer: record.issuer, subject: record.subject,
         };
       } else {
-        if (record.slackUserId !== undefined) return refuse();
+        // C2: no Slack-id equality for a `web` identity (plan 4.1 rule 2); a later Slack link on the sign-in does not change the identity's kind.
         identity = {
           developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
-          method, issuer: record.issuer, subject: record.subject,
+          method: stored.provider, issuer: record.issuer, subject: record.subject,
         };
       }
     }
   }
-  // C1: the one place a check branches on identity kind. `slack` keeps today's proof (D2); `web` is unavailable until C2 (D1).
-  if (!isSlackTaskPerson(identity)) return webIdentityUnavailable();
+  // The one place a check branches on identity kind. `slack` keeps today's proof, byte for byte (D2); `web` has the web proof (C2, D1),
+  // where `channelMember` carries `present` (rules 3 and 4), so every caller's owner rule applies unchanged. No Slack call.
+  if (!isSlackTaskPerson(identity)) {
+    if (taskPersonKindOf(identity) !== "web" || identity.developerId !== developerId) return refuse();
+    // The company is the stored task's, read now; a caller's copy naming another company refuses.
+    const fresh = stored as unknown as { companyId?: unknown; orgId?: unknown };
+    const given = task as unknown as { companyId?: unknown; orgId?: unknown };
+    if (fresh.companyId !== given.companyId || fresh.orgId !== given.orgId) return refuse();
+    const web = await qualifyWeb(deps, stored, identity);
+    return { subject: { developerId }, identity, eligible: web.eligible, channelMember: web.present };
+  }
+  if (deps.slackUnavailable !== undefined) throw deps.slackUnavailable;
   const status = await storedIdentityStatus(deps, identity);
   const subject = { developerId, slackUserId: identity.slackUserId };
   if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };
@@ -391,9 +482,106 @@ export async function resolveTaskPersonId(
 ): Promise<TaskPersonIdentity> {
   const task = await currentTask(deps, taskId);
   const identity = await registryByPerson(deps, taskId, personId);
-  // C1: a `web` person resolves only once C2 adds its proof; until then it is a refusal, with no read and no Slack call.
-  if (!isSlackTaskPerson(identity)) return refuse();
+  // C2: a `web` person resolves only with a current web proof (plan 4.1); a proven loss and anything unreadable both refuse. No Slack call.
+  if (!isSlackTaskPerson(identity)) {
+    if (taskPersonKindOf(identity) !== "web") return refuse();
+    let web: { eligible: boolean };
+    try {
+      web = await qualifyWeb(deps, task, identity);
+    } catch {
+      return refuse();
+    }
+    return web.eligible ? identity : refuse();
+  }
   await verifyStoredIdentity(deps, identity);
   await qualify(deps, task, { developerId: identity.developerId, slackUserId: identity.slackUserId });
   return identity;
+}
+
+/**
+ * C4: the `web` identity a developer's own sign-in record names now, or undefined when the record cannot make one (Slack, revoked, malformed, or
+ * carrying a Slack link: plan 4.1, D2, `web` means no Slack link, so a Slack-linked OIDC or GitHub person is added through Slack and keeps the Slack proof).
+ */
+async function webIdentityFromRecord(deps: TaskPersonIdentityDependencies, developerId: string): Promise<TaskPersonIdentity | undefined> {
+  let record: DeveloperRecord | undefined;
+  try {
+    record = await deps.developerRecord(developerId);
+  } catch {
+    return unavailable();
+  }
+  if (record === undefined || record.revoked !== false || record.developerId !== developerId || typeof record.issuer !== "string" || typeof record.subject !== "string"
+    || record.provider === "slack" || !DeveloperSignInMethodSchema.safeParse(record.provider).success || record.issuer === SLACK_OIDC_ISSUER
+    || record.slackUserId !== undefined
+    || record.subject.length === 0 || record.subject.length > 512 || record.issuer.length === 0 || record.issuer.length > 2048
+    || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return undefined;
+  const identity: TaskPersonIdentity = {
+    developerId, name: typeof record.displayName === "string" ? safeName(record.displayName, TASK_PERSON_UNNAMED) : TASK_PERSON_UNNAMED,
+    method: record.provider, issuer: record.issuer, subject: record.subject,
+  };
+  return taskPersonKindOf(identity) === "web" ? identity : undefined;
+}
+
+/**
+ * C4 (plan 4.2, decision D3): registers a `web` person on a task (PERSON / PERSON_SUBJECT) once they pass the web proof now: a live member of the
+ * task's company with a live developer or administrator grant on its project and a current sign-in. Registration grants nothing: a registered web
+ * person holds only a role a confirmed People change gives them. A Slack sign-in is never registered here (it is added through Slack).
+ */
+export async function registerTaskWebPerson(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  developerId: string,
+): Promise<{ personId: string; identity: TaskPersonIdentity }> {
+  if (!HEX64.test(developerId)) return refuse();
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  const fresh = stored as unknown as { companyId?: unknown; orgId?: unknown };
+  const given = task as unknown as { companyId?: unknown; orgId?: unknown };
+  if (fresh.companyId !== given.companyId || fresh.orgId !== given.orgId) return refuse();
+  const identity = await webIdentityFromRecord(deps, developerId);
+  if (identity === undefined) return refuse();
+  const web = await qualifyWeb(deps, stored, identity);
+  if (!web.eligible || !web.present) return refuse();
+  const persisted = await persistIdentity(deps, stored.taskId, identity);
+  if (taskPersonKindOf(persisted) !== "web") return refuse();
+  const reverse = await getItem(deps, taskPk(stored.taskId), subjectSk(developerId));
+  if (reverse === undefined || reverse.pk !== taskPk(stored.taskId) || reverse.sk !== subjectSk(developerId)
+    || reverse.schemaVersion !== 1 || reverse.developerId !== developerId || typeof reverse.personId !== "string" || !UUID.test(reverse.personId)) return refuse();
+  return { personId: reverse.personId, identity: persisted };
+}
+
+/**
+ * C4 (plan 4.2, decision D3): the people a task owner may add from the web, at most `limit` (200), names and opaque ids only. Each is a lead from
+ * the project's grant rows, proved live with the web proof (a member of the TASK'S company now, a developer or administrator grant, a current
+ * non-Slack sign-in); anyone who fails or cannot be read is left out, so another company's people are never listed. The caller is not listed.
+ */
+export async function listTaskWebCandidates(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  callerDeveloperId: string,
+  limit: number,
+): Promise<{ candidates: Array<{ developerId: string; name: string }>; complete: boolean }> {
+  if (typeof deps.projectMemberIds !== "function" || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) return unavailable();
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId) return refuse();
+  let leads: { ids: readonly string[]; complete: boolean };
+  try {
+    leads = await deps.projectMemberIds(stored.project, limit);
+  } catch {
+    return unavailable();
+  }
+  if (!Array.isArray(leads.ids) || leads.ids.length > limit || typeof leads.complete !== "boolean") return unavailable();
+  const candidates: Array<{ developerId: string; name: string }> = [];
+  for (const developerId of new Set(leads.ids)) {
+    if (typeof developerId !== "string" || !HEX64.test(developerId) || developerId === callerDeveloperId) continue;
+    try {
+      const identity = await webIdentityFromRecord(deps, developerId);
+      if (identity === undefined) continue;
+      const web = await qualifyWeb(deps, stored, identity);
+      if (web.eligible && web.present) candidates.push({ developerId, name: identity.name });
+    } catch {
+      continue;
+    }
+  }
+  candidates.sort((left, right) => left.name.localeCompare(right.name) || left.developerId.localeCompare(right.developerId));
+  return { candidates, complete: leads.complete };
 }

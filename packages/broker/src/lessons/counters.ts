@@ -24,7 +24,7 @@ const MAX_CORRECTIONS_PER_LESSON = 5;
 
 /** Only a lesson the worker reported as having reached the prompt counts for anything: loaded, helpful, harmful. A dropped or unreported lesson never ran. */
 const REACHED_PROMPT: ReadonlySet<string> = new Set(["valid", "moved", "none"]);
-const reached = (manifests: readonly LoadManifest[]): Set<string> => new Set(manifests.flatMap((m) => m.lessons.filter((e) => REACHED_PROMPT.has(e.citation)).map((e) => e.id)));
+export const reachedLessonIds = (manifests: readonly LoadManifest[]): Set<string> => new Set(manifests.flatMap((m) => m.lessons.filter((e) => REACHED_PROMPT.has(e.citation)).map((e) => e.id)));
 
 export interface CounterDeps extends LessonDeps {
   store: LessonStore; judge: CorrectionJudge; settings: LearningSettingsReader; alerts?: AlertSink; /** Where lesson vectors are kept: a lesson the counters retire loses its vector. */ vectors?: LessonVectors;
@@ -129,7 +129,7 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
   if (!modeAllows(resolved.mode, "load")) {
     // A revert needs no model: while the switch is off it still takes back a helpful mark queued before (and remembers the revert, so a later "merged" delivery queues nothing), so a reverted task keeps no credit. Nothing is judged.
     if (resolved.switchedOff && outcome.outcome === "reverted") {
-      for (const lessonId of reached(await deps.store.manifests(key, outcome.taskId))) {
+      for (const lessonId of reachedLessonIds(await deps.store.manifests(key, outcome.taskId))) {
         await deps.store.removePending(key, `helpful:${outcome.taskId}:${lessonId}`);
         await deps.store.markOnce(key, `reverted:${outcome.taskId}:${lessonId}`);
       }
@@ -138,7 +138,7 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
   }
 
   const loaded = new Set<string>();
-  for (const id of reached(await deps.store.manifests(key, outcome.taskId))) loaded.add(id);
+  for (const id of reachedLessonIds(await deps.store.manifests(key, outcome.taskId))) loaded.add(id);
   // Nothing loaded: nothing to count (and no model to ask). Otherwise the outcome is recorded only where outcomes can be rated now: a usable model on the company's own provider and room in the learning month.
   // Where they cannot, nothing is recorded, no helpful mark either (a mark given without a judge that could have blamed the lesson would fail open). Only a revert goes on, judging nothing: taking a queued
   // mark back is the safe direction and must not wait for a model.
@@ -242,7 +242,7 @@ export type FeedbackFailure = "not_loaded" | "not_found" | "repeat" | "not_permi
 export async function recordFeedback(deps: CounterDeps & { access: AccessCheckPort; log?: LessonLog }, input: { workspaceId: string; project: string; taskId: string; lessonId: string; userId: string; /** What the person is in the sources (their linked ids), for the access check. */ viewer: IdentitySet; kind: "helpful" | "wrong_here" | "thumbs_down"; /** A thumbs-down counts only from a member of the project (the route checked their role). */ projectMember?: boolean }): Promise<{ ok: true } | { ok: false; code: FeedbackFailure }> {
   const key: ScopeKey = { workspaceId: input.workspaceId, project: input.project };
   const manifests = await deps.store.manifests(key, input.taskId);
-  if (!reached(manifests).has(input.lessonId)) return { ok: false, code: "not_loaded" };
+  if (!reachedLessonIds(manifests).has(input.lessonId)) return { ok: false, code: "not_loaded" };
   const lesson = await deps.store.get(key, input.lessonId);
   if (lesson === undefined) return { ok: false, code: "not_found" };
   // Only a person who can read the lesson now can mark it (frozen snapshot AND the access records); an unreadable record is a no. So the two "wrong here" marks that auto-retire a lesson

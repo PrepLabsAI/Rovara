@@ -95,7 +95,8 @@ describe("GitHub task people (DEC 254n)", () => {
   it("a GitHub creator's task never takes a creator record of another method, and unknown methods are refused everywhere", async () => {
     const swapped = harness(taskBy("github", true), { ...record("oidc"), developerId: person("github") });
     await expect(checkTaskPersonIdentity(swapped.deps, taskBy("github", true), person("github"))).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
-    for (const provider of ["cloud", "saml", "GitHub", "local"]) {
+    // Web task channel C2: cloud and saml are web identity methods now (proved by tests/contract/task-person-web-proof.test.ts), so only names that are no method stay refused here.
+    for (const provider of ["GitHub", "local"]) {
       const task = { ...taskBy("github", true), provider } as unknown as DeveloperTaskRecord;
       const h = harness(task, record("github"));
       await expect(checkTaskPersonIdentity(h.deps, task, person("github"))).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });

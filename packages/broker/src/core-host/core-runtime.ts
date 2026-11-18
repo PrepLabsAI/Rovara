@@ -13,10 +13,11 @@ import { createTaskFlowFromRegistry, type RegistryTaskFlowOptions, type TaskFlow
 import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flow/deps.js";
 import { withStepFenceRetry } from "./step-fence.js";
 import { startFenceItems } from "../core/task-flow/start-fence.js";
+import { reportStartItems } from "../core/report/task-row.js";
 import { engineForNewTask, ensureCoreInUse, stampForNewTask, stampItem } from "./engine-stamp.js";
 import type { CoreArea, CoreEngineFlags } from "./flags.js";
 import type { HumanEditSink } from "../core/merge/seams.js";
-import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./switch-blockers.js"; import type { AttentionDeliveryDependencies } from "../core/notify/attention.js"; import type { SessionChange } from "../core/sessions/summary.js";
 
 /** A core service a scheduled job runs, per company. */
 export interface CoreService {
@@ -32,7 +33,7 @@ export const CORE_SERVICES = {
   "admission-hold-sweep": "flow",
 } as const satisfies Record<string, CoreArea>;
 /** The required services (above) and the optional ones: a runtime without an optional one skips its job (`service_not_wired`), and the switch is never refused for it. */
-export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons" | "person-erase-resume" | "after-merge";
+export type CoreServiceName = keyof typeof CORE_SERVICES | "automation-stop" | "lessons" | "person-erase-resume" | "after-merge" | "upkeep";
 
 export interface CoreRuntime {
   companyId: OrgId;
@@ -44,7 +45,9 @@ export interface CoreRuntime {
 
 /** What the services builder is handed besides the flow: the validated CI mode reader, so merge tracking reads the same mode the task readers do. Undefined when not wired. */
 export interface CoreServiceWiring {
-  ciMode?: CheckedCiReporting["ciMode"] | undefined;
+  ciMode?: CheckedCiReporting["ciMode"] | undefined; /** The attention email's own seams (hosted core, switch on): the person's address and per-person links. Absent: as before. */ notification?: (Pick<AttentionDeliveryDependencies, "address" | "emailLinks"> & { remember?: (change: SessionChange) => Promise<void> }) | undefined;
+  /** L4-P2: the notice service's live "does this person still administer the project" read for the admins' upkeep notice (`createUpkeepAdministers`). Absent: no upkeep row is delivered. */
+  upkeep?: { administers(orgId: OrgId, developerId: string, project: string): Promise<boolean> } | undefined;
   /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request, for merge tracking to tell. Undefined when lessons are not built for the company. */
   humanEdit?: HumanEditSink | undefined;
 }
@@ -114,7 +117,9 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     const stamped = stampForNewTask(options.flags, companyId, options.now());
     if (stamped.engine !== "core") throw agentXError("RUNTIME_UNAVAILABLE", CORE_START_REFUSED_WORDS);
     const own = given?.(input);
-    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped)] };
+    // The cost report's row for this task (lead 4, A2), in the start's own transaction: the task and its row exist together or not at all. It never throws.
+    const reported = reportStartItems({ companyId, taskId: input.taskId, project: input.project, title: input.title, origin: input.origin, purpose: input.purpose, receivedAt: input.receivedAt });
+    return { ...(own ?? {}), items: [...(own?.items ?? []), ...startFenceItems(), stampItem(companyId, input.taskId, stamped), ...reported] };
   };
   const base = createTaskFlowFromRegistry(withStepFenceRetry(withCompanyMachines(registry, companyId)), {
     ...options.flowOptions,
@@ -126,6 +131,8 @@ export function createCoreRuntime(options: CoreRuntimeOptions): CoreRuntime {
     now: options.now,
     log: options.log,
     startExtras,
+    // The work events of the cost report's wait split and send-backs (slice A4, `core/work-events/flow-events.ts`): on for every core runtime unless the deployment turns them off.
+    workEvents: options.flowOptions?.workEvents !== false,
   });
   // The company's in-use mark is written before its first core start (off the start's transaction), so the root's jobs always find every company that holds core tasks.
   const flow: TaskFlow = {

@@ -9,11 +9,14 @@ import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { createTaskFactsSource } from "../local/app/facts.js";
 import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
-import { createNoticeService } from "../services/notices.js";
+import { createNoticeService, type NoticeServiceOptions } from "../services/notices.js";
+import { taskPeopleRecipients } from "./task-people-recipients.js";
 import { createMergeTrackingService, createMilestoneService } from "../services/merge-tracking.js";
+import { rovaraCheckSource } from "../services/rovara-check.js";
 import { createIdentityMergePeople, type MergePeople } from "../core/merge/people.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
 import type { CodeSettingsReader, HumanEditSink } from "../core/merge/seams.js";
+import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import type { RepositoryResolver } from "../core/merge/host-port.js";
 import type { SummaryDependencies } from "../core/sessions/summary.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
@@ -81,15 +84,25 @@ export interface BrokerCoreServicesOptions {
   repository?: RepositoryResolver;
   people?: MergePeople;
   settings?: CodeSettingsReader;
+  /** The "Rovara" Check's source (its gate, facts and address). Absent: no Check. The merge tracking service adds the verdict that the description's words come from. */
+  summaryCheck?: SummaryCheckSource;
   /** L4-LM1c: the company's lessons' notice of a person's push to a Rovara pull request (the core engine gives it with the company's own lessons). Absent: nothing is told. */
   humanEdit?: HumanEditSink | undefined;
   summary?: Pick<SummaryDependencies, "facts" | "cost">;
-  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread">;
+  notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep"> & Pick<NoticeServiceOptions, "remember">;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
 }
 
 type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver", CoreService>;
+
+/**
+ * L4-RC: the deployed broker's job services, with the "Rovara" Check on for every company's tasks (owner decision 2026-11-17). The Check's "Details" has no link here: Code has no address for a core task's page (a core task's
+ * pull request description carries none either), and the old `/review/<task>/task` page is for the first workflow's tasks only. The company's own code host writes it (aws/core-code-host.ts keeps the company rules).
+ */
+export function createHostedBrokerCoreServices(options: Omit<BrokerCoreServicesOptions, "summaryCheck">): JobServices {
+  return createBrokerCoreServices({ ...options, summaryCheck: rovaraCheckSource() });
+}
 
 /** Built once for one company's runtime. Each pass binds all internal store work to ONE allowance. */
 export function createBrokerCoreServices(options: BrokerCoreServicesOptions): JobServices {
@@ -108,7 +121,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const sessionScan = { cursor: undefined as string | undefined };
   const notifyScan = { cursor: undefined as string | undefined };
   const mergeScan = { cursor: undefined as string | undefined, complete: false };
-  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, ...options.notification });
+  const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification });
   return {
     "session-sweep": pass(async (store, deadlineMs) => {
       const deps = depsFor(store);
@@ -135,7 +148,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         log();
       };
       const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
-        ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
+        ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
       const tierChecked = now() < deadlineMs ? await tracking.tierChecks() : 0;

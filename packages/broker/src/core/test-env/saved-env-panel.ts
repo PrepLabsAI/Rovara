@@ -2,7 +2,7 @@
 // digest, repository, command or secret. Reset is for a maintainer of the project: the role is checked HERE, from the role the route read for the caller, before any row is written; a viewer or a contributor
 // changes nothing and is not audited as having asked. With the saved-environments switch off the panel does not exist (`disabled`).
 import { SAVED_ENV_PANEL_FAILURES, projectAllows, type ProjectRole, type SavedEnvPanel } from "@agentx/contracts";
-import { requestReset, type SavedEnvDeps, type SavedEnvState } from "./saved-env.js";
+import { requestReset, type SavedEnvDeps, type SavedEnvState, type SavedEnvStoreDeps } from "./saved-env.js";
 
 const DAY_MS = 86_400_000;
 
@@ -33,7 +33,8 @@ export function panelView(state: SavedEnvState | undefined, nowMs: number, role:
 
 export type PanelResult = { ok: true; panel: SavedEnvPanel } | { ok: false; reason: "disabled" };
 
-export async function savedEnvPanel(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }, caller: { projectRole: ProjectRole }): Promise<PanelResult> {
+/** Reads need only the store, the clock and the switch (`SavedEnvStoreDeps`), so the deployed API can answer the panel without the image registry. */
+export async function savedEnvPanel(deps: SavedEnvStoreDeps, ids: { orgId: string; projectId: string }, caller: { projectRole: ProjectRole }): Promise<PanelResult> {
   if (!deps.session.config.enabled) return { ok: false, reason: "disabled" };
   return { ok: true, panel: panelView(await deps.store.get(ids.orgId, ids.projectId), deps.now(), caller.projectRole) };
 }

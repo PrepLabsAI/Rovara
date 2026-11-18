@@ -12,7 +12,7 @@
 //   - every name is redacted, one plain line, and cut; at most 500 names go to the evidence, the failing ones first.
 // Pure: no file is read here. The caller reads the bytes (inside the workspace, never through a link) and passes the text.
 import { parseReportParts, type ReportFormatHint } from "./report-adapters.js";
-import { ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, inertEvidenceText, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
+import { FAILURE_ATTRIBUTION_LIMITS, ABSENT_ON_NEW_MAX, EVIDENCE_NEW_TESTS_MAX, EVIDENCE_TEST_NAMES_MAX, TEST_ID_MAX, isValidTestId, inertEvidenceText, redactText, testIdOf, type EvidenceTest, type TestProofVerdict } from "@agentx/contracts";
 
 /** A report file larger than this is not read (the TESTPROOF reader's own limit). */
 export const TEST_REPORT_MAX_BYTES = 8 * 1024 * 1024;
@@ -35,7 +35,14 @@ export interface ReportedTest {
   /** Per-test epoch times, only when the report supplies them. */
   startTimeMs?: number;
   endTimeMs?: number;
+  /**
+   * TE-A6 (DEC 254zt): a failed or errored test's own failure message or stack, cut to `FAILURE_ATTRIBUTION_LIMITS.textMax`, for vitest/jest JSON (`failureMessages`), JUnit (the failure body), TRX and go test JSON.
+   * Read only to find which changed file a failure points at (`failure-causes.ts`); never copied into the evidence, a log or a line. Only the first `FAILURE_TEXTS_MAX` failing tests of a report carry one.
+   */
+  failureText?: string;
 }
+/** Failing tests of one report that keep their failure text: one more than the 50 an attribution can join, so a check with more is seen to have more. */
+export const FAILURE_TEXTS_MAX = 51;
 export interface ParsedTestReport {
   format: "junit" | "json" | "gotest" | "trx" | "ctrf";
   total: number;
@@ -53,6 +60,13 @@ export function displayLine(text: string): string {
   const line = text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
   const points = Array.from(line === "" ? "test" : line);
   return points.length <= TEST_ID_MAX ? points.join("") : `${points.slice(0, TEST_ID_MAX - 1).join("")}…`;
+}
+
+/** A failure's text for `ReportedTest.failureText`: control characters made spaces, cut to the attribution's limit. Undefined when there is nothing. */
+export function failureTextOf(text: string): string | undefined {
+  // eslint-disable-next-line no-control-regex -- control characters are exactly what is made a space
+  const kept = text.slice(0, FAILURE_ATTRIBUTION_LIMITS.textMax * 2).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/gu, " ").slice(0, FAILURE_ATTRIBUTION_LIMITS.textMax).trim();
+  return kept === "" ? undefined : kept;
 }
 
 /** Longest text kept for a test's file or name while a report is read (a bound on memory, far above the 500 characters a valid id may have). */
@@ -100,6 +114,15 @@ export function unescapeXml(text: string): string {
  * the rest could be anything.
  */
 export function withoutCommentsAndCdata(text: string): string | undefined {
+  return stripCommentsAndCdata(text, false);
+}
+
+/** JUnit-only variant: keep escaped CDATA contents available to the failure-body reader without exposing markup as report structure. */
+function withoutCommentsKeepingCdata(text: string): string | undefined {
+  return stripCommentsAndCdata(text, true);
+}
+
+function stripCommentsAndCdata(text: string, keepCdata: boolean): string | undefined {
   const pieces: string[] = [];
   let position = 0;
   const opening = /<!--|<!\[CDATA\[/g;
@@ -109,6 +132,11 @@ export function withoutCommentsAndCdata(text: string): string | undefined {
     const end = text.indexOf(closing, start + 4);
     if (end === -1) return undefined;
     pieces.push(text.slice(position, start));
+    if (match[0] === "<![CDATA[" && keepCdata) {
+      // Keep failure text available to the case reader, while preventing markup inside CDATA from becoming report structure.
+      const content = text.slice(start + match[0].length, end).replaceAll("&", "&#38;").replaceAll("<", "&#60;").replaceAll(">", "&#62;");
+      pieces.push(content);
+    }
     position = end + closing.length;
     opening.lastIndex = position;
   }
@@ -162,14 +190,15 @@ export function parseAttributes(text: string): Map<string, string> {
 }
 
 /**
- * JUnit XML: `<testcase classname name file? time?>` with a `<failure>`, `<error>` or `<skipped>` child when it did not pass. Comments and CDATA are removed first. A case with both a failure and an
+ * JUnit XML: `<testcase classname name file? time?>` with a `<failure>`, `<error>` or `<skipped>` child when it did not pass. Comments are removed and CDATA is escaped before scanning, preserving failure text without exposing markup as report structure. A case with both a failure and an
  * error is errored. Nested `<testsuites>` and `<testsuite>` are read through; their own count attributes are ignored. The scan is one forward pass (no backtracking), because the file is written by a
  * command the agent can influence: a file built to be slow to read is refused when it is malformed (an unclosed tag, comment or CDATA section), and costs a single pass when it is not.
  */
 export function parseJunit(text: string): ParsedTestReport | undefined {
-  const bare = withoutCommentsAndCdata(text);
+  const bare = withoutCommentsKeepingCdata(text);
   if (bare === undefined || !/<(?:testsuites?|testcase)[\s/>]/.test(bare)) return undefined;
   const tests: ReportedTest[] = [];
+  let failing = 0;
   let position = 0;
   for (;;) {
     const start = bare.indexOf("<testcase", position);
@@ -201,14 +230,26 @@ export function parseJunit(text: string): ParsedTestReport | undefined {
     const file = rawFile === undefined || rawFile === "" ? undefined : testText(rawFile);
     const time = attributes.get("time") === undefined ? undefined : Number(attributes.get("time"));
     const ms = duration(time, "s");
-    tests.push({ ...(file === undefined ? {} : { file }), name: testText(attributes.get("name") ?? ""), status, ...(classname === undefined || classname === "" ? {} : { classname: testText(classname) }), ...(attributes.get("file") === undefined ? {} : { fileGiven: true }), ...(ms === undefined ? {} : { durationMs: ms }) });
+    // The failure's own text (a traceback names the files), for the first failing tests only; never kept in the evidence.
+    let failureText: string | undefined;
+    if ((status === "failed" || status === "errored") && failing < FAILURE_TEXTS_MAX) {
+      failing += 1;
+      // Only the failure element's own text: from its tag to its closing tag (a self-closing one has none). The case's console output (`system-out`, `system-err`) is not the failure and is never read.
+      const at = body.search(/<(?:failure|error)[\s/>]/u);
+      if (at !== -1) {
+        const opened = tagEnd(body, at + 1);
+        const closing = opened === -1 || body[opened - 1] === "/" ? -1 : body.search(new RegExp(`</${body.startsWith("<error", at) ? "error" : "failure"}[\\s>]`, "u"));
+        if (opened !== -1 && closing > opened) failureText = failureTextOf(unescapeXml(body.slice(opened + 1, Math.min(closing, opened + 1 + FAILURE_ATTRIBUTION_LIMITS.textMax * 4)).replace(/<[^>]*>/gu, " ")));
+      }
+    }
+    tests.push({ ...(file === undefined ? {} : { file }), name: testText(attributes.get("name") ?? ""), status, ...(failureText === undefined ? {} : { failureText }), ...(classname === undefined || classname === "" ? {} : { classname: testText(classname) }), ...(attributes.get("file") === undefined ? {} : { fileGiven: true }), ...(ms === undefined ? {} : { durationMs: ms }) });
   }
   return tests.length === 0 ? undefined : counted("junit", tests);
 }
 
 // ---- vitest / jest JSON
 
-interface JsonAssertion { fullName?: unknown; title?: unknown; status?: unknown; duration?: unknown }
+interface JsonAssertion { fullName?: unknown; title?: unknown; status?: unknown; duration?: unknown; failureMessages?: unknown }
 interface JsonSuite { name?: unknown; status?: unknown; message?: unknown; assertionResults?: unknown }
 
 /**
@@ -225,6 +266,7 @@ export function parseJsonReport(text: string): ParsedTestReport | undefined {
   const suites = typeof parsed === "object" && parsed !== null ? (parsed as { testResults?: unknown }).testResults : undefined;
   if (!Array.isArray(suites)) return undefined;
   const tests: ReportedTest[] = [];
+  let failing = 0;
   const SKIPPED_STATUSES = new Set(["pending", "todo", "skipped", "disabled"]);
   for (const suite of suites as JsonSuite[]) {
     if (typeof suite !== "object" || suite === null) continue;
@@ -237,7 +279,13 @@ export function parseJsonReport(text: string): ParsedTestReport | undefined {
       const status: ReportedTestStatus = result.status === "passed" ? "passed" : result.status === "failed" ? "failed" : typeof result.status === "string" && SKIPPED_STATUSES.has(result.status) ? "skipped" : "errored";
       const name = typeof result.fullName === "string" ? result.fullName : typeof result.title === "string" ? result.title : "";
       const ms = duration(typeof result.duration === "number" ? result.duration : undefined, "ms");
-      tests.push({ ...(file === undefined ? {} : { file }), name: testText(name), status, ...(ms === undefined ? {} : { durationMs: ms }) });
+      let failureText: string | undefined;
+      if ((status === "failed" || status === "errored") && failing < FAILURE_TEXTS_MAX) {
+        failing += 1;
+        const messages = Array.isArray(result.failureMessages) ? (result.failureMessages as unknown[]).filter((message): message is string => typeof message === "string") : [];
+        failureText = failureTextOf(messages.join("\n").slice(0, FAILURE_ATTRIBUTION_LIMITS.textMax * 2));
+      }
+      tests.push({ ...(file === undefined ? {} : { file }), name: testText(name), status, ...(failureText === undefined ? {} : { failureText }), ...(ms === undefined ? {} : { durationMs: ms }) });
     }
     // A suite that failed with no failing test of its own (it failed to load, or a hook such as afterAll failed) keeps its failure as one errored entry named for the file.
     if (suite.status === "failed" && !objects.some((result) => result.status === "failed")) {
@@ -253,7 +301,7 @@ export function parseJsonReport(text: string): ParsedTestReport | undefined {
 const GO_ACTIONS: ReadonlySet<string> = new Set(["start", "run", "pause", "cont", "pass", "bench", "fail", "output", "skip", "build-output", "build-fail"]);
 const GO_LINE_MAX_CHARS = 1_048_576;
 
-interface GoEvent { action: string; pkg: string; test: string | undefined; elapsed: number | undefined }
+interface GoEvent { action: string; pkg: string; test: string | undefined; elapsed: number | undefined; output: string | undefined }
 
 /** One line of a `go test -json` stream as an event, or undefined when it is not one (any other text, a line that is too long, a wrong type or an Action Go does not define). */
 function goEvent(line: string): GoEvent | undefined {
@@ -261,9 +309,9 @@ function goEvent(line: string): GoEvent | undefined {
   let parsed: unknown;
   try { parsed = JSON.parse(line); } catch { return undefined; }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
-  const event = parsed as { Action?: unknown; Package?: unknown; Test?: unknown; Elapsed?: unknown };
+  const event = parsed as { Action?: unknown; Package?: unknown; Test?: unknown; Elapsed?: unknown; Output?: unknown };
   if (typeof event.Action !== "string" || !GO_ACTIONS.has(event.Action) || typeof event.Package !== "string" || event.Package === "") return undefined;
-  return { action: event.Action, pkg: event.Package, test: typeof event.Test === "string" && event.Test !== "" ? event.Test : undefined, elapsed: typeof event.Elapsed === "number" ? event.Elapsed : undefined };
+  return { action: event.Action, pkg: event.Package, test: typeof event.Test === "string" && event.Test !== "" ? event.Test : undefined, elapsed: typeof event.Elapsed === "number" ? event.Elapsed : undefined, output: typeof event.Output === "string" ? event.Output : undefined };
 }
 
 /** Whether the first non-empty line is a `go test -json` event: how `auto` tells it from vitest/jest JSON, which is one object with no `Action`. */
@@ -275,7 +323,7 @@ export function looksLikeGoTestJson(text: string): boolean {
 }
 
 /**
- * `go test -json` (test2json): one event per line. Only the Action, Package, Test and Elapsed fields are read; the Output text, where a test can print anything, never is. A `pass`, `fail` or `skip` event with a
+ * `go test -json` (test2json): one event per line. Only the Action, Package, Test, Elapsed and bounded failure Output fields are read; passing-test output is discarded. A `pass`, `fail` or `skip` event with a
  * Test is one test (a subtest and its parent are both tests, and a repeated run with -count counts again). A test that started and never finished is errored, so a file cut short never reads as passing. A package
  * that failed with no failing test of its own (a build failure, a panic outside a test) is one errored entry named for the package. Lines that are not events are skipped; a file with no test result is `undefined`.
  * `file` is the package's import path: it is not a test file, so no test is ever taken for one the change touched.
@@ -285,10 +333,20 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
   const running = new Map<string, number>();
   const failedTestsIn = new Set<string>();
   const failedPackages = new Set<string>();
+  const outputByTest = new Map<string, string>();
+  const outputByPackage = new Map<string, string>();
   const key = (pkg: string, test: string): string => `${pkg}\u0000${test}`;
   for (const raw of text.split("\n")) {
     const event = goEvent(raw.trim());
     if (event === undefined) continue;
+    if (event.action === "output" && event.output !== undefined) {
+      const outputKey = event.test === undefined ? event.pkg : key(event.pkg, event.test);
+      const target = event.test === undefined ? outputByPackage : outputByTest;
+      const previous = target.get(outputKey) ?? "";
+      const kept = event.output.slice(0, FAILURE_ATTRIBUTION_LIMITS.textMax * 2 - previous.length);
+      target.set(outputKey, previous + kept);
+      continue;
+    }
     if (event.test === undefined) {
       if (event.action === "fail") failedPackages.add(event.pkg);
       continue;
@@ -296,24 +354,28 @@ export function parseGoTestJson(text: string): ParsedTestReport | undefined {
     if (event.action === "run") { running.set(key(event.pkg, event.test), (running.get(key(event.pkg, event.test)) ?? 0) + 1); continue; }
     const status: ReportedTestStatus | undefined = event.action === "pass" ? "passed" : event.action === "fail" ? "failed" : event.action === "skip" ? "skipped" : undefined;
     if (status === undefined) continue;
+    if (status === "passed") outputByTest.delete(key(event.pkg, event.test));
     if (tests.length >= TEST_REPORT_MAX_TESTS) return undefined;
     const pending = running.get(key(event.pkg, event.test)) ?? 0;
     if (pending > 0) running.set(key(event.pkg, event.test), pending - 1);
     if (status === "failed") failedTestsIn.add(event.pkg);
     const ms = duration(event.elapsed, "s");
-    tests.push({ file: event.pkg, name: testText(event.test), status, ...(ms === undefined ? {} : { durationMs: ms }) });
+    const failureText = status === "failed" && outputByTest.has(key(event.pkg, event.test)) ? failureTextOf(outputByTest.get(key(event.pkg, event.test))!) : undefined;
+    tests.push({ file: event.pkg, name: testText(event.test), status, ...(failureText === undefined ? {} : { failureText }), ...(ms === undefined ? {} : { durationMs: ms }) });
   }
   for (const [entry, pending] of running) {
     for (let count = 0; count < pending; count += 1) {
       if (tests.length >= TEST_REPORT_MAX_TESTS) return undefined;
       const [pkg, test] = entry.split("\u0000") as [string, string];
-      tests.push({ file: pkg, name: testText(test), status: "errored" });
+      const failureText = outputByTest.has(key(pkg, test)) ? failureTextOf(outputByTest.get(key(pkg, test))!) : undefined;
+      tests.push({ file: pkg, name: testText(test), status: "errored", ...(failureText === undefined ? {} : { failureText }) });
     }
   }
   for (const pkg of failedPackages) {
     if (failedTestsIn.has(pkg)) continue;
     if (tests.length >= TEST_REPORT_MAX_TESTS) return undefined;
-    tests.push({ file: pkg, name: testText(pkg), status: "errored" });
+    const failureText = outputByPackage.has(pkg) ? failureTextOf(outputByPackage.get(pkg)!) : undefined;
+    tests.push({ file: pkg, name: testText(pkg), status: "errored", ...(failureText === undefined ? {} : { failureText }) });
   }
   return tests.length === 0 ? undefined : counted("gotest", tests);
 }
@@ -457,7 +519,7 @@ export interface EvidenceTestsOptions {
   skippedOutside?: { before: number; after: number };
 }
 
-function printedTestId(format: ParsedTestReport["format"], id: string): string {
+export function printedTestId(format: ParsedTestReport["format"], id: string): string {
   // The v1 schema disallows format characters. Preserve a visible prefix for a block opener after removing joiners.
   return format === "trx" || format === "ctrf" ? displayLine(inertEvidenceText(id, TEST_ID_MAX).replace(/^\u200D/u, "· ")) : isValidTestId(id) ? id : displayLine(id);
 }
