@@ -191,9 +191,9 @@ export type SetupItemHandling = (typeof SETUP_ITEM_HANDLINGS)[number];
 /** How an item is handled. Decided here, from the kind and the value: the model's own opinion of an item's risk is never read. */
 export function setupItemHandling(kind: SetupItemKind, value: unknown): SetupItemHandling {
   switch (kind) {
+    // L4-EVP: a prompt location goes into the setup candidate with the commands, and is approved at the candidate's own risk (setup-risk.ts).
     case "setup":
     case "tests":
-    // L4-EVP: a prompt location goes into the setup candidate with the commands, and is approved at the candidate's own risk (setup-risk.ts).
     case "prompt_location":
       return "settings";
     case "devcontainer": {

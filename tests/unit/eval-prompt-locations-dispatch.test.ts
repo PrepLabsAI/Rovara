@@ -57,8 +57,8 @@ describe("evalPromptLocations on the CHECKS payload", () => {
     expect(JSON.stringify(logs)).toContain("eval_prompt_locations_dropped_unsupported_worker");
   });
   it("a project with none gets the payload it always got (no field)", async () => {
-    for (const none of [undefined, []]) {
-      const { operation, job } = await world({ projects: [["payments", none as PromptLocation[] | undefined]] });
+    for (const none of [undefined, [] as PromptLocation[]]) {
+      const { operation, job } = await world({ projects: [["payments", none]] });
       expect(operation.dispatch.payload).toHaveProperty("evalRequest");
       expect(operation.dispatch.payload).not.toHaveProperty("evalPromptLocations");
       expect(job?.payload).not.toHaveProperty("evalPromptLocations");

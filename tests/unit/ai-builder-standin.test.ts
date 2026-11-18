@@ -192,7 +192,7 @@ describe("L4-EVP: a prompt kept in code (Deskbot's user-message template, change
     expect(tierOver(w).reasons.map(r => r.code)).not.toContain("eval_hint");
     expect(tierOver(w, DESKBOT_LOCATIONS).reasons).toEqual([{ code: "eval_hint", path: "deskbot/agent.py" }]);
     expect(tierOver(w, DESKBOT_LOCATIONS).level).toBe("small");
-    const asked = (flow: WorkflowSnapshot["flow"]) => evalRequestFor({ ...workflowOf(w), flow } as WorkflowSnapshot, { done: 0, calls: 0, costMicros: 0 });
+    const asked = (flow: WorkflowSnapshot["flow"]) => evalRequestFor({ ...workflowOf(w), flow }, { done: 0, calls: 0, costMicros: 0 });
     expect(asked(withTier(w))).toBeUndefined();
     expect(asked(withTier(w, DESKBOT_LOCATIONS))).toMatchObject({ aiChange: true, reason: "eval_hint", evalPass: 1 });
   });
