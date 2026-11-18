@@ -205,7 +205,7 @@ describe("Cloud #188 item 3: the old task routes on a core task reach the deploy
 
   it("hands the owner's request, the task as read from their company and their company's store to the rules; another company's caller, a script token and a missing task never reach them", async () => {
     const route = vi.fn(async () => ({ statusCode: 200, headers: { "content-type": "application/json" }, body: "{\"ok\":true}" }));
-    const { routes, own, remember, taskId } = await started({ wiring: { taskRules: { route } } });
+    const { routes, own, remember, taskId } = await started({ wiring: { taskRules: { route, readsAsReader: async () => false } } });
     for (const [method, rest] of RULES) {
       const answer = await routes.route({ method, path: `/v1/dev/tasks/${taskId}/${rest}`, headers: {}, body: "{}" }, own);
       expect(answer?.statusCode, `${method} ${rest}`).toBe(200);
@@ -228,12 +228,44 @@ describe("Cloud #188 item 3: the old task routes on a core task reach the deploy
 
   it("owns only the old route table's methods on these paths; unwired, they are not the core's (undefined)", async () => {
     const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
-    const { routes, own, taskId } = await started({ wiring: { taskRules: { route } } });
+    const { routes, own, taskId } = await started({ wiring: { taskRules: { route, readsAsReader: async () => false } } });
     for (const [method, rest] of [["POST", "people"], ["GET", "people/role"], ["POST", "events"], ["POST", "readers"], ["GET", `readers/${"c".repeat(64)}`], ["POST", "comments"], ["GET", "people/requests"], ["GET", "people/requests/a/b"]] as const) {
       expect(await routes.route({ method, path: `/v1/dev/tasks/${taskId}/${rest}`, headers: {}, body: "" }, own), `${method} ${rest}`).toBeUndefined();
     }
     expect(route).not.toHaveBeenCalled();
     const unwired = await started();
     for (const [method, rest] of RULES) expect(await unwired.routes.route({ method, path: `/v1/dev/tasks/${unwired.taskId}/${rest}`, headers: {}, body: "{}" }, unwired.own), `${method} ${rest}`).toBeUndefined();
+  });
+});
+
+describe("DEC 254zzz44 (a): the core task read asks the old reader rule only after its own rule said no, for the caller's own company's task", () => {
+  it("never asks for the owner, a script token, another company's caller or a missing task; a yes reads the task, a no or a throw keeps the missing task's answer", async () => {
+    const readsAsReader = vi.fn(async () => true);
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
+    const { routes, own, remember, taskId } = await started({ wiring: { taskRules: { route, readsAsReader } } });
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), own))?.statusCode).toBe(200);
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }))?.statusCode).toBe(200);
+    expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), remember(OTHER)))?.statusCode).toBe(404);
+    expect((await routes.route(get(`/v1/dev/tasks/${randomUUID()}`), remember(FAKE_COMPANY, "member", "person-reader-00000000005")))?.statusCode).toBe(404);
+    expect(readsAsReader).not.toHaveBeenCalled();
+    const reader = remember(FAKE_COMPANY, "member", "person-reader-00000000005");
+    const read = await routes.route(get(`/v1/dev/tasks/${taskId}`), reader);
+    expect(read?.statusCode).toBe(200);
+    expect(JSON.parse(read!.body)).toMatchObject({ task: { taskId } });
+    expect(readsAsReader).toHaveBeenCalledWith(expect.objectContaining({ person: { developerId: reader.principal.personId, name: reader.principal.displayName }, companyId: FAKE_COMPANY, task: expect.objectContaining({ taskId, companyId: FAKE_COMPANY }) as unknown }));
+    for (const answer of [async () => false, async () => { throw new Error("grant table down"); }]) {
+      readsAsReader.mockImplementation(answer);
+      expect((await routes.route(get(`/v1/dev/tasks/${taskId}`), reader))?.statusCode).toBe(404);
+    }
+  });
+});
+
+describe("DEC 254zzz44 (a): only the core rule's 'no such task' falls back to the reader rule", () => {
+  it("a core read that fails for another reason stays a failure (never turned into a reader's read)", async () => {
+    const readsAsReader = vi.fn(async () => true);
+    const access = { ...ownerRule(), canRead: async () => { throw new Error("people store down"); } };
+    const { routes, remember, taskId } = await started({ access, wiring: { taskRules: { route: vi.fn(), readsAsReader } } });
+    await expect(routes.route(get(`/v1/dev/tasks/${taskId}`), remember(FAKE_COMPANY, "member", "person-reader-00000000006"))).rejects.toThrow("people store down");
+    expect(readsAsReader).not.toHaveBeenCalled();
   });
 });

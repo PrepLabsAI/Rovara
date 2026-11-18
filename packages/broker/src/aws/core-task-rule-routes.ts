@@ -43,6 +43,8 @@ export interface CoreTaskRuleRouteInput {
 
 export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
+  /** DEC 254zzz44 (a): the old task read's reader rule (spec 067, `readsAsReader`) for a task of this company: shared with this person, who is still a member of its project. */
+  readsAsReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<boolean>;
 }
 
 const json = (value: unknown): BrokerResponse => ({ statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -122,6 +124,12 @@ async function coreTimeline(store: Pick<DocumentStore, "query">, companyId: OrgI
  */
 export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies): CoreTaskRuleRoutes {
   return {
+    async readsAsReader(input) {
+      const task = input.task as unknown as DeveloperTaskRecord;
+      if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
+      const deps: DeveloperTaskRouteDependencies = { ...depsFor(input.person, input.companyId), companyId: input.companyId };
+      return await readsAsReader(deps, task, input.person.developerId);
+    },
     async route(input) {
       const served = coreTaskRuleOf(input.path, input.request.method);
       if (served === undefined) throw agentXError("NOT_FOUND", "route not found");
