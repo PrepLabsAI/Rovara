@@ -1005,7 +1005,9 @@ describe("what did not change", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711.
-const EXISTING_ROUTES_DIGEST = "f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b";
+// Owner DEC 254zzz73 (rule D): re-pinned for the ONE removed row GET /v1/dev/me/sign-in-factors (full; the step-up confirmation email and passkeys, removed with the step-up). Nothing else
+// changed: putting exactly that row back where it stood (after DELETE /v1/dev/company/members/{personId}/sign-ins/{method}) gives the previous pin f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b.
+const EXISTING_ROUTES_DIGEST = "f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8";
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
 // Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).

@@ -46,10 +46,9 @@ async function hosted(options: { evalWiring?: boolean; wrapper?: boolean } = {})
   const people = new Map<string, Person>();
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => people.get(personId)?.grants[name];
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
-    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }) };
+    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud" };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {
     const found = people.get(personId);

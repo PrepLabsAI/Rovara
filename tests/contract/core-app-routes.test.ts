@@ -2,7 +2,7 @@
 //   - Off (no core entry): every /v1/app/* path on the core's route answers "route not found" and reads nothing; on any other route the broker answers as before (the golden is in
 //     aws-core-root-golden.test.ts).
 //   - On: a method and path with no row in the route table is refused before anyone is authenticated; the developer token is verified by the broker; a sign-in client reaches a row only
-//     with its scope; the core gets the verified caller (the step-up only from the verified token) and never the credential; the company is the caller's LIVE membership.
+//     with its scope; the core gets the verified caller (DEC 254zzz73: no step-up) and never the credential; the company is the caller's LIVE membership.
 //   - Two companies over one core: a person of one company never sees or reaches the other's script tokens or people.
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,7 @@ import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/de
 import type { CoreEntryCaller } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
-import { ERASE_ON_A_PAGE, createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
+import { createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
 import { noLearningToErase, noWikiToErase } from "../../packages/broker/src/core/people/erase.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { BrokerRequest, BrokerResponse } from "../../packages/broker/src/handler.js";
@@ -27,7 +27,7 @@ import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 const NAMED: readonly ClientScope[] = ["profile:name", "projects:members", "projects:create", "tasks:read", "tasks:start", "tasks:act", "tasks:share", "decisions:decide"];
 const ROUTE_KEY = "ANY /v1/app/{proxy+}";
 const ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
-// The fake world's clock: the broker's token checks and the core's step-up age read the same time.
+// The fake world's clock: the broker's token checks and the core read the same time.
 const T0 = Date.parse("2026-11-15T10:00:00.000Z");
 const ADA = "a".repeat(64);
 const BO = "b".repeat(64);
@@ -194,8 +194,8 @@ async function bearer(claims: Record<string, unknown> = {}): Promise<string> {
   const input = `${header}.${Buffer.from(JSON.stringify(body)).toString("base64url")}`;
   return `Bearer ${input}.${(await signer.sign(Buffer.from(input))).toString("base64url")}`;
 }
-/** The Rovara CLI's token for a person; `stepUpSecondsAgo`: the verified token states a passkey step-up that long ago. */
-const cli = (who = ADA, stepUpSecondsAgo?: number) => bearer({ sub: who, sid: `s-${who.slice(0, 2)}`, ...(stepUpSecondsAgo === undefined ? {} : { step_up_at: T0 / 1000 - stepUpSecondsAgo, step_up_amr: "passkey" }) });
+/** The Rovara CLI's token for a person. */
+const cli = (who = ADA) => bearer({ sub: who, sid: `s-${who.slice(0, 2)}` });
 /** The Cloud web app's token for ADA, with these scopes. */
 const scoped = (...scopes: ClientScope[]) => bearer({ aud: "web-app", azp: "web-app", sid: "s-cloud", ...(scopes.length === 0 ? {} : { scope: scopes.join(" ") }) });
 
@@ -288,24 +288,25 @@ describe("the core's /v1/app routes, switch on (a core entry)", () => {
     expect(spy.seen).toEqual([]);
   });
 
-  it("hands the core the verified caller with the token's step-up, and the request without its credential; the answer comes back as the core gave it, never cached", async () => {
-    const authorization = await cli(ADA, 30);
+  it("hands the core the verified caller (no step-up, DEC 254zzz73), and the request without its credential; the answer comes back as the core gave it, never cached", async () => {
+    const authorization = await cli(ADA);
     const answer = await call("POST", "/v1/app/script-tokens?x=1", authorization, { body: { requestId: "r1" } });
     expect(answer).toMatchObject({ status: 200, body: { served: true } });
     expect(answer.headers["cache-control"]).toBe("no-store");
     expect(spy.seen).toHaveLength(1);
     const [{ request, caller }] = spy.seen as [{ request: BrokerRequest; caller: CoreEntryCaller }];
-    expect(caller).toMatchObject({ developerId: ADA, sessionId: "s-aa", name: "Ada", stepUp: { at: new Date(T0 - 30_000).toISOString(), method: "passkey" } });
+    expect(caller).toMatchObject({ developerId: ADA, sessionId: "s-aa", name: "Ada" });
+    expect(caller).not.toHaveProperty("stepUp");
     expect(request).toMatchObject({ method: "POST", path: "/v1/app/script-tokens?x=1", body: JSON.stringify({ requestId: "r1" }) });
     expect(JSON.stringify(request)).not.toContain(authorization.slice(7));
     expect(request.headers.authorization).toBeUndefined();
   });
 
-  it("never takes a step-up from a header, a query or a body: only the verified token's", async () => {
+  it("never takes a step-up from a header, a query or a body (there is none, DEC 254zzz73)", async () => {
     await call("POST", "/v1/app/people/p1/erase?step_up_at=1", await cli(), { body: { step_up_at: T0 / 1000, stepUp: { at: new Date(T0).toISOString(), method: "passkey" } } });
     await handler({ rawPath: "/v1/app/people/p1/erase", routeKey: ROUTE_KEY, headers: { authorization: await cli(), "x-step-up-at": String(T0 / 1000) }, requestContext: { requestId: "r", http: { method: "POST" } } });
     expect(spy.seen).toHaveLength(2);
-    for (const { caller } of spy.seen) expect(caller.stepUp).toBeUndefined();
+    for (const { caller } of spy.seen) expect(caller).not.toHaveProperty("stepUp");
   });
 
   it("answers 'route not found' when the core does not serve the path, and passes the core's refusals through as they are", async () => {
@@ -359,8 +360,8 @@ describe("the core's /v1/app routes with a sign-in client's token (a named envir
     expect(spy.seen).toEqual([]);
     cloudClient([], true);
     for (const route of APP_ROUTES) expect((await call(route.method, sample(route.path), await scoped())).status, `${route.method} ${route.path}`).toBe(200);
-    // A client's token never carries a step-up to the core.
-    expect(spy.seen.every(({ caller }) => caller.stepUp === undefined)).toBe(true);
+    // No caller carries a step-up to the core (DEC 254zzz73).
+    expect(spy.seen.every(({ caller }) => !("stepUp" in caller))).toBe(true);
   });
 });
 
@@ -412,10 +413,8 @@ describe("the core's /v1/app routes over the core, two companies", () => {
   });
   const makeToken = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
 
-  it("makes a script token only with a fresh step-up from the verified token, and shows it only within the maker's company", async () => {
-    expect(await call("POST", "/v1/app/script-tokens", await cli(ADA), { body: { ...makeToken, requestId: randomUUID() } })).toMatchObject({ status: 403, body: { error: { code: "REAUTH_REQUIRED" } } });
-    expect(await call("POST", "/v1/app/script-tokens", await cli(ADA, 3_600), { body: { ...makeToken, requestId: randomUUID() } })).toMatchObject({ status: 403, body: { error: { code: "REAUTH_REQUIRED" } } });
-    const made = await call("POST", "/v1/app/script-tokens", await cli(ADA, 30), { body: { ...makeToken, requestId: randomUUID() } });
+  it("makes a script token for a live owner or admin with no step-up (DEC 254zzz73), and shows it only within the maker's company", async () => {
+    const made = await call("POST", "/v1/app/script-tokens", await cli(ADA), { body: { ...makeToken, requestId: randomUUID() } });
     expect(made.status).toBe(201);
     expect(made.headers["cache-control"]).toBe("no-store");
     const tokenId = (made.body as { token: { tokenId: string } }).token.tokenId;
@@ -426,12 +425,12 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     // BO, an admin of the other company, neither sees nor revokes it.
     const other = await call("GET", "/v1/app/script-tokens", await cli(BO));
     expect(other).toMatchObject({ status: 200, body: { tokens: [] } });
-    expect((await call("POST", `/v1/app/script-tokens/${encodeURIComponent(tokenId)}/revoke`, await cli(BO, 30))).status).toBe(404);
+    expect((await call("POST", `/v1/app/script-tokens/${encodeURIComponent(tokenId)}/revoke`, await cli(BO))).status).toBe(404);
     expect((await call("GET", "/v1/app/script-tokens", await cli(ADA))).body).toMatchObject({ tokens: [{ tokenId, status: "active" }] });
   });
 
   it("uses live membership for canCreate and creation, while a demoted member can still list and revoke their own tokens", async () => {
-    const authorization = await cli(ADA, 30);
+    const authorization = await cli(ADA);
     const create = () => call("POST", "/v1/app/script-tokens", authorization, { body: { ...makeToken, requestId: randomUUID() } });
     const own = await create();
     expect(own.status).toBe(201);
@@ -439,7 +438,7 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: true });
     // A second person's token in this company stays hidden from the demoted member.
     membership(BO, FAKE_COMPANY, "owner");
-    const others = await call("POST", "/v1/app/script-tokens", await cli(BO, 30), { body: { ...makeToken, requestId: randomUUID() } });
+    const others = await call("POST", "/v1/app/script-tokens", await cli(BO), { body: { ...makeToken, requestId: randomUUID() } });
     expect(others.status).toBe(201);
     const otherId = (others.body as { token: { tokenId: string } }).token.tokenId;
     membership(ADA, FAKE_COMPANY, "member");
@@ -453,11 +452,10 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect(await create()).toMatchObject({ status: 401, body: { error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } } });
   });
 
-  it("erases a removed person only for an admin of that person's company with a fresh step-up; another company's admin is told 'not found'", async () => {
-    const erase = async (who: string, stepUp?: number) => await call("POST", `/v1/app/people/${CY}/erase`, await cli(who, stepUp), { body: { requestId: randomUUID() } });
-    expect(await erase(BO, 30)).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
-    expect(await erase(ADA)).toMatchObject({ status: 403, body: { error: { code: "REAUTH_REQUIRED", message: ERASE_ON_A_PAGE } } });
-    const done = await erase(ADA, 30);
+  it("erases a removed person only for an admin of that person's company (no step-up, DEC 254zzz73); another company's admin is told 'not found'", async () => {
+    const erase = async (who: string) => await call("POST", `/v1/app/people/${CY}/erase`, await cli(who), { body: { requestId: randomUUID() } });
+    expect(await erase(BO)).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
+    const done = await erase(ADA);
     expect(done.status).toBe(200);
     expect(done.body).toMatchObject({ receipt: expect.any(Object) as unknown });
     expect(JSON.stringify(done.body)).not.toContain("Cy");

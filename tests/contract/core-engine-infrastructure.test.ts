@@ -380,7 +380,7 @@ describe("the attention email (CoreAttentionEmail, default off)", () => {
     for (const [id, resource] of Object.entries(inApp.Resources)) if (!ids.includes(id)) for (const own of ids) expect(JSON.stringify(resource), `${id} -> ${own}`).not.toContain(`"${own}"`);
   });
 
-  it("gives the sender's role exactly one statement of its own: ses:SendEmail on the CoreAttentionEmailSender identity, From pinned; no SES right anywhere else in the stack but the step-up's", () => {
+  it("gives the sender's role exactly one statement of its own: ses:SendEmail on the CoreAttentionEmailSender identity, From pinned; no SES right anywhere else in the stack (DEC 254zzz73: no step-up sender)", () => {
     const [[, policy]] = of("AWS::IAM::Policy") as [[string, Resource]];
     const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
     expect(statements.filter((statement) => statement.Sid === "AttentionEmailSend")).toEqual([{
@@ -391,7 +391,7 @@ describe("the attention email (CoreAttentionEmail, default off)", () => {
     // The rest is the function's tracing default only.
     expect(statements.filter((statement) => statement.Sid !== "AttentionEmailSend").flatMap((statement) => list(statement.Action)).sort()).toEqual(["xray:PutTelemetryRecords", "xray:PutTraceSegments"]);
     const sesPolicies = Object.entries(inApp.Resources).filter(([, resource]) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties).includes("ses:"));
-    expect(sesPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy", "DeveloperSignInFunctionServiceRoleDefaultPolicy"]);
+    expect(sesPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy"]);
     expect(JSON.stringify(inApp.Resources[inAppBrokerRoleId])).not.toContain("ses:");
   });
 
@@ -416,13 +416,12 @@ describe("the attention email (CoreAttentionEmail, default off)", () => {
     expect(JSON.stringify(variables)).not.toContain("CoreAttentionEmailHost");
   });
 
-  it("refuses on without its own sender, with the step-up sender's identity, or without the web app's host", () => {
+  it("refuses on without its own sender or without the web app's host (DEC 254zzz73: no step-up sender to compare with)", () => {
     const rules = (inApp as { Rules?: Record<string, { RuleCondition: unknown; Assertions: Array<{ Assert: unknown }> }> }).Rules!;
     const rule = Object.entries(rules).find(([id]) => id.startsWith("CoreEngineJobsAttentionEmailAttentionEmailOwnSender"))![1];
     expect(rule.RuleCondition).toEqual({ "Fn::Equals": [{ Ref: "CoreAttentionEmail" }, "on"] });
     expect(rule.Assertions.map((assertion) => assertion.Assert)).toEqual([
       { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailSender" }, ""] }] },
-      { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailSender" }, { Ref: "StepUpEmailSender" }] }] },
       { "Fn::Not": [{ "Fn::Equals": [{ Ref: "CoreAttentionEmailHost" }, ""] }] },
     ]);
   });

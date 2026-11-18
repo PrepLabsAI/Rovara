@@ -1,4 +1,4 @@
-// Switch-on lane L2a: the deployed approvers point. The task owner (the broker's existing rule), a live member, a fresh step-up proved for one act and bound to its card, and the act's
+// Switch-on lane L2a: the deployed approvers point. The task owner (the broker's existing rule), a live member, a proof of one act bound to its card (DEC 254zzz73: no step-up), and the act's
 // one-time part claimed in the company's own partition (commit spends it, release gives a live claim back, a lapsed claim stays spent).
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,6 @@ import {
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity, hostedSecurityModules } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildCoreRegistry, coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { approvalSignInSettingKey } from "../../packages/broker/src/core/decisions/sign-in-setting.js";
 import { createDecisionGate, type DecisionSubject } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { withPolicyHookApprovers } from "../../packages/broker/src/core/policy-hook/approvers.js";
 import { runApproversConformance } from "../support/ports/policy-conformance.js";
@@ -26,7 +25,6 @@ const DIGEST = "a".repeat(64);
 const NOW = Date.parse("2026-11-15T10:00:00.000Z");
 const SIGNING_KEY = "callback-signing-key-for-tests-0123456789abcdef";
 const KEY = approvalProofKeyOf(SIGNING_KEY);
-const STEP_UP = { at: new Date(NOW - 60_000).toISOString(), method: "passkey" };
 
 /** Ada owns TASK_A in company A; Bea is another member of A; Cy owns TASK_B in company B. */
 const MEMBERS: Record<string, { companyId: OrgId; role: "member" | "admin" }> = { ada: { companyId: A, role: "member" }, bea: { companyId: A, role: "admin" }, cy: { companyId: B, role: "member" } };
@@ -48,7 +46,7 @@ const requestFor = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest =
   risk: "high", outcome: "approve", card: cardOf(TASK_A), settlesClaims: true, ...overrides,
 });
 const input = (overrides: Partial<ApprovalProofInput> = {}): ApprovalProofInput => ({
-  companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "decision-request-0001", kind: "plan", taskId: TASK_A, revision: 3, artifactDigest: DIGEST, outcome: "approve", card: cardOf(TASK_A), ...overrides,
+  companyId: A, personId: "ada", requestId: "decision-request-0001", kind: "plan", taskId: TASK_A, revision: 3, artifactDigest: DIGEST, outcome: "approve", card: cardOf(TASK_A), ...overrides,
 });
 let proofs = 0;
 const proofFor = (request: ApprovalRequest, token: string): ApprovalProof => ({
@@ -66,7 +64,7 @@ function world(options: { now?: () => number; key?: Buffer | undefined; identity
 // ---- the port's own suite
 
 const STANDING = issued();
-runApproversConformance("deployed approvers (task owner, fresh step-up, card-bound one-time proof)", {
+runApproversConformance("deployed approvers (task owner, card-bound one-time proof, no step-up)", {
   create: async () => world().approvers,
   request: requestFor(),
   acceptable: proofFor(requestFor(), STANDING),
@@ -82,19 +80,19 @@ runApproversConformance("deployed approvers (task owner, fresh step-up, card-bou
 });
 
 describe("the deployed approvers point", () => {
-  it("offers one method for every answer, a step-up within the default ten minutes, and the task owner may approve their own task", async () => {
+  it("offers one method for every answer, with no sign-in freshness rule (no step-up), and the task owner may approve their own task", async () => {
     expect(await world().approvers.requirement(requestFor())).toEqual({
       methods: [APPROVAL_PROOF_METHOD], minApprovers: 1, selfApprovalAllowed: true,
       strongMethods: [APPROVAL_PROOF_METHOD], rejectMethods: [APPROVAL_PROOF_METHOD], changesMethods: [APPROVAL_PROOF_METHOD],
-      signIn: { mode: "window", seconds: 600 },
     });
   });
 
-  it("names the task owner, from membership, with the step-up as the sign-in time and factor, and claims the one-time part in the company's partition", async () => {
+  it("names the task owner, from membership, with no step-up time or factor (a proof issued with no step-up verifies), and claims the one-time part in the company's partition", async () => {
     const { approvers, store } = world();
     const request = requestFor();
     const verdict = await approvers.verify(request, proofFor(request, issued()));
-    expect(verdict).toMatchObject({ approved: true, method: APPROVAL_PROOF_METHOD, approver: { companyId: A, personId: "ada", provider: HOSTED_IDENTITY_PROVIDER, roles: ["member"], authTime: STEP_UP.at, methods: ["passkey"] } });
+    expect(verdict).toMatchObject({ approved: true, method: APPROVAL_PROOF_METHOD, approver: { companyId: A, personId: "ada", provider: HOSTED_IDENTITY_PROVIDER, roles: ["member"], methods: [APPROVAL_PROOF_METHOD] } });
+    expect(verdict.approved ? verdict.approver.authTime : "refused").toBeUndefined();
     const claimId = verdict.approved ? verdict.claimId! : "";
     const [company, hash] = claimId.split(".");
     expect(company).toBe(A);
@@ -134,8 +132,6 @@ describe("the deployed approvers point", () => {
       ["a card version that is not the content seen", async () => { const card = cardOf(TASK_A, "v2"); const r = requestFor({ card }); return { request: r, proof: proofFor(r, issued({ card })) }; }, "card_not_for_this_request"],
       ["a proof past its two minutes", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({}, NOW - APPROVAL_PROOF_LIFETIME_MS)) }; }, "proof_expired"],
       ["a request past its own expiry", async () => { const r = requestFor({ expiresAt: new Date(NOW).toISOString() }); return { request: r, proof: proofFor(r, issued()) }; }, "expired"],
-      ["a step-up older than ten minutes", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ stepUp: { at: new Date(NOW - 600_001).toISOString(), method: "passkey" } })) }; }, "sign_in_not_fresh"],
-      ["a step-up from the future beyond the clock skew", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ stepUp: { at: new Date(NOW + 120_001).toISOString(), method: "email_code" } })) }; }, "sign_in_not_fresh"],
       ["a person who is not a member any more", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued()) }; }, "not_a_member"],
       ["another member of the company who is not the task owner", async () => { const r = requestFor(); return { request: r, proof: proofFor(r, issued({ personId: "bea" })) }; }, "not_the_task_owner"],
       ["a project the task is not in", async () => { const r = requestFor({ projectName: "other" }); return { request: r, proof: proofFor(r, issued()) }; }, "not_the_task_owner"],
@@ -152,8 +148,8 @@ describe("the deployed approvers point", () => {
       for (const company of [A, B]) expect((await w.store.query({ pk: `ORG#${company}#APPROVAL_STEP_UP_CLAIM` })).items).toEqual([]);
     });
 
-    it("refuses a step-up factor Code does not own, and an unreadable people read, without throwing", async () => {
-      expect(() => issueApprovalProof(KEY, input({ stepUp: { at: STEP_UP.at, method: "slack" } }), NOW)).toThrow("a step-up approval cannot be issued for this input");
+    it("refuses an unreadable people read without throwing, and issues nothing for an input it cannot bind", async () => {
+      expect(() => issueApprovalProof(KEY, input({ revision: 0 }), NOW)).toThrow("an approval proof cannot be issued for this input");
       const failing = world({ identity: { capabilities: { interactiveSignIn: false, externalAccounts: false }, getPrincipal: async () => { throw new Error("dynamo down ada"); } } as unknown as IdentityProvider });
       const request = requestFor();
       expect(await failing.approvers.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "people_unreadable" });
@@ -163,12 +159,6 @@ describe("the deployed approvers point", () => {
       const request = requestFor();
       expect(await world({ key: undefined }).approvers.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "method_not_available" });
     });
-  });
-
-  it("refuses a window longer than the default, or shorter than a minute", () => {
-    for (const windowSeconds of [601, 59, 1.5]) {
-      expect(() => createHostedApprovers({ store: new MemoryDocumentStore(), identity: identity(), key: KEY, windowSeconds, now: () => new Date(NOW) })).toThrow(/step-up window/u);
-    }
   });
 
   it("the one-time part: a second verify while claimed is refused; release frees it; commit spends it for ever; a lapsed claim stays spent", async () => {
@@ -208,31 +198,16 @@ describe("the deployed approvers point", () => {
 });
 
 describe("review round 1 (Lows)", () => {
-  it("a company's own shorter fresh sign-in window binds the step-up; a longer one never widens the install's", async () => {
-    const { approvers, store } = world();
-    await store.put({ item: { ...approvalSignInSettingKey(A), revision: 1, setting: { mode: "window", seconds: 120 } } });
-    expect((await approvers.requirement(requestFor())).signIn).toEqual({ mode: "window", seconds: 120 });
-    const old = requestFor();
-    expect(await approvers.verify(old, proofFor(old, issued({ stepUp: { at: new Date(NOW - 121_000).toISOString(), method: "passkey" } })))).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-    const recent = requestFor();
-    expect((await approvers.verify(recent, proofFor(recent, issued({ stepUp: { at: new Date(NOW - 119_000).toISOString(), method: "passkey" } })))).approved).toBe(true);
-    // A longer setting keeps ten minutes.
-    const other = world();
-    await other.store.put({ item: { ...approvalSignInSettingKey(A), revision: 1, setting: { mode: "window", seconds: 86_400 } } });
-    expect((await other.approvers.requirement(requestFor())).signIn).toEqual({ mode: "window", seconds: 600 });
-    const late = requestFor();
-    expect(await other.approvers.verify(late, proofFor(late, issued({ stepUp: { at: new Date(NOW - 600_001).toISOString(), method: "passkey" } })))).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-  });
-
-  it("a step-up factor Code does not own is refused even in a token signed with the install's key", async () => {
-    const { approvers } = world();
-    const body = Buffer.from(JSON.stringify({ c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], a: STEP_UP.at, m: "slack", e: NOW + 60_000, n: "n".repeat(43) })).toString("base64url");
-    const token = `su1.${body}.${createHmac("sha256", KEY).update(`su1.${body}`).digest("base64url")}`;
-    const request = requestFor();
-    expect(await approvers.verify(request, proofFor(request, token))).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-    // The same token with a factor Code owns is accepted (the hand-signed form is the issuer's).
-    const good = Buffer.from(JSON.stringify({ c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], a: STEP_UP.at, m: "passkey", e: NOW + 60_000, n: "n".repeat(43) })).toString("base64url");
-    expect((await approvers.verify(request, proofFor(request, `su1.${good}.${createHmac("sha256", KEY).update(`su1.${good}`).digest("base64url")}`))).approved).toBe(true);
+  it("a hand-signed token with no step-up time or factor verifies for the task owner, and one in the old shape (with a step-up time and factor) is read the same way", async () => {
+    const sign = (claims: Record<string, unknown>) => { const body = Buffer.from(JSON.stringify(claims)).toString("base64url"); return `su1.${body}.${createHmac("sha256", KEY).update(`su1.${body}`).digest("base64url")}`; };
+    const base = { c: A, p: "ada", r: "decision-request-0001", q: "plan", s: TASK_A, v: 3, d: DIGEST, o: "approve", k: [cardOf(TASK_A).cardId, DIGEST], e: NOW + 60_000 };
+    const plain = requestFor();
+    expect((await world().approvers.verify(plain, proofFor(plain, sign({ ...base, n: "n".repeat(43) })))).approved).toBe(true);
+    const legacy = requestFor();
+    expect((await world().approvers.verify(legacy, proofFor(legacy, sign({ ...base, a: new Date(NOW - 3_600_000).toISOString(), m: "slack", n: "m".repeat(43) })))).approved).toBe(true);
+    // The same unstepped token for another member of the company, or for a person of another company, is still refused.
+    expect(await world().approvers.verify(plain, proofFor(plain, sign({ ...base, p: "bea", n: "o".repeat(43) })))).toEqual({ approved: false, reason: "not_the_task_owner" });
+    expect(await world().approvers.verify(plain, proofFor(plain, sign({ ...base, c: B, p: "cy", n: "q".repeat(43) })))).toEqual({ approved: false, reason: "wrong_company" });
   });
 
   it("refuses a card that is not a readable card, and a card version other than the one signed even when it equals the content", async () => {
@@ -243,17 +218,12 @@ describe("review round 1 (Lows)", () => {
     expect(await approvers.verify(request, proofFor(request, issued({ card: cardOf(TASK_A, "v-signed") })))).toEqual({ approved: false, reason: "other_card" });
   });
 
-  it("requirement throws (a store fault) when the company's setting cannot be read, rather than show a window the company may have shortened", async () => {
+  it("reads no company sign-in setting any more (DEC 254zzz73): a settings row that cannot be read changes nothing", async () => {
     const { store } = world();
     const failing = createHostedApprovers({ store: { get: async (key) => { if (key.sk === "SETTING") throw new Error("down"); return await store.get(key); }, put: (r) => store.put(r), update: (r) => store.update(r), delete: (r) => store.delete(r) }, identity: identity(), key: KEY, now: () => new Date(NOW) });
-    await expect(failing.requirement(requestFor())).rejects.toThrow("down");
-  });
-
-  it("a setting that cannot be read refuses, never falls back to the install's window", async () => {
-    const { store } = world();
-    const failing = createHostedApprovers({ store: { ...store, get: async (key) => { if (key.sk === "SETTING") throw new Error("down"); return await store.get(key); }, put: (r) => store.put(r), update: (r) => store.update(r), delete: (r) => store.delete(r) }, identity: identity(), key: KEY, now: () => new Date(NOW) });
+    expect((await failing.requirement(requestFor())).signIn).toBeUndefined();
     const request = requestFor();
-    expect(await failing.verify(request, proofFor(request, issued()))).toEqual({ approved: false, reason: "company_rules_unreadable" });
+    expect((await failing.verify(request, proofFor(request, issued()))).approved).toBe(true);
   });
 
   it("refuses a token whose signature or body is spelled differently (canonical base64url only), and one that claims to live longer than two minutes", async () => {

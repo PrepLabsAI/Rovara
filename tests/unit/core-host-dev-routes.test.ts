@@ -2,7 +2,7 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { SYSTEM_RUNS_CONSENT_WORDS, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
@@ -11,7 +11,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { INVOLVED_UNAVAILABLE, COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -133,14 +133,14 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(get("/v1/app/script-tokens"), caller))?.statusCode).toBe(404);
   });
 
-  it("lists and revokes script tokens, and refuses to make one for every caller (the recently-signed-in page rule has no credential on this API yet)", async () => {
+  it("lists and revokes script tokens; making one asks for no step-up and needs the project reader wired (DEC 254zzz73)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
     expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [], canCreate: true });
     const made = await routes.route(post("/v1/app/script-tokens", { name: "ci", projects: ["payments"], permissions: ["read"], expiresInDays: 30 }), caller);
-    expect(made?.statusCode).toBe(403);
-    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+    expect(made?.statusCode).toBe(404);
+    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(NOT_ON_THE_CORE_YET);
     expect((await routes.route(post("/v1/app/script-tokens/sct_nothing/revoke"), caller))?.statusCode).toBe(404);
     // Switched off by its own setting: not there.
     const disabled = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, scriptTokens: { enabled: () => false } }) });
@@ -170,7 +170,7 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(post("/v1/app/script-tokens/%E0/revoke"), owner))?.statusCode).toBe(404);
   });
 
-  it("reads the decision cards but refuses every act on them (no recently-signed-in proof on this API yet)", async () => {
+  it("reads the decision cards and hands every act to them with no step-up in front (DEC 254zzz73)", async () => {
     const { app, companyOf, remember } = await world2();
     const list = vi.fn(async () => []);
     const performer = { approve: vi.fn(), reject: vi.fn() };
@@ -179,8 +179,9 @@ describe("the core's handlers on the deployed API", () => {
     const caller = remember(FAKE_COMPANY);
     for (const action of ["approve", "reject", "request-changes", "evidence-opened"]) {
       const answer = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/${action}`, { digest: "x" }), caller);
-      expect(answer?.statusCode, action).toBe(403);
-      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(DECIDE_ON_A_PAGE);
+      // No step-up refusal in front: the cards' own rules answer (no such card waits for this person), and nothing is decided.
+      expect(answer?.statusCode, action).toBe(404);
+      expect((JSON.parse(answer!.body) as { error: { code: string } }).error.code, action).not.toBe("REAUTH_REQUIRED");
     }
     expect(performer.approve).not.toHaveBeenCalled();
     expect(performer.reject).not.toHaveBeenCalled();
@@ -298,10 +299,9 @@ describe("the project wiki's corrections on the deployed API", () => {
   });
 });
 
-// Lane ID part 2: a fresh step-up (a factor Code owns, checked on the route against the company's window) opens the two acts this API refused.
-describe("a fresh step-up opens making a script token and acting on a decision card", () => {
+// DEC 254zzz73: no step-up. Making a script token needs a live owner or admin of the company; acting on a decision card needs the performer's live rule.
+describe("making a script token and acting on a decision card need no step-up", () => {
   const BODY = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
-  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
   const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
 
   async function setup(extra: Partial<CoreDevWiring> = {}) {
@@ -313,21 +313,19 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     return { ...w, routes: routesFor({}), routesFor, list, performer };
   }
 
-  it("refuses a live member before reading the body or asking for step-up, despite owner claims", async () => {
-    const window = vi.fn(async () => 600);
-    const { routes, remember } = await setup({ stepUpWindowSeconds: window });
+  it("refuses a live member before reading the body, despite owner claims", async () => {
+    const { routes, remember } = await setup();
     const member = remember(FAKE_COMPANY, "member");
     expect(member.principal.roles).toContain("owner");
     const request = { ...post("/v1/app/script-tokens"), headers: { "x-org-role": "owner" }, get body(): string { throw new Error("body must not be read"); } };
     const answer = await routes.route(request, member);
     expect(answer?.statusCode).toBe(403);
     expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
-    expect(window).not.toHaveBeenCalled();
   });
 
   it("reads creation authority live on every request and never takes an owner claim over a demotion", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "owner"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY, "owner");
     for (const role of ["owner", "admin"] as const) {
       remember(FAKE_COMPANY, role);
       expect((await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
@@ -342,16 +340,16 @@ describe("a fresh step-up opens making a script token and acting on a decision c
   it("refuses creation when an admin membership belongs to a different company", async () => {
     const { world, app } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "admin" }), wiring: () => WIRED });
-    const caller = { ...callerOf(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const caller = callerOf(FAKE_COMPANY);
     const answer = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
     expect(answer?.statusCode).toBe(401);
     expect(errorOf(answer)).toEqual({ code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN });
     expect(world.created).toEqual([]);
   });
 
-  it("makes a script token for a caller whose step-up is inside the window, and lists it after", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 2), method: "email_code" } };
+  it("makes a script token for a signed-in owner with no step-up, and lists it after", async () => {
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
     expect(made?.statusCode).toBe(201);
     const created = JSON.parse(made!.body) as { token: { tokenId: string }; secret: string };
@@ -360,21 +358,21 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
   });
 
-  it("writes the step-up's method as the token's amr and its time as the token's sign-in time (ID-STEPUP-FOLLOWUPS d)", async () => {
-    const { world, app, routes, remember } = await setup();
-    for (const method of ["email_code", "passkey", "company_reauth"] as const) {
-      const at = minutesAgo(world, 3);
-      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${method}` }), { ...remember(FAKE_COMPANY), stepUp: { at, method } });
+  it("writes the caller's verified sign-in method as the token's amr, and no sign-in time", async () => {
+    const { app, routes, remember } = await setup();
+    for (const amr of ["slack", "github"] as const) {
+      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${amr}` }), { ...remember(FAKE_COMPANY), amr });
       expect(made?.statusCode).toBe(201);
       const tokenId = (JSON.parse(made!.body) as { token: { tokenId: string } }).token.tokenId;
       const record = await readScriptToken({ store: (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store }, FAKE_COMPANY, tokenId);
-      expect(record).toMatchObject({ amr: method, authTime: at });
+      expect(record).toMatchObject({ amr });
+      expect(record).not.toHaveProperty("authTime");
     }
   });
 
   it("passes the install's session cap through: a token lives no longer than a session would, and an unreadable cap makes nothing", async () => {
-    const { world, app, routesFor, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { app, routesFor, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const store = (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store;
     const capped = await routesFor({ sessionCapSeconds: 3_600 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), days: 30 }), caller);
     expect(capped?.statusCode).toBe(201);
@@ -389,66 +387,25 @@ describe("a fresh step-up opens making a script token and acting on a decision c
       expect(refused?.statusCode, String(cap)).toBe(503);
       expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SESSION_CAP_UNREADABLE });
     }
-    // The step-up comes first: a stale one is refused for that, whatever the cap.
-    const stale = await routesFor({ sessionCapSeconds: 0 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-stale" }), { ...caller, stepUp: { at: minutesAgo(world, 11), method: "passkey" } });
-    expect(errorOf(stale)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
     const listed = JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ name: string }> };
     expect(listed.tokens.map((token) => token.name).sort()).toEqual(["ci", "ci-open"]);
   });
 
-  it("refuses a step-up older than the window, in the future, or unreadable, whatever the body or a header claims", async () => {
-    const { world, routes, remember, list } = await setup();
-    const base = remember(FAKE_COMPANY);
-    const stale = [
-      { at: minutesAgo(world, 11), method: "email_code" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "email_code" },
-      { at: minutesAgo(world, 1), method: "" }, { at: 12345 as never, method: "email_code" }, null as never,
-      // A federated round trip is not a factor Code owns, and a looser time form is not read.
-      { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: "2026-11-15", method: "email_code" }, { at: new Date(world.clock.now - 60_000).toUTCString(), method: "email_code" },
-    ];
-    for (const stepUp of stale) {
-      const caller: DeployedCaller = { ...base, stepUp };
-      const body = { ...BODY, requestId: randomUUID(), stepUp: { at: new Date(world.clock.now).toISOString(), method: "email_code" } };
-      const request = { ...post("/v1/app/script-tokens", body), headers: { "x-step-up-at": new Date(world.clock.now).toISOString() } };
-      const made = await routes.route(request, caller);
-      expect(made?.statusCode, JSON.stringify(stepUp)).toBe(403);
-      expect(errorOf(made)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
-      const acted = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/approve`, body), caller);
-      expect(errorOf(acted)).toEqual({ code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE });
-    }
-    expect(list).not.toHaveBeenCalled();
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), base))!.body)).toEqual({ tokens: [], canCreate: true });
+  it("a step-up a body or a header names is ignored: an owner's token is made, a member's is refused, whatever they send", async () => {
+    const { world, routes, remember } = await setup();
+    const body = { ...BODY, requestId: randomUUID(), stepUp: { at: new Date(world.clock.now).toISOString(), method: "email_code" } };
+    const request = (b: unknown) => ({ ...post("/v1/app/script-tokens", b), headers: { "x-step-up-at": new Date(world.clock.now).toISOString() } });
+    // `stepUp` is not a body field the token schema reads: a strict body refuses it, so the plain body is the owner's.
+    expect((await routes.route(request(body), remember(FAKE_COMPANY)))?.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await routes.route(request({ ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY)))?.statusCode).toBe(201);
+    const member = await routes.route(request({ ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY, "member", "person-member-0001"));
+    expect(errorOf(member)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
   });
 
-  it("takes the company's shorter window from the hook, never a longer one, and refuses when the hook gives no readable answer", async () => {
-    const { world, routesFor, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 5), method: "email_code" } };
-    const routesWith = async (answer: () => Promise<unknown>) => routesFor({ stepUpWindowSeconds: answer });
-    // A 2-minute company window refuses a 5-minute-old step-up; a 30-minute answer is capped at the 10-minute default.
-    expect(errorOf(await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller)).code).toBe("REAUTH_REQUIRED");
-    // A zero window refuses even a step-up made this very moment.
-    expect(errorOf(await (await routesWith(async () => 0)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0.75), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    const old: DeployedCaller = { ...caller, stepUp: { at: minutesAgo(world, 11), method: "email_code" } };
-    expect(errorOf(await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), old)).code).toBe("REAUTH_REQUIRED");
-    expect((await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
-    // Positive short windows: a 30 s window takes a 20 s-old step-up, a 120 s window a 60 s-old one; and the future-skew allowance never exceeds the window.
-    expect((await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 20 / 60), method: "email_code" } }))?.statusCode).toBe(201);
-    expect((await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci2" }), { ...caller, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }))?.statusCode).toBe(201);
-    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, -1), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    // No step-up: refused without asking the hook.
-    const asked = vi.fn(async () => 600);
-    expect(errorOf(await (await routesWith(asked)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY))).code).toBe("REAUTH_REQUIRED");
-    expect(asked).not.toHaveBeenCalled();
-    for (const answer of [async () => { throw new Error("hook down"); }, async () => "600", async () => -1, async () => 1.5, async () => undefined, async () => 90_000]) {
-      const refused = await (await routesWith(answer)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
-      expect(refused?.statusCode).toBe(503);
-      expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: COMPANY_RULES_NO_ANSWER });
-    }
-  });
 
   it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const hidden = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), projects: ["secret"] }), caller);
     expect(hidden?.statusCode).toBe(404);
     expect(errorOf(hidden).message).toBe("project not found");
@@ -458,23 +415,17 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     expect(errorOf(unwired).message).toBe(NOT_ON_THE_CORE_YET);
   });
 
-  it("lets an act on a card reach the cards with the step-up as the person's sign-in time (and a read carries none)", async () => {
-    const { world, routes, remember, list } = await setup();
-    const at = minutesAgo(world, 3);
-    const base = remember(FAKE_COMPANY);
-    const caller: DeployedCaller = { ...base, principal: { ...base.principal, authTime: minutesAgo(world, 0) }, stepUp: { at, method: "email_code" } };
+  it("lets an act on a card reach the cards with no step-up and no sign-in time on the principal (DEC 254zzz73)", async () => {
+    const { routes, remember, list } = await setup();
+    const caller = remember(FAKE_COMPANY);
     const acted = await routes.route(post(`/v1/app/decisions/approve_plan/${randomUUID()}/reject`, { requestId: randomUUID(), reason: "not_now" }), caller);
-    // Past the step-up gate: the card is simply not waiting for them (the sources list is empty).
+    // The card is simply not waiting for them (the sources list is empty): nothing in front of the cards refused the act.
     expect(acted?.statusCode).toBe(404);
     expect(list).toHaveBeenCalledTimes(1);
     const seen = list.mock.calls[0]![0] as { principal: { authTime?: string; methods?: string[] }; stepUp?: unknown };
-    expect(seen.principal.authTime).toBe(at);
-    expect(seen.principal.methods).toEqual(["email_code"]);
-    expect(seen.stepUp).toEqual({ at, method: "email_code" });
-    await routes.route(get("/v1/app/decisions"), caller);
-    const read = list.mock.calls[1]![0] as { principal: { authTime?: string }; stepUp?: unknown };
-    expect(read.principal.authTime).toBeUndefined();
-    expect(read.stepUp).toBeUndefined();
+    expect(seen.principal.authTime).toBeUndefined();
+    expect(seen.principal.methods).toBeUndefined();
+    expect(seen).not.toHaveProperty("stepUp");
     // A malformed body is a fixed refusal, never an echo.
     const bad = await routes.route({ ...post(`/v1/app/decisions/plan/${randomUUID()}/approve`), body: "{not json <script>" }, caller);
     expect(errorOf(bad)).toEqual({ code: "CONFIG_INVALID", message: "the request body is not JSON" });
@@ -757,12 +708,11 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
   });
 });
 
-// L4-P3 (owner 2026-11-17): allowing the company's automatic runs needs the SAME fresh step-up as making a script token (the real check, against the company's window), through both the setup PUT and the company's
-// own route; withdrawing needs only the live owner or admin role. Mutants are listed in the PR body with the test that kills each.
-describe("the company's automatic runs: a fresh step-up to allow, none to withdraw", () => {
+// L4-P3 (owner 2026-11-17), DEC 254zzz73: allowing and withdrawing the company's automatic runs need only the live owner or admin role (no step-up), through both the setup PUT and the company's
+// own route. Mutants are listed in the PR body with the test that kills each.
+describe("the company's automatic runs: the live owner or admin role to allow and to withdraw, no step-up", () => {
   const SYSTEM_RUNS = "/v1/app/company/system-runs";
   const UPKEEP = "/v1/app/projects/payments/upkeep";
-  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
   const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
   const put = (path: string, body: unknown) => ({ method: "PUT", path, headers: {}, body: JSON.stringify(body) });
   const allow = (): { requestId: string; allowed: boolean } => ({ requestId: randomUUID(), allowed: true });
@@ -776,43 +726,23 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
     return { ...w, routes, consentOf };
   }
 
-  // MUTANT E1: dev-routes does not hand the real step-up check to the company route or to the setup route.
-  it("a stale step-up, a missing one, a federated factor and a future time are all refused on BOTH routes; nothing is written", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const base = remember(FAKE_COMPANY);
-    const refused = [undefined, { at: minutesAgo(world, 11), method: "passkey" }, { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, -5), method: "email_code" }, { at: "yesterday", method: "email_code" }, { at: minutesAgo(world, 1), method: "" }];
-    for (const stepUp of refused) {
-      const caller: DeployedCaller = { ...base, ...(stepUp === undefined ? {} : { stepUp }) };
-      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
-        const answer = await routes.route(request, caller);
-        expect(answer?.statusCode, `${request.path} ${JSON.stringify(stepUp)}`).toBe(403);
-        expect(errorOf(answer), request.path).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
-      }
-    }
-    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+
+  it("a signed-in owner with no step-up allows it, through both routes", async () => {
+    const a = await setup();
+    const answer = await a.routes.route(put(SYSTEM_RUNS, allow()), a.remember(FAKE_COMPANY));
+    expect(answer?.statusCode).toBe(200);
+    expect(JSON.parse(answer!.body)).toEqual({ available: true, allowed: true, systemRunsOn: true });
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
+    const b = await setup();
+    const setupAnswer = await b.routes.route(put(UPKEEP, setupAllow()), b.remember(FAKE_COMPANY));
+    expect(setupAnswer?.statusCode).toBe(200);
+    expect(JSON.parse(setupAnswer!.body)).toMatchObject({ enabled: true, systemRunsOn: true });
+    expect(await b.consentOf(FAKE_COMPANY)).toBe(true);
   });
 
-  it("a step-up inside the window (a passkey or an emailed code) allows it, through both routes", async () => {
-    for (const method of ["passkey", "email_code"]) {
-      const a = await setup();
-      const callerA: DeployedCaller = { ...a.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(a.world, 2), method } };
-      const answer = await a.routes.route(put(SYSTEM_RUNS, allow()), callerA);
-      expect(answer?.statusCode, method).toBe(200);
-      expect(JSON.parse(answer!.body)).toEqual({ available: true, allowed: true, systemRunsOn: true });
-      expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
-      const b = await setup();
-      const callerB: DeployedCaller = { ...b.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(b.world, 2), method } };
-      const setupAnswer = await b.routes.route(put(UPKEEP, setupAllow()), callerB);
-      expect(setupAnswer?.statusCode, method).toBe(200);
-      expect(JSON.parse(setupAnswer!.body)).toMatchObject({ enabled: true, systemRunsOn: true });
-      expect(await b.consentOf(FAKE_COMPANY)).toBe(true);
-    }
-  });
-
-  // MUTANT E2: the withdrawal asks for the step-up (here: a caller with none is refused).
-  it("withdrawing needs no step-up on either route: an owner with none withdraws; the consent is gone and the gate says off at once", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const fresh: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+  it("an owner withdraws on either route; the consent is gone and the gate says off at once", async () => {
+    const { routes, remember, consentOf } = await setup();
+    const fresh: DeployedCaller = remember(FAKE_COMPANY);
     expect((await routes.route(put(SYSTEM_RUNS, allow()), fresh))?.statusCode).toBe(200);
     expect(await consentOf(FAKE_COMPANY)).toBe(true);
     const bare = remember(FAKE_COMPANY);
@@ -830,16 +760,16 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
 
   // MUTANT E3: the role is not membership's (a maintainer or member reaches the company route).
   it("the role is membership's: a member (and a project maintainer, who is a member of the company) is refused for reading, allowing and withdrawing; an admin is not", async () => {
-    const { world, routes, remember, consentOf } = await setup();
+    const { routes, remember, consentOf } = await setup();
     // "pm" is the person the setup wiring knows as a project administrator: a maintainer of the project, a plain member of the company.
     for (const personId of ["person-member", "pm"]) {
-      const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "member", personId), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+      const caller: DeployedCaller = remember(FAKE_COMPANY, "member", personId);
       for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false })]) {
         const answer = await routes.route(request, caller);
         expect(answer?.statusCode, `${personId} ${request.method}`).toBe(403);
         expect(errorOf(answer).code).toBe("FORBIDDEN");
       }
-      // The setup route: the maintainer may switch the project, but neither allow nor withdraw the company's consent (even with a fresh step-up).
+      // The setup route: the maintainer may switch the project, but neither allow nor withdraw the company's consent.
       for (const body of [setupAllow(), { requestId: randomUUID(), on: false, allowSystemRuns: false }]) {
         const answer = await routes.route(put(UPKEEP, body), caller);
         expect(answer?.statusCode, personId).toBe(403);
@@ -847,15 +777,15 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
       }
     }
     expect(await consentOf(FAKE_COMPANY)).toBe(false);
-    const admin: DeployedCaller = { ...remember(FAKE_COMPANY, "admin", "person-admin"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const admin: DeployedCaller = remember(FAKE_COMPANY, "admin", "person-admin");
     expect((await routes.route(put(SYSTEM_RUNS, allow()), admin))?.statusCode).toBe(200);
     expect((await routes.route(get(SYSTEM_RUNS), admin))?.statusCode).toBe(200);
   });
 
   // MUTANT E4: the script-token refusal does not cover the new path.
   it("a script token reaches neither route's company control: refused before anything is read", async () => {
-    const { world, routes, remember } = await setup();
-    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" }, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
     for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
       const answer = await routes.route(request, token);
       expect(answer?.statusCode, request.path).toBe(403);
@@ -863,18 +793,10 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
     }
   });
 
-  it("takes the company's shorter step-up window and refuses when the company rules give no answer (both routes)", async () => {
-    for (const [window, code] of [[async () => 0, "REAUTH_REQUIRED"], [async () => { throw new Error("down"); }, "RUNTIME_UNAVAILABLE"], [async () => "ten", "RUNTIME_UNAVAILABLE"]] as const) {
-      const { world, routes, remember, consentOf } = await setup({ stepUpWindowSeconds: window });
-      const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) expect(errorOf(await routes.route(request, caller)).code, request.path).toBe(code);
-      expect(await consentOf(FAKE_COMPANY)).toBe(false);
-    }
-  });
 
   it("the ceiling off: allowing is 'unavailable'; withdrawing still works. Unwired: 'not on the core yet'", async () => {
     const off = await setup({}, false);
-    const caller: DeployedCaller = { ...off.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(off.world, 1), method: "passkey" } };
+    const caller: DeployedCaller = off.remember(FAKE_COMPANY);
     expect(errorOf(await off.routes.route(put(SYSTEM_RUNS, allow()), caller)).code).toBe("NOT_AVAILABLE_HERE");
     expect((await off.routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), caller))?.statusCode).toBe(200);
     const w = await world2();
@@ -885,9 +807,9 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
   });
 
   it("two companies: one's owner allows and withdraws only their own company's setting", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const a: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-    const b: DeployedCaller = { ...remember(OTHER), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember, consentOf } = await setup();
+    const a: DeployedCaller = remember(FAKE_COMPANY);
+    const b: DeployedCaller = remember(OTHER);
     expect((await routes.route(put(SYSTEM_RUNS, allow()), a))?.statusCode).toBe(200);
     expect(await consentOf(FAKE_COMPANY)).toBe(true);
     expect(await consentOf(OTHER)).toBe(false);

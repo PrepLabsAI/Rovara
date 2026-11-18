@@ -169,7 +169,7 @@ describe("invite link secret (DEC 254h)", () => {
     expect(w.db.find((row) => row.entityType === "AUTH_REQUEST" && row.inviteHash === companyInviteCodeHash(invite.secret))).toHaveLength(2);
   });
 
-  it("authorize refuses a secret with no company, too long, from a company-bound client or on a step-up, before anything is stored", async () => {
+  it("authorize refuses a secret with no company, too long, or from a company-bound client, before anything is stored", async () => {
     const { w, owner } = await ready();
     const invite = await mint(w, owner, "x@example.test");
     const before = w.db.find((row) => row.entityType === "AUTH_REQUEST").length;
@@ -177,7 +177,6 @@ describe("invite link secret (DEC 254h)", () => {
     expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", invite: invite.secret })).toContain("unexpected-400");
     expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", company: X, invite: "x".repeat(257) })).toContain("unexpected-400");
     expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", company: X, invite: "" })).toContain("unexpected-400");
-    expect(await refused({ client_id: "web-app", redirect_uri: "https://cloud.example.test/callback", company: X, invite: invite.secret, acr_values: "step-up" })).toContain("unexpected-400");
     // A client bound to company X (not install-level): it signs people in to X, but never with a secret.
     const bound: Record<string, unknown> = { ...w.db.get("SIGNIN_CLIENTS", "CLIENT#web-app")!, sk: "CLIENT#x-app", clientId: "x-app", companyId: X };
     delete bound.installLevel; delete bound.webApp;

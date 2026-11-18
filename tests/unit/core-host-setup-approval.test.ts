@@ -1,5 +1,5 @@
 // L4-D (DEC 254z b; answers #844's Question L2-3): the hosted approval of a project's setup candidate. "Use this setup" (confirm), discard, and the decision on a candidate whose check
-// passed: a fresh step-up, the risk read from the candidate's diff (low and medium: a project maintainer; high: a company owner or admin), the hosted approvers point's proof bound to the
+// passed: the risk read from (DEC 254zzz73: no step-up) the candidate's diff (low and medium: a project maintainer; high: a company owner or admin), the hosted approvers point's proof bound to the
 // candidate's digest, revision and card, and the ONE approval gate. Two companies and two projects never reach each other's candidate; a moved or stale candidate is refused.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ import { toDocument } from "../../packages/broker/src/core/task-flow/records.js"
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_APPROVAL_UNAVAILABLE, SETUP_DECIDE_ON_A_PAGE, SETUP_NOTHING_WAITING, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_APPROVAL_UNAVAILABLE, SETUP_NOTHING_WAITING, SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { SETUP_NEEDS_ADMIN, SETUP_NEEDS_MAINTAINER, createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
 import {
@@ -100,11 +100,10 @@ async function setupWorld(options: { approval?: boolean } = {}) {
     if (grantReadsLeft.value !== undefined && grantReadsLeft.value-- <= 0) { if (grantReadsLeft.thenThrow === true) throw new Error("grant table down detail"); return undefined; }
     return people.get(personId)?.grants[name];
   };
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
     return {
       principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }),
     };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {
@@ -284,7 +283,7 @@ describe("hosted setup approval: the decision's own rule (behind the route's che
     const approval = wirings.get(FAKE_COMPANY)!.approval!;
     const requestId = setupDecisionRequestId(digest, 2);
     const card = { cardId: "setup_proposal:payments", contentVersion: digest };
-    const credential = await approval.issue({ companyId: FAKE_COMPANY, personId: "p-maint", stepUp: { at: new Date(world.clock.now - 60_000).toISOString(), method: "passkey" }, requestId, kind: "setup", project: "payments", revision: 2, artifactDigest: digest, outcome: "approve", card });
+    const credential = await approval.issue({ companyId: FAKE_COMPANY, personId: "p-maint", requestId, kind: "setup", project: "payments", revision: 2, artifactDigest: digest, outcome: "approve", card });
     const result = await approval.gate.decide({ companyId: FAKE_COMPANY, kind: "setup-proposal", subjectId: "payments", requestId, outcome: "approve", seen: { revision: 2, artifactDigest: digest }, credentials: [credential], card });
     expect(result).toEqual({ status: "refused", reason: "not_the_approver", detail: SETUP_NEEDS_ADMIN });
     expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
@@ -293,15 +292,18 @@ describe("hosted setup approval: the decision's own rule (behind the route's che
 });
 
 describe("hosted setup approval: the proof and the binding", () => {
-  it("needs a fresh step-up: none, or one older than the window, is refused before anything is read", async () => {
-    for (const ago of [null, 11 * 60_000]) {
-      const { world, person, call } = await setupWorld();
-      const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
-      const owner = person("p-owner", FAKE_COMPANY, "owner", {}, ago);
-      const refused = await call(post(`${RUN}/decide`, decideBody(digest)), owner);
-      expect(refused.body, String(ago)).toEqual({ error: { code: "REAUTH_REQUIRED", message: SETUP_DECIDE_ON_A_PAGE } });
-      expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
-    }
+  it("needs no step-up (DEC 254zzz73): the company owner decides as a signed-in person, while a project developer and another company's owner are refused and nothing changes", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["install"])] });
+    const dev = person("p-dev-nostep", FAKE_COMPANY, "member", { payments: "developer" });
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), dev)).status).toBeGreaterThanOrEqual(400);
+    const stranger = person("p-other-owner-nostep", OTHER, "owner");
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), stranger)).status).toBeGreaterThanOrEqual(400);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    const owner = person("p-owner", FAKE_COMPANY, "owner");
+    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), owner);
+    expect(decided.status, JSON.stringify(decided.body)).toBe(200);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
   });
 
   it("refuses a decision on what the person did not see (another digest or revision) and on a candidate whose check has not passed", async () => {
@@ -428,14 +430,13 @@ describe("hosted setup approval: confirm and discard", () => {
 describe("hosted approvers: a setup candidate's proof", () => {
   const NOW = Date.parse("2026-11-15T10:00:00.000Z");
   const DIGEST = "e".repeat(64);
-  const STEP_UP = { at: new Date(NOW - 60_000).toISOString(), method: "passkey" };
   const A = FAKE_COMPANY as OrgId;
   const identity = createHostedIdentity({ membershipOf: async (personId) => (personId === "ada" ? { companyId: A, role: "member" as const } : undefined), displayNameOf: async () => "Ada" });
   const request = (overrides: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
     companyId: A, requestId: "setup-request-0001.x", kind: "setup", subject: { type: SETUP_PROPOSAL_SUBJECT, id: "payments" }, projectName: "payments", revision: 2, artifactDigest: DIGEST,
     risk: "low", outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, settlesClaims: true, ...overrides,
   });
-  const token = (overrides: Record<string, unknown> = {}) => issueSetupApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", project: "payments", revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, ...overrides } as never, NOW).token;
+  const token = (overrides: Record<string, unknown> = {}) => issueSetupApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", project: "payments", revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST }, ...overrides } as never, NOW).token;
   const proof = (req: ApprovalRequest, value: string): ApprovalProof => ({ proofId: randomUUID(), method: APPROVAL_PROOF_METHOD, requestId: req.requestId, revision: req.revision, artifactDigest: req.artifactDigest, token: value });
   const point = () => createHostedApprovers({ store: createFakeWorld().store, identity, key: KEY, now: () => new Date(NOW) });
 
@@ -461,7 +462,7 @@ describe("hosted approvers: a setup candidate's proof", () => {
   it("never lets a task proof stand for a setup candidate, nor a setup proof for a task", async () => {
     const TASK = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
     // A task proof is refused on the setup subject (and a setup proof on a task): the proof's subject type is signed into it.
-    const taskToken = issueApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
+    const taskToken = issueApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", taskId: TASK, revision: 2, artifactDigest: DIGEST, outcome: "approve", card: { cardId: "setup_proposal:payments", contentVersion: DIGEST } }, NOW).token;
     expect(await point().verify(request(), proof(request(), taskToken))).toEqual({ approved: false, reason: "other_subject" });
     const taskRequest = request({ subject: { type: "task", id: TASK }, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
     const setupForTask = token({ project: TASK, card: { cardId: `approve_plan:${TASK}`, contentVersion: DIGEST } });
@@ -472,14 +473,14 @@ describe("hosted approvers: a setup candidate's proof", () => {
     const UUID_PROJECT = "3c2d1e0f-9a8b-4c7d-8e6f-5a4b3c2d1e0f";
     const card = { cardId: `setup_proposal:${UUID_PROJECT}`, contentVersion: DIGEST };
     const req = request({ subject: { type: SETUP_PROPOSAL_SUBJECT, id: UUID_PROJECT }, projectName: UUID_PROJECT, card });
-    const taskProof = issueApprovalProof(KEY, { companyId: A, personId: "ada", stepUp: STEP_UP, requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
+    const taskProof = issueApprovalProof(KEY, { companyId: A, personId: "ada", requestId: "setup-request-0001", kind: "setup", taskId: UUID_PROJECT, revision: 2, artifactDigest: DIGEST, outcome: "approve", card }, NOW).token;
     expect(await point().verify(req, proof(req, taskProof))).toEqual({ approved: false, reason: "other_subject" });
     // The same act as a setup proof is accepted.
     expect(await point().verify(req, proof(req, token({ project: UUID_PROJECT, card })))).toMatchObject({ approved: true });
   });
 
   it("issues no setup proof for a malformed project name", () => {
-    for (const project of ["", "-bad", "a/b", "x".repeat(101)]) expect(() => token({ project }), project).toThrow("a step-up approval cannot be issued for this input");
+    for (const project of ["", "-bad", "a/b", "x".repeat(101)]) expect(() => token({ project }), project).toThrow("an approval proof cannot be issued for this input");
   });
 });
 

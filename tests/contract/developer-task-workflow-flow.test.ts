@@ -4533,9 +4533,9 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       ({ requestId: randomUUID(), expectedRevision: blocked.revision, candidateDigest: setup.candidate.digest, resolutions, ...extra });
     return { harness, ...setup, blocked, route, body };
   }
-  /** DEC 236h: accepting a security finding is the web page's: the web app's full-access client, with a step-up made a few seconds ago. */
-  const asPage = (t: { harness: { client: (kind: "web" | "tool" | "fullTool", who: typeof MAYA, method: string, path: string, body?: unknown, stepUp?: { ageSeconds: number; method?: string }) => Promise<{ status: number; body: Record<string, unknown> }> }; route: string }, body: unknown, stepUp: { ageSeconds: number; method?: string } | undefined = { ageSeconds: 5 }) =>
-    t.harness.client("web", MAYA, "POST", t.route, body, stepUp);
+  /** DEC 236h: accepting a security finding is the web page's: the web app's full-access client (DEC 254zzz73: no step-up). */
+  const asPage = (t: { harness: { client: (kind: "web" | "tool" | "fullTool", who: typeof MAYA, method: string, path: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }> }; route: string }, body: unknown) =>
+    t.harness.client("web", MAYA, "POST", t.route, body);
 
   it("moves to the pull request when every finding is accepted, and the pull request lists each with its reason, made inert", async () => {
     const t = await blockedOnFindings([{ ...PARSER, text: "Ping @octocat: see <https://evil.example|here> and #12" }], [TOKEN]);
@@ -4617,7 +4617,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
       expect(taskWorkflow(t.harness, t.taskId).revision).toBe(t.blocked.revision);
       // Slack is not the web page (DEC 236h): accepting the security finding there is refused, with fixed words, and nothing changes.
       const security = await t.harness.handler({ ...event, userId: MAYA.slackUserId, requestId: randomUUID(), resolutions: [resolutions[0]!, { ...resolutions[1]!, action: "ACCEPT", note: "Test token only." }] });
-      expect(JSON.stringify(JSON.parse(security.body))).toContain("Accepting a security finding needs the Rovara web page with a fresh sign-in");
+      expect(JSON.stringify(JSON.parse(security.body))).toContain("Accepting a security finding needs the Rovara web page");
       expect(taskWorkflow(t.harness, t.taskId).revision).toBe(t.blocked.revision);
       // The owner's answer: the accepted finding is recorded, and the finding to fix goes back to coding with the instruction.
       const saved = await t.harness.handler({ ...event, userId: MAYA.slackUserId });
@@ -4755,19 +4755,16 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toBeUndefined();
   });
 
-  it("accepts a security finding only on the web page with a fresh step-up (DEC 236h): the CLI's token, an AI tool's client, and a page with no step-up, a stale one or one made another way are refused, and nothing changes", async () => {
+  it("accepts a security finding only on the web page (DEC 236h; DEC 254zzz73: no step-up): the CLI's token and an AI tool's client are refused, even with a leftover step-up claim, and nothing changes", async () => {
     const t = await blockedOnFindings([PARSER], [TOKEN]);
-    const WORDS = "Accepting a security finding needs the Rovara web page with a fresh sign-in";
+    const WORDS = "Accepting a security finding needs the Rovara web page";
     const NOTE = "SENTINEL-REASON-NOT-TO-ECHO";
     const request = t.body([{ findingId: id("CRITIC", PARSER), action: "ACCEPT", note: "Fine." }, { findingId: id("SECURITY", TOKEN), action: "ACCEPT", note: NOTE }]);
     const attempts: Array<[string, { status: number; body: Record<string, unknown> }, string]> = [
       ["the CLI's token", await t.harness.dev(MAYA, "POST", t.route, request), "FORBIDDEN"],
-      ["an AI tool's client with a fresh step-up", await t.harness.client("tool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
-      ["a full-access AI tool's client (not the web app) with a fresh step-up", await t.harness.client("fullTool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
-      ["the web app with no step-up", await t.harness.client("web", MAYA, "POST", t.route, request), "REAUTH_REQUIRED"],
-      ["the web app with a stale step-up", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: 601 }), "REAUTH_REQUIRED"],
-      ["the web app with a step-up from the future", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: -3_600 }), "REAUTH_REQUIRED"],
-      ["the web app with a Slack round trip", await t.harness.client("web", MAYA, "POST", t.route, request, { ageSeconds: 5, method: "slack" }), "REAUTH_REQUIRED"],
+      ["an AI tool's client", await t.harness.client("tool", MAYA, "POST", t.route, request), "FORBIDDEN"],
+      ["an AI tool's client with a leftover step-up claim", await t.harness.client("tool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
+      ["a full-access AI tool's client (not the web app) with a leftover step-up claim", await t.harness.client("fullTool", MAYA, "POST", t.route, request, { ageSeconds: 5 }), "FORBIDDEN"],
     ];
     for (const [name, answer, code] of attempts) {
       expect(answer.body.error, name).toMatchObject({ code, message: expect.stringContaining(WORDS) as string });
@@ -4777,7 +4774,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED", revision: t.blocked.revision });
     expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toBeUndefined();
     expect(operations(t.harness, t.workspaceId).filter((item) => item.kind === "publish")).toHaveLength(0);
-    // The web page with a fresh step-up may.
+    // The web page may, with no step-up claim at all.
     expect((await asPage(t, request)).status).toBe(200);
     expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
     expect(taskWorkflow(t.harness, t.taskId).acceptedFindings).toHaveLength(2);

@@ -48,7 +48,7 @@ export async function resolveReviewFindings(deps: TaskFlowDeps, options: TaskAct
     if (prior.source !== "FINDINGS" || prior.workflowRevision !== request.expectedRevision || !sameAnswers(workflow, request, prior.reason)) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_ID_USED);
     return taskViewOf(deps, task);
   }
-  // Accepting a security finding is the web page's, with a fresh sign-in (DEC 236h): refused before anything else is read or written.
+  // Accepting a security finding is the web page's (DEC 236h): refused before anything else is read or written.
   const now = iso(deps);
   requirePageForSecurityAccept(caller, via, workflow, request);
   // A person's move never skips an approval of more spend.

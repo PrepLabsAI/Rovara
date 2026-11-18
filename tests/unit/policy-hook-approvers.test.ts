@@ -53,14 +53,24 @@ describe("policy hook: decisions", () => {
     expect(stricterRequirement(baseRequirement, { ...loose, secondPerson: true }, anonymous).minApprovers).toBe(2);
   });
 
-  it("stricter only: a looser answer never loosens the install's requirement", () => {
+  it("stricter only: a looser answer never loosens the install's requirement, and the install's own sign-in rule is kept as it was", () => {
     const strict: ApprovalRequirement = { methods: ["local-session"], minApprovers: 3, selfApprovalAllowed: false, signIn: { mode: "window", seconds: 300 } };
     expect(stricterRequirement(strict, { allow: true, minApprovers: 1, secondPerson: false, selfApproval: true, signInMaxAgeSeconds: 86_400 }, request())).toEqual(strict);
-    expect(stricterRequirement(strict, { allow: true, minApprovers: 5, secondPerson: false, selfApproval: true, signInMaxAgeSeconds: 60 }, request())).toEqual({ ...strict, minApprovers: 5, signIn: { mode: "window", seconds: 60 } });
-    expect(stricterRequirement({ ...baseRequirement, signIn: { mode: "any-active" } }, { ...loose, signInMaxAgeSeconds: 600 }, request()).signIn).toEqual({ mode: "window", seconds: 600 });
+    expect(stricterRequirement(strict, { allow: true, minApprovers: 5, secondPerson: false, selfApproval: true }, request())).toEqual({ ...strict, minApprovers: 5 });
     expect(stricterRequirement(baseRequirement, loose, request())).toEqual(baseRequirement);
     // A second person needed rules out self-approval even if the same answer says self-approval is fine.
     expect(stricterRequirement(baseRequirement, { ...loose, secondPerson: true, selfApproval: true }, request()).selfApprovalAllowed).toBe(false);
+  });
+
+  it("DEC 254zzz73: an answer's signInMaxAgeSeconds (a re-sign-in window) is accepted on the wire and ignored: it adds no sign-in rule and refuses no verdict", async () => {
+    expect(stricterRequirement(baseRequirement, { ...loose, signInMaxAgeSeconds: 60 }, request())).toEqual(baseRequirement);
+    expect(stricterRequirement(baseRequirement, { ...loose, signInMaxAgeSeconds: 0 }, request()).signIn).toBeUndefined();
+    const answer = () => ({ ...loose, signInMaxAgeSeconds: 600 });
+    for (const approver of [person("admin-b", new Date(T0 - 3_600_000).toISOString()), person("admin-b"), person("admin-b", new Date(T0 + 120_000).toISOString())]) {
+      expect((await world(answer, baseApprovers({ approved: true, approver, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).approved).toBe(true);
+    }
+    // The other parts of the same answer still bind: a "no" refuses.
+    expect(await world(() => ({ ...loose, allow: false, signInMaxAgeSeconds: 600 }), baseApprovers({ approved: true, approver: person("admin-b"), method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "company_rules_refused" });
   });
 
   it("reading the requirement (pages, probes) never asks: the stricter default first, then the last known answer", async () => {
@@ -110,14 +120,6 @@ describe("policy hook: decisions", () => {
     expect(down.audit.events[0]).toMatchObject({ action: "policy_hook.no_answer" });
   });
 
-  it("is the sign-in fresh enough: an older sign-in, or none, is refused", async () => {
-    const fresh = person("admin-b", new Date(T0 - 60_000).toISOString());
-    const stale = person("admin-b", new Date(T0 - 3_600_000).toISOString());
-    const answer = () => ({ ...loose, signInMaxAgeSeconds: 600 });
-    expect((await world(answer, baseApprovers({ approved: true, approver: fresh, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).approved).toBe(true);
-    expect(await world(answer, baseApprovers({ approved: true, approver: stale, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-    expect(await world(answer, baseApprovers({ approved: true, approver: person("admin-b"), method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-  });
 
   it("a stricter count or no self-approval turns the install's sole-approver exception off", async () => {
     expect(stricterRequirement(baseRequirement, { ...loose, minApprovers: 2 }, request()).soleApproverAllowed).toBeUndefined();
@@ -131,10 +133,6 @@ describe("policy hook: decisions", () => {
     expect(await two.approvers.verify(request(), proof)).toEqual({ approved: true, approver: asker, method: "local-session", proofId: "p1" });
   });
 
-  it("a sign-in time in the future is not believed", async () => {
-    const ahead = person("admin-b", new Date(T0 + 120_000).toISOString());
-    expect(await world(() => ({ ...loose, signInMaxAgeSeconds: 600 }), baseApprovers({ approved: true, approver: ahead, method: "m", proofId: "p1" })).approvers.verify(request(), proof)).toEqual({ approved: false, reason: "sign_in_not_fresh" });
-  });
 
   it("a cached answer is used only while it is alive, and a no is kept as the stricter default", async () => {
     const other = person("admin-b");

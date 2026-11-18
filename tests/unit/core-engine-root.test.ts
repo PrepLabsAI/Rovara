@@ -178,8 +178,8 @@ describe("the broker's core root, switch on", () => {
 
   it("maps the caller from live membership for /v1/app too, and reads a person's standing in a company from the company's own record", async () => {
     const tables = fakeTables([member("dev-a", ORG, "admin"), member("dev-gone", ORG, "member", { revokedAt: "2026-11-10T00:00:00.000Z" }), member("dev-x", OTHER, "member")]);
-    const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" }, clientId: "web-app" });
-    expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" } });
+    const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", amr: "slack", clientId: "web-app" });
+    expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", amr: "slack" });
     expect(await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-gone", sessionId: "s", name: "Gone" })).toBeUndefined();
     // DEC 254zzz39 (6): the web app's own client marker rides along only as the broker's sign-in set it (exactly true), never otherwise.
     const map = deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN));

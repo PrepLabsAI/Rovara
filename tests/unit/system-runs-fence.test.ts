@@ -36,7 +36,7 @@ const projectRow = (extra: Record<string, unknown> = {}) => ({ ...upkeepSettings
 const consentOf = (store: MemoryDocumentStore) => store.get(systemRunsConsentKey(COMPANY_A));
 
 function control(store: MemoryDocumentStore, hook: () => Promise<void> = async () => undefined): SystemRunsControlDeps {
-  return { store, companyId: COMPANY_A, now: () => T0, isCompanyAdmin: async () => true, available: () => true, requireStepUp: async () => undefined, record: async () => { await hook(); } };
+  return { store, companyId: COMPANY_A, now: () => T0, isCompanyAdmin: async () => true, available: () => true, record: async () => { await hook(); } };
 }
 const allow = (deps: SystemRunsControlDeps, allowed = true) => setSystemRunsConsent(deps, () => ({ requestId: randomUUID(), allowed }));
 const lostRace = { code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${SYSTEM_RUNS_WORDS.unreadable}` };
@@ -106,7 +106,7 @@ describe("company consent control (setSystemRunsConsent)", () => {
 
 function setupDeps(store: MemoryDocumentStore, hook: () => Promise<void> = async () => undefined): UpkeepSettingsDeps {
   return {
-    store, companyId: COMPANY_A, now: () => T0, standing: async () => ({ access: "manage", companyAdmin: true }), requireStepUp: async () => undefined,
+    store, companyId: COMPANY_A, now: () => T0, standing: async () => ({ access: "manage", companyAdmin: true }),
     record: async () => undefined, recordConsent: async () => { await hook(); }, // the hook runs once per request, after both rows were read and before any write
   };
 }

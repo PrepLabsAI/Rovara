@@ -67,7 +67,7 @@ function permissivePoint() {
     async requirement() { return { methods: [METHOD], minApprovers: 1, selfApprovalAllowed: true, strongMethods: [METHOD], rejectMethods: [METHOD], changesMethods: [METHOD] }; },
     async verify(_request: ApprovalRequest, proof: ApprovalProof) {
       const act = issued.get(proof.token);
-      return act === undefined ? { approved: false, reason: "invalid_proof" } : { approved: true, approver: { ...principalOf(act.personId, act.companyId), authTime: act.stepUp.at }, method: proof.method, proofId: proof.proofId };
+      return act === undefined ? { approved: false, reason: "invalid_proof" } : { approved: true, approver: principalOf(act.personId, act.companyId), method: proof.method, proofId: proof.proofId };
     },
   };
   return { proofs, approvers, acts };
@@ -158,17 +158,15 @@ async function setup(options: { permissive?: boolean; people?: boolean; involved
   return { world, app, registry, runtime, otherRuntime, deps, otherDeps, point, memberships, grants, people, log, waitingTask, stored, proof, check, seedPeople, accessFor };
 }
 
-const STEP_UP = { at: "2026-11-15T09:58:00.000Z", method: "email_code" };
-/** The caller the card routes pass: for an act, with the step-up the route checked (as `Principal.authTime`). */
-function cardCaller(personId: string, companyId: string = ORG, options: { stepUp?: boolean } = {}): DeployedDecisionCaller {
+/** The caller the card routes pass: the signed-in person, with no sign-in time and no step-up (DEC 254zzz73). */
+function cardCaller(personId: string, companyId: string = ORG): DeployedDecisionCaller {
   const principal = principalOf(personId, companyId);
-  const acting = options.stepUp !== false;
-  return { orgId: companyId, developerId: developerIdOf(principal), principal: acting ? { ...principal, authTime: STEP_UP.at, methods: [STEP_UP.method] } : principal, ...(acting ? { stepUp: STEP_UP } : {}) };
+  return { orgId: companyId, developerId: developerIdOf(principal), principal };
 }
 
 type Deps = ReturnType<typeof deployedDecisionCards>;
 const call = (deps: Deps, who: DeployedDecisionCaller, method: string, pathname: string, body?: unknown) => routeDecisionCards(deps, who, { method, pathname, searchParams: new URLSearchParams(), body: body ?? {} });
-const view = async (deps: Deps, personId: string, companyId: string = ORG) => DecisionCardsViewSchema.parse((await call(deps, cardCaller(personId, companyId, { stepUp: false }), "GET", "/v1/app/decisions"))?.body);
+const view = async (deps: Deps, personId: string, companyId: string = ORG) => DecisionCardsViewSchema.parse((await call(deps, cardCaller(personId, companyId), "GET", "/v1/app/decisions"))?.body);
 const cardOf = (taskId: string) => `approve_plan:${taskId}`;
 
 /** Opens the evidence and approves, as a page would; answers the approve's reply (or its refusal). */
@@ -280,7 +278,7 @@ describe("the deployed decision cards: what is listed", () => {
     const t = await setup();
     await t.waitingTask("dev-a");
     await t.waitingTask("dev-a", ORG, { foreignKey: true });
-    const items = await t.deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }));
+    const items = await t.deps.sources.list(cardCaller("dev-a", ORG));
     expect(items.map((item) => (item as { files?: readonly string[] }).files).sort()).toEqual([[], ["src/health.ts"]]);
   });
 
@@ -295,9 +293,9 @@ describe("the deployed decision cards: what is listed", () => {
   it("refuses a caller whose session id is not the principal's, or whose principal names another company", async () => {
     const t = await setup();
     await t.waitingTask("dev-a");
-    const forged = { ...cardCaller("dev-a", ORG, { stepUp: false }), developerId: developerIdOf(principalOf("dev-b")) };
+    const forged = { ...cardCaller("dev-a", ORG), developerId: developerIdOf(principalOf("dev-b")) };
     expect(await t.deps.sources.list(forged)).toEqual([]);
-    const crossed = { ...cardCaller("dev-a", ORG, { stepUp: false }), principal: principalOf("dev-a", OTHER) };
+    const crossed = { ...cardCaller("dev-a", ORG), principal: principalOf("dev-a", OTHER) };
     expect(await t.deps.sources.list(crossed)).toEqual([]);
   });
 
@@ -307,7 +305,7 @@ describe("the deployed decision cards: what is listed", () => {
     const get = vi.fn(async () => undefined);
     const runtime = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, companyId: ORG, store: { ...t.runtime.flow.deps.store, query, get } } } } as unknown as CoreRuntime;
     const deps = deployedDecisionCards({ runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
-    expect(await deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }))).toEqual([]);
+    expect(await deps.sources.list(cardCaller("dev-a", ORG))).toEqual([]);
     expect(get).toHaveBeenCalledTimes(DECISION_SOURCE_TASKS_MAX);
     expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: DECISION_SOURCE_TASKS_MAX }));
   });
@@ -317,7 +315,7 @@ describe("the deployed decision cards: what is listed", () => {
     const query = vi.fn(async () => ({ items: Array.from({ length: 100 }, () => ({ taskId: randomUUID(), orgId: OTHER })), cursor: "more" }));
     const runtime = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, companyId: ORG, store: { ...t.runtime.flow.deps.store, query } } } } as unknown as CoreRuntime;
     const deps = deployedDecisionCards({ runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
-    expect(await deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }))).toEqual([]);
+    expect(await deps.sources.list(cardCaller("dev-a", ORG))).toEqual([]);
     // Five listings of at most ten index reads each (listTasks' own bound).
     expect(query.mock.calls.length).toBeLessThanOrEqual(50);
     expect(t.log).toHaveBeenCalledWith(expect.objectContaining({ event: "core_engine.decision_cards_cut", read: 0 }));
@@ -334,7 +332,7 @@ describe("the deployed decision cards: acting", () => {
     expect(reply?.body).toMatchObject({ cardId: cardOf(taskId), outcome: "approved" });
     expect((await t.stored(taskId)).stage).toBe("IMPLEMENT");
     expect(t.point.acts).toEqual([expect.objectContaining({
-      companyId: ORG, personId: "dev-a", stepUp: STEP_UP, outcome: "approve", taskId, kind: "plan", card: { cardId: cardOf(taskId), contentVersion: before.artifacts.at(-1)!.sha256 },
+      companyId: ORG, personId: "dev-a", outcome: "approve", taskId, kind: "plan", card: { cardId: cardOf(taskId), contentVersion: before.artifacts.at(-1)!.sha256 },
       revision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256,
     })]);
     // The decision is recorded under the task's owner.
@@ -342,12 +340,12 @@ describe("the deployed decision cards: acting", () => {
     expect(decided).toMatchObject({ decision: "APPROVE", actorId: before.ownerId });
   });
 
-  it("refuses an act without the route's step-up, before any proof is issued", async () => {
+  it("the owner's act needs no step-up (DEC 254zzz73): a plain signed-in caller is decided, and the proof the point issues carries none", async () => {
     const t = await setup();
     const taskId = await t.waitingTask("dev-a");
-    await expect(approve(t.deps, taskId, cardCaller("dev-a", ORG, { stepUp: false }))).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(t.point.proofs.issue).not.toHaveBeenCalled();
-    expect((await t.stored(taskId)).stage).toBe("PLAN_REVIEW");
+    expect((await approve(t.deps, taskId, cardCaller("dev-a")))?.statusCode).toBe(200);
+    expect(t.point.proofs.issue).toHaveBeenCalledTimes(1);
+    expect(t.point.acts[0]).not.toHaveProperty("stepUp");
   });
 
   it("re-checks live authority at the act: a membership or grant lost after the card was drawn refuses, and nothing is decided", async () => {
@@ -372,7 +370,7 @@ describe("the deployed decision cards: acting", () => {
     const taskId = await t.waitingTask("dev-a");
     const item = await itemFor(t, taskId);
     // The last: this company's caller (orgId) carrying a principal that names another company.
-    for (const who of [cardCaller("dev-b"), cardCaller("dev-x", OTHER), { ...cardCaller("dev-a"), developerId: developerIdOf(principalOf("dev-b")) }, { ...cardCaller("dev-a"), principal: { ...principalOf("dev-a", OTHER), authTime: STEP_UP.at } }]) {
+    for (const who of [cardCaller("dev-b"), cardCaller("dev-x", OTHER), { ...cardCaller("dev-a"), developerId: developerIdOf(principalOf("dev-b")) }, { ...cardCaller("dev-a"), principal: principalOf("dev-a", OTHER) }]) {
       expect(await t.deps.performer.approve(who, { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
     }
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
@@ -383,7 +381,7 @@ describe("the deployed decision cards: acting", () => {
     const t = await setup();
     t.memberships.set("dev-a", { companyId: OTHER, role: "member" });
     const elsewhere = await t.waitingTask("dev-a", OTHER);
-    const items = await t.otherDeps.sources.list(cardCaller("dev-a", OTHER, { stepUp: false }));
+    const items = await t.otherDeps.sources.list(cardCaller("dev-a", OTHER));
     const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(elsewhere))!;
     t.memberships.set("dev-a", { companyId: ORG, role: "member" });
     expect(await t.deps.performer.approve(cardCaller("dev-a"), { card, item: items[0]!, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
@@ -431,7 +429,7 @@ describe("the deployed decision cards: acting", () => {
 
 /** The card and item the person was shown for one task (as the route projects them). */
 async function itemFor(t: Awaited<ReturnType<typeof setup>>, taskId: string) {
-  const items = await t.deps.sources.list(cardCaller("dev-a", ORG, { stepUp: false }));
+  const items = await t.deps.sources.list(cardCaller("dev-a", ORG));
   const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(taskId));
   const item = items.find((entry) => entry.taskId === taskId);
   if (card === undefined || item === undefined) throw new Error("no card");
@@ -448,7 +446,7 @@ async function hexSetup(options: Parameters<typeof setup>[0] = {}) {
   return t;
 }
 // Web task channel C6 (plan 4.1, decision D5): the task's People co-owners decide a core task's documents under the same live rule as the owner moves (live membership, the live proof of the person, the project
-// grant, the People revision fenced into the decision); commenters and viewers never decide; the step-up is still required for every decision.
+// grant, the People revision fenced into the decision); commenters and viewers never decide; no step-up is asked (DEC 254zzz73).
 describe("the deployed decision cards: People co-owners (web task channel C6)", () => {
   
   /** A world with the deployed task access over PEOPLE; dev-a owns the task, dev-b co-owns it, dev-c comments, dev-d views, dev-e is not on it. `involved` is the task ids the involved rows would give. */
@@ -461,7 +459,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     return { ...t, taskId, involved };
   }
   type World = Awaited<ReturnType<typeof peopleWorld>>;
-  const listFor = (t: World, personId: string, companyId: string = ORG) => (companyId === ORG ? t.deps : t.otherDeps).sources.list(cardCaller(personId, companyId, { stepUp: false }));
+  const listFor = (t: World, personId: string, companyId: string = ORG) => (companyId === ORG ? t.deps : t.otherDeps).sources.list(cardCaller(personId, companyId));
   /** The card and item as the task's own person was shown them (drawn while everything still held). */
   async function shown(t: World) {
     const items = await listFor(t, PA);
@@ -560,11 +558,12 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     expect((await approve(t.deps, t.taskId, cardCaller(PB)))?.statusCode).toBe(200);
   });
 
-  it("still needs the fresh step-up for a co-owner's every act, before any proof is issued", async () => {
+  it("a co-owner decides with no step-up, while a commenter, a viewer and a person not on the task decide nothing", async () => {
     const t = await peopleWorld();
-    await expect(approve(t.deps, t.taskId, cardCaller(PB, ORG, { stepUp: false }), PB)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    for (const who of [PC, PD, PE]) await expect(approve(t.deps, t.taskId, cardCaller(who), who)).rejects.toBeDefined();
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
     expect(await decided(t)).toBe(false);
+    expect((await approve(t.deps, t.taskId, cardCaller(PB), PB))?.statusCode).toBe(200);
   });
 
   it("keeps two companies apart: another company's owner named on this task's list, and this company's person on another company's task, decide nothing", async () => {
@@ -573,14 +572,14 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const item = await shown(t);
     // dev-x belongs to the other company: this company's cards are not theirs, in either runtime.
     expect(await listFor(t, PX, OTHER)).toEqual([]);
-    expect(await t.deps.sources.list(cardCaller(PX, OTHER, { stepUp: false }))).toEqual([]);
+    expect(await t.deps.sources.list(cardCaller(PX, OTHER))).toEqual([]);
     expect(await t.deps.performer.approve(cardCaller(PX, OTHER), { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
     // The other company's task, with this company's person on its list.
     const foreign = await t.waitingTask(PX, OTHER);
     await t.seedPeople(foreign, [[PX, "owner"], [PA, "owner"]]);
     t.involved.push(foreign);
-    expect((await t.deps.sources.list(cardCaller(PA, ORG, { stepUp: false }))).map((entry) => entry.taskId)).toEqual([t.taskId]);
-    expect(await t.otherDeps.sources.list(cardCaller(PA, ORG, { stepUp: false }))).toEqual([]);
+    expect((await t.deps.sources.list(cardCaller(PA, ORG))).map((entry) => entry.taskId)).toEqual([t.taskId]);
+    expect(await t.otherDeps.sources.list(cardCaller(PA, ORG))).toEqual([]);
     expect(t.point.proofs.issue).not.toHaveBeenCalled();
     expect(await decided(t)).toBe(false);
   });
@@ -650,7 +649,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     expect((await t.stored(taskId)).decisions.at(-1)).toMatchObject({ decision: "APPROVE", actorId: before.ownerId, actorRole: "TASK_OWNER" });
     expect(t.check).not.toHaveBeenCalled();
     const other = await t.waitingTask(PA);
-    const item = (await t.deps.sources.list(cardCaller(PA, ORG, { stepUp: false }))).map((entry) => ({ item: entry, card: projectDecisionCards([entry]).cards[0]! }))[0]!;
+    const item = (await t.deps.sources.list(cardCaller(PA, ORG))).map((entry) => ({ item: entry, card: projectDecisionCards([entry]).cards[0]! }))[0]!;
     for (const who of [PB, PC]) expect(await t.deps.performer.approve(cardCaller(who), { card: item.card, item: item.item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
     expect((await t.stored(other)).stage).toBe("PLAN_REVIEW");
   });
@@ -661,7 +660,7 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const access = t.runtime.flow.deps.access;
     delete access.ownerActing;
     const bare = deployedDecisionCards({ runtime: t.runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
-    const items = await bare.sources.list(cardCaller(PA, ORG, { stepUp: false }));
+    const items = await bare.sources.list(cardCaller(PA, ORG));
     expect(items.map((entry) => entry.taskId)).toEqual([taskId]);
     const item = { item: items[0]!, card: projectDecisionCards(items).cards[0]! };
     expect(await bare.performer.approve(cardCaller(PB), { ...item, requestId: randomUUID() })).toEqual({ kind: "refused", reason: "forbidden" });
@@ -672,17 +671,17 @@ describe("the deployed decision cards: People co-owners (web task channel C6)", 
     const own = randomUUID();
     const t = await hexSetup({ people: true, involved: async () => { throw new Error("involved down zzq"); } });
     const mine = await t.waitingTask(PA);
-    expect((await t.deps.sources.list(cardCaller(PA, ORG, { stepUp: false }))).map((entry) => entry.taskId)).toEqual([mine]);
+    expect((await t.deps.sources.list(cardCaller(PA, ORG))).map((entry) => entry.taskId)).toEqual([mine]);
     const foreignTask = await t.waitingTask(PX, OTHER);
     const ids = ["not-a-task-id", "", 7 as never, foreignTask, own, mine, mine, ...Array.from({ length: 300 }, () => randomUUID())];
     const wide = deployedDecisionCards({ runtime: t.runtime, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log, involvedTaskIds: async () => ids });
-    expect((await wide.sources.list(cardCaller(PA, ORG, { stepUp: false }))).map((entry) => entry.taskId)).toEqual([mine]);
+    expect((await wide.sources.list(cardCaller(PA, ORG))).map((entry) => entry.taskId)).toEqual([mine]);
     const store = t.runtime.flow.deps.store;
     const reads = vi.fn(store.get.bind(store));
     const counting = new Proxy(store, { get: (target, property): unknown => { const value: unknown = Reflect.get(target, property); return property === "get" ? reads : typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value; } });
     const counted = { companyId: ORG, flow: { deps: { ...t.runtime.flow.deps, store: counting } } } as unknown as CoreRuntime;
     const bounded = deployedDecisionCards({ runtime: counted, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log, involvedTaskIds: async () => ids });
-    await bounded.sources.list(cardCaller(PA, ORG, { stepUp: false }));
+    await bounded.sources.list(cardCaller(PA, ORG));
     expect(reads.mock.calls.length).toBeLessThanOrEqual(1 + INVOLVED_TASKS_MAX + 5);
   });
 });
@@ -833,7 +832,7 @@ describe("the deployed decision cards fed by the involved rows (the host's own w
     await t.seedPeople(taskId, [[PA, "owner"], [PB, "owner"], [PC, "commenter"], [PD, "viewer"]]);
     const createdAt = (await t.world.store.get(taskKey(taskId)))!["createdAt"] as string;
     const wired = (runtime: CoreRuntime) => deployedDevWiringParts({ runtime, registry: t.registry, people: t.people, decisionProofs: t.point.proofs }).decisions!;
-    const list = async (personId: string, companyId: string = ORG) => (await wired(companyId === ORG ? t.runtime : t.otherRuntime).sources.list(cardCaller(personId, companyId, { stepUp: false }))).map((item) => item.taskId);
+    const list = async (personId: string, companyId: string = ORG) => (await wired(companyId === ORG ? t.runtime : t.otherRuntime).sources.list(cardCaller(personId, companyId))).map((item) => item.taskId);
     const row = (personId: string, companyId: string = ORG) => ({ companyId, personId, taskId, createdAt });
     return { ...t, taskId, list, row, createdAt };
   }

@@ -78,7 +78,7 @@ export interface SetupWorldOptions {
 
 export interface SetupWorld {
   world: FakeWorld;
-  person: (personId: string, companyId: OrgId, role: OrgRole, grants?: Person["grants"], stepUpAgoMs?: number | null) => DeployedCaller;
+  person: (personId: string, companyId: OrgId, role: OrgRole, grants?: Person["grants"]) => DeployedCaller;
   call: (request: { method: string; path: string; headers: Record<string, string>; body: string }, caller: DeployedCaller) => Promise<{ status: number; body: Record<string, unknown>; raw: string }>;
   routes: ReturnType<typeof createCoreDevRoutes>;
   audit: AuditEvent[];
@@ -93,11 +93,10 @@ export async function setupWorld(options: SetupWorldOptions = {}): Promise<Setup
   const people = new Map<string, Person>();
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => people.get(personId)?.grants[name];
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
     return {
       principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }),
     };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {
