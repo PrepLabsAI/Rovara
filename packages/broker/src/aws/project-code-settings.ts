@@ -46,6 +46,17 @@ export function codeSettingsReader(store: Store): CodeSettingsReader {
   return { read: (orgId: OrgId, project: string) => readCodeSettings(store, orgId, project) };
 }
 
+/**
+ * The same settings, for ONE company's runtime (the core's job services): asked about any other company it refuses, so a runtime never reads a settings record outside its own company,
+ * whatever company a row it is handed names. A project with no saved settings has Code's defaults (self-approval off, squash, no reviewers).
+ */
+export function companyCodeSettingsReader(store: Store, companyId: string): CodeSettingsReader {
+  return { read: async (orgId: OrgId, project: string) => {
+    if (orgId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", CODE_SETTINGS_UNREADABLE);
+    return readCodeSettings(store, companyId, project);
+  } };
+}
+
 /** Whether `next` is looser than `current`: self-approval turned on, or a required reviewer taken off. */
 export function loosens(current: CodeSettings, next: Omit<CodeSettings, "revision">): boolean {
   if (!current.allowSelfApproval && next.allowSelfApproval) return true;
