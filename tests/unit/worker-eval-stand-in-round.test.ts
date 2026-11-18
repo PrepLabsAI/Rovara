@@ -1,6 +1,7 @@
 // L4-E34 (E3 + E4) in the final-check eval: the stand-in set's version moves the base score's cache identity and nothing the approval binds (a new version re-runs the baseline inside the approved cap, with no new approval), an
 // eval with no stand-ins is unchanged, and the one fill-and-re-ask pass asks the questions that hit a missing row again, on both sides, once, inside the same cap.
-import { rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDocumentBaseScoreCache, evalBaseCacheKey, evalResultFromArtifact, evalSpendInputsDigest, evalSettingsFingerprintOf, standInSetVersion, type EvalBaseCacheKeyParts, type EvalRequest } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -132,11 +133,24 @@ describe("the fill-and-re-ask pass", () => {
     expect(evalResultFromArtifact(artifact).outcome).toBe("ran"); expect(evalResultFromArtifact(artifact).label).toBe(evalResultFromArtifact(plain).label);
     expect(w.stages).toHaveLength(1); expect(w.calls).toHaveLength(4);
   });
-  it("a regression only the suspect re-asks can confirm is still confirmed when the fill pass would have used the budget", async () => {
-    const without = await world(false); Object.assign(without.grant, { maxCalls: 4 + 6 * 4 }); const plain = await runFinalCheckEval(request, without.ports, facts());
-    expect(evalResultFromArtifact(plain).label).toBe("Worse on eval");
-    const w = await world(false); Object.assign(w.grant, { maxCalls: 4 + 6 * 4 }); w.ports.fillMissingRows = async () => ["q1"];
-    expect(evalResultFromArtifact(await runFinalCheckEval(request, w.ports, facts())).label).toBe("Worse on eval");
+  it("a regression only the suspect re-asks can confirm is still confirmed when the fill pass would have used the budget those re-asks need", async () => {
+    // two broken SAFETY questions of four: only the suspect re-asks can confirm them (4 + 12 calls, the whole budget), and a fill pass on a THIRD question (4 calls) would leave them too little
+    const broken = async (withFill: boolean) => {
+      const w = await world(true, 4); Object.assign(w.grant, { maxCalls: 16 }); for (const i of [0, 2]) (w.plan.questions[i] as { category: string }).category = "safety";
+      const run = w.ports.runner;
+      w.ports.runner = async r => {
+        const out = await run(r);
+        if (r.side === "new") { const file = join(out.report.root, out.report.argument); const body = JSON.parse(await readFile(file, "utf8")) as { questions: Array<{ id: string; samples: Array<{ pass: boolean; answer: string }> }> }; for (const q of body.questions) if (q.id === "q0" || q.id === "q2") q.samples = q.samples.map(() => ({ pass: false, answer: "new" })); await writeFile(file, JSON.stringify(body)); }
+        return out;
+      };
+      if (withFill) w.ports.fillMissingRows = async () => ["q1"];
+      return { artifact: await runFinalCheckEval(request, w.ports, facts()), stages: w.stages };
+    };
+    const plain = await broken(false);
+    expect(evalResultFromArtifact(plain.artifact).label).toBe("Worse on eval"); expect(plain.stages.length).toBeGreaterThan(1);
+    const filled = await broken(true);
+    expect(evalResultFromArtifact(filled.artifact).label).toBe("Worse on eval");
+    expect(filled.stages.some(s => s.ids.length === 1 && s.ids[0] === "q1" && s.runs === 3)).toBe(false); // the fill pass was skipped: no room
   });
   it("a refused meter hold or a failed re-ask drops the pass; it never turns a finished round into Not run", async () => {
     const w = await world(); const reserve = w.ports.meter.reserve.bind(w.ports.meter); let holds = 0; w.ports.fillMissingRows = async () => ["q1"];

@@ -17,9 +17,9 @@ const POSTS = { name: "posts", primaryKey: ["id"], uniques: [], columns: [col("i
 const LATER = { name: "audit", primaryKey: ["id"], uniques: [], foreignKeys: [], columns: [col("id", "integer"), col("note", "text")] };
 
 /** A simulated database: a migration command creates its tables, a seed file marked `-- seed:<table>` puts a row in that table, an INSERT block puts the rows it names; the two reads answer from the state. */
-function simulated(options: { migrations?: Record<string, unknown[]>; failCommand?: string; timeoutCommand?: string; failSql?: (sql: string) => boolean; sqlError?: SeedFileError; garbageSchema?: boolean } = {}) {
+function simulated(options: { migrations?: Record<string, unknown[]>; failCommand?: string; timeoutCommand?: string; failSql?: (sql: string) => boolean; sqlError?: SeedFileError; garbageSchema?: boolean; garbageAfterGenerated?: boolean } = {}) {
   const tables = new Map<string, { def: Record<string, unknown>; rows: number }>();
-  const log: string[] = []; const sql: string[] = []; const reads: string[] = [];
+  const log: string[] = []; const sql: string[] = []; const reads: string[] = []; let generated = false;
   const port: StandInDatabasePort = {
     async runCommand(cmd) {
       const line = formatCommandLine(cmd); log.push(`cmd ${line}`);
@@ -29,7 +29,7 @@ function simulated(options: { migrations?: Record<string, unknown[]>; failComman
       return { exitCode: 0, timedOut: false };
     },
     async loadSql(bytes) {
-      const text = bytes.toString("utf8"); log.push(`sql ${text.slice(0, 20).replace(/\n/gu, " ")}`); sql.push(text);
+      const text = bytes.toString("utf8"); if (text.startsWith("DO $stand_in$")) generated = true; log.push(`sql ${text.slice(0, 20).replace(/\n/gu, " ")}`); sql.push(text);
       if (options.sqlError !== undefined) throw options.sqlError;
       if (options.failSql?.(text) === true) throw new SeedFileError("load_failed");
       for (const m of text.matchAll(/-- seed:(\w+)/gu)) { const t = tables.get(m[1]!); if (t) t.rows += 1; }
@@ -37,7 +37,7 @@ function simulated(options: { migrations?: Record<string, unknown[]>; failComman
     },
     async readText(statement) {
       reads.push(statement.slice(0, 40));
-      if (options.garbageSchema === true) return "not json";
+      if (options.garbageSchema === true || (options.garbageAfterGenerated === true && generated && statement === STAND_IN_SCHEMA_STATEMENT)) return "not json";
       if (statement === STAND_IN_SCHEMA_STATEMENT) return JSON.stringify({ tables: [...tables.values()].map(({ def, rows }) => ({ ...def, hasRows: rows > 0 })) });
       const named = [...statement.matchAll(/'(\w+)', \(SELECT COALESCE/gu)].map(m => m[1]!);
       return JSON.stringify(Object.fromEntries(named.map(name => [name, [{ id: 1 }, { id: 2 }]])));
@@ -91,7 +91,7 @@ describe("one side's fresh database", () => {
     expect(report.generatorVersion).toBe(STAND_IN_ROW_GENERATOR_VERSION);
     expect(seedCommandDigest(command("npm", "run", "seed"))).toBe(seedCommandDigest(seedCommand)); expect(seedCommandDigest(command("npm", "run", "seed2"))).not.toBe(seedCommandDigest(seedCommand));
   });
-  it("ends the side with a fixed reason, and runs nothing after it, for a failed or timed-out migration or seed, a rollback command, too many steps, an stop", async () => {
+  it("ends the side with a fixed reason, and runs nothing after it, for a failed or timed-out migration or seed, a rollback command, too many steps and a stop", async () => {
     const down = command("alembic", "downgrade", "base"); const seedCommand = command("npm", "run", "seed");
     const failing = simulated({ migrations: MIGRATIONS, failCommand: "alembic upgrade head" });
     expect(await reasonOf(prepareStandInDatabase({ side: "new", database: failing.port, steps: [{ kind: "command", command: MIGRATE }, seedFile("users")], signal: signal() }))).toBe("migration_failed");
@@ -115,6 +115,12 @@ describe("one side's fresh database", () => {
     expect(report.filled).toEqual([]); expect(report.skipped).toEqual([{ table: "", reason: "not_filled" }]); expect(report.seedDigests).toHaveLength(1);
     expect(db.sql.every(text => !text.includes("$stand_in$"))).toBe(true);
     expect(await filler.fill([{ table: "users", column: "email", value: "a@example.test" }], signal())).toEqual({ filled: [], skipped: [{ table: "", reason: "not_filled" }] });
+  });
+  it("a schema that cannot be read AFTER the generated rows loaded is not a failure either: nothing is counted as filled, the seeds stand, the filler still comes back", async () => {
+    const db = simulated({ migrations: MIGRATIONS, garbageAfterGenerated: true });
+    const { report, filler } = await prepareStandInDatabase({ side: "new", database: db.port, steps: [{ kind: "command", command: MIGRATE }, seedFile("users")], signal: signal() });
+    expect(report.filled).toEqual([]); expect(report.skipped).toEqual([{ table: "orgs", reason: "not_filled" }, { table: "posts", reason: "not_filled" }]); expect(report.seedDigests).toHaveLength(1);
+    expect(typeof filler.fill).toBe("function");
   });
   it("a failure carries a fixed sentence: no command text, no path, no database output", async () => {
     const secret = command("npm", "run", "migrate:up", "--token=private-token-value");
@@ -193,6 +199,7 @@ describe("the fill and re-ask pass", () => {
   it("fills ONLY keys the old code also asked for: a key only the change looked up (its own possible mistake) is never written, so it cannot hide a regression", async () => {
     const old = await prepared("old"); const changed = await prepared("new"); const before = old.db.sql.length;
     const pass = createFillPass({ fillers: [old.filler, changed.filler], signal: signal(), observed: async () => [
+      ...Array.from({ length: 60 }, (_, i) => ({ questionId: "q1", lookup: { table: "users", column: "id", value: 900 + i }, side: "new" as const })),
       { questionId: "q1", lookup: { table: "users", column: "id", value: 777 }, side: "new" as const }, { questionId: "q2", lookup: { table: "users", column: "email", value: "shared@example.test" }, side: "old" as const },
       { questionId: "q2", lookup: { table: "users", column: "email", value: "shared@example.test" }, side: "new" as const }] });
     expect(await pass({ ids: ["q1", "q2"] })).toEqual(["q2"]);

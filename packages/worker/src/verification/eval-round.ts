@@ -320,13 +320,16 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     const known = new Set(ids);
     const found = await Promise.resolve().then(() => config.fillMissingRows!({ ids })).catch(() => undefined);
     const gaps = Array.isArray(found) ? [...new Set(found.filter((id): id is string => typeof id === "string" && known.has(id)))].slice(0, ids.length) : [];
-    if (gaps.length > 0 && fits(4 * gaps.length + 6 * Math.min(gaps.length, 20)) && reserve("re-asks", 4 * gaps.length)) {
+    // Room for the pass AND for the suspect re-asks the round will really make: every suspect now, plus the gap questions (which may become suspects after the refill), at most 20 as `evalSuspects` caps them.
+    const current = evalSuspects(questions); const mayBeSuspects = new Set([...current.down, ...current.up, ...gaps]);
+    if (gaps.length > 0 && fits(4 * gaps.length + 6 * Math.min(mayBeSuspects.size, 20)) && reserve("re-asks", 4 * gaps.length)) {
       const before = stop;
-      const oldAgain = await run("old", gaps, 3); const newAgain = oldAgain === undefined ? undefined : await run("new", gaps, 1);
+      const oldAgain = await run("old", gaps, 3); const afterOld = stop;
+      const newAgain = oldAgain === undefined ? undefined : await run("new", gaps, 1);
       if (oldAgain !== undefined && newAgain !== undefined) {
         const refilled = new Set(gaps);
         questions = questions.map(q => (refilled.has(q.id) ? { ...q, old: oldAgain.get(q.id)!.samples, first: newAgain.get(q.id)!.samples[0]! } : q));
-      } else stop = before;
+      } else if (oldAgain === undefined || afterOld === before) stop = before; // a failed stage is dropped; an overrun the old stage reported with data stays
     }
   }
   if (config.subsetSupported) {

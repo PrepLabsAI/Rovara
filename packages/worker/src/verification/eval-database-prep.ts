@@ -139,9 +139,16 @@ export async function prepareStandInDatabase(input: { side: "old" | "new"; datab
   const keys = await readKeys(database, parentKeyColumns(schema), signal);
   const plan = planStandInRows(schema, keys);
   const loaded = await loadPlan(database, plan, signal);
-  const after = loaded && plan.tables.length > 0 ? await readSchema(database, signal) : schema;
-  const stillEmpty = new Set(after.tables.filter(table => table.hasRows === false).map(table => table.name));
-  const filled = loaded ? plan.tables.filter(entry => !stillEmpty.has(entry.table)) : [];
+  // The check after the load is best effort too: when it cannot be read the load is unverified, nothing is counted as filled, and the seeds and migrations stand.
+  let after: StandInSchema | undefined = schema;
+  if (loaded && plan.tables.length > 0) {
+    try { after = await readSchema(database, signal); } catch (error) {
+      if (error instanceof StandInPrepareError && error.reason === "stopped") throw error;
+      after = undefined;
+    }
+  }
+  const stillEmpty = new Set((after ?? schema).tables.filter(table => table.hasRows === false).map(table => table.name));
+  const filled = loaded && after !== undefined ? plan.tables.filter(entry => !stillEmpty.has(entry.table)) : [];
   const failed = plan.tables.filter(entry => !filled.some(done => done.table === entry.table)).map(entry => ({ table: entry.table, reason: "not_filled" as const }));
   const report: StandInDatabaseReport = { side: input.side, migrations: migrations.length, seeds: seeds.length, seedDigests, generatorVersion: STAND_IN_ROW_GENERATOR_VERSION, filled, skipped: [...plan.skipped.filter(entry => entry.reason !== "has_rows"), ...failed] };
   const filler: StandInFiller = {
@@ -183,7 +190,8 @@ const lookupKey = (lookup: ZeroRowLookup): string => `${lookup.table}\u0000${loo
  *
  * ONLY KEYS THE OLD CODE ASKED FOR. A key that only the CHANGE's code looks up could be the change's own mistake (a wrong id, a wrong column); writing a row for it would hide that regression. So a lookup is filled only when the
  * observer also saw the same table, column and value asked by the OLD side (`side: "old"`, from the baseline's or an old re-ask's ledger). A change that asks for a key the old code never needed stays unfilled and is judged as it ran.
- * Re-asked questions are measured on filled data (the round says so). A second call, an observer that fails, a lookup not in the ids or one that could not be
+ * Re-asked questions are measured on filled data. The observer that reports `side: "old"` lookups (from the old baseline's ledger or an old re-ask) belongs to the services wiring (L4-E12); until it is wired no lookup is
+ * filled, which is the safe direction. A second call, an observer that fails, a lookup not in the ids or one that could not be
  * written gives nothing: this pass never stops an eval and never repeats.
  */
 export function createFillPass(input: {
@@ -199,9 +207,9 @@ export function createFillPass(input: {
     used = true;
     try {
       const ids = new Set(request.ids);
-      let seen = (await input.observed(request.ids)).filter(item => ids.has(item.questionId) && PLAIN_NAME.test(item.lookup.table) && PLAIN_NAME.test(item.lookup.column)).slice(0, STAND_IN_LIMITS.lookups);
-      const oldKeys = new Set(seen.filter(item => item.side === "old").map(item => lookupKey(item.lookup)));
-      seen = seen.filter(item => oldKeys.has(lookupKey(item.lookup)));
+      const plain = (await input.observed(request.ids)).filter(item => ids.has(item.questionId) && PLAIN_NAME.test(item.lookup.table) && PLAIN_NAME.test(item.lookup.column));
+      const oldKeys = new Set(plain.filter(item => item.side === "old").map(item => lookupKey(item.lookup)));
+      const seen = plain.filter(item => oldKeys.has(lookupKey(item.lookup))).slice(0, STAND_IN_LIMITS.lookups);
       if (seen.length === 0) return [];
       for (const item of seen) log({ event: "stand-in.zero-row-lookup", table: item.lookup.table, column: item.lookup.column });
       const lookups = seen.map(item => item.lookup);

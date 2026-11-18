@@ -102,7 +102,7 @@ SELECT json_build_object(
  'name', c.relname::text,
  'hasRows', (xpath('/row/c/text()', query_to_xml(format('select (exists(select 1 from %I.%I))::int as c', n.nspname, c.relname), false, true, '')))[1]::text = '1',
  'columns', (SELECT COALESCE(json_agg(json_build_object('name', a.attname::text, 'type', format_type(a.atttypid, a.atttypmod), 'nullable', NOT a.attnotnull, 'identity', a.attidentity::text, 'generated', a.attgenerated::text <> '',
-   'enumValues', COALESCE((SELECT json_agg(e.enumlabel::text ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = a.atttypid), '[]'::json)) ORDER BY a.attnum), '[]'::json)
+   'enumValues', COALESCE((SELECT json_agg(l.label ORDER BY l.sortorder) FROM (SELECT e.enumlabel::text AS label, e.enumsortorder AS sortorder FROM pg_enum e WHERE e.enumtypid = a.atttypid ORDER BY e.enumsortorder LIMIT 64) l), '[]'::json)) ORDER BY a.attnum), '[]'::json)
    FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped),
  'primaryKey', COALESCE((SELECT json_agg(a.attname::text ORDER BY k.ord) FROM pg_constraint x CROSS JOIN LATERAL unnest(x.conkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum WHERE x.conrelid = c.oid AND x.contype = 'p'), '[]'::json),
  'uniques', COALESCE((SELECT json_agg(u.cols) FROM (SELECT (SELECT json_agg(a.attname::text ORDER BY k.ord) FROM unnest(x.conkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum) AS cols FROM pg_constraint x WHERE x.conrelid = c.oid AND x.contype = 'u') u), '[]'::json),
