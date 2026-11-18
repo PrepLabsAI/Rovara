@@ -71,6 +71,8 @@ import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
 import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wiring.js";
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
+import { baseFlakyTests } from "../core/test-env/base-flaky.js";
+import { flakyFactsPort } from "../lessons/knowledge-facts.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
@@ -553,6 +555,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         } else {
           lessons = createCoreLessons({
             flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId), now: () => now().getTime(), log,
+            // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
+            knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
             ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;

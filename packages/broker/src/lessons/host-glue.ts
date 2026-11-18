@@ -25,9 +25,10 @@ import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
 import { logTaskCorrections } from "./correction-log.js";
 import type { Lesson } from "./types.js";
+import { loadAnswerBriefing } from "./answer-briefing.js";
 import { PUSH_FIT_FLOOR, learnedContextForDispatch, lessonsAndPickedForDispatch, loadPullForStage } from "./load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pathsNamedIn, type KnowledgeSources } from "./knowledge-brief.js";
-import { recordKnowledgeUseReport } from "./knowledge-use.js";
+import { knowledgeGivenItem, recordKnowledgeUseReport } from "./knowledge-use.js";
 import { modeAllows, resolveLearning } from "./policy.js";
 import type { LessonsRuntime } from "./runtime.js";
 import { documentReflectClaims } from "./reflect-claims.js";
@@ -78,6 +79,8 @@ export interface LessonsHostInput {
 
 export interface LessonsHost {
   learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
+  /** Lead 4 L4-AK2b: the team knowledge briefing for the answer a person asks of one project (the same lessons read path, facts and "more" line as a coding step; whole-project readers only). Undefined when learning is off here, nothing fits, or anything cannot be read in time. Never throws, never writes. It takes no person: the caller (the answer service) has already checked the asker's role on this project. */
+  answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
   /** The numbered list written into a pull request's description (a comment's number refers to it). */
@@ -188,7 +191,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.
         if (knowledgeContext !== undefined && !abandoned) {
           const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: (loaded.learnedContext?.lessons ?? []).map((lesson) => lesson.id), knowledge: knowledgeContext });
-          await flow.store.put({ item: { pk: companyScoped(companyId, "KNOWLEDGE_GIVEN"), sk: request.operationId, entityType: "KNOWLEDGE_GIVEN", ...record, ...ttl(LOAD_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+          await flow.store.put({ item: knowledgeGivenItem({ companyId, operationId: request.operationId, record, now, ttlAttribute: flow.store.ttlAttribute }) }).catch(() => undefined);
         }
         return { ...(loaded.learnedContext === undefined ? {} : { learnedContext: loaded.learnedContext }), ...(knowledgeContext === undefined ? {} : { knowledgeContext }) };
       })();
@@ -344,7 +347,14 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     } catch { log("send_back_not_queued"); }
   }
 
-  return { learnedFor, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, noteSentBack, ownTask };
+  async function answerBriefing(request: Parameters<LessonsHost["answerBriefing"]>[0]): Promise<string | undefined> {
+    if (!enabled()) return undefined;
+    try {
+      return await loadAnswerBriefing({ ...runtime.load, ...(input.knowledge?.facts === undefined ? {} : { facts: input.knowledge.facts }) }, { workspaceId: companyId, project: request.project, question: request.question, repos: request.repos });
+    } catch { return undefined; }
+  }
+
+  return { learnedFor, answerBriefing, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, noteSentBack, ownTask };
 }
 
 export type ReflectOutcome = Awaited<ReturnType<typeof runReflectMessage>> | { result: "failed"; retry: true };
