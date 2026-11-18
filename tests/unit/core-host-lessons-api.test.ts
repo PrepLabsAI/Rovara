@@ -1246,12 +1246,61 @@ describe("Rovara skills (L4-AK3)", () => {
     expect(await call(target, "a-admin", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { skills: [{ retired: true }] } });
   });
 
+  it("L4-JA: the list says whether you may decide; one skill is read with the text of its newest version and its form, and the form makes the same text again", async () => {
+    const w = await setUp();
+    await proven(w);
+    const { api: target } = api(w);
+    await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {});
+    // Who may decide (the directory's answer, not a guess): an admin and a maintainer yes, a contributor and a person off the project no.
+    for (const [person, can] of [["a-admin", true], ["a-maint", true], ["a-contrib", false]] as const) expect(await call(target, person, "GET", `${P}/skills`), person).toMatchObject({ ok: true, body: { canDecide: can, skills: [{ name: "add-a-queue-handler" }] } });
+    expect(await call(target, "a-out", "GET", `${P}/skills`)).toMatchObject({ ok: false, status: 404 });
+    // The list carries no text; the one-skill read does, for anyone on the project (a contributor reads what the agents are sent).
+    const list = await call(target, "a-contrib", "GET", `${P}/skills`);
+    expect(JSON.stringify(list)).not.toContain("Register the handler");
+    const one = await call(target, "a-contrib", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { ok: true; body: { project: string; canDecide: boolean; skills: Array<Record<string, any>> } };
+    expect(one).toMatchObject({ ok: true, body: { project: "payments", canDecide: false, skills: [{ name: "add-a-queue-handler", currentVersion: 1, approvals: 0, approvedByYou: false }] } });
+    expect(one.body.skills).toHaveLength(1);
+    const detail = one.body.skills[0]!;
+    expect(detail["content"]).toContain("## Steps");
+    expect(detail["content"]).toContain("Create the queue and its dead-letter queue.");
+    expect(detail["approvers"]).toBeUndefined();
+    expect(detail["form"]).toMatchObject({ when: "adding a new queue", steps: ["Create the queue and its dead-letter queue.", "Register the handler.", "Add an alarm on the dead-letter depth."] });
+    // Saving the form as it was read gives a new version with the very same text, so nothing is lost by an edit that changes one step.
+    const form = detail["form"] as { description: string; when: string; steps: string[]; doneWhen?: string; why?: string };
+    expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, ...form })).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 2 } });
+    const second = (await call(target, "a-maint", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" }) as { body: { skills: Array<Record<string, any>> } }).body.skills[0]!;
+    expect(second["currentVersion"]).toBe(2);
+    expect(second["content"]).toBe(detail["content"]);
+    // Bad asks: another query, a name twice, a name that is not one, a skill that is not there, a skill of the other company.
+    for (const query of [{ x: "1" }, { name: "Bad" }, { name: "" }, { name: "a-b", x: "1" }]) expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, query), JSON.stringify(query)).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    // A name given twice is refused too (a record cannot say it, so the request is made by hand).
+    await expect(target.answer({ method: "GET", path: `${P}/skills`, query: new URLSearchParams("name=a-b&name=c-d") }, { personId: "a-admin" } as any)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(await call(target, "a-admin", "GET", `${P}/skills`, undefined, { name: "no-such-skill" })).toMatchObject({ ok: false, status: 404, message: "That skill is no longer there." });
+    expect(await call(target, "b-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" })).toMatchObject({ ok: false, status: 404 });
+  });
+
+  it("L4-JA: a skill text this build cannot read back exactly has no form (never a guess), and the text is still shown; a long skill carries the splitting note", async () => {
+    const w = await setUp();
+    await proven(w);
+    const { api: target } = api(w);
+    await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {});
+    const documents = w.lessons.get(A)!.runtime.documents;
+    const key = { pk: companyScoped(A, "SKILL#payments"), sk: "v#add-a-queue-handler#000001" };
+    const row = (await documents.get(key))!;
+    await documents.put({ item: { ...row, content: `${String(row["content"])}\nA line added by hand.\n`, bytes: 9_000 } });
+    const got = await call(target, "a-admin", "GET", `${P}/skills`, undefined, { name: "add-a-queue-handler" });
+    const read = (got as { body: { skills: Array<Record<string, any>> } }).body.skills[0]!;
+    expect(read["form"]).toBeUndefined();
+    expect(read["content"]).toContain("A line added by hand.");
+    expect(read["note"]).toBe("This skill is long. Consider splitting it into smaller skills.");
+  });
+
   it("two companies with the same project name never see or change each other's skills", async () => {
     const w = await setUp();
     await proven(w);
     const { api: target } = api(w);
     await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {});
-    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", canDecide: true, skills: [] } });
     for (const [method, path, body] of [["POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 }], ["POST", `${P}/skills/add-a-queue-handler/retire`, {}], ["PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, description: "d", when: "w", steps: ["x"] }]] as const) {
       expect(await call(target, "b-admin", method, path, body), `${method} ${path}`).toMatchObject({ ok: false, status: 404 });
     }
