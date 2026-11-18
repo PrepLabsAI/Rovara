@@ -29,8 +29,8 @@
     {
       "path": "packages/broker/src/aws/slack-adapter.ts",
       "rule": "cloud-aws",
-      "blob": "2b6483d42dbac94f6ab64571a6080b00396e60a9",
-      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync)"
+      "blob": "eb4c09255d3468bfb08d4b16d183f5444dcb59b1",
+      "reason": "owner decision 2026-11-12: AWS files already public on mainline (spec 062, brought in by the mainline sync); re-pinned to #1036's version (the Slack thread_messages read, L4-SRC-SL) by owner DEC 254zzz44"
     },
     {
       "path": "packages/broker/src/aws/slack-channel-presses.ts",
