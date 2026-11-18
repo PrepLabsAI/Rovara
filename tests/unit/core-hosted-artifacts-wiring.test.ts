@@ -47,6 +47,19 @@ describe("the broker's core root gives each company's flow a company-bound artif
     expect(a.artifacts).not.toBe(b.artifacts);
   });
 
+  it("wires both hosted reviewer kinds and fail-safe company autonomy on the real root", async () => {
+    const { root } = await world();
+    const a = (await root.app.runtimeFor(A)).flow.deps;
+    const b = (await root.app.runtimeFor(B)).flow.deps;
+    expect(typeof a.secondReview?.prepare).toBe("function");
+    expect(typeof a.designReview?.runRow).toBe("function");
+    expect(typeof a.designReview?.designFirst).toBe("function");
+    expect(a.secondReview).not.toBe(b.secondReview);
+    expect(a.designReview).not.toBe(b.designReview);
+    expect(await a.autonomy!({ companyId: A } as never)).toEqual({ autonomy: "suggest", unreadable: true });
+    expect(await a.autonomy!({ companyId: B } as never)).toEqual({ autonomy: "suggest", noCompany: true });
+  });
+
   it("reads a company's own workspace documents and never another company's, even for the same raw workspace id", async () => {
     const { root, put, workspace, logs, w } = await world();
     await workspace(A, "ws-shared", "owner-a"); await workspace(B, "ws-shared", "owner-b"); await workspace(B, "ws-b-only", "owner-b");

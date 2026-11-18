@@ -13,6 +13,7 @@ import {
   type SecondOpinion, type WorkflowReviewReport, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { ROUTE_PROVIDER } from "@agentx/model-runtime/catalog";
+import { createHostedReviewers, SECOND_PROVIDER_UNAVAILABLE } from "../../packages/broker/src/core-host/hosted-reviewers.js";
 import { recordReviewed } from "../../packages/broker/src/core/build-step/results.js";
 import { startReview } from "../../packages/broker/src/core/build-step/start.js";
 import { workflowPullRequestBody } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
@@ -506,4 +507,22 @@ describe("the proxy-seen answer, however the report names the model", () => {
     const task = await ends(h, await started(h), { second: answer("FINDINGS", [BLOCKING]) });
     expect(task.secondOpinion?.opinion).toMatchObject({ unavailable: true, unavailableReason: "no-answer" });
   });
+});
+
+it("hosted connectivity refusal is visible in the stored task timeline and rendered PR body without review spend", async () => {
+  const { h } = await seeded("shadow", { secondReviewOn: false });
+  let spends = 0;
+  const admission = h.deps.admission;
+  h.deps.admission = { ...admission, admit: async (request) => { if (request.action === "model.call") spends += 1; return admission.admit(request); } };
+  const registry = { names: () => [], require: (point: string) => point === "audit-sink" ? h.deps.audit : {} } as never;
+  h.deps.secondReview = createHostedReviewers({ flow: h.deps, companyId: COMPANY, registry, taskRoomUsd: async () => 5 }).secondReview;
+  const operation = await started(h);
+  const events = await h.store.query({ pk: operation.pk, sk: { op: "beginsWith", prefix: `EVENT#${operation.id}#` } });
+  expect(events.items.some((event) => (event["payload"] as { message?: string } | undefined)?.message === SECOND_PROVIDER_UNAVAILABLE)).toBe(true);
+  expect(operation.dispatch.payload).not.toHaveProperty("workflowSecondReviewer");
+  const task = await ends(h, operation);
+  const lines = h.deps.secondReview.prLines(task, code.digest);
+  const body = workflowPullRequestBody({ title: "Retry" }, task.workflow, "# Plan", "https://rovara.example/task", { secondReviewLines: lines });
+  expect(body).toContain(SECOND_PROVIDER_UNAVAILABLE);
+  expect(spends).toBe(0);
 });

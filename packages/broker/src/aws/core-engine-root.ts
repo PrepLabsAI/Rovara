@@ -98,6 +98,9 @@ import { createCompanyArtifactReader } from "../core-host/company-artifact-reade
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
+import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
+import { createHostedReviewers } from "../core-host/hosted-reviewers.js";
+import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -800,6 +803,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-HW4 (the laptop's `evidence.keepAfterChecks`): when a run's checks are recorded for a candidate, the evidence of that run (per-check output, the failing tests with the change that most likely broke each, the baseline words) is
       // kept for the Proof route, in the company-bound object store (only this company's own workspaces; the same data guard and caps as the laptop). A rerun of the checks also asks the worker to save the raw parts (`evidenceCapture`).
       keepEvidence: hostedKeepEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, env, now: () => now().getTime(), log, refused: (reason) => log({ event: "core_engine.evidence_refused", companyId, reason }) }),
+      autonomy: hostedAutonomy({ store: registry.require("storage"), companyId }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
@@ -813,6 +817,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       log,
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
+        createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task), env, blobs: registry.require("object-storage") });
         const choice = modelChoices.choiceFor(companyId);
         if (choice !== undefined) {
           // Validate immediately before broker-side dispatch handoff, including start, callbacks and scheduled relays.
@@ -1236,7 +1242,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const wikiOnEvents = createWikiOnEvents({ store: registry.require("storage"), companyId, now: () => now().getTime() });
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
-        const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));
+        const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps, createHostedReviewers({ flow: runtime.flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).grants));
         return createCallbackService({
           ...(gateway === undefined ? {} : { modelGateway: gateway }),
           flow: runtime.flow.deps,

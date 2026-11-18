@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { AgentXError, agentXError, PAYER_UNRESOLVED } from "@agentx/contracts";
+import { AgentXError, agentXError, PAYER_UNRESOLVED, TASK_TOKEN_SECONDS, REVIEWER_GRANT_SECONDS } from "@agentx/contracts";
 import type { CallbackCapabilities } from "../../callbacks.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -24,19 +24,20 @@ const scopeSchema = z.object({
 export async function handleModelAccess(flow: TaskFlowDeps, capabilities: CallbackCapabilities, gateway: ModelGateway, request: BrokerRequest): Promise<BrokerResponse> {
   try {
     return await withinTaskTokenDeadline(async deadline => {
-      if (new URL(request.path, "https://broker.invalid").searchParams.has("slot")) throw new Error("review slots need their own model access");
+      const slots = new URL(request.path, "https://broker.invalid").searchParams.getAll("slot");
+      if (slots.length > 1 || (slots.length === 1 && (!/^[a-z][a-z0-9_-]{0,63}$/u.test(slots[0]!) || gateway.describer.describeReviewer === undefined))) throw new Error("review slots need their own model access");
       const token = request.headers["x-agentx-callback-capability"];
       if (token === undefined || token === "") throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
       if (token.length > 4096) throw agentXError("CALLBACK_FORBIDDEN", "invalid capability");
       const capability = capabilities.verify(token, "model-access");
       const parsed = scopeSchema.safeParse(capability);
       if (!parsed.success) throw agentXError("CALLBACK_FORBIDDEN", "invalid capability");
-      const scope = parsed.data;
+      const scope = { ...parsed.data, ...(slots.length === 0 ? {} : { reviewerSlot: slots[0]! }) };
       const records = await readTaskTokenRecords(flow, scope, deadline);
       const minted = await mintTaskToken({ ...gateway, now: () => (flow.now?.() ?? new Date()).getTime() }, scope, records, deadline);
       deadline.check();
       // Only these three metadata fields may be logged; never the token or a description.
-      flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - 900, exp: minted.expiresAt / 1000 });
+      flow.log?.({ operationId: scope.operationId, iat: minted.expiresAt / 1000 - (scope.reviewerSlot === undefined ? TASK_TOKEN_SECONDS : REVIEWER_GRANT_SECONDS), exp: minted.expiresAt / 1000 });
       return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ baseUrl: gateway.gatewayUrl, apiKey: minted.token, expiresAt: minted.expiresAt }) };
     });
   } catch (error) {

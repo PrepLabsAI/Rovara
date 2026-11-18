@@ -284,7 +284,7 @@ export type InvocationModelRoute = z.infer<typeof ModelRouteSchema>;
  * (`SECOND_REVIEW_CANDIDATES_MAX`; the worker makes at most 3 tries in all). The key may call only the aliases the broker chose for these models and no others, and the proxy is configured with no router fallbacks (`litellmConfig` writes none and the guard refuses fallback fields in a request; checked by a test for Rovara's own config, and a deferred check for company sources), so the model named is the model that answers.
  */
 export const SecondReviewerSchema = z.object({
-  candidates: z.array(z.object({ model: ModelSelectionSchema, modelRoute: ModelRouteSchema.optional() }).strict()).min(1).max(SECOND_REVIEW_CANDIDATES_MAX),
+  candidates: z.array(z.object({ model: ModelSelectionSchema, modelRoute: ModelRouteSchema.optional(), keySlot: z.literal("second_review").optional() }).strict()).min(1).max(SECOND_REVIEW_CANDIDATES_MAX),
   /** What the second reviewer is shown besides the change: absent means `change_only` (no source tools, lessons, step instructions or skills). */
   context: SecondReviewContextSchema.optional(),
 }).strict();
