@@ -1,5 +1,5 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
-import { createBrokerCoreServices } from "./core-job-services.js";
+import { createBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
@@ -15593,7 +15593,11 @@ function buildBrokerHandler(callbackSigningKey: string) {
         log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
       }),
     }),
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode! }),
+    // L4-HW3b: the project's own merge rules (the record the developer API's code-settings route saves), not Code's defaults: for how we work (every company's runtime) and for the merge
+    // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
+    codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
+    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId) }),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
