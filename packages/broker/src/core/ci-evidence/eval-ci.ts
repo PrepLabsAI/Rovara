@@ -132,20 +132,19 @@ export async function evalCiPass(input: {
   // Only counts are kept: failed tests' names and texts are not needed for one line (and are not shown on the task view).
   const { failedTests: _failedTests, flaky: _flaky, proven: _proven, added: _added, ...counted } = entry;
   void _failedTests; void _flaky; void _proven; void _added;
-  let kept: MarkedEntry = counted;
   // Said once for the head, run, state and reason it speaks for. `observeMarked` keeps `announced` only for a passed or failed run, so a "not run" is remembered here (else it would be written on every pass).
   const already = sameHead && priorEntry !== undefined && priorEntry.announced === true && priorEntry.state === entry.state && priorEntry.runId === entry.runId && priorEntry.reason === entry.reason;
-  if (result !== undefined && !reportPending) {
+  const settled = result !== undefined && !reportPending;
+  if (settled) {
     if (entry.announced !== true && !already) {
       await tell(input, evalCiLine(result));
     }
-    kept = { ...counted, announced: true };
   } else if (priorEntry?.announced === true) {
     // What the description says was said for a head or a run that is no longer the current one (a push, a re-run in progress): it is taken out until the check answers again.
     await tell(input, undefined);
   }
   return {
-    fields: { ciEval: kept, ...(rovaraStart === undefined || !Number.isFinite(rovaraStart) ? { ciEvalSince: new Date(ownSince).toISOString() } : {}) },
+    fields: { ciEval: settled ? { ...counted, announced: true as const } : counted, ...(rovaraStart === undefined || !Number.isFinite(rovaraStart) ? { ciEvalSince: new Date(ownSince).toISOString() } : {}) },
     ...(recheck === undefined ? {} : { recheckAt: recheck }),
     result: reportPending ? undefined : result,
   };

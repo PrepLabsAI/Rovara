@@ -3,7 +3,7 @@
 // same line. ADVISORY: nothing about readiness, fixing, comments or the Check changes. A check that is not the named one is ignored. Company scoping of the reads is the marked checks'.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, createCandidateManifest, evalCiLine,
+  DEFAULT_CI_EVIDENCE_SETTINGS, EVAL_CI_LABEL, GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, change, createCandidateManifest, evalCiLine,
   type Check, type CheckRunner, type CiEvidenceSettings,
 } from "@agentx/contracts";
 import { parsePipelineReport } from "../../packages/worker/src/verification/pipeline-report-parser.js";
@@ -31,10 +31,11 @@ const junit = (cases: Array<{ name: string; failure?: string }>) => `<?xml versi
 
 interface Fake { facts: number; scopes: unknown[]; reports: Record<string, string[]>; reads: string[]; attempt?: number }
 /** The world with a fake runner (run facts, per-test report files), the settings the port answers, and a description that says Rovara's own eval label already. */
-async function world(answer: unknown, options: { parser?: boolean; body?: string } = {}): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; fake: Fake; logs: string[]; asked: unknown[] }> {
-  const w = await mergeWorld();
+async function world(answer: unknown, options: { parser?: boolean; body?: string; repositoryId?: string } = {}): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; fake: Fake; logs: string[]; asked: unknown[] }> {
+  const repositoryId = options.repositoryId ?? "app";
+  const w = await mergeWorld(options.repositoryId === undefined ? {} : { pullRequests: [{ repositoryId, number: 1 }] });
   const at = new Date(CLOCK).toISOString();
-  const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: w.prs[0]!.head, treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const candidate = createCandidateManifest([{ repositoryId, commitSha: w.prs[0]!.head, treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
   const current = (await w.task()).workflow;
   await w.setWorkflow({
     ownerId: "a".repeat(64), createdAt: at, artifacts: [], decisions: [], candidate,
@@ -135,6 +136,9 @@ describe("the named check landed", () => {
     await trackTask(deps, TASK_ID);
     expect(evalLines(body(w))).toEqual([`  - Eval (reported by your CI): failed, 2 of 4 cases failing, ${EVAL_URL}`]);
     expect((await item(w)).ciEval).toMatchObject({ state: "failed", report: "read", counts: { passed: 2, failed: 2, skipped: 0 } });
+    // Only counts are kept on the item: no failed test's name or text.
+    expect((await item(w)).ciEval).not.toHaveProperty("failedTests");
+    expect(JSON.stringify((await item(w)).ciEval)).not.toContain("wrong");
   });
   it("passed with a per-test report says how many cases, none failing", async () => {
     const { w, deps, fake } = await world(settings(), { parser: true });
@@ -332,6 +336,24 @@ describe("the ready line with the verdict heading", () => {
   });
 });
 
+describe("the ready line budget in a pass", () => {
+  it("counts the verdict heading: with a long repository name the eval line is dropped, never the heading, and the milestone stays within its limit", async () => {
+    const { w, deps } = await world(settings(), { repositoryId: "r".repeat(100) });
+    const heading = "Verified · Low risk · nothing extra to check";
+    deps.verdict = async () => ({ heading, resultKind: "verified", body: [] }) as never;
+    w.prs[0]!.model.changeRequests[0]!.draft = true;
+    setChecks(w, [unit, evals({ url: `https://github.com/acme/app/actions/runs/${"7".repeat(250)}` })]);
+    await trackTask(deps, TASK_ID);
+    const ready = w.milestones.written.find((entry) => entry.kind === "pr_ready");
+    expect(ready).toBeDefined();
+    expect(ready!.verdict).toBe(heading);
+    expect(ready!.text).toContain(`${heading}.`);
+    expect(ready!.text.length).toBeLessThanOrEqual(500);
+    // A 100-character repository name + heading + the longest line cannot all fit: the eval line (not the heading) is what gives way, so the milestone is still recorded.
+    expect(ready!.evalLine === undefined || ready!.text.endsWith(ready!.evalLine)).toBe(true);
+  });
+});
+
 describe("the ready line fits the milestone", () => {
   it("leaves the address off before the text would pass the milestone's limit, and says nothing rather than overflow", () => {
     const result = { outcome: "failed", counts: { passed: 1, failed: 1, skipped: 0 }, url: `https://github.com/${"a".repeat(250)}` } as const;
@@ -440,6 +462,24 @@ describe("the line follows the head and the settings", () => {
     const sink = { host, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK };
     expect(await writeEvalDescription(sink, evalCiLine({ outcome: "passed" }))).toBe("not_open");
     expect(body(w)).toBe(bodyOf());
+  });
+});
+
+describe("the record write", () => {
+  it("does not overwrite a record a person's edit changed while the line was being written", async () => {
+    const { w } = await world(settings());
+    const keys = await workspaceKeys({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1");
+    const key = pullRequestRecordKey(keys.workspaceKey, "app", w.prs[0]!.number);
+    await w.store.put({ item: { ...key, entityType: "PULL_REQUEST", workspaceId: "ws-1", repository: "app", repositoryUrl: "https://github.com/acme/app", number: w.prs[0]!.number, url: "u", state: "open", headBranch: "b", baseBranch: "main", expectedHeadCommit: w.prs[0]!.head, title: "t", body: bodyOf(), createdByOperationId: "op", updatedAt: new Date(CLOCK).toISOString() } as never });
+    const model = w.prs[0]!.model;
+    const ref = { repository: { url: "https://github.com/acme/app" }, id: String(w.prs[0]!.number), url: model.crUrl(String(w.prs[0]!.number)) };
+    const host = (await w.host.repository("web", 1, "app", IMPLICIT_COMPANY_ID))!.codeHost;
+    const real = host.updateChangeRequest.bind(host);
+    // The record is changed (by another writer) between Rovara's read of it and its write.
+    const wrapped = Object.assign(Object.create(host) as typeof host, { updateChangeRequest: async (...call: Parameters<typeof real>) => { await w.store.update({ key, ops: [change.set("body", "another writer's body")] }); return real(...call); } });
+    const sink = { host: wrapped, store: w.store, companyId: IMPLICIT_COMPANY_ID, workspaceId: "ws-1", repositoryId: "app", number: w.prs[0]!.number, ref, scope: { orgId: IMPLICIT_COMPANY_ID }, now: () => CLOCK };
+    await writeEvalDescription(sink, evalCiLine({ outcome: "passed" })).catch(() => undefined);
+    expect((await pullRequestRecordOf({ store: w.store, companyId: IMPLICIT_COMPANY_ID }, "ws-1", "app", w.prs[0]!.number))?.body).toBe("another writer's body");
   });
 });
 

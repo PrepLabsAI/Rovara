@@ -154,6 +154,10 @@ describe("proposing which job is the eval", () => {
     };
     expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "none_found" });
   });
+  it("a job merely named like an evaluation (evaluate, evaluator) is not an eval", async () => {
+    const files = { "a.yml": workflow("  evaluate-title:\n    steps:\n      - run: make\n  evaluator-bot:\n    steps:\n      - run: make\n") };
+    expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "none_found" });
+  });
   it("never proposes a check it could not find by name: a matrix, a reusable workflow, an expression", async () => {
     const files = { "ci.yml": workflow("  evals:\n    strategy:\n      matrix:\n        v: [1, 2]\n    steps:\n      - run: pytest\n  eval-reuse:\n    uses: ./.github/workflows/x.yml\n  eval-dyn:\n    name: eval ${{ inputs.x }}\n    steps:\n      - run: pytest\n") };
     expect(await proposeEvalChecks(reader(files))).toEqual({ verdict: "none_found" });
