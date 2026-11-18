@@ -3,7 +3,7 @@
 // without the setting behaves exactly as before.
 //
 //   (c) policyHookInstallFromEnvironment: the policy hook's asker (the install's issuer and its question key, purpose `policy-question`; the broker alone may sign with it).
-//   (d) companyReadsFromEnvironment: lanes AU and EV's company reads (#649) on the State table, the company resolved from membership (R4's reader), never from a claim;
+//   (d) companyReadsFromEnvironment: lanes AU and EV's company reads (#649) on the State table, the company and the reader's live owner/admin role resolved from membership (R4's reader), never from a claim;
 //       auditSinkForDeployedCaller: every engine audit event names the caller it came through (`auditViaCaller`).
 //   (e) hostedNightlyCompany: T8's nightly company check, bound to the consumer's own company and required.
 //   (f) hostedSessionCapSeconds: the install's session cap (a developer session's length), for CoreDevWiring.sessionCapSeconds.
@@ -55,6 +55,8 @@ export function companyReadsFromEnvironment(env: NodeJS.ProcessEnv, clients: { d
   return {
     store: { query: (query) => storeOnce().query(query) },
     companyOf: (developerId) => membership.companyOf(developerId),
+    // The live role, from the same membership row: a company owner or admin reads their own company's records (the other company admin routes' rule).
+    membershipOf: async (developerId) => membership.membershipOf?.(developerId),
   };
 }
 
