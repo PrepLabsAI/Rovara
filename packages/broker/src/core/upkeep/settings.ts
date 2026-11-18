@@ -7,8 +7,9 @@
 //   - The schedule follows the switch: ON puts the project's upkeep night on the scheduler, OFF removes it. A schedule that could not be changed is thrown AFTER the row is written (the switch is what is true; a retry of
 //     the same request puts it right).
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
-import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
+import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepSpend, type UpkeepView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, systemRunsConsentKey } from "../system-runs/consent.js";
+import { requireFreshStepUp } from "../system-runs/consent-control.js";
 import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
 
 export const UPKEEP_WORDS = {
@@ -42,6 +43,13 @@ export interface UpkeepSettingsDeps {
    */
   recordConsent?: ((details: { requestId: string; on: boolean; previous: string }) => Promise<void>) | undefined;
   cap?: (() => Promise<number | null>) | undefined;
+  /** L4-SR1: this month's nightly spend of the project (core/system-runs/spend.ts `readSystemRunSpend`), from the company's own rows. Absent: the view carries no `spend`. */
+  spend?: ((project: string) => Promise<UpkeepSpend>) | undefined;
+  /**
+   * L4-P3 (owner 2026-11-17): ALLOWING the company's automatic runs (`allowSystemRuns: true`) needs a FRESH STEP-UP, the same check that guards making a script token. It is run after the role check and before anything is
+   * read for the change or written; it throws REAUTH_REQUIRED (or a 503 when the company's window cannot be read). Absent: nothing can be allowed through this host (the laptop never allows). Withdrawing never calls it.
+   */
+  requireStepUp?: (() => Promise<void>) | undefined;
   /** The laptop has ONE person and no operator ceiling: nothing is consented to, so the switch alone decides (`systemRunsOn` follows `available`). Hosted never sets this. */
   noConsentNeeded?: true | undefined;
 }
@@ -106,15 +114,21 @@ export async function upkeepView(deps: UpkeepControlDeps, personId: string, proj
   if (standing.access === "none") throw agentXError("PROJECT_NOT_FOUND", UPKEEP_WORDS.projectNotFound);
   const available = await availableOf(deps);
   const companyAdmin = standing.access === "manage" && standing.companyAdmin === true;
+  const manage = standing.access === "manage";
+  // The gateway is asked only for a person who may see the answer, and only where nightly upkeep exists at all (a reader's page view never reaches it).
   const monthlyUsd = await (async (): Promise<number | null> => {
+    if (!manage || !available) return null;
     try {
       const read = deps.cap === undefined ? null : await deps.cap();
       return typeof read === "number" && Number.isFinite(read) && read >= 0 ? read : null;
     } catch { return null; }
   })();
+  // L4-SR1: this month's nightly spend, from the company's own rows, for those who manage the project (as the cap). A read that fails is no figure (the line is then left out), never a number made up.
+  const spend = manage && available && deps.spend !== undefined ? await deps.spend(project).catch(() => undefined) : undefined;
   return {
-    enabled: (await readUpkeepSetting(deps, project)).enabled, canManage: standing.access === "manage", available,
-    systemRunsOn: available && (deps.noConsentNeeded === true || (await readSystemRunsConsentRow(deps)).enabled), canEnableSystemRuns: available && companyAdmin, cap: { monthlyUsd: standing.access === "manage" ? monthlyUsd : null, canRaise: companyAdmin },
+    enabled: (await readUpkeepSetting(deps, project)).enabled, canManage: manage, available,
+    systemRunsOn: available && (deps.noConsentNeeded === true || (await readSystemRunsConsentRow(deps)).enabled), canEnableSystemRuns: available && companyAdmin, cap: { monthlyUsd, canRaise: companyAdmin },
+    ...(spend === undefined ? {} : { spend }),
   };
 }
 
@@ -151,6 +165,8 @@ export async function setSystemRunsAndUpkeep(deps: UpkeepSettingsDeps, input: { 
   try { standing = await deps.standing(input.personId, input.project); } catch { throw agentXError("FORBIDDEN", SYSTEM_RUNS_CONSENT_WORDS.notAllowed); }
   if (standing.access === "none") throw agentXError("PROJECT_NOT_FOUND", UPKEEP_WORDS.projectNotFound);
   if (standing.access !== "manage" || standing.companyAdmin !== true) throw agentXError("FORBIDDEN", SYSTEM_RUNS_CONSENT_WORDS.notAllowed);
+  // Allowing (never withdrawing) needs a fresh step-up, checked here, after who and before anything is read for the change or written.
+  if (input.allow) await requireFreshStepUp(deps);
   const scope = { orgId: deps.companyId, project: input.project };
   const settingsKey = upkeepSettingsKey(scope);
   const consentKey = systemRunsConsentKey(deps.companyId);

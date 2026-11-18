@@ -23,11 +23,16 @@ export function createTaskTokenDescriber(deps: TaskFlowDeps): TaskTokenDescriber
       // L4-SR2: the other upkeep AI is a repair draft: a setup run whose developer is exactly this project's system owner (derived from the company and the project), never a person's setup run marked nightly.
       const repairDraft = origin.data === UPKEEP_ORIGIN && task.purpose === "setup_agent" && isSystemOwnerId(task.developerId) && task.developerId === systemOwnerIdOf(operation.companyId, workspace.projectName);
       if (origin.data === UPKEEP_ORIGIN && task.purpose !== "wiki_build" && !repairDraft) return undefined;
-      // L4-SR2 (REVIEW-1 L3): a repair draft's model token is minted only while the company's effective system-runs gate AND the project's own upkeep switch are on NOW (read at every mint; an absent gate, a throw or any doubt: no token),
+      // L4-SR2 (REVIEW-1 L3): a repair draft's model token is minted only while the company's effective system-runs gate, the project's own upkeep switch AND the upkeep cap's room are all open NOW (read at every mint; an absent gate, a throw or any doubt: no token),
       // so withdrawing consent or switching upkeep off stops new model access at once, not only at the next progress pass.
       if (repairDraft) {
         const open = await (async (): Promise<boolean> => {
-          try { return deps.systemRuns !== undefined && (await deps.systemRuns.enabled()) === true && await upkeepIsOn({ store: deps.store, companyId: deps.companyId }, workspace.projectName); } catch { return false; }
+          try {
+            if (deps.systemRuns === undefined || (await deps.systemRuns.enabled()) !== true || !(await upkeepIsOn({ store: deps.store, companyId: deps.companyId }, workspace.projectName))) return false;
+            // L4-SR2b: and the project's upkeep cap has room NOW, as the gateway says (read at every mint). An absent reader, no answer, an invalid one, zero or less: no token (a manual "Fix setup" is another path).
+            const room = deps.upkeepRoomCents === undefined ? undefined : await deps.upkeepRoomCents(workspace.projectName);
+            return typeof room === "number" && Number.isSafeInteger(room) && room > 0;
+          } catch { return false; }
         })();
         if (!open) return undefined;
       }

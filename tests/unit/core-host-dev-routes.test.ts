@@ -2,7 +2,7 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { SYSTEM_RUNS_CONSENT_WORDS, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
@@ -677,5 +677,147 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
       expect(bad?.statusCode, query).toBe(400);
       expect(bad!.body, query).not.toContain(query);
     }
+  });
+});
+
+// L4-P3 (owner 2026-11-17): allowing the company's automatic runs needs the SAME fresh step-up as making a script token (the real check, against the company's window), through both the setup PUT and the company's
+// own route; withdrawing needs only the live owner or admin role. Mutants are listed in the PR body with the test that kills each.
+describe("the company's automatic runs: a fresh step-up to allow, none to withdraw", () => {
+  const SYSTEM_RUNS = "/v1/app/company/system-runs";
+  const UPKEEP = "/v1/app/projects/payments/upkeep";
+  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
+  const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
+  const put = (path: string, body: unknown) => ({ method: "PUT", path, headers: {}, body: JSON.stringify(body) });
+  const allow = (): { requestId: string; allowed: boolean } => ({ requestId: randomUUID(), allowed: true });
+  const setupAllow = () => ({ requestId: randomUUID(), on: true, allowSystemRuns: true });
+
+  async function setup(extra: Partial<CoreDevWiring> = {}, ceiling: boolean = true) {
+    const w = await world2();
+    const upkeep = { standing: async (personId: string) => (personId === "person-member" ? { access: "view" as const } : { access: "manage" as const, basis: personId === "pm" ? ("project-admin" as const) : ("company-owner" as const) }), ...(ceiling ? { available: () => true } : {}) };
+    const routes = createCoreDevRoutes({ app: w.app, companyOf: w.companyOf, wiring: () => ({ ...WIRED, upkeep, ...extra }) });
+    const consentOf = async (companyId: string) => (await w.world.store.get({ pk: `ORG#${companyId}#SYSTEM_RUNS`, sk: "CONSENT" }))?.["enabled"] === true;
+    return { ...w, routes, consentOf };
+  }
+
+  // MUTANT E1: dev-routes does not hand the real step-up check to the company route or to the setup route.
+  it("a stale step-up, a missing one, a federated factor and a future time are all refused on BOTH routes; nothing is written", async () => {
+    const { world, routes, remember, consentOf } = await setup();
+    const base = remember(FAKE_COMPANY);
+    const refused = [undefined, { at: minutesAgo(world, 11), method: "passkey" }, { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, -5), method: "email_code" }, { at: "yesterday", method: "email_code" }, { at: minutesAgo(world, 1), method: "" }];
+    for (const stepUp of refused) {
+      const caller: DeployedCaller = { ...base, ...(stepUp === undefined ? {} : { stepUp }) };
+      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
+        const answer = await routes.route(request, caller);
+        expect(answer?.statusCode, `${request.path} ${JSON.stringify(stepUp)}`).toBe(403);
+        expect(errorOf(answer), request.path).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
+      }
+    }
+    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+  });
+
+  it("a step-up inside the window (a passkey or an emailed code) allows it, through both routes", async () => {
+    for (const method of ["passkey", "email_code"]) {
+      const a = await setup();
+      const callerA: DeployedCaller = { ...a.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(a.world, 2), method } };
+      const answer = await a.routes.route(put(SYSTEM_RUNS, allow()), callerA);
+      expect(answer?.statusCode, method).toBe(200);
+      expect(JSON.parse(answer!.body)).toEqual({ available: true, allowed: true, systemRunsOn: true });
+      expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
+      const b = await setup();
+      const callerB: DeployedCaller = { ...b.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(b.world, 2), method } };
+      const setupAnswer = await b.routes.route(put(UPKEEP, setupAllow()), callerB);
+      expect(setupAnswer?.statusCode, method).toBe(200);
+      expect(JSON.parse(setupAnswer!.body)).toMatchObject({ enabled: true, systemRunsOn: true });
+      expect(await b.consentOf(FAKE_COMPANY)).toBe(true);
+    }
+  });
+
+  // MUTANT E2: the withdrawal asks for the step-up (here: a caller with none is refused).
+  it("withdrawing needs no step-up on either route: an owner with none withdraws; the consent is gone and the gate says off at once", async () => {
+    const { world, routes, remember, consentOf } = await setup();
+    const fresh: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    expect((await routes.route(put(SYSTEM_RUNS, allow()), fresh))?.statusCode).toBe(200);
+    expect(await consentOf(FAKE_COMPANY)).toBe(true);
+    const bare = remember(FAKE_COMPANY);
+    const withdrawn = await routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), bare);
+    expect(withdrawn?.statusCode).toBe(200);
+    expect(JSON.parse(withdrawn!.body)).toEqual({ available: true, allowed: false, systemRunsOn: false });
+    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+    // And the setup route's withdrawal (allowSystemRuns false) the same way.
+    await routes.route(put(SYSTEM_RUNS, allow()), fresh);
+    const setupOff = await routes.route(put(UPKEEP, { requestId: randomUUID(), on: false, allowSystemRuns: false }), bare);
+    expect(setupOff?.statusCode).toBe(200);
+    expect(JSON.parse(setupOff!.body)).toMatchObject({ enabled: false, systemRunsOn: false });
+    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+  });
+
+  // MUTANT E3: the role is not membership's (a maintainer or member reaches the company route).
+  it("the role is membership's: a member (and a project maintainer, who is a member of the company) is refused for reading, allowing and withdrawing; an admin is not", async () => {
+    const { world, routes, remember, consentOf } = await setup();
+    // "pm" is the person the setup wiring knows as a project administrator: a maintainer of the project, a plain member of the company.
+    for (const personId of ["person-member", "pm"]) {
+      const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "member", personId), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+      for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false })]) {
+        const answer = await routes.route(request, caller);
+        expect(answer?.statusCode, `${personId} ${request.method}`).toBe(403);
+        expect(errorOf(answer).code).toBe("FORBIDDEN");
+      }
+      // The setup route: the maintainer may switch the project, but neither allow nor withdraw the company's consent (even with a fresh step-up).
+      for (const body of [setupAllow(), { requestId: randomUUID(), on: false, allowSystemRuns: false }]) {
+        const answer = await routes.route(put(UPKEEP, body), caller);
+        expect(answer?.statusCode, personId).toBe(403);
+        expect(errorOf(answer).code).toBe("FORBIDDEN");
+      }
+    }
+    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+    const admin: DeployedCaller = { ...remember(FAKE_COMPANY, "admin", "person-admin"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    expect((await routes.route(put(SYSTEM_RUNS, allow()), admin))?.statusCode).toBe(200);
+    expect((await routes.route(get(SYSTEM_RUNS), admin))?.statusCode).toBe(200);
+  });
+
+  // MUTANT E4: the script-token refusal does not cover the new path.
+  it("a script token reaches neither route's company control: refused before anything is read", async () => {
+    const { world, routes, remember } = await setup();
+    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" }, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
+      const answer = await routes.route(request, token);
+      expect(answer?.statusCode, request.path).toBe(403);
+      expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: NOT_FOR_SCRIPT_TOKENS });
+    }
+  });
+
+  it("takes the company's shorter step-up window and refuses when the company rules give no answer (both routes)", async () => {
+    for (const [window, code] of [[async () => 0, "REAUTH_REQUIRED"], [async () => { throw new Error("down"); }, "RUNTIME_UNAVAILABLE"], [async () => "ten", "RUNTIME_UNAVAILABLE"]] as const) {
+      const { world, routes, remember, consentOf } = await setup({ stepUpWindowSeconds: window });
+      const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) expect(errorOf(await routes.route(request, caller)).code, request.path).toBe(code);
+      expect(await consentOf(FAKE_COMPANY)).toBe(false);
+    }
+  });
+
+  it("the ceiling off: allowing is 'unavailable'; withdrawing still works. Unwired: 'not on the core yet'", async () => {
+    const off = await setup({}, false);
+    const caller: DeployedCaller = { ...off.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(off.world, 1), method: "passkey" } };
+    expect(errorOf(await off.routes.route(put(SYSTEM_RUNS, allow()), caller)).code).toBe("NOT_AVAILABLE_HERE");
+    expect((await off.routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), caller))?.statusCode).toBe(200);
+    const w = await world2();
+    const unwired = createCoreDevRoutes({ app: w.app, companyOf: w.companyOf, wiring: () => WIRED });
+    const answer = await unwired.route(get(SYSTEM_RUNS), w.remember(FAKE_COMPANY));
+    expect(answer?.statusCode).toBe(404);
+    expect(errorOf(answer).message).toBe(NOT_ON_THE_CORE_YET);
+  });
+
+  it("two companies: one's owner allows and withdraws only their own company's setting", async () => {
+    const { world, routes, remember, consentOf } = await setup();
+    const a: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const b: DeployedCaller = { ...remember(OTHER), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    expect((await routes.route(put(SYSTEM_RUNS, allow()), a))?.statusCode).toBe(200);
+    expect(await consentOf(FAKE_COMPANY)).toBe(true);
+    expect(await consentOf(OTHER)).toBe(false);
+    expect(JSON.parse((await routes.route(get(SYSTEM_RUNS), b))!.body)).toMatchObject({ allowed: false });
+    expect((await routes.route(put(SYSTEM_RUNS, allow()), b))?.statusCode).toBe(200);
+    expect((await routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), a))?.statusCode).toBe(200);
+    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+    expect(await consentOf(OTHER)).toBe(true);
   });
 });

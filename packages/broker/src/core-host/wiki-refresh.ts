@@ -16,6 +16,8 @@ import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { taskKey } from "../core/task-flow/keys.js";
 import { systemPrincipalOf } from "../core/system-runs/access.js";
 import { systemRunsGateSaysOn, type SystemRunsGate } from "../core/system-runs/consent.js";
+import { knownTaskCostMicros, recordSystemRunSpend } from "../core/system-runs/spend.js";
+import { readUpkeepCap, type UpkeepCapReader } from "../core/upkeep/cap.js";
 import { startUpkeepWikiRefresh, type UpkeepRefreshAnswer } from "../core/upkeep/refresh.js";
 import type { FileMapRepository } from "../core/wiki/file-map.js";
 import { createWikiStore } from "../core/wiki/store.js";
@@ -39,12 +41,22 @@ export interface HostedWikiRefreshInputs {
   aiKey?: (() => Promise<"connected" | "missing" | "unknown">) | undefined;
   /** The same file map wiring the wiki controls use (one kept map service). */
   map: HostedWikiMapWiring;
+  /**
+   * L4-SR1: the gateway's own answer about this project's upkeep cap. The refresh starts only while it says the cap is ENFORCED for this company, project and month (core/upkeep/cap.ts); absent, throwing or any other answer:
+   * `no_cost_cap`, nothing held, nothing recorded.
+   */
+  cap?: UpkeepCapReader | undefined;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
 
 /** The task rows' end and wait states, as the unattended door sweeps them. Hosted: no person closes a system run; a stop cancels the running step. */
 export function hostedUnattendedTasks(flow: TaskFlowDeps): UnattendedTasks {
   return {
+    // L4-SR1: what the install's cost ledger booked for the task, or undefined when that is not known (never 0 for unknown; core/system-runs/spend.ts).
+    async costUsd(taskId) {
+      const micros = await knownTaskCostMicros(flow.store, flow.companyId, taskId);
+      return micros === undefined ? undefined : micros / 1_000_000;
+    },
     async read(taskId) {
       const task = await flow.store.get(taskKey(taskId)) as { closedAt?: unknown; purpose?: unknown; setupAgentResult?: { status?: unknown } | null; workflow?: { stage?: unknown; state?: unknown } } | undefined;
       if (task === undefined) return undefined;
@@ -69,11 +81,15 @@ export function createHostedWikiRefresh(inputs: HostedWikiRefreshInputs): (proje
   if (flow.companyId !== companyId) throw new Error("the refresh is not for this company's flow");
   const wiki = createWikiStore({ store: flow.store, companyId, now });
   const service = wikiMapServiceOf(inputs.map, now, inputs.log);
-  const enforces = { dollars: admissionEnforcesCost(inputs.admission) };
   return async (project, day, options) => {
     if (!WikiProjectSchema.safeParse(project).success) throw agentXError("CONFIG_INVALID", "the request is not valid");
     // 1. Both locks, now.
     if (!(await systemRunsGateSaysOn(inputs.gate))) return { outcome: "unavailable" };
+    // L4-SR1: the gateway says it holds this project's upkeep cap NOW. Anything else starts nothing (a dollar cap that is only believed is no cap). Both caps are needed: the install's per-run stop (the Admission)
+    // and the gateway's monthly upkeep cap.
+    const capNow = await readUpkeepCap(inputs.cap, project, now(), companyId);
+    if (capNow.state !== "enforced" || capNow.pause !== undefined) return { outcome: "no_cost_cap" };
+    const enforces = { dollars: admissionEnforcesCost(inputs.admission) };
     const caller = systemCaller(companyId, project);
     const readMap = async (name: string): Promise<WikiFileMap | undefined> => {
       const latest = await flow.projects.latest(name);
@@ -129,6 +145,15 @@ export function createHostedAutomationStop(inputs: {
     automation: { enabled: () => false }, companyId: inputs.companyId, admission: inputs.admission, audit: inputs.flow.audit,
     starter: { start: async () => { throw agentXError("NOT_AVAILABLE_HERE", "this sweep starts nothing"); }, read: async () => undefined },
     enforces: { dollars: admissionEnforcesCost(inputs.admission) }, store: inputs.flow.store, tasks: hostedUnattendedTasks(inputs.flow), now: inputs.now, ...(inputs.log === undefined ? {} : { log: inputs.log }),
+    // L4-SR1: the nightly spend line. Only a nightly run (the wiki refresh, the one AI kind) writes one; its cost is what the install's ledger booked for the task, left out when not known. Written once per request,
+    // before the reservation is settled; a failure leaves the run open and the next sweep tries again.
+    onSettled: async (run) => {
+      if (run.origin !== "nightly") return;
+      await recordSystemRunSpend({ store: inputs.flow.store, companyId: inputs.companyId, now: inputs.now }, {
+        project: run.project, kind: "wiki_refresh", requestId: run.requestId, taskId: run.taskId, startedAt: run.startedAt, end: run.end,
+        costMicros: run.costUsd === undefined ? undefined : Math.round(run.costUsd * 1_000_000),
+      });
+    },
   };
   return {
     pass: async ({ budgetMs }) => {

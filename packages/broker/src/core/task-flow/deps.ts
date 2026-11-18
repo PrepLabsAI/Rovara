@@ -228,6 +228,11 @@ export interface TaskFlowDeps {
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
   systemRuns?: { enabled(): boolean | Promise<boolean> };
+  /**
+   * L4-SR2b: whole cents of a project's monthly upkeep cap still free, as the model gateway says NOW (core/upkeep/cap.ts `upkeepRoomCentsOf`: company, project and month checked, nothing cached). The model token of an
+   * AUTOMATIC repair draft is minted only while it answers a number above zero (read at every mint); absent, undefined, a throw, zero or less: no token. A hosted install fills it with the repair draft's wiring only.
+   */
+  upkeepRoomCents?: (project: string) => Promise<number | undefined>;
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */

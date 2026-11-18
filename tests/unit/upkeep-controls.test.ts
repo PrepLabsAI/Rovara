@@ -56,7 +56,9 @@ function hosted(options: { store?: MemoryDocumentStore; company?: OrgId; audit?:
 const put = (w: ReturnType<typeof hosted>, person: string, project: string, body: unknown) => w.call(person, "PUT", project, body);
 /** The view a person gets (L4-P2 contract): the company admins (owner, admin) may also set the consent and raise the cap; nobody else. `systemRunsOn` is the ceiling AND the consent. */
 const view = (enabled: boolean, who: "admin" | "maintainer" | "reader", over: Record<string, unknown> = {}): Body => ({
-  enabled, canManage: who !== "reader", available: true, systemRunsOn: true, canEnableSystemRuns: who === "admin", cap: { monthlyUsd: null, canRaise: who === "admin" }, ...over,
+  enabled, canManage: who !== "reader", available: true, systemRunsOn: true, canEnableSystemRuns: who === "admin", cap: { monthlyUsd: null, canRaise: who === "admin" },
+  // L4-SR1: a manager of an available install reads this month's nightly spend (a real zero with no runs); a reader never does.
+  ...(who === "reader" ? {} : { spend: { month: "2026-11", spentUsd: 0, runs: 0, unknownRuns: 0 } }), ...over,
 });
 const NOT_FOUND = { status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } };
 
@@ -196,7 +198,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
   it("a deployment with no runner says available false and refuses a change in fixed words: nothing recorded, nothing written, no schedule touched", async () => {
     const calls: string[] = [];
     const w = hosted({ available: false, schedule: () => ({ put: async () => { calls.push("put"); }, remove: async () => { calls.push("remove"); } }) });
-    expect(await w.call(OWNER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false }) });
+    expect(await w.call(OWNER, "GET", "beacon")).toEqual({ status: 200, body: view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false, spend: undefined }) });
     const refused = await put(w, OWNER, "beacon", { requestId: randomUUID(), on: true });
     expect(refused.status).toBe(404);
     expect(refused.body).toEqual({ error: { code: "NOT_AVAILABLE_HERE", message: "Nightly upkeep isn't available on this Rovara yet" } });
@@ -226,7 +228,7 @@ describe("availability: the switch stays hidden until nightly runs really happen
       principal: { companyId: COMPANY_A, personId: OWNER, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A,
       flow: { store: w.store, projects: { latest: async () => ({ definition: { repositories: [] } }) } } as never, wiring: flaky, audit: { stage: () => [], record: async () => undefined }, now: () => T0,
     });
-    expect(JSON.parse(answer.body)).toEqual(view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false }));
+    expect(JSON.parse(answer.body)).toEqual(view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false, spend: undefined }));
   });
 
   it("on a laptop with no local runner the answer says available false and a change is refused", async () => {

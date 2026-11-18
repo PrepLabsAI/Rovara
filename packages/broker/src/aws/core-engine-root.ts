@@ -63,6 +63,8 @@ import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/up
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
 import { upkeepIsOn } from "../core/upkeep/settings.js";
+import { readUpkeepCap, upkeepRoomCentsOf, type UpkeepCapReader } from "../core/upkeep/cap.js";
+import { upkeepCapReaderFromEnvironment } from "../core-host/upkeep-cap-http.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
 import { listProjectMembers } from "./admin-actions.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, type CoreLessons, type CoreLessonsOptions } from "../core-host/lessons.js";
@@ -171,10 +173,11 @@ export interface BrokerCoreRootInputs {
    */
   offeredModels?: OfferedModelsReader;
   /**
-   * L4-SR2: whole cents of a project's monthly upkeep cap that are still free, as the model gateway says now (Cloud's `upkeep_month` row). The automatic repair draft starts only with room for its whole run: without this reader
-   * (or when it answers undefined or throws) there is no room, so no draft starts on its own and the manual "Fix setup" stays. The gateway holds the real cap on every call either way.
+   * L4-SR1: the gateway's own answer about one company's projects' nightly upkeep caps (core/upkeep/cap.ts; the contract is `UpkeepCapReadSchema`, a service read on the gateway). Absent, it is built from the environment
+   * where the gateway's origin and the task-token signer are configured, and where that gateway does not answer the read nothing that spends AI starts by itself. L4-SR2b: the automatic repair draft's room check is
+   * read from this same reader (`upkeepRoomCentsOf`, core/upkeep/cap.ts), fresh each time: there is no second source of the project's remaining room.
    */
-  upkeepRoomCents?: (companyId: OrgId, project: string) => Promise<number | undefined>;
+  upkeepCap?: (companyId: OrgId) => UpkeepCapReader | undefined;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -591,6 +594,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const pauses = upkeepPauseHooks({ store, companyId, now: () => now().getTime(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.upkeep", ...entry }) });
     return { gate, administers, pauses };
   };
+  // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
+  const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
 
@@ -676,20 +681,25 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
         // L4-SR2: the automatic repair draft, only where the ceiling covers the company (nothing is built otherwise). Its start is behind the effective gate, the project's upkeep switch, an enforced cap with room and the access rule's marks.
+        // L4-SR2b: the project's remaining room is the gateway's own answer (the SAME reader as the night's cap signal), read fresh at the draft's start and at every model token's mint; any doubt is no room.
+        const upkeepRoom = (project: string): Promise<number | undefined> => upkeepRoomCentsOf(upkeepCapFor(companyId), project, now().getTime(), companyId);
         const repair = switchCovers(systemRunsFlag.value, companyId)
           ? createHostedSetupRepair({
             flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured,
             readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
               .fileAtRevision({ url: repository.url }, path, commit, { orgId: companyId }, { ...(readOptions.untilLine === undefined ? {} : { untilLine: readOptions.untilLine }), timeoutMs: readOptions.timeoutMs, maxBytes: 262_144 }),
-            ...(inputs.upkeepRoomCents === undefined ? {} : { room: (project: string) => inputs.upkeepRoomCents!(companyId, project) }),
+            room: upkeepRoom,
             onUpkeepPaused: (scope, reason) => upkeep.pauses.onRunPaused(scope, reason), log,
           })
           : undefined;
-        if (repair !== undefined) flow.deps.afterSetupBroken = repair.hook;
+        if (repair !== undefined) {
+          flow.deps.afterSetupBroken = repair.hook;
+          flow.deps.upkeepRoomCents = upkeepRoom;
+        }
         const systemRuns = createHostedSystemRuns({
           flow, companyId, flag: systemRunsFlag.value, now: () => now().getTime(), log,
-          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input),
-          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, log }),
+          enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input), cap: upkeepCapFor(companyId),
+          refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
@@ -773,7 +783,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             displayName: displayNameOf,
           },
           // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
-          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
+          upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value),
+            // L4-SR1: the project's monthly cap as the gateway says now (the page's "of $Y"); null where the gateway does not answer.
+            cap: async (company, project) => { const read = await readUpkeepCap(upkeepCapFor(company), project, now().getTime(), company); return read.state === "enforced" ? read.limitUsd : null; } },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

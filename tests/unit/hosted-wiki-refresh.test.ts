@@ -19,6 +19,7 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { createHarness, definition } from "../support/task-flow-harness.js";
 import { API_SHA } from "../support/wiki-build-fixtures.js";
+import { capReader, type CapKind } from "../support/upkeep-cap-fixtures.js";
 
 const A: OrgId = IMPLICIT_COMPANY_ID;
 const URL_ = "https://examplehost.test/acme/app";
@@ -31,7 +32,7 @@ const page = (pageId: string): WikiPageWrite => ({
 });
 const projectOf = (name: string): ProjectDefinition => ({ ...definition, name, repositories: [{ ...definition.repositories[0]!, name: "demo", url: URL_, host: { kind: "fake" } }] });
 
-interface Options { consent?: boolean; flag?: string; enforces?: boolean; upkeep?: boolean; audit?: "fail"; company?: OrgId }
+interface Options { cap?: CapKind; consent?: boolean; flag?: string; enforces?: boolean; upkeep?: boolean; audit?: "fail"; company?: OrgId }
 
 async function build(options: Options = {}) {
   const company = options.company ?? A;
@@ -71,7 +72,7 @@ async function build(options: Options = {}) {
       await real.record(event);
     },
   };
-  const refresh = createHostedWikiRefresh({ flow: h.deps, companyId: company, now: () => h.clock.now, gate, admission: options.enforces === false ? { ...admission, enforcesCost: false } : admission, modelAccessConfigured: true, map: { standing: async () => ({ access: "none" }), hostFor: () => host } });
+  const refresh = createHostedWikiRefresh({ flow: h.deps, companyId: company, now: () => h.clock.now, gate, admission: options.enforces === false ? { ...admission, enforcesCost: false } : admission, modelAccessConfigured: true, map: { standing: async () => ({ access: "none" }), hostFor: () => host }, cap: capReader(options.cap ?? "enforced", () => h.clock.now) });
   return { h, wiki, refresh, admitted, released, auditBefore, gate, company };
 }
 const go = (w: Awaited<ReturnType<typeof build>>) => w.refresh("payments", DAY, { includeUnwritten: false });

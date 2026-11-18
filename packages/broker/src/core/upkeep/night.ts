@@ -37,7 +37,7 @@ export interface UpkeepNightDeps {
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
 
-export interface UpkeepNightResult { outcome: UpkeepNightOutcome; setupCheck: UpkeepStepResult; mockChecks: UpkeepStepResult; wiki: string }
+export interface UpkeepNightResult { outcome: UpkeepNightOutcome; setupCheck: UpkeepStepResult; mockChecks: UpkeepStepResult; wiki: string; /** L4-SR1: why the night paused before it started (the gateway's cap read), when it did. */ pauseReason?: UpkeepPauseReason }
 
 const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 const headsHash = (heads: ReadonlyArray<{ repo: string; commit: string }>): string =>
@@ -97,7 +97,7 @@ export async function runUpkeepNight(deps: UpkeepNightDeps, input: { project: st
   // 4. Recorded in fixed words; the commits are remembered so tomorrow can tell whether anything merged.
   const at = new Date(deps.now()).toISOString();
   try {
-    await deps.store.put({ item: { ...upkeepNightKey(scope, day), entityType: "UPKEEP_NIGHT", orgId: deps.companyId, project, day, outcome, wiki: result.wiki, at, ...upkeepExpiryOf(deps.now()) } });
+    await deps.store.put({ item: { ...upkeepNightKey(scope, day), entityType: "UPKEEP_NIGHT", orgId: deps.companyId, project, day, outcome, wiki: result.wiki, ...(result.pauseReason === undefined ? {} : { pauseReason: result.pauseReason }), at, ...upkeepExpiryOf(deps.now()) } });
     if (hash !== undefined) await deps.store.put({ item: { ...upkeepLastKey(scope), entityType: "UPKEEP_LAST", orgId: deps.companyId, project, day, headsHash: hash, outcome, at, ...(refreshed === undefined ? {} : { refreshedHash: refreshed }), ...upkeepExpiryOf(deps.now()) } });
   } catch (error) {
     deps.log?.({ event: "upkeep.night_not_recorded", error: error instanceof Error ? error.name : "unknown" });
@@ -113,6 +113,7 @@ async function wikiStep(deps: UpkeepNightDeps, project: string, day: string, res
     if (read?.state === "paused") {
       await deps.paused({ orgId: deps.companyId, project, reason: read.reason });
       result.wiki = "paused";
+      result.pauseReason = read.reason;
       return "paused";
     }
   }

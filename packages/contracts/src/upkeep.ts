@@ -5,6 +5,7 @@
 //   - a refused upkeep call is HTTP 422 `upkeep_paused` with the header `x-rovara-upkeep-pause` = one of `UPKEEP_PAUSE_REASONS`; its message is one of the fixed sentences below (the gateway's `UPKEEP_PAUSE_MESSAGES`).
 //   - the admins' notice is Code's: one attention event per company, project, month and reason (`upkeepNoticeId`), kind `upkeep_paused`, in fixed words.
 import { z } from "zod";
+import { OrgIdSchema } from "./browser-ids.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** The TC-1 `src` claim that marks nightly upkeep AI (Cloud: model-gateway-token.ts WORK_ORIGINS, upkeep-cap.ts UPKEEP_ORIGIN). */
@@ -13,6 +14,19 @@ export const UPKEEP_ORIGIN = "nightly" as const;
 export const UPKEEP_TARGET_KIND = "upkeep" as const;
 /** The default upkeep cap, shown by the setup page; the gateway holds the real number. */
 export const UPKEEP_DEFAULT_MONTH_USD = 25;
+/**
+ * L4-SR1 (nightly wiki refresh): the gateway's cap READ. Code never starts nightly AI on a guess that the upkeep cap is enforced: it starts only while the gateway itself says so for THIS company, project and month.
+ * A service read, the same family as the offered-models read (broker `offered-models-http.ts`): `GET <gateway>/v1/service/companies/<company>/upkeep/<project>` with a service token (aud `UPKEEP_CAP_AUDIENCE`),
+ * answering `UpkeepCapReadSchema`. Anything else (no route, 404, a bad answer, a late one, another month or project) is "not known", and nothing is started.
+ */
+export const UPKEEP_CAP_AUDIENCE = "rovara-model-gateway-upkeep-cap" as const;
+/** What the gateway says of one project's nightly upkeep cap (`company` echoes the company the token named: Code refuses an answer for another): `enforced` is always true (a gateway that does not hold the cap does not answer); `limitMicros` is the effective `upkeep_month` limit (the default when none was set, 0 = no upkeep spend); `spentMicros` is what finished upkeep calls cost this month. */
+export const UpkeepCapReadSchema = z.object({
+  version: z.literal(1), company: OrgIdSchema, project: z.string().regex(AGENTX_NAME_PATTERN), month: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/u), enforced: z.literal(true),
+  limitMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), spentMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export type UpkeepCapRead = z.infer<typeof UpkeepCapReadSchema>;
+
 /** The header the gateway names the pause reason in. */
 export const UPKEEP_PAUSE_HEADER = "x-rovara-upkeep-pause" as const;
 
@@ -91,6 +105,8 @@ export const SYSTEM_RUNS_CONSENT_WORDS = {
   notAllowed: "Only company owners and admins can allow or stop Rovara's automatic runs for the company.",
   needsConsent: "A company owner or admin has to allow Rovara's automatic runs for the company first.",
   contradiction: "Rovara's automatic runs cannot be stopped and nightly upkeep switched on in the same step.",
+  // L4-P3 (owner 2026-11-17): ALLOWING them needs a fresh step-up (the script token's pattern: a long-lived grant is never made by a tool that holds an API token). Stopping them never does.
+  needsSignIn: "Rovara's automatic runs are allowed right after you confirm it's you on the sign-in page: a tool that holds an API token cannot allow them. Confirm it's you, then try again within a few minutes.",
 } as const;
 
 /**
@@ -108,6 +124,13 @@ export type UpkeepSwitchBody = z.infer<typeof UpkeepSwitchBodySchema>;
 export const UpkeepCapSchema = z.object({ monthlyUsd: z.number().nonnegative().nullable(), canRaise: z.boolean() }).strict();
 export type UpkeepCap = z.infer<typeof UpkeepCapSchema>;
 /**
+ * L4-SR1: what nightly upkeep spent on this project this UTC month, for the page's "Nightly upkeep: $X of $Y" line ($Y is `cap.monthlyUsd`). Only people who manage the project get it (as the cap). It is built from
+ * the settled cost of each finished nightly run, as the install's own cost ledger booked it: `spentUsd` counts the runs whose cost is KNOWN; a run whose cost is not known (no price, another currency, no usage
+ * booked) is counted in `unknownRuns` and adds nothing, so when `unknownRuns` is more than 0 `spentUsd` is a floor ("at least"), never a made-up number and never a quiet zero.
+ */
+export const UpkeepSpendSchema = z.object({ month: UpkeepMonthSchema, spentUsd: z.number().nonnegative(), runs: z.number().int().nonnegative(), unknownRuns: z.number().int().nonnegative() }).strict();
+export type UpkeepSpend = z.infer<typeof UpkeepSpendSchema>;
+/**
  * What GET and PUT answer.
  *   enabled              the PROJECT's switch (off by default).
  *   canManage            the caller may change the project's switch: a live company owner or admin, or the project's administrator.
@@ -117,6 +140,25 @@ export type UpkeepCap = z.infer<typeof UpkeepCapSchema>;
  *   cap                  see `UpkeepCapSchema`.
  */
 export const UpkeepViewSchema = z.object({
-  enabled: z.boolean(), canManage: z.boolean(), available: z.boolean(), systemRunsOn: z.boolean(), canEnableSystemRuns: z.boolean(), cap: UpkeepCapSchema,
+  enabled: z.boolean(), canManage: z.boolean(), available: z.boolean(), systemRunsOn: z.boolean(), canEnableSystemRuns: z.boolean(), cap: UpkeepCapSchema, spend: UpkeepSpendSchema.optional(),
 }).strict();
 export type UpkeepView = z.infer<typeof UpkeepViewSchema>;
+
+// ---- The company's one control (L4-P3, owner 2026-11-17) -------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The company-level route for the consent itself: a live company owner or admin reads it (GET) and allows or withdraws it (PUT). Hosted only, a page session only (a script token never reaches it).
+ * ALLOWING (`allowed: true`) needs a FRESH STEP-UP (a passkey or an emailed code, the same rule as making a script token), checked before the body is acted on; the refusal is REAUTH_REQUIRED (403) with
+ * `SYSTEM_RUNS_CONSENT_WORDS.needsSignIn`. WITHDRAWING (`allowed: false`) needs only the live owner or admin role (turning off must be easy), works while the operator's ceiling is off, writes one audit record
+ * (`SYSTEM_RUNS_CONSENT_AUDIT`) before the row, and leaves every project's own switch exactly as it is (they read as off while the consent is off). Future runs stop at once: the effective gate is read on every use.
+ */
+export const SYSTEM_RUNS_ROUTE = { method: "GET and PUT", path: "/v1/app/company/system-runs" } as const;
+/** The PUT body: strict, a request id (one act per id AND choice) and the choice. */
+export const SystemRunsBodySchema = z.object({ requestId: z.string().uuid(), allowed: z.boolean() }).strict();
+export type SystemRunsBody = z.infer<typeof SystemRunsBodySchema>;
+/**
+ * What GET and PUT answer. `available`: the operator ceiling covers this company (false: nothing can be allowed yet, a withdrawal still works). `allowed`: the company's own stored consent. `systemRunsOn`:
+ * EFFECTIVE (ceiling AND consent, read now), the same number as the project upkeep view's.
+ */
+export const SystemRunsViewSchema = z.object({ available: z.boolean(), allowed: z.boolean(), systemRunsOn: z.boolean() }).strict();
+export type SystemRunsView = z.infer<typeof SystemRunsViewSchema>;
