@@ -121,3 +121,20 @@ export async function weeklyExtrasOf(reader: SignalsReader, key: ScopeKey): Prom
   const signals = await reader.read(key).catch(() => undefined);
   return signals === undefined ? undefined : { underQuestion: signals.questions, askedToKeep: signals.askedToKeep, repeats: signals.repeats };
 }
+
+/**
+ * A reader that reads the project's signals fresh at every call (no cache): for a DECISION (making a lesson permanent, drafting a skill), where a stale "nothing against it" must not stand. It reads only this company's rows for the
+ * project asked about, and a store fault or a read that runs past `FLIGHT_LIMIT_MS` is "no answer" (the caller then treats the lesson as not proven).
+ */
+export function freshSignalsReader(store: Pick<DocumentStore, "query">, companyId: OrgId, now: () => number, options: { settings?: Pick<RankingSettings, "evidenceWindowDays"> } = {}): SignalsReader {
+  return {
+    async read(key) {
+      if (key.workspaceId !== companyId) return undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const limit = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), FLIGHT_LIMIT_MS); timer.unref?.(); });
+        return await Promise.race([readProjectSignals(store, { companyId, project: key.project, now: now(), ...(options.settings === undefined ? {} : { settings: options.settings }) }).catch(() => undefined), limit]);
+      } finally { if (timer !== undefined) clearTimeout(timer); }
+    },
+  };
+}

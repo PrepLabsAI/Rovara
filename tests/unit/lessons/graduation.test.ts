@@ -6,6 +6,16 @@ import { loadLessonsForStage, type LoadDeps, type LoadRequest } from "../../../p
 import { approveLesson } from "../../../packages/broker/src/lessons/approve.js";
 import { allowedTargets, graduateLesson, graduationCandidates, graduationLater, weeklyCard, type GraduateDeps, type GraduationTarget, type SkillGraduation } from "../../../packages/broker/src/lessons/graduate.js";
 import { GraduationUnreadable, DAY_MS, WEEK_MS, draftIdFor, getCheckDraft, listCheckDrafts, readCard, weekOf } from "../../../packages/broker/src/lessons/graduation-store.js";
+import { recordBecame } from "../../../packages/broker/src/lessons/became.js";
+import { documentEvidenceSink } from "../../../packages/broker/src/lessons/evidence.js";
+import { questionPk } from "../../../packages/broker/src/lessons/revert-question.js";
+import { provenSignalsOf, type ProvenSignal } from "../../../packages/broker/src/lessons/proven.js";
+import { skillDepsOf, skillGraduationOf } from "../../../packages/broker/src/lessons/skill-graduation.js";
+import { approveSkill, draftSkillFromLesson, provenProcedure } from "../../../packages/broker/src/lessons/skills.js";
+import { PROVEN_DAYS, PROVEN_TASKS } from "../../../packages/broker/src/lessons/scoring-settings.js";
+import { ROVARA_SKILL_PROVEN } from "@agentx/contracts";
+import type { SignalsReader } from "../../../packages/broker/src/lessons/signals.js";
+import { freshSignalsReader } from "../../../packages/broker/src/lessons/signals.js";
 import { PROVEN, provenLesson } from "../../../packages/broker/src/lessons/proven.js";
 import { settleBothPlaces } from "../../../packages/broker/src/lessons/settle-both.js";
 import { TIDY_MAX, TIDY_MIN_ACTIVE, retireTidy, tidyCard, tidyLater, type TidyDeps } from "../../../packages/broker/src/lessons/tidy.js";
@@ -42,7 +52,7 @@ function world(over: { dir?: ReturnType<typeof directory>; companyId?: OrgId } =
   const published: Array<Record<string, unknown>> = [];
   const deps: GraduateDeps = {
     now: clock.now, audit, store, directory: dir, settings: settings(), vectors, publisher: createTeamRulePublisher({ store: documents, companyId, now: clock.now }),
-    taskVisibility: allSharedTasks, documents, access: allowAllAccess,
+    taskVisibility: allSharedTasks, documents, access: allowAllAccess, signals: freshSignalsReader(documents, companyId, clock.now),
   };
   /** The tasks a lesson was given to: one use row per task. */
   const uses = async (lessonId: string, count: number, project = PROJECT, company: OrgId = companyId): Promise<void> => {
@@ -662,5 +672,160 @@ describe("the Tidy card: the ten least used, retire?", () => {
     await tidyCard(tidyDeps(a), KEY, IDENTITY("ann"));
     const b = world({ companyId: B });
     expect(await tidyCard(tidyDeps(b), { workspaceId: B, project: PROJECT }, IDENTITY("ann"))).toBeUndefined();
+  });
+});
+
+// ---- L4-INT: the proven band is phase 2's computed one, and a skill is made through AK3 ------------------------------------------------------------------------------------------------------------------------------------
+
+describe("the proven band is lessons phase 2's computed band (L4-INT)", () => {
+  const mark = (w: World, lessonId: string, over: { at?: number; weight?: number; id?: string; company?: OrgId } = {}) => documentEvidenceSink(w.documents, over.company ?? A).note({ workspaceId: over.company ?? A, project: PROJECT, lessonId, kind: "against", weight: over.weight ?? 1, at: over.at ?? w.clock.now() - DAY_MS, id: over.id ?? "mark-1" });
+  const question = (w: World, lessonId: string) => w.documents.put({ item: { pk: questionPk(A, PROJECT), sk: `Q#${lessonId}#task-9#${"a".repeat(40)}`, entityType: "LESSON_QUESTION", kind: "revert_overlap", project: PROJECT, lessonId, taskId: "task-9", via: "a".repeat(40), at: w.clock.now(), keepUntil: w.clock.now() + 30 * DAY_MS } });
+  const candidates = async (w: World) => (await graduationCandidates(w.deps, KEY, IDENTITY("ann"))).map((offer) => offer.lessonId).sort();
+
+  it("the numbers are the settings module's, the same ones the skills contract names", () => {
+    expect(PROVEN).toEqual({ tasks: PROVEN_TASKS, days: PROVEN_DAYS });
+    expect(ROVARA_SKILL_PROVEN).toEqual({ tasks: PROVEN_TASKS, days: PROVEN_DAYS });
+  });
+
+  it("a lesson in the band gets the card; one with weight against it, one under question, and one whose signals cannot be read do not", async () => {
+    const w = world();
+    await prove(w, provenLessonRecord(w.clock, "les_inband01"), provenLessonRecord(w.clock, "les_against1"), provenLessonRecord(w.clock, "les_quest001"));
+    expect(await candidates(w)).toEqual(["les_against1", "les_inband01", "les_quest001"]);
+    await mark(w, "les_against1");
+    await question(w, "les_quest001");
+    expect(await candidates(w)).toEqual(["les_inband01"]);
+    expect((await weeklyCard(w.deps, KEY, IDENTITY("ann")))?.lessonId).toBe("les_inband01");
+    // Unreadable signals: no lesson is proven now (a card is never made on a guess).
+    const blind: SignalsReader = { read: async () => undefined };
+    expect(await graduationCandidates({ ...w.deps, signals: blind }, KEY, IDENTITY("ann"))).toEqual([]);
+    const cut: SignalsReader = { read: async (key) => ({ ...(await w.deps.signals.read(key))!, truncated: true }) };
+    expect(await graduationCandidates({ ...w.deps, signals: cut }, KEY, IDENTITY("ann"))).toEqual([]);
+    const broken: SignalsReader = { read: async () => { throw new Error("down"); } };
+    expect(await graduationCandidates({ ...w.deps, signals: broken }, KEY, IDENTITY("ann"))).toEqual([]);
+  });
+
+  it("an 'against' that is older than the evidence window no longer counts, and a weight of zero is not against", async () => {
+    const w = world();
+    await prove(w, provenLessonRecord(w.clock, "les_old00001", { createdAt: w.clock.now() - 400 * DAY_MS, expiresAt: w.clock.now() + 60 * DAY_MS }), provenLessonRecord(w.clock, "les_zero0001"));
+    await mark(w, "les_old00001", { at: w.clock.now() - 300 * DAY_MS });
+    await mark(w, "les_zero0001", { weight: 0 });
+    expect(await candidates(w)).toEqual(["les_old00001", "les_zero0001"]);
+  });
+
+  it("making a lesson permanent re-reads the band: a mark that came after the card was shown stops it, whatever target", async () => {
+    const w = world();
+    await prove(w, provenLessonRecord(w.clock, "les_inband01"));
+    expect((await weeklyCard(w.deps, KEY, IDENTITY("ann")))?.lessonId).toBe("les_inband01");
+    await mark(w, "les_inband01");
+    expect(await ask(w, "les_inband01", "ann")).toEqual({ ok: false, code: "not_proven" });
+    expect(await ask(w, "les_inband01", "ann", "check")).toEqual({ ok: false, code: "not_proven" });
+    expect(await rulesCount(w)).toBe(0);
+  });
+
+  it("the pure rule: nothing against, not under question, readable; a NaN weight is against", () => {
+    const clock = new Clock();
+    const lesson = provenLessonRecord(clock, "les_prov0001");
+    const at = (signal: ProvenSignal | undefined) => provenLesson({ lesson, tasks: 10, now: clock.now(), signal });
+    expect([at(undefined), at({ againstW: 0, underQuestion: false })]).toEqual([true, true]);
+    expect([at({ againstW: 0.01, underQuestion: false }), at({ againstW: 0, underQuestion: true }), at("unreadable"), at({ againstW: Number.NaN, underQuestion: false })]).toEqual([false, false, false, false]);
+  });
+
+  it("the signals of one lesson come from its own company's rows only: another company's reader reads nothing for this project", async () => {
+    const w = world();
+    await prove(w, provenLessonRecord(w.clock, "les_inband01"));
+    const other = freshSignalsReader(w.documents, B, w.clock.now);
+    expect((await provenSignalsOf(other, KEY))("les_inband01")).toBe("unreadable");
+    // A mark written for company B under the same project name is not a mark against A's lesson.
+    await mark(w, "les_inband01", { company: B });
+    expect(await candidates(w)).toEqual(["les_inband01"]);
+  });
+});
+
+async function rulesCount(w: World): Promise<number> { return (await w.documents.query({ pk: companyScoped(w.companyId, `TEAMRULES#${PROJECT}`) })).items.length; }
+
+describe("a skill from a lesson: graduation drafts through AK3, two people approve, the lesson becomes the skill (L4-INT)", () => {
+  const BODY = "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth.";
+  const procedureRecord = (clock: Clock, id: string, over: Partial<Lesson> = {}) => provenLessonRecord(clock, id, { type: "procedure", title: "Add a queue handler", description: "A new queue needs a dead-letter queue.", body: BODY, scope: {}, ...over });
+  const withSkills = (w: World) => {
+    const skillDeps = skillDepsOf({ documents: w.documents, store: w.store, directory: w.dir, audit: w.audit, access: allowAllAccess, vectors: w.vectors }, { companyId: w.companyId, now: w.clock.now });
+    return { skillDeps, deps: { ...w.deps, skills: skillGraduationOf(skillDeps) } satisfies GraduateDeps };
+  };
+
+  it("drafts through AK3 by the person who asked, retires nothing, and the lesson becomes the skill only when its second approval takes it live", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0001"));
+    const { skillDeps, deps } = withSkills(w);
+    const made = await graduateLesson(deps, { ...KEY, lessonId: "les_proc0001", approverId: "ann", target: "skill" });
+    expect(made).toEqual({ ok: true, target: "skill", state: "drafted", ref: "add-a-queue-handler", version: 1 });
+    // Drafted is not live: the lesson is still in use and has no link.
+    expect(await w.store.get(KEY, "les_proc0001")).toMatchObject({ status: "active" });
+    expect((await w.store.get(KEY, "les_proc0001"))?.became).toBeUndefined();
+    // The two-approver rule: one person is not enough, the same person twice is still one.
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" })).toEqual({ ok: true, approvals: 1, live: false });
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" })).toEqual({ ok: false, code: "already_approved" });
+    expect(await w.store.get(KEY, "les_proc0001")).toMatchObject({ status: "active" });
+    // A person who may not decide cannot be the second.
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "mallory" })).toEqual({ ok: false, code: "not_eligible" });
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "bob" })).toEqual({ ok: true, approvals: 2, live: true });
+    // Live: the lesson is retired AND says what it became.
+    const after = await w.store.get(KEY, "les_proc0001");
+    expect(after).toMatchObject({ status: "retired", became: { kind: "skill", ref: "add-a-queue-handler" } });
+    expect(w.audit.actions()).toEqual(expect.arrayContaining(["lesson.graduated", "lesson.skill_drafted", "lesson.skill_approved", "lesson.skill_activated", "lesson.retired"]));
+    // It is not offered, not loaded and not asked again.
+    expect(await weeklyCard(deps, KEY, IDENTITY("ann"))).toBeUndefined();
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0001", approverId: "bob", target: "skill" })).toEqual({ ok: true, target: "skill", state: "done", ref: "add-a-queue-handler", already: true });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0001", approverId: "bob", target: "rule" })).toEqual({ ok: false, code: "already_approved" });
+  });
+
+  it("a tier-2 procedure needs a second person to ask first, then the skill needs its own two approvals", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0002", { tier: 2 }));
+    const { skillDeps, deps } = withSkills(w);
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0002", approverId: "ann", target: "skill" })).toEqual({ ok: true, target: "skill", state: "waiting", needs: "second_person" });
+    expect(await w.documents.query({ pk: companyScoped(A, `SKILL#${PROJECT}`) })).toMatchObject({ items: [] });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0002", approverId: "ann", target: "skill" })).toMatchObject({ ok: false });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0002", approverId: "bob", target: "skill" })).toMatchObject({ ok: true, state: "drafted" });
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" })).toMatchObject({ live: false });
+    expect(await w.store.get(KEY, "les_proc0002")).toMatchObject({ status: "active" });
+    expect(await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "cat" })).toMatchObject({ live: true });
+    expect(await w.store.get(KEY, "les_proc0002")).toMatchObject({ status: "retired", became: { kind: "skill", ref: "add-a-queue-handler" } });
+  });
+
+  it("the skill's draft reads the SAME band: a lesson with a mark against it, or under question, is refused by AK3 too (not drafted, nothing claimed)", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0003"), procedureRecord(w.clock, "les_proc0004"));
+    await documentEvidenceSink(w.documents, A).note({ workspaceId: A, project: PROJECT, lessonId: "les_proc0003", kind: "against", weight: 1, at: w.clock.now() - DAY_MS, id: "m1" });
+    const { skillDeps, deps } = withSkills(w);
+    expect(await draftSkillFromLesson(skillDeps, KEY, { lessonId: "les_proc0003", by: "ann" })).toEqual({ ok: false, code: "not_proven" });
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0003", approverId: "ann", target: "skill" })).toEqual({ ok: false, code: "not_proven" });
+    expect(await draftSkillFromLesson(skillDeps, KEY, { lessonId: "les_proc0004", by: "ann" })).toMatchObject({ ok: true });
+    // No signals reader at all is the plain rule, and a reader of another company is no answer.
+    const foreign = skillDepsOf({ documents: w.documents, store: w.store, directory: w.dir, audit: w.audit, access: allowAllAccess, vectors: w.vectors }, { companyId: B, now: w.clock.now });
+    expect(await draftSkillFromLesson(foreign, KEY, { lessonId: "les_proc0004", by: "ann" })).toEqual({ ok: false, code: "not_proven" });
+    expect(provenProcedure({ lesson: procedureRecord(w.clock, "les_x0000001"), tasks: 12, now: w.clock.now() })).toBe(true);
+    expect(provenProcedure({ lesson: provenLessonRecord(w.clock, "les_x0000002"), tasks: 12, now: w.clock.now() })).toBe(false);
+  });
+
+  it("a lesson that already became something else keeps its first link when a skill of it goes live", async () => {
+    const w = world();
+    await prove(w, procedureRecord(w.clock, "les_proc0005"));
+    const { skillDeps, deps } = withSkills(w);
+    expect(await graduateLesson(deps, { ...KEY, lessonId: "les_proc0005", approverId: "ann", target: "skill" })).toMatchObject({ state: "drafted" });
+    // While the skill waits, a person made the lesson a rule through another way: its first link stands.
+    expect(await recordBecame({ store: w.store, now: w.clock.now, vectors: w.vectors }, KEY, "les_proc0005", { kind: "rule", ref: "rule_first" })).toMatchObject({ ok: true, already: false });
+    await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "ann" });
+    await approveSkill(skillDeps, KEY, { name: "add-a-queue-handler", version: 1, by: "bob" });
+    expect((await w.store.get(KEY, "les_proc0005"))?.became).toMatchObject({ kind: "rule", ref: "rule_first" });
+  });
+
+  it("two companies: company B's library cannot draft, approve or link company A's lesson", async () => {
+    const a = world();
+    await prove(a, procedureRecord(a.clock, "les_proc0006"));
+    const b = world({ companyId: B });
+    // B's world shares nothing with A's store; point it at A's lesson store and documents on purpose: the signals reader still refuses the foreign project.
+    const crossed = skillDepsOf({ documents: a.documents, store: a.store, directory: b.dir, audit: b.audit, access: allowAllAccess, vectors: b.vectors }, { companyId: B, now: a.clock.now });
+    expect(await draftSkillFromLesson(crossed, KEY, { lessonId: "les_proc0006", by: "ann" })).toEqual({ ok: false, code: "not_proven" });
+    expect((await a.documents.query({ pk: companyScoped(A, `SKILL#${PROJECT}`) })).items).toEqual([]);
+    expect((await a.store.get(KEY, "les_proc0006"))?.became).toBeUndefined();
   });
 });

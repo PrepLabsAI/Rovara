@@ -15,12 +15,15 @@ import type { LessonsPauseStore } from "./pause.js";
 import type { LessonStore, ScopeKey } from "./store.js";
 import { proposedByOf } from "./proposal-mark.js";
 import { skillOffers } from "./skills.js";
+import type { SignalsReader } from "./signals.js";
 import { ERASED_MARK, idIn, normId, normSource, sameId, type IdentitySet, type Lesson } from "./types.js";
 import { lessonValue } from "./value.js";
 
 export interface LessonViewDeps {
   /** The install's document store, for the "Make this a skill?" offers (`skillOffers`). Absent: no offers. */
   documents?: DocumentStore | undefined;
+  /** Phase 2's signals, which the "proven" band reads for those offers (a card is shown from them; the button reads them fresh). Absent: the plain rule. */
+  signals?: SignalsReader | undefined;
   store: LessonStore; directory: ApproverDirectory; settings: LearningSettingsReader; access: AccessCheckPort;
   /** Names of the people a lesson mentions. */
   names: AttributionReader;
@@ -219,7 +222,7 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
   const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
 
   // "Make this a skill?" (L4-AK3): only for the people who decide, never on Home, and never an error: a card that cannot be worked out is not shown.
-  const offers = state.canDecide && !home && deps.documents !== undefined ? await skillOffers({ documents: deps.documents, lessons: deps.store, now: deps.now }, key).catch(() => []) : [];
+  const offers = state.canDecide && !home && deps.documents !== undefined ? await skillOffers({ documents: deps.documents, lessons: deps.store, now: deps.now, signals: deps.signals }, key).catch(() => []) : [];
   const setVersion = await deps.store.setVersion(key);
   const snapshots = state.canDecide && !home ? (await deps.store.snapshots(key)).filter((s) => s.setVersion !== setVersion).slice(-SNAPSHOTS_MAX).map((s) => ({ setVersion: s.setVersion, at: s.at, lessons: s.members.length })) : [];
   const truncated: Array<"waiting" | "active" | "removed"> = [];

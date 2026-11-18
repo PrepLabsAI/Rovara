@@ -92,6 +92,16 @@ export const AREA_CHECK_KEEP_DAYS = 14;
 /** Lessons and files one nightly area check looks at (bounds). */
 export const AREA_CHECK_LESSONS_MAX = 200;
 
+// ---- Phase 4 reads these: the "proven" band --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The "proven" band (research Q5; starting values, replaced by phase 0's measured ones like every number here): a lesson is proven when it was given to at least `PROVEN_TASKS` tasks over at least `PROVEN_DAYS` days, nothing is
+ * against it, its anchors hold and two people (or one person and a measured result) stand behind it. "Nothing against it" is read from this phase's own evidence: no `against` weight inside the evidence window and no mark
+ * of "under question" (`proven.ts`). Graduation (`graduate.ts`) and skills (`skills.ts`) both ask the one function, so a card is never offered for something the skill step then refuses.
+ */
+export const PROVEN_TASKS = 10;
+export const PROVEN_DAYS = 30;
+
 export interface RankingSettings {
   fitFloorWords: number; fitFloorCosine: number;
   weights: { fit: number; strength: number; recency: number };
