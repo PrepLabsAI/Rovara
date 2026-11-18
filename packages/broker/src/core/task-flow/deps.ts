@@ -36,6 +36,7 @@ import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.j
 import type { StepOutcome } from "./outcome.js";
 import type { CodeMilestones, SessionBindingsReader } from "../merge/seams.js";
 import type { PlaybookMode } from "../playbook/service.js";
+import type { PinnedStanding } from "../instructions/pinned.js";
 import type { CiDefinitionReader } from "../../rovara-code/ci-checks.js";
 import type { StructuredPlanContext, StructuredPlanInput } from "../plan/prompts.js";
 import type { SecondReview } from "../second-review/service.js";
@@ -187,9 +188,11 @@ export interface BuildSteps {
  * started after the rules changed carries the newest ones. A rejection with `CONFIG_INVALID` or `PROCESS_UNAVAILABLE` ends the operation with its sentence; any other waits and tries again.
  */
 export interface StandingInstructionsSeam {
-  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined }): Promise<StandingInstructionsPayload | undefined>;
+  forOperation(input: { project: string; mode: PlaybookMode | undefined; purpose?: string | undefined; playbookCommit?: string | undefined; pinned?: PinnedStanding | undefined }): Promise<StandingInstructionsPayload | undefined>;
   /** The playbook commit a task starting now is pinned to, kept on its workspace; the task's steps read the file at it. Refuses (as `forOperation`) when the rules cannot be read, so a task does not start under rules it cannot be given. */
   pin(project: string): Promise<string | undefined>;
+  /** Hosted: the copy of the rules kept on the task's workspace for the dispatcher (see `createStandingInstructions`). Absent on a laptop. */
+  pinContent?(project: string, playbookCommit: string | undefined): Promise<PinnedStanding | undefined>;
 }
 
 /**

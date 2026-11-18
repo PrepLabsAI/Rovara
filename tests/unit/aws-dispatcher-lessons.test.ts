@@ -65,9 +65,14 @@ describe("read-only dispatcher lessons", () => {
     w.send.mockClear();
     // Even though the supplied options say on, only the deployment's switch decides.
     const uncovered = hostedDispatcherFlow(env, { ...w.options, companyId: B });
-    expect(uncovered).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+    // L4-HW3: lessons are not covered, so no learned reader; the standing seam is still declared (the company's rules and How we work pinned on the task need no lessons) and holds no team rules.
+    expect(uncovered).toMatchObject({ modelAccess: null, learned: null });
+    expect(typeof uncovered?.standingInstructions?.forOperation).toBe("function");
     for (const raw of [undefined, "off"]) {
-      expect(hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options)).toEqual({ standingInstructions: null, modelAccess: null, learned: null });
+      const off = hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options);
+      expect(off).toMatchObject({ modelAccess: null, learned: null });
+      expect(typeof off?.standingInstructions?.forOperation).toBe("function");
+      expect(await off!.standingInstructions!.forOperation({ project: "p", mode: "PLAN" })).toBeUndefined();
     }
     expect(w.send).not.toHaveBeenCalled();
     for (const write of w.writes) expect(write).not.toHaveBeenCalled();
