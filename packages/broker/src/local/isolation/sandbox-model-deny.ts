@@ -18,7 +18,7 @@ export const SANDBOX_PINNED_MODEL_HOSTS: readonly string[] = ["api.anthropic.com
  */
 export const SANDBOX_PINNED_MODEL_PARENTS: readonly string[] = ["*.openai.com", "*.anthropic.com", "*.openrouter.ai", "*.chatgpt.com"];
 
-/** Google's token hosts: left out of this deny list (a pending owner decision removes them everywhere). */
+/** Google's token hosts: left out of this deny list on purpose (they serve every Google API; owner decision 2026-11-17 put them in the default list's "Google Vertex AI" group). */
 export const SANDBOX_DENY_LEAVES_OUT: readonly string[] = ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"];
 
 type DenyRow = Pick<ModelCatalogRow, "hosts" | "hostSuffixes"> & { readonly authHosts?: readonly string[] | undefined };
