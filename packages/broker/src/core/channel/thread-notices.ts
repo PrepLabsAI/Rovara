@@ -23,6 +23,7 @@ import type { DecisionGate } from "../decisions/approval-gate.js";
 import { CHAT_METHOD_PREFIX } from "../decisions/strong-methods.js";
 import { WORKFLOW_DOCUMENT_KIND, waitingDocumentDigest } from "../decisions/workflow-subject.js";
 import { taskKey } from "../task-flow/keys.js";
+import { readPlanFeature } from "../report/plan-feature.js";
 import { taskSessionId } from "../sessions/create.js";
 import { inertTicketTitle } from "../ticket-updates/handler.js";
 import { postApprovalCard } from "./cards.js";
@@ -116,14 +117,12 @@ export function threadFollows(deps: { store: Pick<DocumentStore, "get"> }): (org
   return async (orgId, sessionId) => (await readTaskThread(deps.store, orgId, sessionId)) !== undefined;
 }
 
-export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
+/**
+ * The two steps every message to a task's thread goes through, shared by the milestone lines and the task log's mirror (`log-mirror.ts`): `reach` finds the adapter of a thread that is this company's and whose person is served,
+ * and `send` claims a notice (one row per session and key) before it is delivered, renews the claim while the delivery runs and gives it back when the delivery fails, so a notice is sent once and a failed one is sent again.
+ */
+export function threadSender(deps: Pick<ThreadNoticeDeps, "store" | "registry" | "now" | "companyOf" | "isMember" | "log">) {
   const log: Log = deps.log ?? (() => undefined);
-  const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
-  const open = (taskId: string): string => {
-    const link = deps.taskUrl?.(taskId);
-    return link !== undefined ? link : deps.footer ?? "";
-  };
-
   /** The thread to tell, when it is this company's and its person is served; otherwise nothing is sent. */
   async function reach(orgId: OrgId, thread: TaskThread) {
     const { conversation } = thread;
@@ -154,6 +153,17 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
     }
     await deps.store.update({ key: at, ops: [change.set("state", "done"), change.remove("leaseUntil"), ...(sent === undefined ? [] : [change.set("cardUntil", sent.cardUntil)])] }).catch(() => undefined);
   }
+  return { reach, send };
+}
+
+export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
+  const log: Log = deps.log ?? (() => undefined);
+  const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
+  const open = (taskId: string): string => {
+    const link = deps.taskUrl?.(taskId);
+    return link !== undefined ? link : deps.footer ?? "";
+  };
+  const { reach, send } = threadSender({ ...deps, log });
 
   return {
     name: CHANNEL_THREAD_HANDLER,
@@ -193,7 +203,9 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         // Buttons only where the approvers take a decision made in this chat (and never for a high risk plan); otherwise the card is a pointer to the task page.
         const chatTakes = risk !== "high" && found.requirement.methods.includes(`${CHAT_METHOD_PREFIX}${conversation.channel}`);
         const taskUrl = deps.taskUrl?.(taskId);
-        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.`;
+        // Lead 4 PCF: the task's feature as one line (no cost, no controls here: "Change" is on the task page). A read that fails leaves the line out and never holds the card back.
+        const feature = await readPlanFeature({ store: deps.store, companyId: orgId, now: deps.now }, { taskId, project: typeof task["project"] === "string" ? task["project"] : "" }, { mayFile: false, manager: false, admin: false });
+        const words = `The plan for "${title}" is ready for review. Risk: ${risk}.${feature === undefined ? "" : `\n${feature.feature === null ? feature.line : feature.line.replace(feature.feature.name, inertTicketTitle(feature.feature.name))}`}`;
         // Request changes asks "What should change?" in a form the chat opens (an adapter that declares `forms`); a chat with none sends the person to the task page for it instead, and the card offers Approve alone.
         const asks = adapter.capabilities.forms === true;
         const extra = chatTakes
@@ -216,11 +228,11 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
         const key = `pr_opened#${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(",")).slice(0, 24)}`;
         const links = requests.flatMap((request) => plainHttpsLink(request.url) ?? []);
         // L4-EVCI: the customer's own eval result, when it had landed by the time the pull request was marked ready: the same one line as in the description (fixed words, numbers and a plain https address; a line that is
-        // not exactly Rovara's own words is not sent). The typed pull request event has no place for it, so a ready line that carries it is the plain progress text.
+        // not exactly Rovara's own words is not sent). It rides on the typed card as its own field when the card is used, and on the plain text otherwise.
         const evalLine = milestone.evalLine !== undefined && EVAL_CI_LINE_PATTERN.test(milestone.evalLine) ? milestone.evalLine : undefined;
         await send(orgId, sessionId, key, () => tell(links.length === 1 && evalLine === undefined
-          ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened" } }
-          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}` } }));
+          ? { ...base(key), type: "pr", data: { url: links[0]!, title, action: "opened", ...(milestone.verdict === undefined ? {} : { verdict: milestone.verdict }) } }
+          : { ...base(key), type: "progress", data: { text: `A pull request is ready for review for "${title}".${milestone.verdict === undefined ? "" : ` ${milestone.verdict}.`}${links.map((link) => `\n${link}`).join("")}${evalLine === undefined ? "" : `\n${evalLine}`}` } }));
         return;
       }
 

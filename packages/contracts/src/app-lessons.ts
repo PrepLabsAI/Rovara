@@ -203,7 +203,8 @@ export const LoadedLessonRowSchema = z.object({
   trial: z.enum(["trial", "stable"]).optional(),
 }).strict();
 /** `canThumbsDown`: the caller has a role in the project and may write, so the task page offers the one-tap thumbs-down only to someone it will work for. Absent (an older broker): offered, and the broker decides. */
-export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional() }).strict();
+export const LoadedWikiUseSchema = z.object({ given: z.array(z.string().min(1).max(120)).max(80), read: z.array(z.string().min(1).max(120)).max(80) }).strict();
+export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional(), wikiUse: LoadedWikiUseSchema.optional() }).strict();
 export const LoadedLessonsReaderSchema = forwardReader(LoadedLessonsSchema);
 
 // ---- request bodies

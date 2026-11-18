@@ -5,6 +5,8 @@
 // a body. Every row is checked again against the person's session access now (`core/notify/inbox.ts`), so a person who lost access reads nothing. Refusals are fixed words that echo nothing.
 import { agentXError } from "@agentx/contracts";
 import { listInbox, markInboxRead } from "../core/notify/inbox.js";
+import { writeNotifyPrefs } from "../core/notify/prefs.js";
+import { verifyUnsubscribeToken } from "../core/notify/unsubscribe-token.js";
 import { createSessionAccess, type SessionMembers } from "../core/sessions/access.js";
 import { sessionOpenPath } from "../core/decisions/open-path.js";
 import { developerIdOf } from "../core/sessions/create.js";
@@ -12,9 +14,12 @@ import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { DocumentStore, OrgId } from "@agentx/contracts";
 
-export const INBOX_PATH = /^\/v1\/app\/inbox(?:\/read)?$/u;
+export const INBOX_PATH = /^\/v1\/app\/(?:inbox(?:\/read)?|notify\/unsubscribe)$/u;
+/** The methods this module serves on a path it owns (any other is the old broker's): the list is a GET, a read mark and the unsubscribe are POSTs. */
+export const inboxOwns = (path: string, method: string): boolean => (path.endsWith("/read") || path.endsWith("/unsubscribe") ? method === "POST" : method === "GET");
 export const INBOX_SIGN_IN_AGAIN = "Sign in again.";
 export const INBOX_BAD_REQUEST = "That request is not valid.";
+export const UNSUBSCRIBE_BAD_LINK = "That link is not valid for you. Open it from the email while signed in as the person it was sent to.";
 const CURSOR_MAX = 200;
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
@@ -25,6 +30,8 @@ export interface InboxRoutesDeps {
   companyId: OrgId;
   origin: () => string;
   members: SessionMembers;
+  /** The key that verifies the signed link of an attention email (the hosted core with the attention email switch on). Absent: the unsubscribe route is not served. */
+  unsubscribeKey?: Buffer;
   now?: () => number;
 }
 
@@ -37,6 +44,19 @@ export function createInboxRoutes(deps: InboxRoutesDeps): (request: BrokerReques
     // The host mounts one runtime per company the caller's membership names; a principal of any other company is never served from it.
     if (caller.principal.companyId !== deps.companyId) return json(401, { error: { code: "UNAUTHENTICATED", message: INBOX_SIGN_IN_AGAIN } });
     const who = { companyId: deps.companyId, developerId: developerIdOf(caller.principal) };
+    if (url.pathname === "/v1/app/notify/unsubscribe") {
+      if (request.method !== "POST") return undefined;
+      if (deps.unsubscribeKey === undefined) throw agentXError("NOT_FOUND", "That is not on the core engine on this install yet.");
+      let body: unknown;
+      try { body = request.body === undefined || request.body === "" ? undefined : JSON.parse(request.body); } catch { body = undefined; }
+      const fields = typeof body === "object" && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : undefined;
+      if (fields === undefined || Object.keys(fields).some((key) => key !== "requestId" && key !== "token") || typeof fields["requestId"] !== "string" || !REQUEST_ID.test(fields["requestId"])) throw agentXError("CONFIG_INVALID", INBOX_BAD_REQUEST);
+      // The link only says which person it was sent to: it stops emails for the signed-in person it names, and for nobody else. Anything wrong with it (not signed here, expired, someone else's) is one answer.
+      const named = verifyUnsubscribeToken(deps.unsubscribeKey, fields["token"], now());
+      if (named === undefined || named.orgId !== who.companyId || named.developerId !== who.developerId) throw agentXError("CONFIG_INVALID", UNSUBSCRIBE_BAD_LINK);
+      await writeNotifyPrefs({ store: deps.store, now: () => new Date(now()) }, who.companyId, who.developerId, { emailUnsubscribed: true });
+      return json(200, { emailUnsubscribed: true });
+    }
     if (url.pathname === "/v1/app/inbox/read") {
       if (request.method !== "POST") return undefined;
       let body: unknown;

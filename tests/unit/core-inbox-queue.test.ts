@@ -102,7 +102,7 @@ describe("the notice service's queue", () => {
 
   it("is switched on by the hosted job services alone", () => {
     const jobs = readFileSync("packages/broker/src/aws/core-job-services.ts", "utf8");
-    expect(jobs).toContain("createNoticeService({ store, registry, now: clock, log, inbox: true, ...options.notification })");
+    expect(jobs).toContain("createNoticeService({ store, registry, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification })");
     const others = ["packages/broker/src/services/notices.ts", "packages/broker/src/core-host/code-modules.ts", "packages/broker/src/local/runtime.ts"].map((file) => readFileSync(file, "utf8")).join("\n");
     expect(others).not.toMatch(/inbox:\s*true/u);
   });

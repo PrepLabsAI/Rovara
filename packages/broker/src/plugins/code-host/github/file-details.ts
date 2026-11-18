@@ -72,3 +72,22 @@ export function instructionList(tree: IndexedTree, max: number): { files: Array<
   }
   return { files, complete };
 }
+
+/**
+ * L4-DR: the files a tree read holds whose path `match` accepts, with the host's object id of each (never the content). A symbolic link counts (its id changes when its target does); a directory, a submodule and
+ * an entry of an unknown kind are skipped. `complete` is false when the tree was cut short or more than `max` files matched.
+ */
+export function setupFileList(tree: IndexedTree, input: { match: (path: string) => boolean; max: number }): { files: Array<{ path: string; id: string }>; complete: boolean } {
+  const files: Array<{ path: string; id: string }> = [];
+  let complete = !tree.truncated;
+  for (const entry of tree.entries.values()) {
+    if (entry.type !== "blob" || !input.match(entry.path)) continue;
+    const type = fileEntryType(entry);
+    if (type === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "A setup file type is unknown");
+    if (!/^[a-f0-9]{40,64}$/u.test(entry.sha)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid object id");
+    if (files.length >= input.max) { complete = false; continue; }
+    files.push({ path: entry.path, id: entry.sha });
+  }
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { files, complete };
+}

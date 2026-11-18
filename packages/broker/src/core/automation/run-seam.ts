@@ -8,7 +8,7 @@
 //      releases the reservation.
 // Nothing here decides anything for a person: an unattended run never carries an approval, never answers a question and never merges. A plan, a design or a merge it reaches waits for the owner, as for any task.
 import { admissionRefusal } from "../task-flow/admission.js";
-import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, orgScoped, queryAll, when, type Admission, type AgentId, type AuditSink, type DocumentKey, type DocumentStore, type RunInput } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, orgScoped, queryAll, when, type Admission, type AgentId, type AuditSink, type DocumentKey, type DocumentStore, type RunInput, type SetupAgentLimits } from "@agentx/contracts";
 import { iso, text } from "./kit.js";
 import { automationIsOn, type AutomationSwitch } from "./switch.js";
 
@@ -37,6 +37,12 @@ export interface AutomatedRunRequest {
   /** An automatic job's mark (the nightly run, an image rebuild): the run is model-free and the starter hands it no model key. */
   automatic?: { job: string; purpose: string; approvedBy?: string | undefined } | undefined;
   limits: AutomatedRunLimits;
+  /**
+   * L4-RD: this run is the setup agent's repair draft for a broken setup, not an agent's job. The host's starter starts the project's setup run (a task with the setup purpose and these limits, the pointer written in its
+   * own start) as the project's system owner, with the origin above. A starter that does not know it must REFUSE the request, never start an ordinary task from its text (`createTaskFlowRunStarter` refuses). It spends
+   * model money, so it is never an `automatic` (model-free) job and needs an enforced cap like any run.
+   */
+  setupRepair?: { limits: SetupAgentLimits; seenTaskId: string | undefined } | undefined;
   /** The digest of the recipe the run is frozen with (narrowed by the guardrails and the project's rules). A starter that runs an agent reads the frozen recipe by this digest and never re-resolves a wider one. */
   recipeDigest?: string | undefined;
 }

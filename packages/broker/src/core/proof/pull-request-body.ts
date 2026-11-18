@@ -2,12 +2,12 @@
 // code is, between markers that Rovara rewrites after every fix or sync, and it ends with the line that says a person approves and a person merges. The description is public to the repository's
 // readers: every line that a model, a file name or a branch name wrote goes through `inertLine` (redacted, one line, no mention, link, image, cross-reference or hidden comment), every list is bounded,
 // and the whole body stays under the byte cap with its markers, risk and closing line intact so it can always be regenerated in place.
-import { EVAL_CI_LINE_PATTERN, attributionBodyLines, hideEmailAddresses, type ActingAttribution, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
+import { EVAL_CI_LINE_PATTERN, attributionBodyLines, hideEmailAddresses, type ActingAttribution, type PrVerdict, type RiskAssessment, type TestingView, type VerdictSecondReview, type VerificationReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import { inertLine } from "./inert-text.js";
 import { reviewModelLines } from "./review-model-lines.js";
 import { linearCloseLine, neutralizeLinearWords, normalizeIssueKey, sealLinearText } from "./linear-close.js";
-import { LAYOUT_LEVEL_LAST, layoutBlockLines } from "./pull-request-layout.js";
+import { LAYOUT_LEVEL_LAST, layoutBlockLines, verdictOfLayout } from "./pull-request-layout.js";
 import { proofParts, recordedCheckIdsOf, type ProofContext } from "./proof-section.js";
 import { testProofLinesOf, testProofQualifier } from "./proof-table.js";
 import type { EvidenceRiskSignal } from "./evidence-risk.js";
@@ -94,6 +94,8 @@ export interface PullRequestBodyContext {
    * Text only: no image, no address of one and no digest ever reaches GitHub, because an image a PR reader's browser can fetch would be public. Absent or empty: the description is exactly what it was.
    */
   browserEvidenceLines?: readonly string[] | undefined;
+  /** L4-SC (DEC 254z c): one line per mock the approved plan made for this task (`mockPrLines`). Absent or empty: the description is exactly what it was. */
+  setupLines?: readonly string[] | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */
@@ -227,6 +229,12 @@ function checksExtraLines(workflow: WorkflowSnapshot, context: PullRequestBodyCo
  * The lines between the markers: What changed, Tests, Reviews and Risk, about the code now on the pull request. `reviewLines(listed)` gives the Reviews section's lines (at most `listed` accepted
  * findings named). The lists shrink until the block fits `budgetBytes`.
  */
+/** The "Setup change" section: the one line per task-only mock, each made inert and cut, so a service name from the plan can add no heading, link or mention. Nothing when there is none. */
+export function setupChangeSection(lines: readonly string[] | undefined): string[] {
+  const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line)).map((line) => inertLine(line, ITEM_MAX));
+  return kept.length === 0 ? [] : ["## Setup change", ...kept, ""];
+}
+
 /** The "Browser evidence" section: its fixed lines under a heading and a blank line after; nothing for none. Each line is one line (a line with a break in it is dropped, so a section never carries other markup). */
 export function browserEvidenceSection(lines: readonly string[] | undefined): string[] {
   const kept = (lines ?? []).filter((line) => typeof line === "string" && line !== "" && !/[\r\n]/u.test(line));
@@ -246,12 +254,26 @@ export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullReque
     const extra = checksExtraLines(workflow, context, level >= 3 ? 3 : 10);
     const built = layoutBlockLines({
       workflow, context, risk, parts, reviewLines, checksExtra: extra.lines, testsAdded: extra.testsAdded, reviewExtra, linearCloseLine: closeLine, asOf: context.asOf ?? workflow.updatedAt,
+      // L4-SC (#916, merged over the PR redesign in batch 14): the plan's "Setup change" lines, after the verdict list and before the drawers.
+      setupChange: setupChangeSection(context.setupLines),
     }, level);
     // The last guard: whatever a path let through, no line has a Linear magic word before a key but Rovara's own Fixes line. No email address on GitHub; hidden before the size is checked.
     lines = sealLinearText(built.lines, linearKey).map((line) => hideEmailAddresses(line));
     if (byteLength(lines.join("\n")) <= budgetBytes) return lines;
   }
   return lines;
+}
+
+/**
+ * L4-PRP: the verdict of the code now on the pull request, from the same facts and the same functions the description's block is written from (`rovaraStatusLines`): the "Rovara" Check says these words too. The verdict does
+ * not depend on the shrink level (every level keeps the heading, the six lines and the first items), so it is computed once, at the full block's own inputs.
+ */
+export function rovaraPullRequestVerdict(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[]): PrVerdict {
+  const extra = checksExtraLines(workflow, context, 10);
+  return verdictOfLayout({
+    workflow, context, risk: riskShown(workflow, context), parts: proofParts(workflow, context.proof), reviewLines, checksExtra: extra.lines, testsAdded: extra.testsAdded,
+    reviewExtra: [], linearCloseLine: undefined, asOf: context.asOf ?? workflow.updatedAt,
+  });
 }
 
 /** The "Merge order" section: at most 4 lines, each one line (the lines are made inert where they are written, and are cut here again, so nothing a caller passes can add a heading or a link). */

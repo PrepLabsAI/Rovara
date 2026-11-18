@@ -749,6 +749,8 @@ export const CodeMilestoneSchema = z
     text: z.string().min(1).max(500),
     /** L4-EVCI: on a `pr_ready` milestone, the customer's own eval result as `evalCiLine` says it (fixed words, numbers and a plain https address), for the chat and ticket lines. Absent: nothing to say. */
     evalLine: z.string().min(1).max(500).optional(),
+    /** L4-PRP: a `pr_ready` milestone's verdict heading (fixed words and counts: `Verified · Low risk · nothing extra to check`), the same words as the pull request's description, for the chat and the ticket. */
+    verdict: z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}<>@[\]`*_~#|!]*$/u).optional(),
     pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048) }).strict()).max(32).optional(),
     bindings: z.array(SessionBindingSchema).max(2).optional(),
     to: z.array(z.string().min(1).max(200)).max(50).optional(),

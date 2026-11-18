@@ -8,6 +8,7 @@
 // KNOWN LIMIT: "a check proves this claim" is what the PLAN asserts (its `checks.proves` and `scenarioProves`); nothing here runs the check, so a plan can claim proof it does not have and look less
 // risky. The backstop is the merge card, whose tier comes from the pull request's actual changed files and the checks that really ran.
 import type { DecisionRisk, PlanDocument, WorkflowSnapshot } from "@agentx/contracts";
+import { planHasSetupChanges } from "@agentx/contracts";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { raiseRisk } from "@agentx/contracts";
 import { pathsIn, planFiles, planUntestedClaims } from "./plan-facts.js";
@@ -18,6 +19,8 @@ export interface PlanFacts {
   untestedClaims: number;
   /** The files or the checks that prove the plan could not be read from it: no such chips, and the tier is at least medium. */
   unread: boolean;
+  /** L4-SC (DEC 254z c): the plan proposes a change to the project's test setup. The tier goes up one level (`bumpForSetupChanges`), which is read from the plan's own stored document, never from the planner's words about risk. */
+  setupChange?: boolean | undefined;
 }
 
 /** Every bit of a plan's own text that may name a path: claims (and their children), risks, decisions and their options, and work items. */
@@ -40,7 +43,7 @@ export function planFactsOf(loaded: LoadedDocument | undefined, workflow?: Pick<
   if (loaded === undefined) return { files: [], untestedClaims: 0, unread: true };
   if (loaded.format === "structured") {
     const files = [...new Set([...planFiles(loaded.plan), ...pathsIn(planText(loaded.plan)), ...designFiles(workflow)])];
-    return { files, untestedClaims: planUntestedClaims(loaded.plan), unread: files.length === 0 };
+    return { files, untestedClaims: planUntestedClaims(loaded.plan), unread: files.length === 0, ...(planHasSetupChanges(loaded.plan) ? { setupChange: true as const } : {}) };
   }
   return { files: [...new Set([...pathsIn(loaded.markdown), ...designFiles(workflow)])], untestedClaims: 0, unread: true };
 }
@@ -51,11 +54,21 @@ export function planRiskOf(facts: PlanFacts, costHighUsd: number | undefined): D
 }
 
 /**
+ * L4-SC: a plan that changes the test setup is one level riskier than it would be (low -> medium, medium -> high; high stays high), so it is decided on the web card and, at high, by the strong proof. The bump is
+ * applied to the finished tier, after the floor, so no other rule can hide it. A plan with no setup change is returned as it is.
+ */
+export function bumpForSetupChanges(risk: DecisionRisk, setupChange: boolean | undefined): DecisionRisk {
+  if (setupChange !== true) return risk;
+  return risk === "low" ? "medium" : "high";
+}
+
+/**
  * The ONE rule for "this coding plan is decided on its card, not by an Approve in Slack, a tool or a token": the plan's tier (`planRiskOf`) is medium or high. Answers that tier, or
  * undefined when the plan may be approved anywhere (cards off, or low risk). The server's refusal (`requirePlanApprovalPlace`) and the Slack plan message (which then offers no Approve) both read it, so they cannot drift.
  */
 export function planDecidedOnCard(loaded: LoadedDocument | undefined, workflow: Pick<WorkflowSnapshot, "designReview"> | undefined, costHighUsd: number | undefined): "medium" | "high" | undefined {
-  const risk = planRiskOf(planFactsOf(loaded, workflow), costHighUsd);
+  const facts = planFactsOf(loaded, workflow);
+  const risk = bumpForSetupChanges(planRiskOf(facts, costHighUsd), facts.setupChange);
   return risk === "low" ? undefined : risk;
 }
 
@@ -86,7 +99,8 @@ export function planRiskFloor(input: { texts: readonly string[]; costHighUsd?: n
 
 /** The tier of the plan waiting for approval: what the planner's own document says, raised (never lowered) to the core's floor. */
 export function gradePlanRisk(input: { loaded: LoadedDocument | undefined; workflow: Pick<WorkflowSnapshot, "designReview">; requestText?: string | undefined; costHighUsd?: number | undefined }): DecisionRisk {
-  const planner = planRiskOf(planFactsOf(input.loaded, input.workflow), input.costHighUsd);
+  const facts = planFactsOf(input.loaded, input.workflow);
+  const planner = planRiskOf(facts, input.costHighUsd);
   const floor = planRiskFloor({ texts: [...(input.loaded === undefined ? [] : [input.loaded.markdown]), ...(input.requestText === undefined ? [] : [input.requestText])], costHighUsd: input.costHighUsd });
-  return raiseRisk(planner, floor);
+  return bumpForSetupChanges(raiseRisk(planner, floor), facts.setupChange);
 }

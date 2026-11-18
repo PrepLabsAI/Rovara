@@ -1,4 +1,4 @@
-// L4-EVCI (owner decision D7, the Influur fallback): the customer's OWN eval result on Rovara's pull request. One check of the customer's CI is named at setup as their eval (`CiEvidenceSettings.evalCheck`, confirmed
+// L4-EVCI (owner decision D7): the customer's OWN eval result on Rovara's pull request. One check of the customer's CI is named at setup as their eval (`CiEvidenceSettings.evalCheck`, confirmed
 // by a maintainer: settings are the host's to store, as for the marked checks). When that check completes on the head, the pass keeps its result on the tracking item (`ciEval`, the marked-check entry shape, read
 // with the same run facts and per-test report reader) and says it once as one line in the description, next to Rovara's own eval label: "Eval (reported by your CI): passed, <link>".
 //
@@ -63,7 +63,7 @@ export async function writeEvalDescription(sink: EvalDescriptionSink, line: stri
   await sink.host.updateChangeRequest(sink.ref, { body: next.body }, sink.scope);
   if (record !== undefined && record.body === now.body) {
     const key = pullRequestRecordKey((await workspaceKeys({ store: sink.store, companyId: sink.companyId }, sink.workspaceId)).workspaceKey, sink.repositoryId, sink.number);
-    await sink.store.update({ key, ops: [change.set("body", next.body), change.set("updatedAt", new Date(sink.now()).toISOString())], condition: when.present() });
+    await sink.store.update({ key, ops: [change.set("body", next.body), change.set("updatedAt", new Date(sink.now()).toISOString())], condition: when.eq("body", record.body) });
   }
   return "written";
 }
@@ -129,13 +129,17 @@ export async function evalCiPass(input: {
   const reportPending = reportsOn({ settings, reportParser: input.reportParser, runner: input.runner }) && (entry.state === "passed" || entry.state === "failed") && entry.workflowRunId !== undefined
     && (entry.report === undefined || ((entry.report === "none" || entry.report === "unreadable") && (entry.reportTries ?? 0) < REPORT_TRIES_MAX));
   const result = evalResultOf(entry);
-  let kept: MarkedEntry = entry;
+  // Only counts are kept: failed tests' names and texts are not needed for one line (and are not shown on the task view).
+  const { failedTests: _failedTests, flaky: _flaky, proven: _proven, added: _added, ...counted } = entry;
+  void _failedTests; void _flaky; void _proven; void _added;
+  let kept: MarkedEntry = counted;
+  // Said once for the head, run, state and reason it speaks for. `observeMarked` keeps `announced` only for a passed or failed run, so a "not run" is remembered here (else it would be written on every pass).
+  const already = sameHead && priorEntry !== undefined && priorEntry.announced === true && priorEntry.state === entry.state && priorEntry.runId === entry.runId && priorEntry.reason === entry.reason;
   if (result !== undefined && !reportPending) {
-    // Said once for the run and state it speaks for: `announced` is kept from the earlier pass only for the same head, run and state (`observeMarked`).
-    if (entry.announced !== true) {
+    if (entry.announced !== true && !already) {
       await tell(input, evalCiLine(result));
-      kept = { ...entry, announced: true };
     }
+    kept = { ...counted, announced: true };
   } else if (priorEntry?.announced === true) {
     // What the description says was said for a head or a run that is no longer the current one (a push, a re-run in progress): it is taken out until the check answers again.
     await tell(input, undefined);

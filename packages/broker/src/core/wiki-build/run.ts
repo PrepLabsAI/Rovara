@@ -14,15 +14,16 @@
 //   `submitWikiPage` takes the worker's answer for the granted page only, re-checks every citation (check.ts) and writes what survived through the page sink. A page is "done" only once the
 //                    sink wrote it (or nothing on it survived), so a stop at any point keeps every finished page and a continue never writes them again.
 import {
-  WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WIKI_BUILD_WORKFLOW_MODE, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
+  UpkeepPauseReasonSchema, WIKI_BUILD_PAYER_KIND, WIKI_BUILD_WORDS, WIKI_BUILD_WORKFLOW_MODE, WIKI_CONTROLS_WORDS, WikiBuildPinsSchema, WikiPageDraftSchema, agentXError, change, effectiveWikiBuildLimits, oneLineText, when, wikiPageFits,
   type DocumentStore, type JsonValue, type OrgId, type TransactItem, type WikiBuildEndWord, type WikiBuildLimits, type WikiBuildPins, type WikiBuildRecord, type WikiBuildSummary, type WikiFileMap,
-  type WikiPagePlan, type WikiPageSink,
+  type WikiPagePlan, type WikiPageSink, type UpkeepPauseReason,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { CitationFileReader } from "../citations/citation-check.js";
 import { checkWikiPage, storeCheckCache } from "./check.js";
 import { wikiBuildNotesKey, wikiBuildPartition, wikiBuildRunKey, wikiExpiryOf, wikiPageDoneKey, type WikiRunScope } from "./keys.js";
 import { planWikiPages } from "./plan.js";
+import { releaseWikiBuildSlot, reserveWikiBuildSlot, type WikiCompanySlot } from "./company-cap.js";
 import { cleanWikiNotes, frameWikiNotes, wikiPageInstructions } from "./prompt.js";
 
 /** The operation mode of a build run's own step (defined in the contract so the worker and the broker read one definition). */
@@ -48,8 +49,10 @@ export const WikiPageAnswerSchema = z.object({
   spentCents: z.number().int().min(0).max(1_000_000),
   draft: z.unknown().optional(),
   /** The worker could not write the page: the run ends with this word (a model key refused, a repository unreadable at its commit, its own spend reached the ceiling it was given, anything else). The page is not done: a continue writes it again. */
-  failure: z.enum(["needs_ai_key", "repo_unreadable", "budget_used", "infrastructure"]).optional(),
-}).strict();
+  failure: z.enum(["needs_ai_key", "repo_unreadable", "budget_used", "infrastructure", "upkeep_paused"]).optional(),
+  /** Why the gateway paused nightly upkeep (only with the failure `upkeep_paused`, and only an unattended run takes it: a person's build reads it as `infrastructure`). */
+  pause: UpkeepPauseReasonSchema.optional(),
+}).strict().refine((answer) => answer.pause === undefined || answer.failure === "upkeep_paused", "a pause reason goes with the pause failure only");
 export const WikiNextBodySchema = z.object({ spentCents: z.number().int().min(0).max(1_000_000) }).strict();
 
 // ---- who may act
@@ -60,6 +63,8 @@ export type WikiBuildStanding = { access: "manage" } | { access: "view" | "none"
 // ---- the pointer
 
 export interface WikiBuildPointer {
+  /** Ownership of this run's slot on the existing company limit row. */
+  companySlot?: WikiCompanySlot;
   orgId: OrgId;
   project: string;
   taskId: string;
@@ -87,6 +92,11 @@ export interface WikiBuildPointer {
   payer: { kind: typeof WIKI_BUILD_PAYER_KIND; project: string };
   /** The store's build kind: the project's first wiki, or a rebuild of one ("Refresh now"). A continue keeps the kind of the run it continues. */
   buildKind: "first" | "refresh";
+  /**
+   * Lead 4 N1: a NIGHTLY refresh nobody pressed (nightly upkeep, started through `startUnattendedRun`). `requestedBy` is then the project's system owner, not a person; the page loop asks whether upkeep is still ON
+   * for the project instead of a person's standing (`WikiPageLoopDeps.upkeepOn`), and the store's record says `nightly` with no starter. Only `prepareUnattendedWikiRefresh` sets it.
+   */
+  unattended?: true;
 }
 
 /** The pointer's write for the build's start transaction: holds only while the pointer is the one the start read, so two starts cannot both win. */
@@ -243,16 +253,18 @@ async function requireKey(deps: WikiBuildDeps): Promise<void> {
 async function launch(
   deps: WikiBuildDeps, personId: string, project: string, requestId: string,
   shape: {
-    pins: WikiBuildPins; plan: WikiPagePlan[]; keptFromEarlier: string[]; continuedFrom?: string; notes: string | undefined; notesBy?: string; buildKind: "first" | "refresh"; spentEarlierCents: number;
+    pins: WikiBuildPins; plan: WikiPagePlan[]; keptFromEarlier: string[]; continuedFrom?: string; notes: string | undefined; notesBy?: string; buildKind: "first" | "refresh"; spentEarlierCents: number; unattended?: true;
   }, seenTaskId: string | undefined,
 ): Promise<string> {
   const starter = deps.starter!;
   const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
   const startedAt = new Date(deps.now()).toISOString();
+  const companySlot = await reserveWikiBuildSlot(deps.store, deps.companyId, project, Date.parse(startedAt), Date.parse(startedAt) + (limits.wallClockMin + STALE_GRACE_MIN) * 60_000);
   const payer = { kind: WIKI_BUILD_PAYER_KIND, project };
   const pointerFor = (taskId: string): WikiBuildPointer => ({
-    orgId: deps.companyId, project, taskId, requestId, requestedBy: personId, startedAt, limits, pins: shape.pins, plan: shape.plan, keptFromEarlier: shape.keptFromEarlier,
+    companySlot, orgId: deps.companyId, project, taskId, requestId, requestedBy: personId, startedAt, limits, pins: shape.pins, plan: shape.plan, keptFromEarlier: shape.keptFromEarlier,
     ...(shape.continuedFrom === undefined ? {} : { continuedFrom: shape.continuedFrom }), doneIds: [], pagesWritten: 0, claimsKept: 0, claimsDropped: 0, spentCents: 0, spentEarlierCents: shape.spentEarlierCents, payer, buildKind: shape.buildKind,
+    ...(shape.unattended === true ? { unattended: true as const } : {}),
   });
   try {
     const started = await starter.start({
@@ -263,8 +275,13 @@ async function launch(
         condition: when.absent(),
       },
     });
+    if (started.duplicate) await releaseWikiBuildSlot(deps.store, deps.companyId, companySlot);
     return started.taskId;
   } catch (error) {
+    // A failed response can follow a committed task start. The port's strongly
+    // consistent read tells us whether the running task already owns this slot.
+    const committed = await readWikiBuildPointer(deps.store, deps.companyId, project);
+    if (committed?.companySlot?.token !== companySlot.token) await releaseWikiBuildSlot(deps.store, deps.companyId, companySlot);
     if (error instanceof Error && (error as { code?: unknown }).code === "WORKSPACE_BUSY") throw agentXError("WORKSPACE_BUSY", WIKI_BUILD_WORDS.busy);
     throw error;
   }
@@ -273,7 +290,11 @@ async function launch(
 /**
  * Start a fresh build: plan from the file map, pin the default branches now, start the task. A repeat of the request id answers the first request. One run at a time.
  */
-export async function startWikiBuild(deps: WikiBuildDeps, personId: string, project: string, rawBody: unknown): Promise<{ status: 200 | 202; view: WikiBuildView }> {
+export async function startWikiBuild(
+  deps: WikiBuildDeps, personId: string, project: string, rawBody: unknown,
+  /** W4 "Refresh now": the run writes only the planned pages `include` accepts (the changed, the marked wrong and the not yet written), and is a refresh even when there was no earlier run. */
+  options?: { refresh?: { include(page: WikiPagePlan): boolean } },
+): Promise<{ status: 200 | 202; view: WikiBuildView }> {
   const parsed = WikiBuildStartBodySchema.safeParse(rawBody);
   if (!parsed.success) throw bodyError();
   await requireManager(deps, personId, project);
@@ -289,13 +310,55 @@ export async function startWikiBuild(deps: WikiBuildDeps, personId: string, proj
   if (pins === undefined) throw agentXError("CONFIG_INVALID", WIKI_BUILD_WORDS.noRepositories);
   const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
   const notes = cleanWikiNotes(parsed.data.notes);
-  const plan = planWikiPages({ map, repositories: pins.map((pin) => pin.repo), pages: limits.pages, chipsOn: parsed.data.chipsOn, notes }).pages;
-  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined ? "first" : "refresh", spentEarlierCents: 0 }, before?.taskId);
+  const planned = planWikiPages({ map, repositories: pins.map((pin) => pin.repo), pages: limits.pages, chipsOn: parsed.data.chipsOn, notes }).pages;
+  const refresh = options?.refresh;
+  const plan = refresh === undefined ? planned : planned.filter((page) => refresh.include(page));
+  if (refresh !== undefined && plan.length === 0) throw agentXError("CONFIG_INVALID", WIKI_CONTROLS_WORDS.nothingToRefresh);
+  await launch(deps, personId, project, parsed.data.requestId, { pins, plan, keptFromEarlier: [], notes, buildKind: before === undefined && refresh === undefined ? "first" : "refresh", spentEarlierCents: 0 }, before?.taskId);
   await recordNow(deps, project);
   return { status: 202, view: await wikiBuildState(deps, project) };
 }
 
 const requestIdOf = (body: { requestId: string }) => body.requestId;
+
+/** Why a nightly refresh was not prepared (nothing was written). */
+export type UnattendedRefreshSkip = "no_wiki" | "nothing_to_refresh" | "busy" | "needs_ai_key" | "no_map" | "no_repositories" | "unavailable";
+
+/**
+ * Lead 4 N1: prepares ONE nightly refresh for a project, with no person: the same plan as "Refresh now" (the pages that are flagged, have changed claims or no page yet) over fresh default-branch commits, the
+ * project's own build limits, paid by the project. Nothing is started or written here. Answers why nothing is to be done, or `launch`, which starts the run through `deps.starter` (the host's SYSTEM-OWNER starter; a
+ * person's starter is never used for it) with the pointer written in the start's own transaction, `requestedBy` the project's system owner and `unattended` set. The caller puts `launch` behind the one unattended
+ * door (`startUnattendedRun`), so the switch, the cap, admission and the one-run-per-request rule all hold before anything starts. `requestId` is the night's own id: a repeat answers the first run.
+ */
+export async function prepareUnattendedWikiRefresh(
+  deps: WikiBuildDeps, project: string, requestId: string, include: (page: WikiPagePlan) => boolean, owner: string,
+): Promise<{ skip: UnattendedRefreshSkip } | { limits: WikiBuildLimits; launch(): Promise<{ taskId: string; duplicate: boolean }>; existing?: { taskId: string } }> {
+  if (!z.string().uuid().safeParse(requestId).success) throw bodyError();
+  if (deps.starter === undefined || !deps.modelAccessConfigured) return { skip: "needs_ai_key" };
+  let key: "connected" | "missing" | "unknown";
+  try { key = await deps.aiKey(); } catch { key = "unknown"; }
+  if (key === "missing") return { skip: "needs_ai_key" };
+  const before = await readWikiBuildPointer(deps.store, deps.companyId, project);
+  const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
+  if (before?.requestId === requestId) return { limits, launch: async () => ({ taskId: before.taskId, duplicate: true }), existing: { taskId: before.taskId } };
+  try { await deps.requireNewWork?.(project); } catch { return { skip: "unavailable" }; }
+  if (before !== undefined && endWordOf(before, deps.now()) === undefined) return { skip: "busy" };
+  const map = await deps.fileMap(project);
+  if (map === undefined) return { skip: "no_map" };
+  const pins = pinsOf(await deps.defaultBranchHeads(project), map);
+  if (pins === undefined) return { skip: "no_repositories" };
+  const planned = planWikiPages({ map, repositories: pins.map((pin) => pin.repo), pages: limits.pages, chipsOn: undefined, notes: undefined }).pages;
+  const plan = planned.filter((page) => include(page));
+  if (plan.length === 0) return { skip: "nothing_to_refresh" };
+  return {
+    limits,
+    launch: async () => {
+      const taskId = await launch(deps, owner, project, requestId, { pins, plan, keptFromEarlier: [], notes: undefined, buildKind: "refresh", spentEarlierCents: 0, unattended: true }, before?.taskId);
+      await recordNow(deps, project);
+      return { taskId, duplicate: false };
+    },
+  };
+}
 
 /** The pins: one per readable repository the map lists, at the head the code host gave now. Undefined when none. */
 function pinsOf(heads: ReadonlyArray<{ repo: string; commit: string }>, map: WikiFileMap): WikiBuildPins | undefined {
@@ -359,11 +422,14 @@ export async function stopWikiBuild(deps: WikiBuildDeps, personId: string, proje
 /**
  * Ends the run with a word (the first word stands). A page that is out stays granted, so the worker can still hand in a page it finished (a stop keeps finished pages); no new page is granted.
  */
-export async function endWikiBuild(store: Pick<DocumentStore, "update">, scope: WikiRunScope, word: WikiBuildEndWord, now: () => number): Promise<boolean> {
+export async function endWikiBuild(store: Pick<DocumentStore, "get" | "update">, scope: WikiRunScope, word: WikiBuildEndWord, now: () => number): Promise<boolean> {
+  const pointer = await readWikiBuildPointer(store, scope.orgId, scope.project);
   const written = await store.update({
     key: wikiBuildRunKey(scope), ops: [change.setIfAbsent("end", { word, at: new Date(now()).toISOString() })],
     condition: when.and(when.present(), when.eq("taskId", scope.taskId), when.notExists("end")),
   });
+  // Retry a failed release even when the first end write already succeeded.
+  if (pointer?.taskId === scope.taskId && pointer.companySlot !== undefined) await releaseWikiBuildSlot(store, scope.orgId, pointer.companySlot);
   return written.applied;
 }
 
@@ -397,21 +463,28 @@ export interface WikiPageLoopDeps {
   sink: WikiPageSink;
   /** The wiki store's build record write (W2 `WikiStore.writeBuild`), so the Wiki tab shows the last build. Absent: no record. A failed write never stops the run. */
   recordBuild?: ((record: WikiBuildRecord) => Promise<void>) | undefined;
+  /**
+   * Lead 4 N1: whether nightly upkeep is still ON for this company's project, read live before every page of an UNATTENDED run (its requester is the project's system owner, which has no standing as a person). Absent
+   * or failing: not on, and the run ends `access_lost` (never a page without the switch).
+   */
+  upkeepOn?: ((project: string) => Promise<boolean>) | undefined;
+  /** Told once when an unattended run ends because the gateway paused upkeep (its reason): the admins' notice is written there. A failure here never changes the run's end. */
+  onUpkeepPaused?: ((scope: WikiRunScope, reason: UpkeepPauseReason) => Promise<void>) | undefined;
 }
 
 /** The store's stop reason for an end word. */
 const STOP_REASON: Readonly<Record<WikiBuildEndWord, WikiBuildRecord["stopReason"] | undefined>> = {
   built: undefined, budget_used: "cap", pages_used: "cap", time_used: "failed", stopped_by_person: "person", needs_ai_key: "no_ai_key", repo_unreadable: "repo_unreadable",
-  access_lost: "failed", infrastructure: "failed",
+  access_lost: "failed", infrastructure: "failed", upkeep_paused: "cap",
 };
 
 /** The store's build record of a run, as it stands. Pure. */
 export function wikiBuildRecordOf(pointer: WikiBuildPointer): WikiBuildRecord {
-  const kind: WikiBuildRecord["kind"] = pointer.buildKind === "refresh" ? "refresh" : "first";
+  const kind: WikiBuildRecord["kind"] = pointer.unattended === true ? "nightly" : pointer.buildKind === "refresh" ? "refresh" : "first";
   const word = pointer.end?.word;
   return {
-    buildId: pointer.taskId, kind, state: word === undefined ? "running" : word === "built" ? "done" : word === "stopped_by_person" || word === "budget_used" || word === "pages_used" ? "stopped" : "failed",
-    startedBy: pointer.requestedBy, taskId: pointer.taskId, startedAt: pointer.startedAt, ...(pointer.end === undefined ? {} : { endedAt: pointer.end.at }),
+    buildId: pointer.taskId, kind, state: word === undefined ? "running" : word === "built" ? "done" : word === "stopped_by_person" || word === "budget_used" || word === "pages_used" || word === "upkeep_paused" ? "stopped" : "failed",
+    ...(pointer.unattended === true ? {} : { startedBy: pointer.requestedBy }), taskId: pointer.taskId, startedAt: pointer.startedAt, ...(pointer.end === undefined ? {} : { endedAt: pointer.end.at }),
     repos: pointer.pins.map((pin) => ({ repo: pin.repo, commit: pin.commit })),
     counts: { pagesWritten: pointer.pagesWritten, claimsKept: pointer.claimsKept, claimsDropped: pointer.claimsDropped, skipped: 0 },
     dropped: [], skipped: [], ...(Number.isSafeInteger(buildSpendOf(pointer)) ? { spentCents: buildSpendOf(pointer) } : {}),
@@ -476,7 +549,10 @@ export async function nextWikiPage(deps: WikiPageLoopDeps, scope: WikiRunScope, 
     await deps.store.update({ key: wikiBuildRunKey(scope), ops: [change.set("spentCents", spent)], condition: when.and(when.eq("taskId", scope.taskId), when.lte("spentCents", spent)) });
   }
   let standing: WikiBuildStanding["access"];
-  try { standing = (await deps.standing(pointer.requestedBy, pointer.project)).access; } catch { standing = "none"; }
+  try {
+    // A nightly refresh was started by no person: it goes on only while upkeep is ON for this project (read now), and never on any person's standing.
+    standing = pointer.unattended === true ? (deps.upkeepOn !== undefined && await deps.upkeepOn(pointer.project) ? "manage" : "none") : (await deps.standing(pointer.requestedBy, pointer.project)).access;
+  } catch { standing = "none"; }
   if (standing !== "manage") return ended(deps, scope, "access_lost");
   if (pointer.stop !== undefined) return ended(deps, scope, "stopped_by_person");
   if (deps.now() - Date.parse(pointer.startedAt) > pointer.limits.wallClockMin * 60_000) return ended(deps, scope, "time_used");
@@ -521,8 +597,12 @@ export async function submitWikiPage(deps: WikiPageLoopDeps, scope: WikiRunScope
   const spent = Math.max(pointer.spentCents, answer.spentCents);
   if (answer.failure !== undefined) {
     await deps.store.update({ key: wikiBuildRunKey(scope), ops: [change.set("spentCents", spent), change.remove("granted")], condition: when.and(when.eq("taskId", scope.taskId), when.lte("spentCents", spent)) });
-    await endWikiBuild(deps.store, scope, answer.failure, deps.now);
+    // Only an unattended run is ever paused by the upkeep limit; the same word from any other run is a fault.
+    const paused = answer.failure === "upkeep_paused" && pointer.unattended === true;
+    const word: WikiBuildEndWord = answer.failure === "upkeep_paused" && !paused ? "infrastructure" : answer.failure;
+    await endWikiBuild(deps.store, scope, word, deps.now);
     await recordBuild(deps, scope);
+    if (paused) await deps.onUpkeepPaused?.(scope, answer.pause ?? "monthly_limit").catch(() => undefined);
     return { pageId: page.id, kept: false, claimsKept: 0, claimsDropped: 0, complete: false };
   }
   const draft = WikiPageDraftSchema.safeParse(answer.draft);

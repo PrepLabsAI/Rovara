@@ -1,4 +1,4 @@
-// L4-EVCI (owner decision D7, the Influur fallback): the customer's own eval result on Rovara's pull request. One check of the customer's CI is named at setup; when it completes, the description says
+// L4-EVCI (owner decision D7): the customer's own eval result on Rovara's pull request. One check of the customer's CI is named at setup; when it completes, the description says
 // "Eval (reported by your CI): passed / failed / not run, <link>" as a sub-line under the verdict's "Proven" line, next to Rovara's own eval label (two verdicts, never one), and the ready line carries the
 // same line. ADVISORY: nothing about readiness, fixing, comments or the Check changes. A check that is not the named one is ignored. Company scoping of the reads is the marked checks'.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -224,6 +224,31 @@ describe("the named check did not run", () => {
     expect((await item(w)).ci).not.toBe("failing");
     expect((await w.task()).workflow.state).toBe("WAITING");
   });
+  it("a \"not run\" is said once: later passes do not read or write the description again", async () => {
+    const { w, deps } = await world(settings());
+    setChecks(w, [unit]);
+    await trackTask(deps, TASK_ID);
+    w.now.value = CLOCK + 121 * MIN;
+    await trackTask(deps, TASK_ID);
+    expect(evalLines(body(w))).toHaveLength(1);
+    const model = w.prs[0]!.model;
+    const writes: string[] = [];
+    const update = model.update.bind(model);
+    model.update = (id, patch) => { writes.push(Object.keys(patch).join(",")); return update(id, patch); };
+    const reads: string[] = [];
+    const repository = deps.repository;
+    deps.repository = async (...args) => {
+      const home = await repository(...args);
+      if (home === undefined) return home;
+      const getChangeRequest = home.codeHost.getChangeRequest.bind(home.codeHost);
+      return { ...home, codeHost: Object.assign(Object.create(home.codeHost) as typeof home.codeHost, { getChangeRequest: (...call: Parameters<typeof getChangeRequest>) => { reads.push("read"); return getChangeRequest(...call); } }) };
+    };
+    for (let pass = 0; pass < 3; pass += 1) { w.now.value += 5 * MIN; await trackTask(deps, TASK_ID); }
+    expect(writes).toEqual([]);
+    expect(reads).toEqual([]);
+    expect(evalLines(body(w))).toHaveLength(1);
+    expect((await item(w)).ciEval).toMatchObject({ state: "not_run", announced: true });
+  });
   it("says \"not run\" when the CI skipped it", async () => {
     const { w, deps } = await world(settings());
     setChecks(w, [unit, evals({ conclusion: "skipped" })]);
@@ -285,6 +310,25 @@ describe("the ready line", () => {
     expect(early).toBeDefined();
     expect(early?.evalLine).toBeUndefined();
     expect(early?.text).not.toContain(EVAL_CI_LABEL);
+  });
+});
+
+describe("the ready line with the verdict heading", () => {
+  it("keeps the heading and the eval line together, and drops the eval line (never the heading) when both would pass the limit", () => {
+    const heading = "Verified · Low risk · nothing extra to check";
+    const base = `Rovara marked app pull request 1 ready for review. ${heading}.`;
+    const result = { outcome: "passed" } as const;
+    expect(readyEvalLine(result, base)).toBe(evalCiLine(result));
+    expect(readyEvalLine(result, "x".repeat(500 - evalCiLine(result).length))).toBeUndefined();
+  });
+  it("a landed result and a heading are both on the milestone", async () => {
+    const { w, deps } = await world(settings());
+    w.prs[0]!.model.changeRequests[0]!.draft = true;
+    setChecks(w, [unit, evals()]);
+    await trackTask(deps, TASK_ID);
+    const ready = w.milestones.written.find((entry) => entry.kind === "pr_ready");
+    expect(ready?.evalLine).toBe(`Eval (reported by your CI): passed, ${EVAL_URL}`);
+    expect(ready?.text.length).toBeLessThanOrEqual(500);
   });
 });
 

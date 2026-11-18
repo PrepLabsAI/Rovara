@@ -11,6 +11,7 @@ import {
 } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
@@ -577,6 +578,7 @@ return createReconcilerHandler({
         return (await sfn.send(new StartExecutionCommand(input))).executionArn!;
       },
     },
+    ...optionalPicker(machineSizePicker({ documentClient, tableName })),
   }),
   async instances() {
     const found: InstanceView[] = [];

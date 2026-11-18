@@ -5,7 +5,7 @@
 //
 // The file is UNTRUSTED by the broker, which binds it to the candidate's digest, checks every count against the check report it holds itself and the data guard before anything is kept
 // (broker/src/rovara-code/evidence-keep.ts). This module only has to be bounded and never throw: a fault leaves the file out, and the round goes on as it would have.
-import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, FLAKY_ON_RERUN_MAX, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand, type RawBaseline, type RawRepositoryBaseline } from "@agentx/contracts";
+import { EVIDENCE_ARTIFACT_MAX_BYTES, EVIDENCE_RAW_ARTIFACT, FAILURE_CAUSES_ARTIFACT, FAILURE_CAUSES_FILE_MAX_BYTES, FailureCausesFileSchema, type FailureCauses, EVIDENCE_RAW_MAX_BYTES, EvidenceRawSchema, FLAKY_ON_RERUN_MAX, createCandidateManifest, redactText, type CandidateRepository, type CheckEntry, type TestServicesUsageRecord, type EvidenceRaw, type ProjectCommand, type RawBaseline, type RawRepositoryBaseline } from "@agentx/contracts";
 import type { ArtifactSink } from "../artifacts.js";
 import type { CheckPlan } from "./checks.js";
 import { coveragePart, readChangedCoverage, type RepositoryChanges } from "./cobertura-lcov-coverage.js";
@@ -23,6 +23,7 @@ import { withIsolatedGit } from "../isolated-git.js";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { evidenceTests } from "./test-report.js";
+import { commitsOfChanges, failureCausesAcrossRepositories, failureCausesOf } from "./failure-causes.js";
 import { readCheckTests } from "./check-tests.js";
 import type { FlakyRerunResult } from "./flaky-rerun.js";
 
@@ -68,6 +69,11 @@ export interface CollectEvidenceInput {
   baselines?: readonly RawRepositoryBaseline[] | undefined;
   /** Present only after an automatically derived scope ran. Facts, never a check verdict. */
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
+  /**
+   * TE-A6 (DEC 254zt): asked for by the caller that saves `failure-causes.json` (`saveEvidenceRaw`). Called once for each failed check whose failing tests could all be joined to the change, with the causes of
+   * those tests. Never changes the raw evidence this function returns, which is byte-identical with or without it. Multi-repository causes require each test path to identify its repository.
+   */
+  onFailureCauses?: ((checkId: string, causes: FailureCauses) => void) | undefined;
 }
 
 type EvidenceSelection = NonNullable<EvidenceRaw["selection"]>;
@@ -120,6 +126,7 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
       repositoryId: repository.repositoryId, directory: repository.directory,
       changes: await candidateChanges({ directory: repository.directory, baseCommitSha: repository.startCommit, treeSha: repository.candidateTreeSha }, { exactLines: true }),
     }))).then((read) => (read.length === 0 ? undefined : read), () => undefined));
+    let commits: Promise<Map<string, string>> | undefined;
     const usedReports = new Set<string>();
     const entryOf = (index: number) => input.entries.find((candidate) => candidate.id === `readiness:${String(index)}`);
     const ended = (entry: CheckEntry | undefined): entry is CheckEntry => entry?.after === "passed" || entry?.after === "failed";
@@ -142,6 +149,32 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
         const flaky = input.flaky?.get(entry.id)?.flaky.filter((id) => partial.tests!.names.some((name) => name.name === id && (name.status === "failed" || name.status === "errored")));
         if (flaky !== undefined && flaky.length > 0) { partial.tests.flakyOnRerun = flaky.slice(0, FLAKY_ON_RERUN_MAX); partial.tests.flakyOnRerunCount = flaky.length; }
         measured += parsed.total;
+        // TE-A6: which change most likely broke each failing test. Fully optional and fail closed: any doubt leaves the check with its per-check line and writes nothing.
+        if (input.onFailureCauses !== undefined && entry.after === "failed" && input.repositories.length > 0 && input.repositoriesComplete !== false) {
+          try {
+            const allChanges = await diffs();
+            if (allChanges !== undefined && parsed.tests.some((test) => test.status === "failed" || test.status === "errored")) {
+              let causes: FailureCauses | undefined;
+              if (input.repositories.length === 1) {
+                const repository = input.repositories[0]!;
+                const changes = allChanges[0]?.changes;
+                if (changes !== undefined) {
+                  commits ??= commitsOfChanges(repository, new Set(changes.filter((change) => change.status !== "DELETED").map((change) => change.path)));
+                  causes = failureCausesOf({ report: parsed, names: partial.tests.names, changes, commits: await commits });
+                }
+              } else {
+                const withCommits = await Promise.all(input.repositories.map(async (repository) => {
+                  const found = allChanges.find((candidate) => candidate.repositoryId === repository.repositoryId);
+                  if (found === undefined) return undefined;
+                  const commits = await commitsOfChanges(repository, new Set(found.changes.filter((change) => change.status !== "DELETED").map((change) => change.path)));
+                  return { directory: repository.directory, changes: found.changes, commits };
+                }));
+                if (withCommits.every((repository) => repository !== undefined)) causes = failureCausesAcrossRepositories({ report: parsed, names: partial.tests.names, workspaceRoot: input.rootPath, checkDirectory: resolve(input.rootPath, command.cwd), repositories: withCommits });
+              }
+              if (causes !== undefined) input.onFailureCauses(entry.id, causes);
+            }
+          } catch { /* the check keeps its per-check line */ }
+        }
       }
       if (entry.after === "failed") { const tail = outputTailOf(entry.output); if (tail !== undefined) partial.outputTail = tail; }
       // A timed-out, stopped or never-run check may have left an older report on disk: only a check that ended is read.
@@ -286,7 +319,9 @@ export async function saveEvidenceRaw(input: {
     // Showing the original code in only some repositories would mix two states: the baseline needs every repository's start commit (as the test proof does).
     const complete = placed.length === input.repositories.length;
     const baseline = input.baseline;
+    const causesByCheck = new Map<string, FailureCauses>();
     const raw = await collectEvidenceRaw({
+      onFailureCauses: (checkId, causes) => { causesByCheck.set(checkId, causes); },
       rootPath: input.rootPath, reportRootPath: input.baseline?.runners.reportRoot?.(), commands: input.plan.readiness, entries: input.entries, candidateDigest: createCandidateManifest(input.candidateBefore).digest, roundStartedAtMs: input.roundStartedAtMs,
       repositories: placed, repositoriesComplete: complete,
       selection: input.selection, coveragePaths: input.coveragePaths,
@@ -301,6 +336,15 @@ export async function saveEvidenceRaw(input: {
     });
     if (raw === undefined) return false;
     await input.sink({ name: EVIDENCE_RAW_ARTIFACT, mediaType: "application/json", content: JSON.stringify(raw) });
+    // TE-A6: the failing tests' causes, beside the raw file, only when there are some. A fault here never fails the round: the checks keep their per-check lines.
+    try {
+      const checks = [...causesByCheck].map(([checkId, causes]) => ({ checkId, causes })).filter((check) => raw.checks.some((entry) => entry.checkId === check.checkId));
+      if (checks.length > 0) {
+        const file = FailureCausesFileSchema.safeParse({ schemaVersion: 1, candidateDigest: raw.candidateDigest, checks });
+        const content = file.success ? JSON.stringify(file.data) : undefined;
+        if (content !== undefined && Buffer.byteLength(content, "utf8") <= FAILURE_CAUSES_FILE_MAX_BYTES) await input.sink({ name: FAILURE_CAUSES_ARTIFACT, mediaType: "application/json", content });
+      }
+    } catch { /* informational */ }
     return true;
   } catch (error) {
     // The one fault that must stop the task: the agent's files are not back.

@@ -46,6 +46,7 @@ export interface LocalScriptTokensOptions extends ScriptTokenDependencies {
 
 export function createLocalScriptTokens(options: LocalScriptTokensOptions): LocalScriptTokens {
   const enabled = options.enabled ?? (() => scriptTokensEnabled());
+  // A laptop has one configured owner (localOwnerPrincipal supplies owner); there is no hosted membership row.
   const caller = (): ScriptTokenCaller => ({
     developerId: developerIdOf(options.owner), personId: options.owner.personId, orgId: options.companyId,
     orgRole: options.owner.roles.includes("owner") ? "owner" : options.owner.roles.includes("admin") ? "admin" : "member",
@@ -94,7 +95,10 @@ export function createLocalScriptTokens(options: LocalScriptTokensOptions): Loca
       if (path !== "/v1/app/script-tokens" && !/^\/v1\/app\/script-tokens\/[^/]+\/revoke$/u.test(path)) return undefined;
       if (!enabled()) return undefined;
       try {
-        if (path === "/v1/app/script-tokens" && request.method === "GET") return json(200, { tokens: await self.list() });
+        if (path === "/v1/app/script-tokens" && request.method === "GET") {
+          const scriptCaller = caller();
+          return json(200, { tokens: await self.list(), canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin" });
+        }
         // Making one is the page's, never this route's, even for a caller that holds the API token.
         if (path === "/v1/app/script-tokens" && request.method === "POST") throw agentXError("FORBIDDEN", MAKE_ON_THE_PAGE);
         const revoke = /^\/v1\/app\/script-tokens\/([^/]+)\/revoke$/u.exec(path);

@@ -84,7 +84,7 @@ const refused = (answer: { status: number; body: Answer }) => ({ status: answer.
 const startAgain = { status: 403, error: { code: "FORBIDDEN", message: START_AGAIN } };
 
 describe("connect start", () => {
-  it("an admin gets a single-use state (stored only as its hash) and Linear's consent address: actor=app, the three scopes, consent, PKCE S256, Cloud's callback", async () => {
+  it("an admin gets a single-use state (stored only as its hash) and Linear's consent address: actor=app, the four scopes, consent, PKCE S256, Cloud's callback", async () => {
     const w = world(); w.as(PERSON, A);
     const answer = await w.start();
     expect(answer.status).toBe(200);
@@ -93,10 +93,11 @@ describe("connect start", () => {
     const url = new URL(answer.body.authorizeUrl as string);
     expect(`${url.origin}${url.pathname}`).toBe("https://linear.app/oauth/authorize");
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,comments:create,issues:create", state, actor: "app", prompt: "consent",
+      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,write,comments:create,issues:create", state, actor: "app", prompt: "consent",
       code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as string, code_challenge_method: "S256",
     });
     expect(LINEAR_SCOPES).not.toContain("admin");
+    expect(LINEAR_SCOPES).toEqual(["read", "write", "comments:create", "issues:create"]);
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
     expect(w.db.get(linearStateKey(state).pk, "META")).toMatchObject({ companyId: A, personId: PERSON, provider: "linear", status: "live", indexExpiresAt: Date.parse(TIME) / 1000 + 600 + 86_400 });
     expect(w.stored()).not.toContain(state);
@@ -416,6 +417,45 @@ describe("disconnect", () => {
     w.as(PERSON_B, B);
     expect((await w.connect(WORKSPACE_A)).status).toBe(200);
   });
+
+  /** A connected company with one pick, ready for an owner to disconnect; returns the tokens Rovara holds. */
+  async function connectedOwner() {
+    const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
+    w.asWeb(PERSON, A, "owner"); w.stepUp();
+    return w;
+  }
+  const revokeLogs = (w: ReturnType<typeof world>) => w.logs.filter((e) => e.event === "linear.revoke_failed");
+
+  it("revokes the REFRESH token first (token_type_hint=refresh_token) and then the ACCESS token (access_token), because Linear does not say one revoke ends the grant", async () => {
+    const w = await connectedOwner();
+    expect((await w.web("DELETE", BASE)).body).toMatchObject({ status: "disconnected" });
+    expect(w.linear.revokeCalls.map((c) => c.hint)).toEqual(["refresh_token", "access_token"]);
+    const [refresh, access] = w.linear.revokeCalls;
+    expect(w.linear.isCurrentRefresh(refresh!.token)).toBe(false);
+    expect(w.linear.validAccess(access!.token)).toBe(false);
+    expect(refresh!.token).not.toBe(access!.token);
+    expect(revokeLogs(w)).toEqual([]);
+  });
+  it("Linear answering 400 (already revoked) counts as done: no failure line, the connection is gone", async () => {
+    const w = await connectedOwner(); w.linear.answerRevokeWith(400);
+    expect((await w.web("DELETE", BASE)).body).toMatchObject({ status: "disconnected" });
+    expect(w.linear.revokeCalls.length).toBe(2);
+    expect(revokeLogs(w)).toEqual([]);
+    expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeUndefined();
+  });
+  it("Linear failing (500 or unreachable) never keeps Rovara's tokens: they are deleted first, both revokes are tried, and each failure is one fixed line with no token in it", async () => {
+    for (const failure of [500, "down"] as const) {
+      const w = await connectedOwner(); w.linear.answerRevokeWith(failure);
+      const answer = await w.web("DELETE", BASE);
+      expect(answer.body).toMatchObject({ status: "disconnected" });
+      expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeUndefined();
+      expect(w.linear.revokeCalls.map((c) => c.hint)).toEqual(["refresh_token", "access_token"]);
+      expect(revokeLogs(w)).toEqual([{ companyId: A, event: "linear.revoke_failed" }, { companyId: A, event: "linear.revoke_failed" }]);
+      const logged = JSON.stringify(w.logs);
+      for (const call of w.linear.revokeCalls) expect(logged).not.toContain(call.token);
+      expect((await w.web("GET", BASE)).body).toMatchObject({ status: "disconnected" });
+    }
+  });
   it("disconnects a company with more picks than the routing read's cap, clearing all of them", async () => {
     const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
     for (let i = 0; i < 502; i++) w.db.set({ ...linearTeamKey(A, `p${String(i)}`), entityType: "LINEAR_PROJECT_TEAM", companyId: A, project: `p${String(i)}`, teamId: "team-a-eng", teamKey: "ENG", teamName: "Engineering", setBy: PERSON, setAt: TIME });
@@ -487,6 +527,24 @@ describe("app webhooks", () => {
     expect(delivered).toEqual([]);
     // Inside the window, on the edge.
     expect((await deliver({ ...issue(WORKSPACE_A.id, "team-a-eng"), webhookTimestamp: w.now() - LINEAR_WEBHOOK_WINDOW_MS })).status).toBe(200);
+  });
+  it("a failed signature logs ONE fixed line naming the workspace (never the secret or signature), so a per-workspace signing secret would show quickly; a hostile workspace value is not logged", async () => {
+    const { w, deliver } = await setup();
+    const failures = () => w.logs.filter((e) => e.event === "linear.webhook_signature_failed");
+    expect(await deliver(issue(WORKSPACE_B.id, "team-b-web"), { secret: "someone-elses-secret" })).toMatchObject({ status: 401 });
+    expect(failures()).toEqual([{ event: "linear.webhook_signature_failed", organizationId: WORKSPACE_B.id }]);
+    const forged = "f".repeat(64);
+    await deliver(issue(WORKSPACE_A.id, "team-a-eng"), { headers: { "linear-signature": forged } });
+    expect(failures().length).toBe(2);
+    await deliver({}, { raw: JSON.stringify({ webhookTimestamp: w.now(), type: "Issue", action: "create", organizationId: "x\nINJECTED line" }), headers: { "linear-signature": forged } });
+    await deliver({}, { raw: "not json", headers: { "linear-signature": forged } });
+    expect(failures().slice(2)).toEqual([{ event: "linear.webhook_signature_failed" }, { event: "linear.webhook_signature_failed" }]);
+    const logged = JSON.stringify(w.logs);
+    for (const secret of [LINEAR_WEBHOOK_SECRET, "someone-elses-secret", forged, "INJECTED"]) expect(logged).not.toContain(secret);
+    // A delivery that verifies logs no failure.
+    const before = failures().length;
+    expect((await deliver(issue(WORKSPACE_A.id, "team-a-eng"))).status).toBe(200);
+    expect(failures().length).toBe(before);
   });
   it("a replay of a delivered body inside the window is taken once", async () => {
     const { w, delivered, deliver } = await setup();

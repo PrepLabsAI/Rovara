@@ -32,7 +32,7 @@ export const MarkedCheckSchema = z.object({
 export type MarkedCheck = z.infer<typeof MarkedCheckSchema>;
 
 /**
- * L4-EVCI (owner decision D7, the Influur fallback): the ONE check of the customer's CI that is their eval, named at setup. Rovara reads that check's result on its pull request and says it as "Eval (reported
+ * L4-EVCI (owner decision D7): the ONE check of the customer's CI that is their eval, named at setup. Rovara reads that check's result on its pull request and says it as "Eval (reported
  * by your CI)", next to its own eval line when it has one. Advisory only: it is never a marked check (no waiting for readiness, no fix round, no comment) and never changes the Rovara Check. Matched by name (and by
  * `source`, the reporting app, when given), exactly as a marked check is.
  */
@@ -210,7 +210,7 @@ export function evalCiLine(result: EvalCiResult): string {
 }
 
 /** The line exactly as `evalCiLine` writes it (any outcome, with or without cases or an address): the only line of this kind Rovara will change or take out of a description. */
-export const EVAL_CI_LINE_PATTERN = /^Eval \(reported by your CI\): (?:passed|failed|not run)(?: \([^()\r\n]{1,80}\))?(?:, [0-9,?]+ of [0-9,?]+ cases failing|, [0-9,?]+ cases?, none failing)?(?:, https:\/\/[^\s<>()[\]]{1,300})?$/u;
+export const EVAL_CI_LINE_PATTERN = /^Eval \(reported by your CI\): (?:passed|failed|not run)(?: \((?:no result after (?:\?|[0-9]+ (?:min|h)(?: [0-9]+ min)?)|your CI skipped it|your CI reported it as neutral)\))?(?:, [0-9,?]+ of [0-9,?]+ cases failing|, [0-9,?]+ cases?, none failing)?(?:, https:\/\/[^\s<>()[\]]{1,300})?$/u;
 
 // ---- per-test reports (TE-E0 option B)
 

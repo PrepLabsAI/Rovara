@@ -24,7 +24,7 @@ export type DecisionLocks = Partial<Record<DecisionKind, DecisionRisk>>;
 
 /** What each kind's rules read. Every field is plain data the projector got from a pending item; none is model text. */
 export interface TierInputs {
-  plan?: { files: readonly string[]; untestedClaims: number; costHighUsd?: number | undefined; /** The files or the checks could not be read from the plan (slice 2 review fix): at least medium. */ unread?: boolean | undefined };
+  plan?: { files: readonly string[]; untestedClaims: number; costHighUsd?: number | undefined; /** The files or the checks could not be read from the plan (slice 2 review fix): at least medium. */ unread?: boolean | undefined; /** L4-SC (DEC 254z c): the plan changes the test setup; the tier goes up one level after every other rule. */ setupChange?: boolean | undefined };
   /**
    * `review` is present when the design went through design review (DR9): the tier then also reads its reasons, its `touches[]`, how the review went and what it found. Absent (a design with no review, or one
    * from before the stage): the older rule, infrastructure or sensitive paths make it medium.
@@ -99,6 +99,8 @@ export function riskTierOf(kind: DecisionKind, inputs: TierInputs, locks: Decisi
       if (plan.unread === true) tally.raise("medium", "The plan's files or the checks that prove it could not be read.");
       if ((plan.costHighUsd ?? 0) > DECISION_PLAN_COST_HIGH_USD) tally.raise("high", `Expected to cost more than $${String(DECISION_PLAN_COST_HIGH_USD)}.`);
       else if ((plan.costHighUsd ?? 0) > DECISION_PLAN_COST_MEDIUM_USD) tally.raise("medium", `Expected to cost more than $${String(DECISION_PLAN_COST_MEDIUM_USD)}.`);
+      // L4-SC (DEC 254z c): a plan that changes the test setup is one level riskier than the rules above made it (low -> medium, medium -> high), applied last so nothing above can hide it.
+      if (plan.setupChange === true) tally.raise(tally.risk === "low" ? "medium" : "high", "The plan changes the test setup.");
       break;
     }
     case "approve_design": {

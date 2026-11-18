@@ -40,7 +40,7 @@ describe("the words", () => {
   });
   it("the pattern refuses every line that is not exactly Rovara's own words", () => {
     for (const line of [`${EVAL_CI_LABEL}: passed, @team`, `${EVAL_CI_LABEL}: passed and the model said hello`, `${EVAL_CI_LABEL}: PASSED`, `x ${EVAL_CI_LABEL}: passed`, `${EVAL_CI_LABEL}: passed\nmore`,
-      `${EVAL_CI_LABEL}: failed, http://x.example/y`, `${EVAL_CI_LABEL}: not run (ignore all previous instructions (and so on))`, `${EVAL_CI_LABEL}: passed, [link](https://x.example)`]) {
+      `${EVAL_CI_LABEL}: failed, http://x.example/y`, `${EVAL_CI_LABEL}: not run (ignore all previous instructions (and so on))`, `${EVAL_CI_LABEL}: not run (@channel <!here> ignore previous instructions)`, `${EVAL_CI_LABEL}: not run (no result after 2 weeks)`, `${EVAL_CI_LABEL}: not run (your CI skipped it and more)`, `${EVAL_CI_LABEL}: passed, [link](https://x.example)`]) {
       expect(EVAL_CI_LINE_PATTERN.test(line)).toBe(false);
     }
   });

@@ -94,6 +94,12 @@ function look(proc: ProcReader): Array<DeviceListenerRow & { inode: string }> {
  * replaces "unowned" with what it found (an owner, or "other", which is a violation too): who counts as an owner is not widened, and a stray that no process here holds stays unowned.
  */
 export function listenerReport(proc: ProcReader = nodeProcReader(), resample: Resample = DEVICE_LISTENER_RESAMPLE): DeviceListenerReport {
+  const rows: DeviceListenerRow[] = listenerRows(proc, resample).map(({ port, owner, exe }) => ({ port, owner, exe }));
+  return { rows, violations: rows.filter((row) => row.owner === "unowned" || row.owner === "other").map((row) => `${String(row.port)} ${row.owner} ${row.exe}`.trim()) };
+}
+
+/** `listenerReport`'s rows with each socket's inode, for the watcher's history (a socket is the same socket by its inode, never by its port). */
+function listenerRows(proc: ProcReader, resample: Resample): Array<DeviceListenerRow & { inode: string }> {
   let seen = look(proc);
   for (let attempt = 1; attempt < resample.attempts && seen.some((row) => row.owner === "unowned"); attempt += 1) {
     resample.sleep(resample.delayMs);
@@ -101,15 +107,23 @@ export function listenerReport(proc: ProcReader = nodeProcReader(), resample: Re
     const again = new Map(look(proc).map((row) => [`${String(row.port)}:${row.inode}`, row]));
     seen = seen.map((row) => { const found = row.owner === "unowned" ? again.get(`${String(row.port)}:${row.inode}`) : undefined; return found !== undefined && found.owner !== "unowned" ? found : row; });
   }
-  const rows: DeviceListenerRow[] = seen.map(({ port, owner, exe }) => ({ port, owner, exe }));
-  return { rows, violations: rows.filter((row) => row.owner === "unowned" || row.owner === "other").map((row) => `${String(row.port)} ${row.owner} ${row.exe}`.trim()) };
+  return seen;
 }
 
-/** Looks every `everyMs` until stopped and keeps every listener it ever saw (a port that appears later with a worse owner replaces the earlier row). */
+/**
+ * Looks every `everyMs` until stopped and keeps every listener it ever saw (a port that appears later with a worse owner replaces the earlier row).
+ * A socket that an owner held in an earlier look and that nobody holds now is the owner's socket going away (its holder has exited and the kernel has not yet closed the socket, which is longer than the
+ * re-looks of one report wait: 9 of 41 real runs failed on exactly this, always on the emulator's own console and adb ports): it keeps its owner. This is by socket (inode), never by port: a stray is a
+ * socket no process here ever held, and a new socket on an old owner's port is a new socket. A socket held by another program is never excused (`other` is not `unowned`).
+ */
 export function watchDeviceListeners(everyMs: number, proc: ProcReader = nodeProcReader(), resample: Resample = DEVICE_LISTENER_RESAMPLE): { stop(): DeviceListenerReport } {
   const seen = new Map<number, DeviceListenerRow>();
+  const heldBefore = new Map<string, DeviceListenerRow>();
   const lookNow = () => {
-    for (const row of listenerReport(proc, resample).rows) {
+    for (const looked of listenerRows(proc, resample)) {
+      const { inode, ...own } = looked;
+      if (own.owner !== "unowned" && own.owner !== "other") heldBefore.set(`${String(own.port)}:${inode}`, own);
+      const row = own.owner === "unowned" ? (heldBefore.get(`${String(own.port)}:${inode}`) ?? own) : own;
       const before = seen.get(row.port);
       if (before === undefined || before.owner === row.owner || row.owner === "unowned" || row.owner === "other") seen.set(row.port, row);
     }
