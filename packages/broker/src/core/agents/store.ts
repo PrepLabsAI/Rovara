@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import {
   AGENT_DESCRIPTION_MAX, AGENT_NAME_MAX, BaseRefSchema, EMPTY_RECIPE, RecipeOverlaySchema, agentDirectoryKey, agentKey, agentNameKey, agentVersionSk, applyOverlay, builtinDefaultPin, builtinRecipe, canonicalJson, isBuiltinAgentId,
   newPrefixedId, overlayProblems, queryAll, recipeProblems, when,
-  type AgentId, type AuditSink, type BaseRef, type OrgId, type RecipeLayer, type RecipeOverlay, type RecipeProblem, type ResolvedRecipe,
+  type AgentId, type AgentOwner, type AuditSink, type BaseRef, type OrgId, type RecipeLayer, type RecipeOverlay, type RecipeProblem, type ResolvedRecipe,
 } from "@agentx/contracts";
 import { coded, commit, iso, overwriteRow, putRow, strip, updateRow, type Item, type RequestMark, type Table } from "../automation/kit.js";
 
@@ -20,8 +20,8 @@ export interface AgentRecord {
   agentId: AgentId;
   name: string;
   description: string;
-  /** The person who owns the agent. On a laptop, the owner. */
-  owner: { kind: "member"; developerId: string };
+  /** The member or project that owns the agent. */
+  owner: AgentOwner;
   currentVersion?: number;
   latestVersion: number;
   draftRevision: number;
@@ -88,7 +88,11 @@ export class AgentStore {
 
   async get(orgId: OrgId, agentId: AgentId): Promise<AgentRecord | undefined> {
     const item = await this.input.store.get(agentKey(orgId, agentId, "META"));
-    return item === undefined || item["orgId"] !== orgId ? undefined : (strip(item as Item) as unknown as AgentRecord);
+    if (item === undefined || item["orgId"] !== orgId) return undefined;
+    const record = strip(item as Item) as unknown as AgentRecord;
+    // Older META rows stored only { developerId }; keep those readable as member-owned.
+    if (record.owner !== undefined && !("kind" in record.owner)) record.owner = { kind: "member", developerId: (record.owner as unknown as { developerId: string }).developerId };
+    return record;
   }
 
   async getDraft(orgId: OrgId, agentId: AgentId): Promise<AgentDraft | undefined> {

@@ -85,7 +85,7 @@ function builtinView(id: (typeof BUILTIN_AGENT_IDS)[number], disabled: boolean):
 function customView(record: AgentRecord): AgentView {
   return {
     agentId: record.agentId, name: record.name, description: record.description, builtin: false, access: "manage", status: record.status,
-    owner: { kind: "member", developerId: record.owner.developerId },
+    owner: record.owner,
     ...(record.currentVersion === undefined ? {} : { currentVersion: record.currentVersion }), latestVersion: record.latestVersion, draftRevision: record.draftRevision,
     createdBy: record.createdBy, createdAt: record.createdAt, updatedAt: record.updatedAt,
     needsLaterConnectors: AGENT_CANT_RUN_ON_HOSTED,
@@ -123,7 +123,7 @@ export async function routeHostedAgentDirectory(input: HostedAgentDirectoryInput
     }
     if (scope === "all" || scope === "mine") {
       for (const record of await guarded(async () => await customAgents(input))) {
-        if (scope === "mine" && record.owner.developerId !== input.developerId) continue;
+        if (scope === "mine" && (record.owner.kind !== "member" || record.owner.developerId !== input.developerId)) continue;
         views.push(customView(record));
       }
     }
