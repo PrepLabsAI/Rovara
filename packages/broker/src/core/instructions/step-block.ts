@@ -10,7 +10,7 @@ import { playbookIsEmpty } from "../playbook/file.js";
 import { runningProcessOf } from "../playbook/process.js";
 import { isReviewingStage } from "../playbook/process-reviewers.js";
 import { readCompanyInstructions } from "./company-source.js";
-import { pinnedPlaybookFile, readPinnedStanding, type PinnedStanding } from "./pinned.js";
+import { PINNED_STANDING_UNREADABLE, pinnedPlaybookFile, readPinnedStanding, type PinnedStanding } from "./pinned.js";
 import { buildStandingInstructions, type StandingLayer } from "./standing-block.js";
 
 /**
@@ -70,6 +70,11 @@ export const TEAM_RULES_UNREADABLE = "The project's team rules can't be read rig
 
 export const STANDING_BLOCK_TOO_LONG = "The standing instructions for this step are too long to send to the worker. Shorten the company rules, the project's How we work file or the project's team rules.";
 
+/** The layers of a pinned file. A file that parses but fails the recipe's own guards is a fixed refusal (it will not pass by waiting), never a raw error that retries until the queue gives up. */
+function pinnedLayersOf(file: Parameters<typeof playbookLayersOf>[0], mode: PlaybookMode | undefined): StandingLayer[] {
+  try { return playbookLayersOf(file, mode); } catch { throw agentXError("CONFIG_INVALID", PINNED_STANDING_UNREADABLE); }
+}
+
 export function createStandingInstructions(options: StandingInstructionsOptions): StandingInstructions {
   const instructions: StandingInstructions = {
     async forOperation(input) {
@@ -77,7 +82,7 @@ export function createStandingInstructions(options: StandingInstructionsOptions)
       // A pinned task takes both parts from its own record (checked again); any other task reads them live. Team rules are the project's own and are always read at the step.
       const pinned = readPinnedStanding(input.pinned);
       const company = pinned !== undefined ? pinned.company : await readCompanyInstructions(options.company, options.companyId);
-      const playbookLayers = pinned !== undefined ? playbookLayersOf(pinned.playbook?.file, input.mode)
+      const playbookLayers = pinned !== undefined ? pinnedLayersOf(pinned.playbook?.file, input.mode)
         : options.playbook === undefined ? [] : await options.playbook.layersFor(input.project, input.mode, input.playbookCommit);
       let teamLayers: StandingLayer[] = [];
       if (options.teamRules !== undefined) {
@@ -102,7 +107,11 @@ export function createStandingInstructions(options: StandingInstructionsOptions)
       let playbook: PinnedStanding["playbook"];
       if (options.playbook !== undefined && playbookCommit !== undefined) {
         const read = await options.playbook.current(project, { commit: playbookCommit });
-        if (read.file !== undefined && !playbookIsEmpty(read.file)) playbook = { commit: playbookCommit, file: pinnedPlaybookFile(read.file) };
+        if (read.file !== undefined && !playbookIsEmpty(read.file)) {
+          playbook = { commit: playbookCommit, file: pinnedPlaybookFile(read.file) };
+          // The file must be one every step can build from (the recipe's own guards): checked now, so a start is refused with the reason instead of every step failing later.
+          try { playbookLayersOf(playbook.file, undefined); } catch { throw agentXError("PROCESS_UNAVAILABLE", "This project's How we work file can't be used right now. Fix .rovara/playbook.yaml on the default branch, then try again."); }
+        }
       }
       return company === undefined && playbook === undefined ? undefined : { ...(playbook === undefined ? {} : { playbook }), ...(company === undefined ? {} : { company }) };
     },

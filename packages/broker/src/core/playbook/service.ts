@@ -91,6 +91,11 @@ export interface PlaybookServiceDeps {
   source: PlaybookSource;
   codeSettings?: CodeSettingsReader;
   now?: () => Date;
+  /**
+   * False: a read at the head never writes the stored project item (the design review setting a file carries). The hosted broker's pin uses it: there the stored item belongs to the company's admin path, and a
+   * task start must not let repository text change it. Default true (the laptop's behaviour).
+   */
+  syncStored?: boolean;
 }
 
 const stateOf = (reading: PlaybookReading): PlaybookFileState =>
@@ -109,7 +114,7 @@ export function createPlaybookService(deps: PlaybookServiceDeps): PlaybookServic
     if (reading.status === "invalid") throw agentXError("PROCESS_UNAVAILABLE", playbookRefusal(reading.problems));
     const file = reading.status === "ok" && !playbookIsEmpty(reading.file) ? reading.file : undefined;
     // A task's pinned read never writes: the item says what the head of the default branch says, and an older file must not take it back.
-    if (options.commit !== undefined) return { file, playbook: await readProjectPlaybook({ store: deps.store, companyId: deps.companyId }, project), reading };
+    if (options.commit !== undefined || deps.syncStored === false) return { file, playbook: await readProjectPlaybook({ store: deps.store, companyId: deps.companyId }, project), reading };
     const synced = await sync(project, file, file === undefined ? undefined : reading.status === "ok" ? reading.digest : undefined);
     return { file, playbook: synced.playbook, reading };
   }
