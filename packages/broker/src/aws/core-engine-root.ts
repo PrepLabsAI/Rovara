@@ -962,7 +962,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // install steps, else none.
           evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log, createEvalEnvironmentSource({
             store: registry.require("storage"), companyId, now: () => now().getTime(), env, repositoryPaths: repositoryPathsOf(runtime.flow.deps.projects),
-            savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
+            savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: () => registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
             log: (event) => { log({ event: `core_engine.${event}` }); },
           })),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is

@@ -746,7 +746,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // L4-EVS2: the sealed eval's environment (this project's saved image when this computer can serve a pull, else its approved install steps, else none), read for the run's own company and project.
     evalPlan: createEvalPlanSources({ store, companyId, registry, environment: createEvalEnvironmentSource({
       store, companyId, now: () => clock().getTime(), env: options.environment ?? process.env, repositoryPaths: repositoryPathsOf(projectSource),
-      savedEnv: () => evalSavedEnvDepsOf({ store, registry: registry.require("image-registry"), envName: "local", now: () => clock().getTime(), env: options.environment ?? process.env }),
+      savedEnv: () => evalSavedEnvDepsOf({ store, registry: () => registry.require("image-registry"), envName: "local", now: () => clock().getTime(), env: options.environment ?? process.env }),
       log: (event) => { log({ component: "eval-environment", event }); },
     }) }),
   });

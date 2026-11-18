@@ -1,5 +1,5 @@
 // L4-EVS2 (DEC 254zzz20 D3): the broker fills the `eval-plan` answer's `environment` from the project's own saved environment (the saved-image row and the pull login of #952's store) or its approved
-// install steps, for THIS company and project only, and says nothing when neither is there. Every guard has a test that fails without it (mutants listed in L4-EVS2-MUTANTS-20261118.md).
+// install steps, for THIS company and project only, and says nothing when neither is there. Every guard has a test that fails without it (mutants in briefs/lead4/L4-EVS2-MUTANTS-20261118.md; the producer's own `savedEnvRepositoryIsFor` check is defence in depth behind `mintPullSession`'s, so it has no mutant test).
 import { describe, expect, it } from "vitest";
 import {
   EvalEnvironmentSchema, TestEnvironmentBodySchema, evalCommandFingerprint, evalQuestionHash, savedEnvRepositoryIsFor, savedEnvRepositoryName, testEnvDigest,
@@ -67,7 +67,7 @@ function world(options: { env?: NodeJS.ProcessEnv; paths?: Map<string, string> |
   const paths = "paths" in options ? options.paths : new Map([["demo", "demo"]]);
   const source = createEvalEnvironmentSource({
     store: db, companyId: company, now: () => NOW, env, repositoryPaths: async () => paths,
-    savedEnv: () => evalSavedEnvDepsOf({ store: db, registry, envName: "local", now: () => NOW, env, ...(options.hosted === true ? { hosted: true } : {}) }),
+    savedEnv: () => evalSavedEnvDepsOf({ store: db, registry: () => registry, envName: "local", now: () => NOW, env, ...(options.hosted === true ? { hosted: true } : {}) }),
     log: (event) => { events.push(event); },
   });
   const repositoryName = (org: OrgId = A, project = WEB): string => savedEnvRepositoryName({ env: "local", orgId: org, projectId: project });
@@ -199,6 +199,9 @@ describe("the approved install steps", () => {
       expect(await w.source(scope(), undefined), name).toBeUndefined();
       expect(w.events, name).toContain("eval_environment_install_unusable");
     }
+    // a list over the byte bound is no install (never a part, never a reason to withhold the plan)
+    const wide = Array.from({ length: 8 }, () => cmd("npm", ["install", ...Array.from({ length: 4 }, () => "x".repeat(8_000))]));
+    expect(installStepsOf(wide, "demo")).toBeUndefined();
     // an empty env object is no variable
     expect(installStepsOf([cmd("npm", ["ci"], "demo", { env: {} })], "demo")).toEqual([{ executable: "npm", args: ["ci"], cwd: "." }]);
     expect(installStepsOf([], "demo")).toBeUndefined();
@@ -343,6 +346,28 @@ describe("unreadable stores fail closed", () => {
       store: w.db, companyId: A, now: () => NOW, env: ON, repositoryPaths: async () => new Map([["demo", "demo"]]), savedEnv: () => { throw new Error("no registry"); },
     });
     expect(await throwingSaved(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
+  });
+});
+
+describe("an archived project", () => {
+  it("is given no environment, not even its install steps", async () => {
+    const w = world();
+    await approve(w.db, A, WEB, body());
+    const archived = createEvalEnvironmentSource({ store: w.db, companyId: A, now: () => NOW, env: ON, repositoryPaths: repositoryPathsOf({ latest: async () => ({ archived: true, definition: { repositories: [{ name: "demo", path: "demo" }] } }) as never }) });
+    expect(await archived(scope(), undefined)).toBeUndefined();
+    const live = createEvalEnvironmentSource({ store: w.db, companyId: A, now: () => NOW, env: ON, repositoryPaths: repositoryPathsOf({ latest: async () => ({ definition: { repositories: [{ name: "demo", path: "demo" }] } }) as never }) });
+    expect(await live(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
+  });
+
+  it("an install install-list too big for the answer, and an unbound registry, are no fault", async () => {
+    const w = world();
+    await approve(w.db, A, WEB, body());
+    const noRegistry = createEvalEnvironmentSource({
+      store: w.db, companyId: A, now: () => NOW, env: OFF, repositoryPaths: async () => new Map([["demo", "demo"]]),
+      savedEnv: () => evalSavedEnvDepsOf({ store: w.db, registry: () => { throw new Error("no registry"); }, envName: "local", now: () => NOW, env: OFF }), log: (event) => w.events.push(event),
+    });
+    expect(await noRegistry(scope(), undefined)).toEqual({ kind: "install", commands: FALLBACK });
+    expect(w.events).toEqual([]);
   });
 });
 

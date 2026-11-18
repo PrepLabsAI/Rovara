@@ -49,7 +49,7 @@ export interface EvalEnvironmentSourceDeps {
  * The saved-image deps of an install: the company's own saved-image rows over `store`, the registry (a hosted install holds the login to a cloud registry host), and the approved environment read for the
  * pull login's own check. `proveHolds` is a push-side read and is never used here. Undefined when the saved-environments switch is off.
  */
-export function evalSavedEnvDepsOf(input: { store: DocumentStore; registry: ImageRegistry; envName: string; now: () => number; env?: NodeJS.ProcessEnv | undefined; hosted?: boolean | undefined }): EvalSavedEnvDeps | undefined {
+export function evalSavedEnvDepsOf(input: { store: DocumentStore; /** Read only when the switch is on (an install with no registry adapter is then no fault). */ registry: () => ImageRegistry; envName: string; now: () => number; env?: NodeJS.ProcessEnv | undefined; hosted?: boolean | undefined }): EvalSavedEnvDeps | undefined {
   if (!savedEnvEnabled(input.env ?? process.env)) return undefined;
   const test = { store: input.store, now: input.now, ...(input.env === undefined ? {} : { env: input.env }) };
   return {
@@ -57,7 +57,7 @@ export function evalSavedEnvDepsOf(input: { store: DocumentStore; registry: Imag
     session: {
       config: { enabled: true, env: input.envName },
       ports: {
-        registry: input.registry,
+        registry: input.registry(),
         ...(input.hosted === true ? { registryAuthSchema: HostedSavedEnvRegistryAuthSchema } : {}),
         readApproved: async (orgId, project) => {
           const found = await readApprovedTestEnvironment(test, orgId as OrgId, project);
@@ -76,10 +76,14 @@ export function repositoryPathsOf(projects: Pick<ProjectSource, "latest">): Eval
   return async (project) => {
     try {
       const found = await projects.latest(project);
-      return found === undefined ? undefined : new Map(found.definition.repositories.map(repository => [repository.name, repository.path] as const));
+      // An archived project accepts no new work: nothing is delivered for it.
+      return found === undefined || found.archived === true ? undefined : new Map(found.definition.repositories.map(repository => [repository.name, repository.path] as const));
     } catch { return undefined; }
   };
 }
+
+/** The most bytes the delivered install steps may take (the answer is bounded at 1 MiB and holds them twice with a saved image); a larger list is no install, never a reason to withhold the plan. */
+export const EVAL_INSTALL_STEPS_MAX_BYTES = 64 * 1024;
 
 /** The checkout-relative directory of a command that runs in the workspace at `cwd` when the repository is at `repositoryPath`; undefined when it runs somewhere else. */
 function checkoutDirectory(cwd: string, repositoryPath: string): string | undefined {
@@ -101,7 +105,7 @@ export function installStepsOf(commands: readonly ProjectCommand[], repositoryPa
     if (!step.success) return undefined;
     steps.push(step.data);
   }
-  return steps;
+  return Buffer.byteLength(JSON.stringify(steps), "utf8") > EVAL_INSTALL_STEPS_MAX_BYTES ? undefined : steps;
 }
 
 export function createEvalEnvironmentSource(deps: EvalEnvironmentSourceDeps): EvalEnvironmentSource {
@@ -150,7 +154,7 @@ async function savedEnvironmentOf(
     if (state === undefined || state.orgId !== scope.companyId || state.projectId !== scope.project) return undefined;
     const image = imageForTask(state, want.pin, saved.now());
     const record = state.images[0];
-    if (image === undefined || record === undefined || record.digest !== image.digest || !record.manifest.commits.some(commit => commit.repositoryId === want.repositoryId)) return undefined;
+    if (image === undefined || record === undefined || !record.manifest.commits.some(commit => commit.repositoryId === want.repositoryId)) return undefined;
     const login = await savedEnvPullLogin(saved, { orgId: scope.companyId, projectId: scope.project }, image.digest);
     if (!login.ok) { log("eval_environment_saved_unusable"); return undefined; }
     // A login for another company's or project's repository is never given on.
