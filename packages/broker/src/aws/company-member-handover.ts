@@ -50,9 +50,25 @@ export const MemberRemovalRecord = z.object({
   entityType: z.literal("COMPANY_MEMBER_REMOVAL"), companyId: OrgIdSchema, removalId: RemovalId,
   leaverId: PersonId, successorId: PersonId, expectedRole: OrgRoleSchema, by: PersonId, startedAt: z.iso.datetime(),
   state: z.enum(["STARTED", "DONE"]), finishedAt: z.iso.datetime().optional(),
+  /** DEC 254zzz101: a stuck hand-over finished by an owner or admin to another successor: who it went to, who finished it and that request's id. */
+  handedTo: PersonId.optional(), finishedBy: PersonId.optional(), finishRequestId: RemovalId.optional(),
   moved: z.object({ agents: z.number().int().min(0), chains: z.number().int().min(0), projects: z.number().int().min(0), tasks: z.number().int().min(0), tasksLeft: z.number().int().min(0) }).strict().optional(),
 }).strict();
 export type MemberRemovalRecord = z.infer<typeof MemberRemovalRecord>;
+
+/**
+ * DEC 254zzz101: the leaver's pending hand-over, `ORG#<company>#MEMBER_REMOVAL` / `LEAVER#<person>`: written with the STARTED record, removed when the hand-over
+ * finishes or the removal is refused, so an owner or admin can find and finish a hand-over that is stuck after the membership ended.
+ */
+export function pendingHandOverKey(companyId: string, leaverId: string): { pk: string; sk: string } {
+  return { pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBER_REMOVAL"), sk: `LEAVER#${PersonId.parse(leaverId)}` };
+}
+/** The receipt of one "finish hand-over" request, so its repeat answers the same: `ORG#<company>#MEMBER_REMOVAL` / `FINISH#<requestId>`. */
+export function finishReceiptKey(companyId: string, requestId: string): { pk: string; sk: string } {
+  return { pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBER_REMOVAL"), sk: `FINISH#${RemovalId.parse(requestId).toLowerCase()}` };
+}
+const PendingHandOver = z.object({ entityType: z.literal("COMPANY_MEMBER_HANDOVER_PENDING"), companyId: OrgIdSchema, leaverId: PersonId, removalId: RemovalId }).strict();
+const FinishReceipt = z.object({ entityType: z.literal("COMPANY_MEMBER_HANDOVER_FINISH"), companyId: OrgIdSchema, removalId: RemovalId, leaverId: PersonId, by: PersonId, successorId: PersonId }).strict();
 
 /** The request a removal record answers: the same request id must name the same person, successor, role and remover. */
 export function sameRemoval(record: MemberRemovalRecord, request: { leaverId: string; successorId: string; expectedRole: OrgRole; by: string }): boolean {
@@ -168,15 +184,14 @@ async function administeredProjects(ctx: HandOverContext, companyId: OrgId, leav
     if (current?.["role"] === "administrator") continue;
     if (current === undefined) {
       steps.push({ Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
+        // The grant writer's own row shape (admin-actions.ts grantProjectAccess), as an administrator; the key says the company.
         ...successorKey, entityType: "MEMBERSHIP", ownerKey: successorId, projectName: project, role: "administrator", grantId: randomUUID(), grantedAt: at,
-        ...(namedCompany(companyId) === undefined ? {} : { companyId }),
       } } });
     } else {
       steps.push({ Update: { TableName: ctx.tableName, Key: successorKey, UpdateExpression: "SET #role = :administrator", ConditionExpression: "#role = :developer AND ownerKey = :successor",
         ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator", ":developer": "developer", ":successor": successorId } } });
     }
-    steps.push({ Put: { TableName: ctx.tableName, Item: { ...projectMemberRowKeyFor(companyId, project, successorId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: at,
-      ...(namedCompany(companyId) === undefined ? {} : { companyId }) },
+    steps.push({ Put: { TableName: ctx.tableName, Item: { ...projectMemberRowKeyFor(companyId, project, successorId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: at },
       // Only over the successor's own project-side row (or none): never over a row of another kind.
       ConditionExpression: "attribute_not_exists(pk) OR (entityType = :projectMember AND (#role = :developer OR #role = :administrator))",
       ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":projectMember": "PROJECT_MEMBER", ":developer": "developer", ":administrator": "administrator" } } });
@@ -229,8 +244,8 @@ export async function planHandOver(ctx: HandOverContext, input: { companyId: str
     if ("items" in handOver) { tasks++; taskSteps += handOver.items.length; steps.push(...handOver.items); continue; }
     if (handOver.skipped !== ("not_their_task" satisfies TaskHandOverSkip)) tasksLeft++;
   }
-  // The record's finish and the audit record share the transaction; the preview counts the task steps the commit will write.
-  if (steps.length + (input.commit ? 0 : taskSteps) + 2 > HANDOVER_LIMITS.transactionSteps) throw new HandOverTooBig();
+  // The record's finish, the audit record, the pending row's delete and a finish receipt share the transaction; the preview counts the task steps the commit will write.
+  if (steps.length + (input.commit ? 0 : taskSteps) + 4 > HANDOVER_LIMITS.transactionSteps) throw new HandOverTooBig();
   return { agents: agents.length, chains: chains.length, projects: projects.count, tasks, tasksLeft, steps };
 }
 
@@ -246,11 +261,20 @@ function auditStep(tableName: string, event: AuditEvent): Write {
   return { Put: { TableName: tableName, Item: { ...staged.key, ...fields }, ConditionExpression: "attribute_not_exists(pk)" } };
 }
 
+/** The pending row's delete, only while it still names this removal (a newer removal of the same person keeps its own). */
+function pendingDelete(ctx: HandOverContext, record: MemberRemovalRecord): Write {
+  return { Delete: { TableName: ctx.tableName, Key: pendingHandOverKey(record.companyId, record.leaverId),
+    ConditionExpression: "attribute_not_exists(pk) OR removalId = :removal", ExpressionAttributeValues: { ":removal": record.removalId } } };
+}
+
 /** A refused removal leaves no STARTED record behind (so that request id can never end the membership later); best effort, only while still STARTED. */
 export async function dropStartedRemoval(ctx: HandOverContext, record: MemberRemovalRecord): Promise<void> {
   try {
-    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Delete: { TableName: ctx.tableName, Key: memberRemovalKey(record.companyId, record.removalId),
-      ConditionExpression: "#state = :started AND leaverId = :leaver", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":started": "STARTED", ":leaver": record.leaverId } } }] }));
+    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Delete: { TableName: ctx.tableName, Key: memberRemovalKey(record.companyId, record.removalId),
+        ConditionExpression: "#state = :started AND leaverId = :leaver", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":started": "STARTED", ":leaver": record.leaverId } } },
+      pendingDelete(ctx, record),
+    ] }));
   } catch { /* a record left behind is refused by its age and its revoker (company-member-routes.ts) */ }
 }
 
@@ -260,7 +284,11 @@ export async function startRemoval(ctx: HandOverContext, input: { companyId: str
   const record = MemberRemovalRecord.parse({ entityType: "COMPANY_MEMBER_REMOVAL", companyId: input.companyId, removalId: input.removalId.toLowerCase(), leaverId: input.leaverId,
     successorId: input.successorId, expectedRole: input.expectedRole, by: input.by, startedAt: new Date(ctx.now()).toISOString(), state: "STARTED" });
   try {
-    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Put: { TableName: ctx.tableName, Item: { ...key, ...record }, ConditionExpression: "attribute_not_exists(pk)" } }] }));
+    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: ctx.tableName, Item: { ...key, ...record }, ConditionExpression: "attribute_not_exists(pk)" } },
+      // The latest removal of this person is the one a "finish hand-over" finds.
+      { Put: { TableName: ctx.tableName, Item: { ...pendingHandOverKey(input.companyId, input.leaverId), ...PendingHandOver.parse({ entityType: "COMPANY_MEMBER_HANDOVER_PENDING", companyId: input.companyId, leaverId: input.leaverId, removalId: record.removalId }) } } },
+    ] }));
     return record;
   } catch (error) {
     if (!(error instanceof Error) || (error.name !== "TransactionCanceledException" && error.name !== "ConditionalCheckFailedException")) throw error;
@@ -285,26 +313,68 @@ export async function readRemoval(ctx: HandOverContext, companyId: string, remov
  * Moves everything in ONE transaction with the record's finish (STARTED -> DONE, still naming this leaver and successor) and the audit record. Any step that
  * finds its row changed cancels all of it (HandOverRaced; the caller plans again). Answers what moved.
  */
-export async function finishHandOver(ctx: HandOverContext, record: MemberRemovalRecord, plan: HandOverPlan): Promise<NonNullable<MemberRemovalRecord["moved"]>> {
+export async function finishHandOver(ctx: HandOverContext, record: MemberRemovalRecord, plan: HandOverPlan,
+  takeover?: { successorId: string; by: string; requestId: string }): Promise<NonNullable<MemberRemovalRecord["moved"]>> {
   const at = new Date(ctx.now()).toISOString();
   const moved = { agents: plan.agents, chains: plan.chains, projects: plan.projects, tasks: plan.tasks, tasksLeft: plan.tasksLeft };
+  const handedTo = takeover?.successorId ?? record.successorId;
   const finish: Write = { Update: {
     TableName: ctx.tableName, Key: memberRemovalKey(record.companyId, record.removalId),
-    UpdateExpression: "SET #state = :done, finishedAt = :at, moved = :moved",
+    UpdateExpression: `SET #state = :done, finishedAt = :at, moved = :moved${takeover === undefined ? "" : ", handedTo = :handedTo, finishedBy = :finishedBy, finishRequestId = :finishRequest"}`,
     ConditionExpression: "#state = :started AND leaverId = :leaver AND successorId = :successor",
     ExpressionAttributeNames: { "#state": "state" },
-    ExpressionAttributeValues: { ":done": "DONE", ":started": "STARTED", ":at": at, ":moved": moved, ":leaver": record.leaverId, ":successor": record.successorId },
+    ExpressionAttributeValues: { ":done": "DONE", ":started": "STARTED", ":at": at, ":moved": moved, ":leaver": record.leaverId, ":successor": record.successorId,
+      ...(takeover === undefined ? {} : { ":handedTo": takeover.successorId, ":finishedBy": takeover.by, ":finishRequest": takeover.requestId.toLowerCase() }) },
   } };
   const audit = auditStep(ctx.tableName, {
-    eventId: `evt_member_removal_${record.removalId.toLowerCase()}`, companyId: record.companyId, at, actor: { type: "person", id: record.by },
+    eventId: `evt_member_removal_${record.removalId.toLowerCase()}`, companyId: record.companyId, at, actor: { type: "person", id: takeover?.by ?? record.by },
     action: "member.removed", subject: { type: "person", id: record.leaverId },
-    details: { successor: record.successorId, role: record.expectedRole, agents: moved.agents, chains: moved.chains, projects: moved.projects, tasks: moved.tasks, tasksLeft: moved.tasksLeft },
+    details: { successor: handedTo, role: record.expectedRole, agents: moved.agents, chains: moved.chains, projects: moved.projects, tasks: moved.tasks, tasksLeft: moved.tasksLeft,
+      ...(takeover === undefined ? {} : { removedBy: record.by, finishedBy: takeover.by }) },
   });
+  const receipt: Write[] = takeover === undefined ? [] : [{ Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)",
+    Item: { ...finishReceiptKey(record.companyId, takeover.requestId), ...FinishReceipt.parse({ entityType: "COMPANY_MEMBER_HANDOVER_FINISH", companyId: record.companyId, removalId: record.removalId,
+      leaverId: record.leaverId, by: takeover.by, successorId: takeover.successorId }) } } }];
   try {
-    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [finish, audit, ...plan.steps] }));
+    await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [finish, audit, pendingDelete(ctx, record), ...receipt, ...plan.steps] }));
   } catch (error) {
     if (error instanceof Error && (error.name === "TransactionCanceledException" || error.name === "ConditionalCheckFailedException")) throw new HandOverRaced();
     throw error;
   }
   return moved;
+}
+
+/** A pending hand-over of this leaver (the latest removal of theirs that has not finished), or undefined. A row that does not read throws. */
+export async function pendingHandOver(ctx: HandOverContext, companyId: string, leaverId: string): Promise<MemberRemovalRecord | undefined> {
+  const key = pendingHandOverKey(companyId, leaverId);
+  const item = await get(ctx, key);
+  if (item === undefined) return undefined;
+  const { pk, sk, ...fields } = item;
+  const row = PendingHandOver.parse(fields);
+  if (pk !== key.pk || sk !== key.sk || row.companyId !== companyId || row.leaverId !== leaverId) throw new Error("pending hand-over does not read");
+  const record = await readRemoval(ctx, companyId, row.removalId);
+  return record?.state === "STARTED" && record.leaverId === leaverId ? record : undefined;
+}
+
+/** A finish request's receipt: the removal it finished, or undefined. A row that does not read throws. */
+export async function finishReceipt(ctx: HandOverContext, companyId: string, requestId: string): Promise<z.infer<typeof FinishReceipt> | undefined> {
+  const key = finishReceiptKey(companyId, requestId);
+  const item = await get(ctx, key);
+  if (item === undefined) return undefined;
+  const { pk, sk, ...fields } = item;
+  const receipt = FinishReceipt.parse(fields);
+  if (pk !== key.pk || sk !== key.sk || receipt.companyId !== companyId) throw new Error("finish receipt does not read");
+  return receipt;
+}
+
+/** Every pending hand-over in the company (at most `max`; past it the whole answer is refused, never a part). */
+export async function pendingHandOvers(ctx: HandOverContext, companyId: string, max: number): Promise<MemberRemovalRecord[]> {
+  const found: MemberRemovalRecord[] = [];
+  for (const row of await rows(ctx, companyScoped(OrgIdSchema.parse(companyId), "MEMBER_REMOVAL"), "LEAVER#", max)) {
+    const leaverId = typeof row["leaverId"] === "string" ? row["leaverId"] : undefined;
+    if (leaverId === undefined || !PersonId.safeParse(leaverId).success) throw new Error("pending hand-over does not read");
+    const record = await pendingHandOver(ctx, companyId, leaverId);
+    if (record !== undefined) found.push(record);
+  }
+  return found;
 }

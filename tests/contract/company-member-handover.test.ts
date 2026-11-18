@@ -5,16 +5,16 @@
 // it idempotent; the role seen and the successor are fenced at the commit; the last owner is never removed; a hand-over too big for one transaction is refused first.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey } from "@agentx/contracts";
 import { DocumentAuditSink, auditEventOfRow, auditRowKey } from "@agentx/local-adapters";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
 import {
-  HANDOVER_UNFINISHED, MEMBERS_UNAVAILABLE, NOT_FOUND, OWN_MEMBERSHIP, PREVIEW_QUERY, REMOVAL_CHANGED, REQUEST_REUSED, SUCCESSOR_INVALID, TOO_MUCH_WORK, routeCompanyMembers,
+  FINISH_BODY, HANDOVER_UNFINISHED, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, NO_PENDING_HANDOVER, NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, PREVIEW_QUERY, REMOVAL_CHANGED, REQUEST_REUSED, SUCCESSOR_INVALID, TOO_MUCH_WORK, routeCompanyMembers,
   type CompanyMemberRouteContext,
 } from "../../packages/broker/src/aws/company-member-routes.js";
-import { HANDOVER_LIMITS, HANDOVER_TOO_BIG, memberRemovalKey } from "../../packages/broker/src/aws/company-member-handover.js";
+import { HANDOVER_LIMITS, HANDOVER_TOO_BIG, memberRemovalKey, pendingHandOverKey } from "../../packages/broker/src/aws/company-member-handover.js";
 import { grantKeyFor, projectMemberRowKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
@@ -71,13 +71,15 @@ function world(options: { tasks?: boolean } = {}) {
       },
     } }),
   };
-  let caller = ADMIN;
+  let caller = ADMIN, webApp = true;
   const as = (id: string) => { caller = id; };
+  /** DEC 254zzz91: a change from a client other than the Rovara website's own (the CLI's token, an AI tool's). */
+  const fromTool = () => { webApp = false; };
   const call = async (method: string, path: string, body?: unknown) => {
     const request = { method, path, headers: {}, requestId: "r", ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) };
     const companyId = (db.get(membershipKey(caller).pk, "COMPANY") as { companyId?: string } | undefined)?.companyId ?? A;
     try {
-      return { status: 200, body: await routeCompanyMembers(ctx, { caller: { developerId: caller, sessionId: `s-${caller.slice(0, 4)}`, amr: "slack", name: NAMES[caller]! }, companyId }, request, new URL(path, "https://broker.example.test")) as Record<string, unknown> };
+      return { status: 200, body: await routeCompanyMembers(ctx, { caller: { developerId: caller, sessionId: `s-${caller.slice(0, 4)}`, amr: "slack", name: NAMES[caller]! }, companyId, webApp }, request, new URL(path, "https://broker.example.test")) as Record<string, unknown> };
     } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
       return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } as Record<string, unknown> };
@@ -105,7 +107,9 @@ function world(options: { tasks?: boolean } = {}) {
   const people = (taskId: string) => db.get(`DEVTASK#${taskId}`, "PEOPLE") as { revision: number; orphaned: boolean; people: Array<{ developerId: string; role: string }> } | undefined;
   const record = (companyId: string, removalId: string) => { const key = memberRemovalKey(companyId, removalId); return db.get(key.pk, key.sk) as Record<string, unknown> | undefined; };
   const audits = (companyId: string) => db.find((item) => item.pk === `ORG#${companyId}#AUDIT`);
-  return { db, ctx, as, call, remove, preview, revoked, join, forwarded, agent, chain, task, ownerOf, people, record, audits, canOwn, registered };
+  const finish = (id: string, body: Record<string, unknown>) => call("POST", `${MEMBERS}/${id}/handover`, body);
+  const pending = () => call("GET", `${MEMBERS}/handovers`);
+  return { db, ctx, as, fromTool, finish, pending, call, remove, preview, revoked, join, forwarded, agent, chain, task, ownerOf, people, record, audits, canOwn, registered };
 }
 
 describe("the hand-over moves what the person owned, in one transaction, with the record and the audit", () => {
@@ -203,7 +207,7 @@ describe("projects the person administers (company layout keys, DEC 254zzz80)", 
       expect(roleOn(h, A, LEAVER, project), project).toBeUndefined(); expect(reverseOn(h, A, LEAVER, project), project).toBeUndefined();
     }
     expect(roleOn(h, A, PEER, "gamma")).toBeUndefined(); expect(roleOn(h, A, LEAVER, "gamma")).toBe("developer");
-    expect(h.db.get(grantKeyFor(A, PEER, "alpha").pk, grantKeyFor(A, PEER, "alpha").sk)).toMatchObject({ entityType: "MEMBERSHIP", ownerKey: PEER, projectName: "alpha", companyId: A });
+    expect(h.db.get(grantKeyFor(A, PEER, "alpha").pk, grantKeyFor(A, PEER, "alpha").sk)).toMatchObject({ entityType: "MEMBERSHIP", ownerKey: PEER, projectName: "alpha", role: "administrator" });
   });
 
   it("another company's grants, and a row under the successor's key that names another company, are never moved or overwritten", async () => {
@@ -415,6 +419,96 @@ describe("a STARTED record ends a membership only as its own prompt retry (revie
     h.join(LEAVER, A, "member", { revokedAt: new Date(NOW).toISOString(), revokedBy: OWNER });
     expect(await h.remove(LEAVER, { requestId, expectedRole: "member" })).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
     expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER); expect(h.audits(A)).toEqual([]);
+  });
+});
+
+describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
+  /** A removal whose successor leaves between the membership's end and the hand-over: the person is removed, nothing moved, the hand-over waits. */
+  const stuck = async (h: ReturnType<typeof world>) => {
+    h.agent(A, "agt_one", LEAVER); h.task(TASK1);
+    const helper = h.ctx.members;
+    h.ctx.members = { ...helper, revoke: async (caller, request) => { const answer = await helper.revoke(caller, request); h.join(PEER, A, "member", { revokedAt: TIME }); return answer; } };
+    const body = { requestId: randomUUID(), expectedRole: "member", successorId: PEER };
+    expect(await h.remove(LEAVER, body)).toEqual(refusal(409, "SUCCESSOR_INVALID", SUCCESSOR_INVALID));
+    h.ctx.members = helper;
+    expect(h.revoked(LEAVER)).toBe(true); expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER);
+    return body;
+  };
+
+  it("lists the stuck hand-over; an owner finishes it to another live member; everything moves once, audited; the pending entry goes", async () => {
+    const h = world(); const removal = await stuck(h);
+    expect((await h.pending()).body["handovers"]).toEqual([{ personId: LEAVER, name: "Lee", removalId: removal.requestId, startedAt: new Date(NOW).toISOString(), removedBy: ADMIN, successorId: PEER }]);
+    h.as(OWNER);
+    const requestId = randomUUID();
+    const answer = await h.finish(LEAVER, { requestId, successorId: ADMIN });
+    expect(answer).toEqual({ status: 200, body: { removalId: removal.requestId, state: "DONE", successorId: ADMIN, moved: { agents: 1, chains: 0, projects: 0, tasks: 1, tasksLeft: 0 } } });
+    expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(ADMIN);
+    expect(h.people(TASK1)!.people.find((p) => p.developerId === ADMIN)?.role).toBe("owner");
+    expect(h.record(A, removal.requestId)).toMatchObject({ state: "DONE", successorId: PEER, handedTo: ADMIN, finishedBy: OWNER, finishRequestId: requestId });
+    expect(auditEventOfRow(h.audits(A)[0] as never)).toMatchObject({ actor: { type: "person", id: OWNER }, details: { successor: ADMIN, removedBy: ADMIN, finishedBy: OWNER } });
+    expect((await h.pending()).body["handovers"]).toEqual([]);
+    // The finish request repeated answers the same; the same id for another successor is refused; the first remover's own retry now answers DONE too.
+    expect(await h.finish(LEAVER, { requestId, successorId: ADMIN })).toEqual(answer);
+    expect(await h.finish(LEAVER, { requestId, successorId: OWNER })).toEqual(refusal(409, "IDEMPOTENCY_CONFLICT", REQUEST_REUSED));
+    h.as(ADMIN);
+    expect((await h.remove(LEAVER, removal)).body).toMatchObject({ state: "DONE", successorId: ADMIN });
+    expect(h.audits(A)).toHaveLength(1);
+  });
+
+  it("only from the website, only an owner or admin, only in the person's own company, only for a removed person with a hand-over waiting", async () => {
+    const h = world(); await stuck(h);
+    const body = () => ({ requestId: randomUUID(), successorId: ADMIN });
+    h.fromTool();
+    expect(await h.finish(LEAVER, body())).toEqual(refusal(403, "FORBIDDEN", ON_THE_WEBSITE_MESSAGE));
+    const web = world(); await stuck(web);
+    web.as(OTHER);
+    expect(await web.finish(LEAVER, body())).toEqual(refusal(404, "NOT_FOUND", MEMBER_NOT_FOUND));
+    expect((await web.pending()).body["handovers"]).toEqual([]);
+    web.join(PEER, A, "member"); web.as(PEER);
+    expect(await web.finish(LEAVER, body())).toEqual(refusal(404, "NOT_FOUND", NOT_FOUND));
+    expect((await web.pending()).status).toBe(404);
+    web.as(ADMIN);
+    expect(await web.finish(OWNER, body())).toEqual(refusal(404, "NOT_FOUND", NO_PENDING_HANDOVER));
+    for (const bad of [{}, { requestId: CANARY, successorId: ADMIN }, { requestId: randomUUID(), successorId: CANARY }, { requestId: randomUUID(), successorId: ADMIN, companyId: B }]) {
+      const answer = await web.finish(LEAVER, bad);
+      expect(answer).toEqual(refusal(400, "CONFIG_INVALID", FINISH_BODY)); expect(JSON.stringify(answer)).not.toContain(CANARY);
+    }
+    for (const successorId of [OTHER, LEAVER, "f".repeat(64)]) expect(await web.finish(LEAVER, { requestId: randomUUID(), successorId })).toEqual(refusal(409, "SUCCESSOR_INVALID", SUCCESSOR_INVALID));
+    expect(web.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER); expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER);
+  });
+
+  it("a person back in the company, or a pending row whose removal already finished, has nothing to finish", async () => {
+    const h = world(); const removal = await stuck(h);
+    h.join(LEAVER, A, "member");
+    expect(await h.finish(LEAVER, { requestId: randomUUID(), successorId: ADMIN })).toEqual(refusal(404, "NOT_FOUND", NO_PENDING_HANDOVER));
+    expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER);
+    h.join(LEAVER, A, "member", { revokedAt: TIME, revokedBy: ADMIN });
+    expect((await h.finish(LEAVER, { requestId: randomUUID(), successorId: ADMIN })).status).toBe(200);
+    // A pending row left pointing at the finished removal is never finished again.
+    h.db.set({ ...pendingHandOverKey(A, LEAVER), entityType: "COMPANY_MEMBER_HANDOVER_PENDING", companyId: A, leaverId: LEAVER, removalId: removal.requestId });
+    expect(await h.finish(LEAVER, { requestId: randomUUID(), successorId: OWNER })).toEqual(refusal(404, "NOT_FOUND", NO_PENDING_HANDOVER));
+    expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(ADMIN);
+  });
+
+  it("an owner's stuck hand-over is finished only by an owner", async () => {
+    const h = world(); h.join(OWNER2, A, "owner"); h.agent(A, "agt_o", OWNER2); h.as(OWNER);
+    const helper = h.ctx.members;
+    h.ctx.members = { ...helper, revoke: async (caller, request) => { const answer = await helper.revoke(caller, request); h.join(PEER, A, "member", { revokedAt: TIME }); return answer; } };
+    expect((await h.remove(OWNER2, { requestId: randomUUID(), expectedRole: "owner", successorId: PEER })).status).toBe(409);
+    h.ctx.members = helper;
+    h.as(ADMIN);
+    expect(await h.finish(OWNER2, { requestId: randomUUID(), successorId: ADMIN })).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
+    h.as(OWNER);
+    expect((await h.finish(OWNER2, { requestId: randomUUID(), successorId: OWNER })).status).toBe(200);
+    expect(h.ownerOf(agentKey(A, "agt_o", "META"))).toBe(OWNER);
+  });
+
+  it("a person removed again later: only their latest removal is pending; a refused removal leaves nothing pending", async () => {
+    const h = world();
+    expect((await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "admin" })).status).toBe(409);
+    h.join(OWNER2, A, "owner"); h.as(OWNER2); h.db.set({ ...h.db.get(`ORG#${A}#MEMBERS`, `MEMBER#${OWNER2}`)!, role: "admin" });
+    expect((await h.remove(OWNER, { requestId: randomUUID(), expectedRole: "owner" })).status).toBe(409);
+    expect((await h.pending()).body["handovers"]).toEqual([]);
   });
 });
 

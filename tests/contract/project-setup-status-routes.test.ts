@@ -1007,7 +1007,9 @@ describe("what did not change", () => {
 // removing exactly those 11 rows gives back the batch 16+17 pin d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711.
 // Owner DEC 254zzz73 (rule D): re-pinned for the ONE removed row GET /v1/dev/me/sign-in-factors (full; the step-up confirmation email and passkeys, removed with the step-up). Nothing else
 // changed: putting exactly that row back where it stood (after DELETE /v1/dev/company/members/{personId}/sign-ins/{method}) gives the previous pin f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b.
-const EXISTING_ROUTES_DIGEST = "f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8";
+// DEC 254zzz101 (rule D): plus #1100's two new rows (GET company/members/handovers, POST company/members/{personId}/handover). Added, none changed: removing exactly those 2 rows gives back
+// f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
+const EXISTING_ROUTES_DIGEST = "88d9d9bb09e60d803ba361d9faa9161eca343cba37f414d652716a856d3dee50";
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
 // Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).

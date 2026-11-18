@@ -270,7 +270,7 @@ describe("only an owner changes or removes an owner (DEC 232e)", () => {
   it("an owner demotes and then removes another owner with no step-up (DEC 254zzz73)", async () => {
     const h = world(); h.join(OWNER2, A, "owner"); h.as(OWNER);
     expect(await h.call("PUT", member(OWNER2, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect((await h.call("POST", member(OWNER2, "removal"))).status).toBe(200);
+    expect((await h.call("POST", member(OWNER2, "removal"), { requestId: randomUUID(), expectedRole: "member" })).status).toBe(200);
     expect(h.role(OWNER2)).toBe("member"); expect(h.revoked(OWNER2)).toBe(true);
     expect(h.forwarded.map((event) => [event["kind"], event["createdBy"]])).toEqual([["company-member-role-set", OWNER], ["company-member-revoke", OWNER]]);
   });

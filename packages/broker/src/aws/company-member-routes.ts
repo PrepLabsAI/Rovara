@@ -4,6 +4,8 @@
 //   GET  /v1/dev/company/members[?cursor=&limit=]               the company's people and roles, one page (T3b's list)
 //   GET  /v1/dev/company/members/{personId}/removal-preview[?successorId=]  what removing the person would take from them and what would move to the successor
 //   POST /v1/dev/company/members/{personId}/removal  { requestId, expectedRole, successorId? }  remove them (T3b's revoke) and hand what they own to the successor
+//   GET  /v1/dev/company/members/handovers                      DEC 254zzz101: the hand-overs that did not finish after the membership ended (the latest removal of each person)
+//   POST /v1/dev/company/members/{personId}/handover  { requestId, successorId }  finish one of them, to a successor picked now (website only)
 //   PUT  /v1/dev/company/members/{personId}/role                 change their role (T3b's role-set)
 //
 // Rules:
@@ -24,7 +26,7 @@
 //     the removal (a failure is logged in fixed words, no cause), and a repeat of the same removal request retries it (the repeat is still answered "already removed"). Only this company's rows are read or removed.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, agentXError, companyLog, type DocumentStore, type OrgRole } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { Membership, membershipKey, recordInCompany } from "./company-check.js";
 import { unlinkGithubAccount } from "../core/people/github-links.js";
@@ -35,7 +37,8 @@ import {
   CompanyMember, MEMBER_CHANGED, MEMBER_LAST_OWNER, MEMBER_ONLY_OWNER, MEMBER_REVOKED, MEMBER_SUCCESSOR_INVALID, memberCursorPerson, type CompanyMemberReply,
 } from "../developer/company-member-contract.js";
 import {
-  HANDOVER_TOO_BIG, HandOverRaced, HandOverTooBig, dropStartedRemoval, finishHandOver, planHandOver, readRemoval, sameRemoval, startRemoval, type HandOverContext, type MemberRemovalRecord,
+  HANDOVER_TOO_BIG, HandOverRaced, HandOverTooBig, dropStartedRemoval, finishHandOver, finishReceipt, pendingHandOver, pendingHandOvers, planHandOver, readRemoval, sameRemoval, startRemoval,
+  type HandOverContext, type MemberRemovalRecord,
 } from "./company-member-handover.js";
 
 export const MEMBER_NOT_FOUND = "member not found";
@@ -49,6 +52,8 @@ export const PREVIEW_QUERY = "the preview takes only an optional successorId";
 export const SUCCESSOR_INVALID = MEMBER_SUCCESSOR_INVALID;
 export const REMOVAL_CHANGED = MEMBER_CHANGED;
 export const REQUEST_REUSED = "this request id was already used for another removal; start the removal again";
+export const FINISH_BODY = "send a request id and who takes over";
+export const NO_PENDING_HANDOVER = "this person has no hand-over waiting to be finished";
 export const HANDOVER_UNFINISHED = "the person was removed but the hand-over did not finish; try the removal again with the same request";
 export const LIST_QUERY = "the list takes an optional cursor this list gave and a limit from 1 to 100";
 export const TOO_MUCH_WORK = "This person has too much work to show in one preview. Hand some of it over first.";
@@ -90,7 +95,12 @@ async function dropGithubLink(ctx: CompanyMemberRouteContext, companyId: string,
 }
 
 const MEMBERS = "/v1/dev/company/members";
-const MEMBER_ROUTE = /^\/v1\/dev\/company\/members\/([^/]+)\/(removal-preview|removal|role)$/u;
+const MEMBER_ROUTE = /^\/v1\/dev\/company\/members\/([^/]+)\/(removal-preview|removal|role|handover)$/u;
+/** DEC 254zzz101: the company's hand-overs waiting to be finished. */
+const HANDOVERS = "/v1/dev/company/members/handovers";
+const FinishBody = z.object({ requestId: z.uuid(), successorId: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+/** The most pending hand-overs one answer lists; past it the whole list is refused. */
+export const PENDING_HANDOVERS_MAX = 100;
 const PersonId = z.string().regex(/^[a-f0-9]{64}$/);
 const RoleBody = z.object({ role: z.enum(["member", "admin", "owner"]) }).strict();
 const RemovalBody = z.object({ requestId: z.uuid(), expectedRole: z.enum(["member", "admin", "owner"]), successorId: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
@@ -99,7 +109,7 @@ const Cursor = z.string().min(1).max(512);
 
 /** Whether this module answers the path (the dispatcher sends it here before anything else is read). */
 export function isCompanyMemberPath(path: string): boolean {
-  return path === MEMBERS || MEMBER_ROUTE.test(path);
+  return path === MEMBERS || path === HANDOVERS || MEMBER_ROUTE.test(path);
 }
 
 function body(request: AdaptedHttpRequest): unknown {
@@ -145,9 +155,13 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
     if (request.method !== "GET") throw agentXError("NOT_FOUND", NOT_FOUND);
     return listMembers(ctx, caller, me.companyId, url);
   }
+  if (url.pathname === HANDOVERS) {
+    if (request.method !== "GET" || [...url.searchParams.keys()].length > 0) throw agentXError("NOT_FOUND", NOT_FOUND);
+    return listPendingHandOvers(ctx, me.companyId);
+  }
 
   const match = MEMBER_ROUTE.exec(url.pathname);
-  const method = match === null ? undefined : match[2] === "role" ? "PUT" : match[2] === "removal" ? "POST" : "GET";
+  const method = match === null ? undefined : match[2] === "role" ? "PUT" : match[2] === "removal" || match[2] === "handover" ? "POST" : "GET";
   if (match === null || request.method !== method) throw agentXError("NOT_FOUND", NOT_FOUND);
   let targetId: string | undefined;
   try { targetId = decodeURIComponent(match[1]!); } catch { targetId = undefined; }
@@ -166,6 +180,11 @@ export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input:
   if (targetId === caller.developerId) throw agentXError("FORBIDDEN", OWN_MEMBERSHIP);
   // Owner DEC 254zzz91: a role change or a removal is made only from the Rovara website's own client (never the CLI's or an AI tool's token); reads and the preview are not.
   if (input.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
+  if (match[2] === "handover") {
+    const parsed = FinishBody.safeParse(body(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", FINISH_BODY);
+    return finishStuckHandOver(ctx, me, target, { requestId: parsed.data.requestId.toLowerCase(), successorId: parsed.data.successorId });
+  }
   if (match[2] === "role") {
     const parsed = RoleBody.safeParse(body(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", ROLE_BODY);
@@ -199,7 +218,8 @@ export const REMOVAL_RETRY_MS = 15 * 60_000;
 /** Clock difference allowed between this broker and the sign-in function when telling whether a revoke was this removal's. */
 const CLOCK_SKEW_MS = 60_000;
 
-const done = (record: MemberRemovalRecord, moved: NonNullable<MemberRemovalRecord["moved"]>) => ({ removalId: record.removalId, state: "DONE" as const, successorId: record.successorId, moved });
+/** A finished removal's answer: who the hand-over went to (the successor named, or the one an owner or admin finished it to, DEC 254zzz101). */
+const done = (record: MemberRemovalRecord, moved: NonNullable<MemberRemovalRecord["moved"]>) => ({ removalId: record.removalId, state: "DONE" as const, successorId: record.handedTo ?? record.successorId, moved });
 
 /**
  * Remove the person and hand over what they own. Order: the record (STARTED) once per request id; T3b's revoke with the fences (role seen, live successor, last
@@ -263,6 +283,63 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
     }
   }
   // The membership has ended; only the hand-over is left. The same request id finishes it.
+  throw agentXError("RUNTIME_UNAVAILABLE", HANDOVER_UNFINISHED);
+}
+
+// ---- finishing a stuck hand-over (DEC 254zzz101)
+
+/** The company's hand-overs waiting to be finished: the person, their name, when the removal started, who removed them and who was to take over. */
+async function listPendingHandOvers(ctx: CompanyMemberRouteContext, companyId: string) {
+  let pending: MemberRemovalRecord[];
+  try { pending = await pendingHandOvers(handOverContext(ctx), companyId, PENDING_HANDOVERS_MAX); } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
+  const handovers = await Promise.all(pending.map(async (record) => {
+    const name = await personName(ctx, record.leaverId);
+    return { personId: record.leaverId, ...(name === undefined ? {} : { name }), removalId: record.removalId, startedAt: record.startedAt, removedBy: record.by, successorId: record.successorId };
+  }));
+  return { handovers };
+}
+
+/**
+ * An owner or admin finishes a hand-over that stopped after the membership ended (for example, the successor left in between): what the removed person still owns
+ * moves to a successor picked now, in the same one transaction as a removal's (record DONE, audit record, the pending row gone, this request's receipt). The person
+ * must already be removed and have a pending hand-over; an owner's hand-over is finished only by an owner. The request id makes it idempotent.
+ */
+async function finishStuckHandOver(ctx: CompanyMemberRouteContext, me: z.infer<typeof Membership>, target: z.infer<typeof Membership>, request: { requestId: string; successorId: string }) {
+  const handOver = handOverContext(ctx);
+  const companyId = me.companyId, leaverId = target.personId;
+  const finished = async (): Promise<ReturnType<typeof done> | undefined> => {
+    const receipt = await finishReceipt(handOver, companyId, request.requestId);
+    if (receipt === undefined) return undefined;
+    if (receipt.leaverId !== leaverId || receipt.by !== me.personId || receipt.successorId !== request.successorId) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_REUSED);
+    const record = await readRemoval(handOver, companyId, receipt.removalId);
+    if (record?.state !== "DONE" || record.moved === undefined) throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);
+    return done(record, record.moved);
+  };
+  let replay: ReturnType<typeof done> | undefined;
+  try { replay = await finished(); } catch (error) { if (error instanceof AgentXError) throw error; throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
+  if (replay !== undefined) return replay;
+  if (target.revokedAt === undefined) throw agentXError("NOT_FOUND", NO_PENDING_HANDOVER);
+  let record: MemberRemovalRecord | undefined;
+  try { record = await pendingHandOver(handOver, companyId, leaverId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
+  if (record === undefined) throw agentXError("NOT_FOUND", NO_PENDING_HANDOVER);
+  if (record.expectedRole === "owner" && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
+  await liveSuccessor(ctx, companyId, request.successorId, leaverId);
+  const takeover = { successorId: request.successorId, by: me.personId, requestId: request.requestId };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const plan = await planHandOver(handOver, { companyId, leaverId, successorId: request.successorId, by: me.personId, removalId: record.removalId, commit: true });
+      const moved = await finishHandOver(handOver, record, plan, takeover);
+      return done({ ...record, handedTo: request.successorId }, moved);
+    } catch (error) {
+      if (error instanceof HandOverRaced) {
+        const now = await finished().catch(() => undefined);
+        if (now !== undefined) return now;
+        continue;
+      }
+      if (error instanceof HandOverTooBig) throw agentXError("CONFIG_INVALID", HANDOVER_TOO_BIG);
+      break;
+    }
+  }
   throw agentXError("RUNTIME_UNAVAILABLE", HANDOVER_UNFINISHED);
 }
 

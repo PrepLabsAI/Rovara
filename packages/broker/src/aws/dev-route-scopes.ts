@@ -184,6 +184,9 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/company/members/{personId}/removal", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/members/{personId}/role", requires: "full" },
+  // DEC 254zzz101: the hand-overs waiting to be finished, and finishing one to a successor picked now (website only, checked by the route).
+  { method: "GET", path: "/v1/dev/company/members/handovers", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/members/{personId}/handover", requires: "full" },
   // Guided onboarding PR 1: connect the company's GitHub App installation (live owner/admin; the claim proves control on GitHub) and read the company's connections (any member).
   { method: "POST", path: "/v1/dev/company/github/connect", requires: "full" },
   { method: "POST", path: "/v1/dev/company/github/claim", requires: "full" },

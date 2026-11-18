@@ -137,4 +137,7 @@ describe("the knowledge routes at the developer router", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
-const OTHER_ROWS_DIGEST = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
+// DEC 254zzz101 (rule D): #1100 stacks on #1086, whose own table (step-up removed) gives ff498627c2c192b3cb3ea56aa4fb04369cb6b6f2957598952f4b96d7ea4c128a here (the earlier pin was
+// 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0); #1100 adds two rows (GET company/members/handovers, POST company/members/{personId}/handover), none changed: removing
+// exactly those 2 rows gives back ff498627....
+const OTHER_ROWS_DIGEST = "ffcecbb6818e65c59557e3895af7f8aefa9c91e6482068e47be79ea678160801";
