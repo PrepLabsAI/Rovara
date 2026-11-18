@@ -145,7 +145,7 @@ const NO_SUCH_PROJECT_WORDS = "No such project.";
 
 export interface ControlPlaneClient {
   /** Team knowledge for one project (`POST /v1/dev/projects/<project>/lessons`): at most 10 units and 2 KB, approved and live only. Never a bulk read: the body has no such field. */
-  knowledgeFor(project: string, body: Omit<LocalLessonsBody, "all" | "skipRepoFile">): Promise<KnowledgeAsk<LocalLessonsRead>>;
+  knowledgeFor(project: string, body: LocalLessonsBody): Promise<KnowledgeAsk<LocalLessonsRead>>;
   /** The table of contents of one project's team knowledge (`POST /v1/dev/projects/<project>/knowledge/areas`): a tree project > repository > top folder, counts only. */
   knowledgeAreas(project: string, body: { repo?: string }): Promise<KnowledgeAsk<LocalKnowledgeAreasRead>>;
   /** The environment's agentx-configuration, read without a token. */
