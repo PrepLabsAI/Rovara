@@ -14,6 +14,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, orgProjectCatalogKey, projectCatalogKey } from "@agentx/contracts";
 import type { CompanyMembershipReader } from "./company-check.js";
 import { queryAllItems } from "./admin-reads.js";
+import { projectNameHolder } from "./company-layout.js";
 
 /** The one answer for a name-only admin route on a name a named company also uses. Fixed words: no project, company or cause. */
 export const ADMIN_NAME_COLLISION_MESSAGE = "this project name is also used by a company's project; manage it from that company's own pages";
@@ -54,13 +55,16 @@ async function callerCompanyHasName(deps: AdminNameCollisionDependencies, person
 export async function refuseNamedCompanyName(deps: AdminNameCollisionDependencies, personId: string, projectName: string): Promise<void> {
   let collides: boolean;
   try {
-    const [latest, catalog, own] = await Promise.all([
+    const [latest, catalog, own, reserved] = await Promise.all([
       // The latest revision only (newest first, one item, consistent), as admin-reads.ts latestProjectRecord reads it.
       queryAllItems(deps, `PROJECT#${projectName}`, "REV#", { limit: 1, newestFirst: true }),
       deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: projectCatalogKey(projectName), ConsistentRead: true })) as Promise<{ Item?: Record<string, unknown> } | undefined>,
       callerCompanyHasName(deps, personId, projectName),
+      // R2-F1 (DEC 254zzz80): 4. the name's install-wide holder (company-layout.ts projectNameHolder: its reservation, else the own catalogs of the companies the core
+      // lists as in use), whatever company the caller is in. A named holder collides; an unreadable one refuses.
+      projectNameHolder(deps.documentClient, deps.tableName, projectName),
     ]);
-    collides = namedCompanyOwns(latest[0]) || namedCompanyOwns(catalog?.Item) || own;
+    collides = namedCompanyOwns(latest[0]) || namedCompanyOwns(catalog?.Item) || own || (reserved !== undefined && reserved !== IMPLICIT_COMPANY_ID);
   } catch {
     // Unreadable is refused, never allowed: no cause leaves this function.
     collides = true;

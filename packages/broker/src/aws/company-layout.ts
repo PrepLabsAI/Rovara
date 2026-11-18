@@ -141,3 +141,67 @@ export async function namedCompanySlackBinding(client: Client, tableName: string
     return SlackChannelBindingSchema.safeParse(binding).success ? { ...binding, companyId: company } : undefined;
   } catch { return undefined; }
 }
+
+/**
+ * R2-F1 review H1 (DEC 254zzz80): project names stay unique across the whole install while project grants are still keyed by name (lane 2). A named company's
+ * registration claims its project's name install-wide with one row, `PROJECT_NAME_RESERVATION#<name>` / `RESERVATION` (the company that holds it), written in the
+ * registration's own transaction (`projectNameReservationWrite`: only when absent, or already this company's). Every name check reads it (`projectNameReservedBy`).
+ */
+export function projectNameReservationKey(project: string): Key {
+  return { pk: `PROJECT_NAME_RESERVATION#${project}`, sk: "RESERVATION" };
+}
+
+/** Who holds `project`'s install-wide name: undefined when nobody does; a row that names no valid company is reported as `"unreadable"` (callers refuse: fail closed). */
+export async function projectNameReservedBy(client: Client, tableName: string, project: string): Promise<string | undefined> {
+  const key = projectNameReservationKey(project);
+  const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+  if (row === undefined) return undefined;
+  const company = OrgIdSchema.safeParse(row.companyId);
+  return row.pk === key.pk && row.sk === key.sk && company.success ? company.data : "unreadable";
+}
+
+/** The registration transaction's item that claims (or keeps) `project`'s install-wide name for `company`: refused when another company holds it. */
+export function projectNameReservationWrite(tableName: string, company: OrgId, project: string, at: string) {
+  return { Update: {
+    TableName: tableName, Key: projectNameReservationKey(project),
+    UpdateExpression: "SET entityType = :entity, companyId = :company, #name = :name, reservedAt = if_not_exists(reservedAt, :at)",
+    ConditionExpression: "attribute_not_exists(pk) OR companyId = :company",
+    ExpressionAttributeNames: { "#name": "name" },
+    ExpressionAttributeValues: { ":entity": "PROJECT_NAME_RESERVATION", ":company": company, ":name": project, ":at": at },
+  } };
+}
+
+/** The most companies `projectNameHolder` looks through; more is refused as unreadable (fail closed), never a silent subset. */
+export const PROJECT_NAME_HOLDER_COMPANIES_MAX = 500;
+
+/**
+ * Which company holds `project`'s name install-wide, read in a bounded way: its reservation (projects registered since R2-F1), else the own catalog row of every company the
+ * core lists as in use (`CORE_ENGINE_IN_USE`, the one install-wide list of companies: a project made before the reservation existed, by the switch-over move or the core's own
+ * writers, by a company that has ever run a task on the core). There is no other list of companies and no scan is made, so a named company that never ran a core task and
+ * registered nothing since R2-F1 is not found here (the reservation backfill closes that). More companies than PROJECT_NAME_HOLDER_COMPANIES_MAX, a list row or catalog row
+ * naming no valid company, or a catalog row naming another company: "unreadable" (refuse).
+ */
+export async function projectNameHolder(client: Client, tableName: string, project: string): Promise<string | undefined> {
+  const reserved = await projectNameReservedBy(client, tableName, project);
+  if (reserved !== undefined) return reserved;
+  const companies: OrgId[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await client.send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": "CORE_ENGINE_IN_USE" },
+      ConsistentRead: true, Limit: 100, ...(start === undefined ? {} : { ExclusiveStartKey: start }) })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> } | undefined;
+    for (const item of page?.Items ?? []) {
+      const company = OrgIdSchema.safeParse(item.orgId);
+      if (!company.success || item.sk !== `ORG#${company.data}`) return "unreadable";
+      if (company.data !== IMPLICIT_COMPANY_ID) companies.push(company.data);
+    }
+    if (companies.length > PROJECT_NAME_HOLDER_COMPANIES_MAX) return "unreadable";
+    start = page?.LastEvaluatedKey;
+  } while (start !== undefined);
+  for (const company of companies) {
+    const key = orgProjectCatalogKey(company, project);
+    const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+    if (row === undefined) continue;
+    return ownPartitionRow(row, company) ? company : "unreadable";
+  }
+  return undefined;
+}

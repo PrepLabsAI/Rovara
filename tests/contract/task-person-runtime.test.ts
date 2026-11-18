@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonRevisionFromResponse, TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, type TaskPersonRuntimePorts } from "../../packages/broker/src/aws/task-person-runtime.js";
+import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, type TaskPersonRuntimePorts } from "../../packages/broker/src/aws/task-person-runtime.js";
 import { checkTaskPersonIdentity } from "../../packages/broker/src/developer/task-person-identity.js";
+import { evaluateProjectAuthority } from "../../packages/broker/src/developer/task-project-access.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
@@ -32,7 +34,7 @@ function ports(input: { task?: DeveloperTaskRecord; memberOf?: string[]; develop
     return input.developerRecord as never;
   });
   const projectAuthorityReader = {
-    latestRevision: vi.fn(async (_project: string, _admission: unknown, signal: AbortSignal) => ({
+    latestRevision: vi.fn(async (_project: string, _admission: unknown, signal: AbortSignal, _company?: string) => ({
       revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, definition: {} }, complete: !signal.aborted,
     })),
     memberships: vi.fn(async (_developerId: string, _admission: unknown, signal: AbortSignal) => ({ items: [], complete: !signal.aborted })),
@@ -347,9 +349,10 @@ describe("task person runtime: the web proof", () => {
       complete: !signal.aborted,
     }));
     const revisionCompany = "revisionCompany" in options ? options.revisionCompany : companyA;
-    injected.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal) => ({
+    // DEC 254zzz80: the reader is asked for the task company's partition; a named company's revision key is its own partition's.
+    injected.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal, company?: string) => ({
       revision: {
-        pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7,
+        pk: company === undefined ? "PROJECT#payments-api" : `ORG#${company}#PROJECT#payments-api`, sk: "REV#000000000007", revision: 7,
         ...(revisionCompany === "unstamped" ? {} : { companyId: revisionCompany }),
         definition: options.channelPolicy === true ? { developerTasks: { enabled: true, channelMembersMayUse: true } } : {},
       }, complete: !signal.aborted,
@@ -425,11 +428,18 @@ describe("task person runtime: the web proof", () => {
     await expect(checker.stateAuthorityWitnessForOwnerActor(webTask(), taskOwnerKey(webDeveloperId, taskId))).resolves.toBeUndefined();
   });
 
-  it("refuses an unstamped revision on a task of a named company (an unstamped row is the implicit company's)", async () => {
+  it("DEC 254zzz80: a named company's task reads its own partition, where an unstamped row is the company's (the partition names it); a legacy row never is", async () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     const injected = webPorts({ revisionCompany: "unstamped" });
-    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
-    expect(injected.projectAuthorityReader.memberships.mock.calls).toHaveLength(0);
+    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({ eligible: true });
+    expect(injected.projectAuthorityReader.latestRevision.mock.calls[0]?.[3]).toBe(companyA);
+    // The reader answering the legacy row (an unstamped `PROJECT#<name>`, the implicit company's) for a named company's task: refused, before any grant is read.
+    const legacy = webPorts({ revisionCompany: "unstamped" });
+    legacy.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal) => ({
+      revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, definition: {} }, complete: !signal.aborted,
+    }));
+    await expect(runtime(createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 }), legacy).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    expect(legacy.projectAuthorityReader.memberships.mock.calls).toHaveLength(0);
   });
 
   it.each([["a number", 7], ["null", null], ["a string that is not a company id", "acme"]])("refuses a revision whose company is %s", async (_label, revisionCompany) => {
@@ -518,5 +528,44 @@ describe("task person runtime: the dispatcher's latest-revision read", () => {
   it("carries a company that is not a plain value as it is (null stays null), so the company check refuses it, and answers none for no row", () => {
     expect(taskPersonRevisionFromResponse({ Items: [{ ...stamped, companyId: null }] }).revision).toHaveProperty("companyId", null);
     expect(taskPersonRevisionFromResponse({ Items: [] })).toStrictEqual({ complete: true });
+  });
+});
+
+describe("DEC 254zzz80: the dispatcher's revision read for a named company's project", () => {
+  const A = `org_${"a".repeat(20)}`, B = `org_${"b".repeat(20)}`;
+  const definition = (revision: number, extra: Record<string, unknown> = {}) => ({ name: "payments-api", revision, orchestratorInstructions: "x", setup: [], readiness: [],
+    repositories: [{ name: "r", url: "https://github.com/acme/r", path: "repo/r", defaultBranch: "main", credentialRef: "github" }], ...extra });
+  const rev = (n: number) => `REV#${String(n).padStart(12, "0")}`;
+  const read = async (db: FakeDynamoDb, company = A) => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const before = admission.remainingStateReads();
+    const client = { send: async (command: never) => db.send(command) };
+    const answer = await taskPersonNamedLatestRevision(client, "state", company, "payments-api", admission, admission.admitStateRead());
+    return { answer, admitted: before - admission.remainingStateReads() };
+  };
+
+  it("reads the company's own partition in the core's order, admits every read, and an unstamped own row is the company's", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: `ORG#${A}#PROJECT#payments-api`, sk: rev(6), entityType: "PROJECT", definition: definition(6) });
+    db.set({ pk: `ORG#${A}#PROJECT#payments-api`, sk: rev(7), entityType: "PROJECT", definition: definition(7, { developerTasks: { enabled: true } }) });
+    db.set({ pk: `ORG#${A}#PROJECT_CATALOG`, sk: "PROJECT#payments-api", entityType: "PROJECT_CATALOG", latestRevision: 7 });
+    // A legacy row of the same name is never read for a named company.
+    db.set({ pk: "PROJECT#payments-api", sk: rev(9), companyId: A, definition: definition(9) });
+    const { answer, admitted } = await read(db);
+    expect(answer).toEqual({ complete: true, revision: { pk: `ORG#${A}#PROJECT#payments-api`, sk: rev(7), revision: 7, definition: { developerTasks: { enabled: true } } } });
+    expect(admitted).toBe(2);
+    // The proof's evaluation accepts this company's partition key with a team set, and refuses it for the legacy key's company.
+    const input = { project: "payments-api", developerId: "d".repeat(64), teamId: "T0AAAAAAA", revision: answer.revision!, memberships: [], bindings: [] };
+    expect(evaluateProjectAuthority({ ...input, companyId: A }).kind).not.toBe("unavailable");
+    expect(evaluateProjectAuthority(input).kind).toBe("unavailable");
+    expect(evaluateProjectAuthority({ ...input, companyId: B }).kind).toBe("unavailable");
+  });
+
+  it("another company's partition, and a row in this partition naming another company, give no revision", async () => {
+    const db = new FakeDynamoDb();
+    db.set({ pk: `ORG#${B}#PROJECT#payments-api`, sk: rev(1), entityType: "PROJECT", definition: definition(1) });
+    expect((await read(db)).answer).toEqual({ complete: true });
+    db.set({ pk: `ORG#${A}#PROJECT#payments-api`, sk: rev(1), entityType: "PROJECT", companyId: B, definition: definition(1) });
+    expect((await read(db)).answer).toEqual({ complete: true });
   });
 });
