@@ -14,7 +14,10 @@ import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
 import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, PUSH_FIT_FLOOR, selectLessons } from "../../lessons/load.js";
-import { buildKnowledgeContext, pullable } from "../../lessons/knowledge-brief.js";
+import { buildKnowledgeContext, deliveryRecordOf, pullable } from "../../lessons/knowledge-brief.js";
+import { agreedDefaultBranch, flakyFactsPort } from "../../lessons/knowledge-facts.js";
+import { writeKnowledgeDeliveryOnce } from "../../lessons/knowledge-use.js";
+import { baseFlakyTests } from "../../core/test-env/base-flaky.js";
 import { readVisible } from "../../lessons/read-visible.js";
 import { modeAllows, resolveLearning, resolveLoadBudget, whyLearningOff } from "../../lessons/policy.js";
 import { workspaceCompanyReader } from "./workspace-company.js";
@@ -27,6 +30,9 @@ export const DISPATCHER_PULL_READS = 40;
 /** The look-up's own clock, and the time it always leaves of the dispatch deadline for the answer itself. */
 export const DISPATCHER_PULL_MS = 900;
 export const DISPATCHER_PULL_MARGIN_MS = 300;
+/** The delivery record's own write: it gets at most this long, and always leaves the margin of the dispatch deadline. */
+export const DISPATCHER_RECORD_MS = 400;
+export const DISPATCHER_RECORD_MARGIN_MS = 100;
 class PullBudgetSpent extends Error {}
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
 function refuse(): never { throw agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE); }
@@ -61,9 +67,12 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
     // The look-up (lead 4 L4-AK2) runs on a share of its own, and it can never fail the lessons: while it runs, a read past its share of reads, past its own short clock, past what is left of the shared caps, or a read that
     // fails, throws HERE (`PullBudgetSpent`) before anything is counted or `failed` is set, so the look-up ends and the lessons stand.
     let pulling = false;
+    // Set when the look-up has ended (finished or given up on): work of it that is still in flight can no longer read, count or fail anything.
+    let pullOver = false;
     let pullReads = 0;
     let pullDeadline = 0;
     const read = async <T>(work: () => Promise<T>, count = 1): Promise<T> => {
+      if (pullOver) throw new PullBudgetSpent();
       check();
       if (pulling && (Date.now() >= pullDeadline || ++pullReads > DISPATCHER_PULL_READS || reads + 1 > DISPATCHER_LESSONS_LIMITS.reads || items + count > DISPATCHER_LESSONS_LIMITS.items || bytes >= DISPATCHER_LESSONS_LIMITS.bytes / 2)) throw new PullBudgetSpent();
       reads++; items += count;
@@ -72,9 +81,9 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         const answer = await work();
         check();
         bytes += Buffer.byteLength(JSON.stringify(answer) ?? "", "utf8");
-        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { if (pulling) throw new PullBudgetSpent(); failed = true; refuse(); }
+        if (bytes > DISPATCHER_LESSONS_LIMITS.bytes) { if (pulling || pullOver) throw new PullBudgetSpent(); failed = true; refuse(); }
         return answer;
-      } catch { if (pulling) throw new PullBudgetSpent(); failed = true; return refuse(); }
+      } catch { if (pulling || pullOver) throw new PullBudgetSpent(); failed = true; return refuse(); }
     };
     // The shared lesson selector can catch dependency failures. A sticky failed budget ensures
     // those catches never turn a cap or failed read into a partial successful answer.
@@ -163,25 +172,45 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       });
       check();
       if (!selected.ok || !selected.complete) refuse();
-      // The knowledge briefing (lead 4 L4-AK2) for a worker that lists it: the look-up's lessons on their own read share, and no facts or skill names (this reader has no source for them). Anything that goes wrong here is no
-      // briefing, never a refused load. This reader writes nothing, so it leaves no delivery record: a use report for such a step cannot be checked and is not kept.
+      // The knowledge briefing (lead 4 L4-AK2, L4-AK2b) for a worker that lists it: the look-up's lessons and the measured facts, each on the look-up's own read share and one short clock, and no skill names (this reader has no
+      // source for them). Anything that goes wrong here is no part of the briefing, never a refused load. The one write this reader makes is the ids-only delivery record below, after the briefing is built.
+      const stageParts = KNOWLEDGE_STAGE_PARTS[stage];
       let knowledgeContext: ReturnType<typeof buildKnowledgeContext>;
       pullDeadline = Math.min(deadline - DISPATCHER_PULL_MARGIN_MS, Date.now() + DISPATCHER_PULL_MS);
-      if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && KNOWLEDGE_STAGE_PARTS[stage].pull && Date.now() < pullDeadline) {
+      if (request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) && (stageParts.pull || stageParts.facts) && Date.now() < pullDeadline) {
         pulling = true;
+        let pullTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          const widerRun = selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
+          // ONE clock for both: a read already in flight is raced against the look-up's own limit too, so the look-up ends at its limit whatever a slow read is doing, and the lessons are never waiting on it.
+          const clock = new Promise<undefined>((resolve) => { pullTimer = setTimeout(() => { resolve(undefined); }, Math.max(1, pullDeadline - Date.now())); pullTimer.unref?.(); });
+          const bounded = <T,>(work: Promise<T>): Promise<T | undefined> => Promise.race([work.catch(() => undefined), clock]);
+          const widerRun = stageParts.pull ? selectLessons({ store: lessons, settings, vectors: documentLessonVectors(store), access: parts.access, ...(people.resolveMember === undefined ? {} : { resolveMember: (c: OrgId, who: string) => people.resolveMember!(c, who) }), now, audit: { emit: async () => refuse() } }, {
             key: { workspaceId: company, project: task.project }, stage, resolved,
             active: visible.filter((lesson) => lesson.status === "active" && lesson.expiresAt > now() && !hasStaleCitation(lesson)),
             intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
             repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
             reader: { running: { taskId: task.taskId } }, where: "load", budget: { lessons: Math.min(KNOWLEDGE_PULL_MAX_UNITS, DISPATCHER_LESSONS_LIMITS.lessons), bytes: 256 * 1024 }, prefilter: async (eligible) => eligible.filter(pullable),
-          });
-          // A read already in flight is raced against the look-up's own clock too: the look-up ends at its limit whatever a slow read is doing, and the lessons are never waiting on it.
-          let pullTimer: ReturnType<typeof setTimeout> | undefined;
-          const wider = await Promise.race([widerRun, new Promise<undefined>((resolve) => { pullTimer = setTimeout(() => { resolve(undefined); }, Math.max(1, pullDeadline - Date.now())); pullTimer.unref?.(); })]).finally(() => { if (pullTimer !== undefined) clearTimeout(pullTimer); });
-          if (wider !== undefined && wider.ok && wider.complete) knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, pull: wider.picked, pullLeftOut: 0 });
-        } catch { knowledgeContext = undefined; } finally { pulling = false; }
+          }) : Promise.resolve(undefined);
+          // The base's known-flaky tests (counted by the nightly baseline, never written by a person or a model): one read of THIS company's and project's baseline row, through the same guarded reader. The base branch is the one this task's own revision names.
+          const baseBranch = agreedDefaultBranch(project.definition);
+          const factsRun = stageParts.facts && baseBranch !== undefined
+            ? flakyFactsPort((flakyTask) => baseFlakyTests({ store, now }, flakyTask, { taskBranches: [baseBranch] }))({ companyId: company, project: task.project, stage, files: [], repos: [] })
+            : Promise.resolve(undefined);
+          const [wider, facts] = await Promise.all([bounded(widerRun), bounded(factsRun)]);
+          knowledgeContext = buildKnowledgeContext({ stage, pushed: selected.picked, ...(wider !== undefined && wider.ok && wider.complete ? { pull: wider.picked, pullLeftOut: 0 } : {}), facts });
+        } catch { knowledgeContext = undefined; } finally { pulling = false; pullOver = true; if (pullTimer !== undefined) clearTimeout(pullTimer); }
+      }
+      // The ids this delivery gives, kept once for the operation so the worker's use report can be checked against it (a hosted step's report was dropped for want of this). A store fault, a slow write or a repeated delivery is only "no
+      // new record": the briefing still goes. Never STARTED once the call is over or with less than its margin left; a write already started may still land late (it is idempotent: the same ids).
+      if (knowledgeContext !== undefined) {
+        const room = Math.min(DISPATCHER_RECORD_MS, deadline - Date.now() - DISPATCHER_RECORD_MARGIN_MS);
+        if (!stopped && !failed && room > 0) {
+          let recordTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: selected.chosen.map((lesson) => lesson.id), knowledge: knowledgeContext });
+            await Promise.race([writeKnowledgeDeliveryOnce(options.store, { companyId: company, operationId: request.data.operationId, record, now }), new Promise<void>((resolve) => { recordTimer = setTimeout(resolve, room); recordTimer.unref?.(); })]);
+          } catch { /* no record: the report of this step is dropped, as it was before */ } finally { if (recordTimer !== undefined) clearTimeout(recordTimer); }
+        }
       }
       return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
         ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),

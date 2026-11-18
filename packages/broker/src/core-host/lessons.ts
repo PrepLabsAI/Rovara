@@ -19,6 +19,7 @@ import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
+import type { KnowledgeSources } from "../lessons/knowledge-brief.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import type { ChannelCompanyOf } from "../core/channel/company.js";
@@ -83,6 +84,8 @@ export interface CoreLessonsOptions {
   /** The lessons of another company, for a message of the shared reflection queue that names it. Undefined: lessons are off for that company (the message is removed). */
   hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>;
   edition?: Edition;
+  /** Where the knowledge briefing's measured facts and skill names come from (lead 4 L4-AK2b: the base's known-flaky tests, read from this company's own nightly baseline). Absent: the briefing carries lessons and the look-up only. */
+  knowledge?: KnowledgeSources | undefined;
   /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places. Absent: one company, whose every tenant is. */
   channelCompanyOf?: ChannelCompanyOf;
   now: () => number;
@@ -158,6 +161,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   });
   const host = createLessonsHost({
     flow: deps, runtime, companyId, blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
+    ...(options.knowledge === undefined ? {} : { knowledge: options.knowledge }),
     visibility: async (project): Promise<RepositoryVisibility> => {
       const found = await repositories.ofProject(project);
       if (found.length === 0) return "unknown";
