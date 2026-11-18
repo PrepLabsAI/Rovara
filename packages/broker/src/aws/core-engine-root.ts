@@ -666,7 +666,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
   // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
-  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole });
+  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : stepUpApprovalKeyOf(inputs.callbackSigningKey));
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true; 
   // Web task channel C8 (option b): the attention email, OFF unless ROVARA_ATTENTION_EMAIL is `on` (attention-email.ts). One attempt per invoke: a send whose answer was lost is never sent again.
@@ -1097,7 +1097,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       chatThreads === undefined ? undefined : (deployed, input) => addChatThreadInput({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
       // HW5b: a press of Approve, or the words for Request changes, on the plan card (one line here; the rule is core-host/chat-decision.ts and the approvers' `chat-<channel>` method).
       chatApproval === undefined || chatThreads?.personOf === undefined ? undefined : (deployed, press) => decideFromChat({
-        chatThreads, now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
+        chatThreads, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
         companyFor: async (companyId) => {
           const runtime = await app.runtimeFor(companyId);
           const registry = await app.registry();

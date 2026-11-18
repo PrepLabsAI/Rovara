@@ -11,17 +11,16 @@
 //      company's, low or medium risk, never a rejection). A link the press relied on is the decision's own transaction fence (an unlink that commits first wins). The gate stages the audit event in the SAME transaction as the write.
 //
 // Nothing here believes the chat's word for who it is: the gate's Approvers read the link, the membership and the task's owner again.
-import { createHash } from "node:crypto";
 import {
   ChannelDecisionSchema, INDEX_EXPIRY_ATTRIBUTE, orgScoped, when,
   type ActorRef, type ConversationRef, type DocumentKey, type DocumentStore, type OrgId, type TransactItem,
 } from "@agentx/contracts";
-import { cardMayBeDecidedInChat, readApprovalCard, type ApprovalCard } from "../core/channel/cards.js";
+import { cardMayBeDecidedInChat, readApprovalCard } from "../core/channel/cards.js";
 import { tenantIsCompanys } from "../core/channel/company.js";
 import { channelLinkFence } from "../core/channel/links.js";
 import { cleanChangeReason, decisionRefusalWords } from "../core/channel/sink.js";
 import type { DecisionGate, DecisionOutcome } from "../core/decisions/approval-gate.js";
-import { chatApprovalMethod } from "./hosted-approvers.js";
+import { chatApprovalMethod, chatPressToken } from "./hosted-chat-approval.js";
 import type { ChatThreads } from "./chat-threads.js";
 import type { DeployedCaller } from "./dev-routes.js";
 
@@ -53,6 +52,8 @@ export interface ChatDecisionDeps {
   chatThreads: Pick<ChatThreads, "companyOf" | "adapterFor" | "personOf">;
   /** The company's own store and approval gate; undefined (or a throw) when the company is not served. */
   companyFor(companyId: OrgId): Promise<ChatDecisionCompany | undefined>;
+  /** The install's approval proof key: a press's token is a MAC under it (`chatPressToken`). */
+  proofKey: Buffer;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -63,13 +64,6 @@ const EVENT_DEDUPE_SECONDS = 24 * 3_600;
 const refused = (reason: string): ChatDecisionResult => ({ outcome: "refused", reason });
 
 const sameConversation = (a: ConversationRef, b: ConversationRef): boolean => a.channel === b.channel && a.tenant === b.tenant && a.space === b.space && a.thread === b.thread;
-
-/**
- * The token a chat press carries. It is made from the card and the account that pressed, NOT from the press itself, so the same person pressing the same card again presents the same proof: the gate answers a repeat of a decision it
- * already made as the repeat it is, and a press by another account is another proof. The token proves nothing by itself: the approvers decide from the claimed account.
- */
-export const chatPressToken = (card: Pick<ApprovalCard, "requestId">, actor: Pick<ActorRef, "tenant" | "userId">): string =>
-  createHash("sha256").update(`chat-press\0${card.requestId}\0${actor.tenant}\0${actor.userId}`).digest("hex");
 
 /** The fixed words for a refusal (the sink's own table; nothing of the person, the task or what was sent). */
 export const chatDecisionWords = decisionRefusalWords;
@@ -124,7 +118,7 @@ export async function decideFromChat(deps: ChatDecisionDeps, deployed: DeployedC
     const fence: readonly TransactItem[] = found.via === "link" ? [channelLinkFence(companyId, actor, found.personId)] : [];
     const result = await gate.decide({
       companyId, kind: card.subject.type, subjectId: card.subject.id, requestId: card.requestId, outcome, seen: { revision: card.revision, artifactDigest: card.artifactDigest },
-      credentials: [{ method: chatApprovalMethod(conversation.channel), token: chatPressToken(card, actor), claimedAccount: { provider: conversation.channel, tenant: actor.tenant, accountId: actor.userId } }],
+      credentials: [{ method: chatApprovalMethod(conversation.channel), token: chatPressToken(deps.proofKey, { companyId, requestId: card.requestId, revision: card.revision, artifactDigest: card.artifactDigest, outcome, tenant: actor.tenant, userId: actor.userId }), claimedAccount: { provider: conversation.channel, tenant: actor.tenant, accountId: actor.userId } }],
       reason, fence,
     });
     if (result.status === "refused") {

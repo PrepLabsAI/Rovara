@@ -80,7 +80,11 @@ export function corePlanPressHandler(deps: CorePlanPressDeps): SlackActionHandle
       if (action.userTeamId !== action.thread.teamId || (action.workspaceTeamId !== "" && action.workspaceTeamId !== action.thread.teamId)) { log("core_plan_press.other_workspace", {}); await tell(action.responseUrl, NOT_HERE_WORDS); return; }
       if (value.o === "REQUEST_CHANGES") {
         // The box asks for the words; what is decided is decided when it is sent. The press's trigger is good for a few seconds only.
-        const context: Context = { r: value.r, v: value.v, d: value.d, t: action.thread.teamId, s: action.thread.channelId, h: action.thread.threadTs, u: action.userId, w: action.userTeamId, m: action.messageTs, x: [...action.messageText].slice(0, 1_500).join("") };
+        const base = { r: value.r, v: value.v, d: value.d, t: action.thread.teamId, s: action.thread.channelId, h: action.thread.threadTs, u: action.userId, w: action.userTeamId, m: action.messageTs };
+        // The card's words ride in the box's metadata (Slack keeps it to 3,000 characters once encoded): cut until the whole fits.
+        let words = [...action.messageText].slice(0, 1_500).join("");
+        while (words !== "" && JSON.stringify({ ...base, x: words }).length > 2_800) words = [...words].slice(0, Math.floor([...words].length * 0.8)).join("");
+        const context: Context = { ...base, x: words };
         const view = { ...(changesModal({ r: value.r, v: value.v, d: value.d, t: context.t, s: context.s, h: context.h, u: context.u, w: context.w }) as Record<string, unknown>), private_metadata: JSON.stringify(context) };
         try {
           await deps.openView(action.triggerId, view, Math.max(500, 2_500 - (now() - action.requestStartedAt)));

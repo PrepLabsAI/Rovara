@@ -14,7 +14,8 @@ import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { chatApprovalMethod, createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedChatApproval, hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
-import { chatPressToken, decideFromChat } from "../../packages/broker/src/core-host/chat-decision.js";
+import { decideFromChat } from "../../packages/broker/src/core-host/chat-decision.js";
+import { chatPressToken } from "../../packages/broker/src/core-host/hosted-chat-approval.js";
 import { hostedThreadHandler } from "../../packages/broker/src/core-host/thread-notification.js";
 import { coreTaskEntryFrom, type CoreEntryCaller, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { deployedCallerFromMembership, hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -59,6 +60,7 @@ const PROJECT: ProjectDefinition = {
 const CONVERSATION: ConversationRef = { channel: SLACK_CHANNEL, tenant: TEAM_A, space: CHANNEL, thread: TS };
 const ACTOR = (userId: string, tenant: string = TEAM_A): ActorRef => ({ channel: SLACK_CHANNEL, tenant, userId });
 const principalOf = (personId: string, companyId: string = ORG): Principal => ({ companyId, personId, displayName: personId, roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER });
+const PROOF_KEY = stepUpApprovalKeyOf("k".repeat(32));
 const proved = { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 } }], proves: { unit: ["1", "2"] } };
 
 type Kind = "low" | "medium" | "high";
@@ -116,8 +118,8 @@ async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean 
     person: createSlackPersonResolver({ workspaces: bindings, store: fake.store, companies, now: () => fake.clock.now }),
   });
   const approvers = (): ReturnType<typeof createHostedApprovers> => createHostedApprovers({
-    store: fake.store, identity, key: stepUpApprovalKeyOf("k".repeat(32)), now: () => new Date(fake.clock.now),
-    ...(options.withChat === false ? {} : { chat: hostedChatApproval(threads, people) }),
+    store: fake.store, identity, key: PROOF_KEY, now: () => new Date(fake.clock.now),
+    ...(options.withChat === false ? {} : { chat: hostedChatApproval(threads, people, PROOF_KEY) }),
   });
   fake.modules.push(coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: "fake", create: () => identity }));
   fake.modules.push(coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => approvers() }));
@@ -181,7 +183,7 @@ async function world(options: { kind?: Kind; post?: boolean; withChat?: boolean 
   const entry: CoreTaskEntry = coreTaskEntryFrom(
     { route: async () => undefined }, deployedCallerFromMembership(people.membershipOf), undefined, undefined,
     (deployed, press) => decideFromChat({
-      chatThreads: threads, now: () => fake.clock.now, log: (entry) => decisionLog.push(entry),
+      chatThreads: threads, proofKey: PROOF_KEY, now: () => fake.clock.now, log: (entry) => decisionLog.push(entry),
       companyFor: async (companyId) => ({ store: (await app.runtimeFor(companyId)).flow.deps.store, gate: hostedDecisionService({ deps: (await app.runtimeFor(companyId)).flow.deps, registry, companyId, now: () => new Date(fake.clock.now) }).gate }),
     }, deployed, press),
   );
@@ -436,7 +438,7 @@ describe("the plan card on a hosted Slack thread (HW5b)", () => {
     };
     const gate = w.gateOf();
     const result = await decideFromChat(
-      { chatThreads: w.threads, now: () => w.fake.clock.now, companyFor: async () => ({ store: w.fake.store, gate }) },
+      { chatThreads: w.threads, proofKey: PROOF_KEY, now: () => w.fake.clock.now, companyFor: async () => ({ store: w.fake.store, gate }) },
       { principal: principalOf("dev-a") },
       { conversation: CONVERSATION, actor: ACTOR(OWNER), eventId: "evt-race", requestId: card.requestId, expectedRevision: card.revision, artifactDigest: card.artifactDigest, decision: "APPROVE", reason: "x" },
     );
@@ -632,10 +634,13 @@ describe("a signed Slack request through the company interactivity gate", () => 
 
 describe("the approvers' chat method on its own", () => {
   const requestOf = (w: World, over: Record<string, unknown> = {}) => ({
-    companyId: ORG, requestId: "req-1.x", kind: "plan", subject: { type: "task", id: w.task.taskId }, revision: 1, artifactDigest: "a".repeat(64), risk: "medium" as const, outcome: "approve" as const, projectName: "payments", ...over,
+    companyId: ORG, requestId: "req-1.x", kind: "plan", subject: { type: "task", id: w.task.taskId }, revision: 1, artifactDigest: "a".repeat(64), risk: "medium" as const, outcome: "approve" as const, projectName: "payments", settlesClaims: true as const, ...over,
   });
-  const proofOf = (request: { requestId: string; revision: number; artifactDigest: string }, account: { provider: string; tenant: string; accountId: string } | undefined, token = "t".repeat(64)) => ({
-    proofId: randomUUID(), method: "chat-slack", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token, ...(account === undefined ? {} : { claimedAccount: account }),
+  /** The broker's own proof for this request and account (what `decideFromChat` makes), or a given token. */
+  const proofOf = (request: { companyId: string; requestId: string; revision: number; artifactDigest: string; outcome?: string }, account: { provider: string; tenant: string; accountId: string } | undefined, token?: string) => ({
+    proofId: randomUUID(), method: "chat-slack", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest,
+    token: token ?? (account === undefined ? "x" : chatPressToken(PROOF_KEY, { companyId: request.companyId, requestId: request.requestId.split(".")[0]!, revision: request.revision, artifactDigest: request.artifactDigest, outcome: request.outcome ?? "approve", tenant: account.tenant, userId: account.accountId })),
+    ...(account === undefined ? {} : { claimedAccount: account }),
   });
   const owner = { provider: SLACK_CHANNEL, tenant: TEAM_A, accountId: OWNER };
 
@@ -644,13 +649,24 @@ describe("the approvers' chat method on its own", () => {
     const approvers = w.approvers();
     for (const risk of ["low", "medium"] as const) for (const outcome of ["approve", "request_changes"] as const) {
       const request = requestOf(w, { risk, outcome });
-      expect(await approvers.verify(request as never, proofOf(request, owner) as never), `${risk} ${outcome}`).toMatchObject({ approved: true, method: "chat-slack", approver: { personId: "dev-a", companyId: ORG } });
+      expect(await approvers.verify(request as never, proofOf(request as never, owner) as never), `${risk} ${outcome}`).toMatchObject({ approved: true, method: "chat-slack", approver: { personId: "dev-a", companyId: ORG } });
     }
     const refusal = async (over: Record<string, unknown>, account: typeof owner | null = owner) => {
       const request = requestOf(w, over);
       const verdict = await approvers.verify(request, proofOf(request, account ?? undefined));
       return verdict.approved ? "approved" : verdict.reason;
     };
+    // Only a plan's decision, only from the decision gate, only with the broker's own proof.
+    expect(await refusal({ kind: "merge" })).toBe("no_rule_for_this_request");
+    expect(await refusal({ kind: "requirements" })).toBe("no_rule_for_this_request");
+    expect(await refusal({ settlesClaims: undefined })).toBe("needs_settling_caller");
+    const real = requestOf(w);
+    expect(await approvers.verify(real as never, proofOf(real as never, owner, "t".repeat(64)) as never)).toEqual({ approved: false, reason: "not_a_valid_proof" });
+    expect(await approvers.verify(real as never, proofOf(real as never, owner, "") as never)).toEqual({ approved: false, reason: "not_a_valid_proof" });
+    // A proof made for another answer, another card or another account is not this press's.
+    const forOther = proofOf({ ...real, outcome: "request_changes" }, owner);
+    expect(await approvers.verify(real as never, { ...proofOf(real as never, owner), token: forOther.token })).toEqual({ approved: false, reason: "not_a_valid_proof" });
+    expect(await approvers.verify(real as never, { ...proofOf(real as never, { ...owner, accountId: PEER }), claimedAccount: owner })).toEqual({ approved: false, reason: "not_a_valid_proof" });
     expect(await refusal({ risk: "high" })).toBe("chat_not_enough_for_this_risk");
     expect(await refusal({ risk: undefined })).toBe("chat_not_enough_for_this_risk");
     expect(await refusal({ outcome: "reject" })).toBe("chat_cannot_reject");
@@ -670,9 +686,9 @@ describe("the approvers' chat method on its own", () => {
     expect(await approvers.verify(request as never, { ...proofOf(request, owner), method: "rovara-step-up" })).toMatchObject({ approved: false });
     expect(await approvers.verify(request as never, { ...proofOf(request, owner), method: "chat-teams" })).toEqual({ approved: false, reason: "unknown_method" });
     // A request bound to another revision, digest or id than the proof's is refused.
-    expect(await approvers.verify(request as never, { ...proofOf(request, owner), revision: 2 })).toEqual({ approved: false, reason: "other_revision" });
-    expect(await approvers.verify(request as never, { ...proofOf(request, owner), artifactDigest: "c".repeat(64) })).toEqual({ approved: false, reason: "other_content" });
-    expect(await approvers.verify(request as never, { ...proofOf(request, owner), requestId: "req-2.x" })).toEqual({ approved: false, reason: "other_request" });
+    expect(await approvers.verify(request as never, { ...proofOf(request as never, owner), revision: 2 })).toEqual({ approved: false, reason: "other_revision" });
+    expect(await approvers.verify(request as never, { ...proofOf(request as never, owner), artifactDigest: "c".repeat(64) })).toEqual({ approved: false, reason: "other_content" });
+    expect(await approvers.verify(request as never, { ...proofOf(request as never, owner), requestId: "req-2.x" })).toEqual({ approved: false, reason: "other_request" });
   });
 
   it("offers the method only for a task's plan at low or medium risk, and never as a strong or rejecting method; without a chat there is no such method", async () => {
@@ -683,6 +699,8 @@ describe("the approvers' chat method on its own", () => {
     expect(await offered({ risk: "low" })).toEqual(["rovara-step-up", "chat-slack"]);
     expect(await offered({ risk: "medium" })).toEqual(["rovara-step-up", "chat-slack"]);
     expect(await offered({ risk: "high" })).toEqual(["rovara-step-up"]);
+    expect(await offered({ kind: "merge" })).toEqual(["rovara-step-up"]);
+    expect(await offered({ kind: "design" })).toEqual(["rovara-step-up"]);
     expect(await offered({ risk: undefined })).toEqual(["rovara-step-up"]);
     expect(await offered({ subject: { type: "setup_proposal", id: "payments" } })).toEqual(["rovara-step-up"]);
     const requirement = await approvers.requirement(base);
@@ -691,14 +709,15 @@ describe("the approvers' chat method on its own", () => {
     expect(requirement.changesMethods).toEqual(["rovara-step-up", "chat-slack"]);
     const plain = (await world({ kind: "medium", post: false, withChat: false })).approvers();
     expect((await plain.requirement(base as never)).methods).toEqual(["rovara-step-up"]);
-    expect(await plain.verify(base as never, proofOf(base, owner) as never)).toEqual({ approved: false, reason: "unknown_method" });
+    expect(await plain.verify(base as never, proofOf(base as never, owner) as never)).toEqual({ approved: false, reason: "unknown_method" });
   });
 
-  it("the press token is made from the card and the account only: the same press is the same proof, another account is another", () => {
-    const card = { requestId: randomUUID() };
-    expect(chatPressToken(card, { tenant: TEAM_A, userId: OWNER })).toBe(chatPressToken(card, { tenant: TEAM_A, userId: OWNER }));
-    expect(chatPressToken(card, { tenant: TEAM_A, userId: OWNER })).not.toBe(chatPressToken(card, { tenant: TEAM_A, userId: PEER }));
-    expect(chatPressToken(card, { tenant: TEAM_A, userId: OWNER })).not.toBe(chatPressToken({ requestId: randomUUID() }, { tenant: TEAM_A, userId: OWNER }));
+  it("the press token is a MAC under the install's key over the card, the answer and the account: the same press is the same proof, anything else is another", () => {
+    const base = { companyId: ORG, requestId: randomUUID(), revision: 2, artifactDigest: "a".repeat(64), outcome: "approve", tenant: TEAM_A, userId: OWNER };
+    const token = chatPressToken(PROOF_KEY, base);
+    expect(token).toBe(chatPressToken(PROOF_KEY, { ...base }));
+    for (const change of [{ userId: PEER }, { tenant: TEAM_B }, { outcome: "request_changes" }, { requestId: randomUUID() }, { revision: 3 }, { artifactDigest: "b".repeat(64) }, { companyId: OTHER }]) expect(chatPressToken(PROOF_KEY, { ...base, ...change })).not.toBe(token);
+    expect(chatPressToken(stepUpApprovalKeyOf("z".repeat(32)), base)).not.toBe(token);
   });
 });
 
@@ -709,9 +728,9 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
 
   it("the hosted root builds the chat approval from its chat seam and passes it to the approvers; the entry's chat decision is wired", () => {
     const root = read("packages/broker/src/aws/core-engine-root.ts");
-    expect(root).toContain("const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole });");
+    expect(root).toContain("const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, ");
     expect(root).toContain("...(chatApproval === undefined ? {} : { chat: chatApproval })");
-    expect(root).toMatch(/decideFromChat\(\{\s+chatThreads, now/u);
+    expect(root).toMatch(/decideFromChat\(\{\s+chatThreads, proofKey: stepUpApprovalKeyOf\(inputs\.callbackSigningKey\), now/u);
     expect(root).toContain("chatDecision: (caller: CoreEntryCaller, press");
     const broker = read("packages/broker/src/aws/broker.ts");
     expect(broker).toContain("isSlackCorePressEvent(event)");

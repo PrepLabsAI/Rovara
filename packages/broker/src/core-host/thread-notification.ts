@@ -71,8 +71,7 @@ export interface HostedThreadHandlerInputs {
 
 /**
  * What a hosted company's chat thread is told of its task: the plan's approval card, the setup pause with its link, the pull request and the end (`core/channel/thread-notices.ts`), through this company's own chat adapter only.
- * The card reads the SAME gate the web's decision cards use (the company's approvers point) and nothing else of it: the handler is handed `requirement` alone, so a chat can post a card but never decide. The hosted approvers offer
- * one method (a fresh step-up proved on the web), so the card is the sign-in card: the plan's risk and a link to the task's page, no button. The addresses are the web app's own.
+ * The card reads the SAME gate the web's decision cards use (the company's approvers point) and nothing else of it: the handler is handed `requirement` alone, so this handler can post a card but never decide (a press on the card is decided by `chat-decision.ts`, through the same gate). Where the approvers offer the chat's own method (low and medium risk, HW5b) the card has Approve and Request changes; otherwise (high risk, or no chat method) it is the sign-in card: the plan's risk and a link to the task's page, no button. The addresses are the web app's own.
  */
 export function hostedThreadHandler(input: HostedThreadHandlerInputs): CodeMilestoneHandler {
   const { threads, registry, companyId, deps } = input;
