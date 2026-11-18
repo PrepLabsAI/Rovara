@@ -3,9 +3,9 @@
 // reservation or a refusal; nothing the gateway or the model sent is echoed.
 import { createHash, generateKeyPairSync, sign, verify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { TASK_KEY_PURPOSE, TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
+import { CORE_ANSWERS_MODEL_VARIABLE, TASK_KEY_PURPOSE, TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
-import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
+import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, readGatewayModelAccess, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import {
   ANSWERS_CALL_FAILED, ANSWERS_MESSAGES_PATH, ANSWERS_PAUSE_HEADER, ANSWERS_STEP, createHttpAnswersGateway, hostedAnswersModel,
 } from "../../packages/broker/src/core-host/gateway-answers.js";
@@ -399,6 +399,68 @@ describe("the deployment's wiring (hostedAnswersModel)", () => {
     await b.complete(turn());
     await a.complete(turn());
     expect(r.seen.map((seen) => claimsOf(tokenOf(seen))["cid"])).toEqual([ORG_B, ORG_A]);
+    await a.finish({ tokens: 0 });
+    await b.finish({ tokens: 0 });
+  });
+});
+
+// L4-AM (DEC 254zzn(2)): ROVARA_CORE_ANSWERS_MODEL is the hosted answers' own model; empty means the agent model, exactly as before; the task flow's route is never touched.
+describe("the dedicated answers model (ROVARA_CORE_ANSWERS_MODEL)", () => {
+  const ANSWERS_MODEL = "claude-haiku-4-5";
+  const BASE = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
+  const tokens = () => ({ signer: taskKey(), issuer: ISSUER });
+  const sentModel = async (env: NodeJS.ProcessEnv): Promise<{ token: unknown; body: string } | undefined> => {
+    const r = recording();
+    const factory = hostedAnswersModel(env, tokens, r.fetchImpl);
+    if (factory === undefined) return undefined;
+    const session = await factory(ORG_A)!.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
+    await session.complete(turn());
+    await session.finish({ tokens: 0 });
+    return { token: claimsOf(tokenOf(r.seen[0]!)).mdl, body: (JSON.parse(r.seen[0]!.init.body as string) as { model: string }).model };
+  };
+
+  it("empty or unset: answers use the agent model, exactly as before", async () => {
+    for (const env of [BASE, { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "" }, { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "   " }]) {
+      expect(await sentModel(env)).toEqual({ token: [MODEL], body: MODEL });
+    }
+  });
+
+  it("set: the answers token and request name the answers model, and only they", async () => {
+    expect(await sentModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
+    expect(await sentModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ` ${ANSWERS_MODEL} ` })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
+    // Coding tasks: the flow's own route still reads the agent model and never the answers model.
+    const env = { ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL };
+    expect(readGatewayModelAccess(env)).toMatchObject({ route: { alias: MODEL, catalog: MODEL } });
+    expect(readGatewayModelAccess(BASE)).toEqual(readGatewayModelAccess({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: "zai.glm-5" }));
+  });
+
+  it("answers can run on Claude while the agent model is another model (the point of the setting), and not without it", async () => {
+    const glm = { ...BASE, [CORE_AGENT_MODEL_VARIABLE]: "zai.glm-5" };
+    expect(hostedAnswersModel(glm, tokens)).toBeUndefined();
+    expect(await sentModel({ ...glm, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL })).toEqual({ token: [ANSWERS_MODEL], body: ANSWERS_MODEL });
+  });
+
+  it.each(["zai.glm-5", "us.anthropic.claude-haiku-4-5", "anthropic.claude-haiku-4-5-v1:0", "Claude-Haiku-4-5", "claude-", "claude-haiku 4", "claude-haiku-4-5,am=x", `claude-${"a".repeat(33)}`, "https://evil.example/x"])(
+    "a set value that is not a Claude engine name (%j) is 'not set up', never the agent model", async (bad) => {
+      const r = recording();
+      expect(hostedAnswersModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: bad }, tokens, r.fetchImpl)).toBeUndefined();
+      expect(r.seen).toEqual([]);
+    });
+
+  it("it still needs the gateway: an answers model alone, or with a broken gateway setting, is 'not set up'", () => {
+    expect(hostedAnswersModel({ [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
+    expect(hostedAnswersModel({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
+    expect(hostedAnswersModel({ ...BASE, [CORE_MODEL_GATEWAY_URL_VARIABLE]: "http://gateway.example", [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens)).toBeUndefined();
+  });
+
+  it("two companies through one deployment with the answers model set: each token names its own company and the answers model", async () => {
+    const r = recording();
+    const factory = hostedAnswersModel({ ...BASE, [CORE_ANSWERS_MODEL_VARIABLE]: ANSWERS_MODEL }, tokens, r.fetchImpl)!;
+    const a = await factory(ORG_A)!.open({ companyId: ORG_A, project: "alpha", personId: "ada", answerId: ANSWER_ID_A, ceilingCents: 15 });
+    const b = await factory(ORG_B)!.open({ companyId: ORG_B, project: "alpha", personId: "bo", answerId: ANSWER_ID_B, ceilingCents: 15 });
+    await a.complete(turn());
+    await b.complete(turn());
+    expect(r.seen.map((seen) => claimsOf(tokenOf(seen)))).toMatchObject([{ cid: ORG_A, mdl: [ANSWERS_MODEL] }, { cid: ORG_B, mdl: [ANSWERS_MODEL] }]);
     await a.finish({ tokens: 0 });
     await b.finish({ tokens: 0 });
   });

@@ -15,7 +15,7 @@
 // `cost_too_high` (and any reason this code does not know) mean the month has no room ("paused"). A gateway without the answers purpose yet answers 404: "not set up", so a deployment that gets this code
 // before Cloud L4-E is live shows the fixed outcome and nothing else. A 401, 429, 5xx, a redirect, a bad body and any thrown error are "unavailable". Nothing the gateway or the model sent is echoed.
 import { randomUUID } from "node:crypto";
-import { AGENTX_NAME_PATTERN, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, type OrgId } from "@agentx/contracts";
+import { AGENTX_NAME_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_MODEL_GATEWAY_URL_VARIABLE, OrgIdSchema, isCoreAnswersModelId, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../developer/tokens.js";
 import { mintTaskToken, type TaskTokenDescriber } from "../core/model-gateway/token.js";
 import { AnswersGatewayError, createGatewayAnswerModel, type AnswersGateway, type AnswersGatewayRefusal } from "../core/answers/gateway-model.js";
@@ -183,17 +183,30 @@ export function createHttpAnswersGateway(options: HttpAnswersGatewayOptions): An
 }
 
 /**
+ * The model the hosted answers (and the hosted start-box classifier, which shares this wiring) run on (L4-AM, DEC 254zzn(2)): `ROVARA_CORE_ANSWERS_MODEL` when it is set, else the install's agent model (the
+ * route's alias), exactly as before. Fail closed: a SET value that is not a well-formed Claude engine name is `undefined` (answers stay "not set up"), never a silent fall back to the agent model.
+ * Only this wiring reads it: the task flow's own route (gateway-model-access.ts) is untouched, so a coding task keeps the agent model.
+ */
+export function hostedAnswersModelName(env: NodeJS.ProcessEnv, agentModel: string): string | undefined {
+  const chosen = env[CORE_ANSWERS_MODEL_VARIABLE]?.trim() ?? "";
+  if (chosen === "") return CORE_CLAUDE_AGENT_MODEL.test(agentModel) ? agentModel : undefined;
+  return isCoreAnswersModelId(chosen) ? chosen : undefined;
+}
+
+/**
  * The deployment's hosted answers model for each company, or undefined (the fixed "answers are not set up here yet" outcome): the model gateway is configured and checked
- * (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model), the install can sign task tokens, and the agent model is a Claude model (the answers purpose runs on the company's own Anthropic account; a
+ * (ROVARA_CORE_MODEL_GATEWAY_URL with its agent model), the install can sign task tokens, and the model that answers (ROVARA_CORE_ANSWERS_MODEL, else the agent model; L4-AM) is a Claude model (the answers purpose runs on the company's own Anthropic account; a
  * Bedrock-only model id cannot be served there). A broken setting is not a failure here: the task flow's own wiring refuses loudly, and answers stay "not set up". One gateway serves every company
  * (a reservation carries its company; the model returned for a company can open reservations for that company only).
  */
 export function hostedAnswersModel(env: NodeJS.ProcessEnv, taskTokens: (() => { signer: TokenSigner; issuer: string } | undefined) | undefined, fetchImpl?: typeof fetch): ((companyId: OrgId) => AnswerModel | undefined) | undefined {
   const settings = readGatewayModelAccess(env);
-  if (settings === undefined || "problem" in settings || !CORE_CLAUDE_AGENT_MODEL.test(settings.route.alias)) return undefined;
+  if (settings === undefined || "problem" in settings) return undefined;
+  const model = hostedAnswersModelName(env, settings.route.alias);
+  if (model === undefined) return undefined;
   let tokens: { signer: TokenSigner; issuer: string } | undefined;
   try { tokens = taskTokens?.(); } catch { return undefined; }
   if (tokens === undefined || typeof tokens.issuer !== "string" || tokens.issuer === "" || typeof tokens.signer?.sign !== "function" || typeof tokens.signer.publicJwk !== "function") return undefined;
-  const gateway = createHttpAnswersGateway({ gatewayUrl: settings.gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, model: settings.route.alias, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
+  const gateway = createHttpAnswersGateway({ gatewayUrl: settings.gatewayUrl, issuer: tokens.issuer, signer: tokens.signer, model, ...(fetchImpl === undefined ? {} : { fetch: fetchImpl }) });
   return (companyId) => (OrgIdSchema.safeParse(companyId).success ? createGatewayAnswerModel(gateway, companyId) : undefined);
 }

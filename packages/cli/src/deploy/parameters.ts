@@ -83,6 +83,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
     // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
     "CoreModelGatewayHost", "CoreAgentModel",
+    // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
+    "CoreAnswersModel",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
     "StepUpEmailSender"],
   slack: ["SlowTurnMinutes", "ModelFallback"],

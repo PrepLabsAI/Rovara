@@ -71,7 +71,10 @@ export class SessionLifecycle extends Construct {
     // Foundation roles use / for legacy deployments and /agentx/<env>/ for named environments.
     // IAM inline-policy attachments require the name, without the role's path.
     this.instanceRoleName = Fn.select(naming.env === undefined ? 1 : 3, Fn.split("/", instanceRoleArn.valueAsString));
-    const launchTemplateId = parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template");
+    // L4-AM (room in the named broker's 4 KB for the answers model): a named environment packs this id into the broker's AGENTX_SETTINGS (BROKER_SETTINGS `lt`), which needs a constrained
+    // parameter: a launch template id is `lt-` and 8 to 17 lowercase hex digits. The legacy template's parameter is unchanged (its broker still gets the variable whole).
+    const launchTemplateId = naming.env === undefined ? parameter("Ec2WorkerLaunchTemplateId", "The EC2 workers' launch template")
+      : new CfnParameter(stack, "Ec2WorkerLaunchTemplateId", { type: "String", description: "The EC2 workers' launch template", allowedPattern: "^lt-[0-9a-f]{8,17}$" });
     // Read by the broker (spec 065b), which binds a project a sign-in client creates to these workers.
     parameter("Ec2WorkerSubnets", "The EC2 workers' availabilityZone=subnetId pairs");
 

@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -102,6 +102,20 @@ export const coreAgentModel = (key: string) => (value: string): string => {
   return trimmed;
 };
 
+/**
+ * coreEngine.answersModel (L4-AM, DEC 254zzn(2)): empty (the agent model answers, as before), or ONE Anthropic model id this Rovara's catalog knows (such as claude-haiku-4-5) that the hosted answers
+ * and the hosted start-box classifier run on instead. Held to the agent model's Claude rule (contracts isCoreAgentModelId, then the catalog) and to a Claude engine name: the answers purpose runs on
+ * the company's own Anthropic account, so a Bedrock `us.anthropic....` id or a model such as zai.glm-5 cannot be served there and is refused here, before any deploy. The refusal never echoes the value.
+ */
+export const coreAnswersModel = (key: string) => (value: string): string => {
+  const trimmed = value.trim();
+  if (CORE_GATEWAY_UNSET.has(trimmed)) return "";
+  if (!isCoreAnswersModelId(trimmed) || catalogModel({ provider: "anthropic", modelId: trimmed }) === undefined) {
+    return refuse(key, `empty (none: answers use the agent model) or an Anthropic model id this Rovara knows, such as claude-haiku-4-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: the answers run on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_ANSWERS_MODEL_MAX_LENGTH} characters)`);
+  }
+  return trimmed;
+};
+
 const oneOf = (key: string, values: readonly string[]) => (value: string): string =>
   (values.includes(value.trim()) ? value.trim() : refuse(key, `one of ${values.join(", ")}`));
 
@@ -177,6 +191,8 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
     target: parameter("control-plane", CORE_MODEL_GATEWAY_HOST_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.agentModel", shown: coreModelGatewayShown, parse: coreModelGatewayUrl("coreEngine.modelGatewayUrl") },
   { key: "coreEngine.agentModel", description: "the model every core engine step runs on through the model gateway: an Anthropic model id, such as claude-sonnet-4-6, or any model the gateway offers (checked live), such as zai.glm-5; empty (the default, or none) leaves the core engine refusing work. Set coreEngine.modelGatewayUrl too",
     target: parameter("control-plane", CORE_AGENT_MODEL_PARAMETER), defaultValue: "", corePairedWith: "coreEngine.modelGatewayUrl", gatewayOffered: true, parse: coreAgentModel("coreEngine.agentModel") },
+  { key: "coreEngine.answersModel", description: "the model the hosted Just answer and the start-box classifier run on through the model gateway (not coding tasks, which keep coreEngine.agentModel): an Anthropic model id, such as claude-haiku-4-5; empty (the default, or none) uses coreEngine.agentModel, as before",
+    target: parameter("control-plane", CORE_ANSWERS_MODEL_PARAMETER), defaultValue: "", parse: coreAnswersModel("coreEngine.answersModel") },
   { key: "mcp.confirmElicitation", description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button or the CLI", target: parameter("control-plane", "McpConfirmElicitation"), defaultValue: "enabled", parse: oneOf("mcp.confirmElicitation", ["enabled", "disabled"]) },
 ];
 

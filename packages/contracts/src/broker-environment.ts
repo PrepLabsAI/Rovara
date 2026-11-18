@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -150,6 +150,10 @@ export const BROKER_SETTINGS = {
   coreEngine: { code: "sw", variable: CORE_ENGINE_VARIABLE },
   coreModelGateway: { code: "gw", variable: CORE_MODEL_GATEWAY_URL_VARIABLE, httpsOrigin: true },
   coreAgentModel: { code: "am", variable: CORE_AGENT_MODEL_VARIABLE },
+  // L4-AM (DEC 254zzn(2)): the hosted answers model (the stack parameter CoreAnswersModel), the BROKER only (the dispatcher does not answer), empty = the agent model.
+  // L4-AM (room in the broker's 4 KB): the EC2 workers' launch template id (a constrained parameter in a named environment), packed instead of a variable of its own.
+  ec2WorkerLaunchTemplate: { code: "lt", variable: "EC2_WORKER_LAUNCH_TEMPLATE_ID" },
+  coreAnswersModel: { code: "aa", variable: CORE_ANSWERS_MODEL_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
 } as const satisfies Record<string, BrokerSettingSpec>;

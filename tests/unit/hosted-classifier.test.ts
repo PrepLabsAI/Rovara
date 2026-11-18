@@ -149,10 +149,10 @@ const refused = (status: number, type: string, reason?: string) =>
   new Response(JSON.stringify({ error: { type, message: "gateway words that must never be echoed sk-ant-secret" } }), { status, headers: { "content-type": "application/json", ...(reason === undefined ? {} : { [ANSWERS_PAUSE_HEADER]: reason }) } });
 
 interface Seen { url: string; init: RequestInit }
-function gatewayWorld(answer: (n: number) => Response | Promise<Response> = () => messages(ROUTE("large_change"))) {
+function gatewayWorld(answer: (n: number) => Response | Promise<Response> = () => messages(ROUTE("large_change")), env: NodeJS.ProcessEnv = ENV) {
   const seen: Seen[] = [];
   const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => { seen.push({ url: String(url), init: init ?? {} }); return answer(seen.length - 1); }) as unknown as typeof fetch;
-  const route = hostedStartRoute(() => hostedAnswersModel(ENV, () => ({ signer: taskKey(), issuer: ISSUER }), fetchImpl));
+  const route = hostedStartRoute(() => hostedAnswersModel(env, () => ({ signer: taskKey(), issuer: ISSUER }), fetchImpl));
   const store = new MemoryDocumentStore();
   const roles = new Map<string, SetupRunStanding["access"]>([[`${A}/alpha/ada`, "view"], [`${A}/beta/ada`, "view"], [`${B}/alpha/ada`, "view"], [`${A}/alpha/bob`, "manage"]]);
   const wiring: HostedStartSuggestWiring = {
@@ -374,5 +374,39 @@ describe("the hosted route's hourly limit, stored", () => {
     expect(result.body).toEqual({ kind: "unknown", classifier: "unavailable", pick: "answer" });
     expect(result.raw).not.toContain("secret");
     expect(w.seen).toHaveLength(0);
+  });
+});
+
+// L4-AM (DEC 254zzn(2)): the classifier runs on the dedicated answers model when ROVARA_CORE_ANSWERS_MODEL is set, and on the agent model otherwise.
+describe("the hosted start box and the dedicated answers model (L4-AM)", () => {
+  const ANSWERS_MODEL = "claude-haiku-4-5";
+
+  it("empty or unset: the token and the request name the agent model, exactly as before", async () => {
+    for (const env of [ENV, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "" }, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: "  " }]) {
+      const w = gatewayWorld(undefined, env);
+      expect((await w.post(A, "ada")).status).toBe(200);
+      expect(claimsOf(tokenOf(w.seen[0]!)).mdl).toEqual([MODEL]);
+      expect((JSON.parse(w.seen[0]!.init.body as string) as { model: string }).model).toBe(MODEL);
+    }
+  });
+
+  it("set: the one classifier call names the answers model in its token and request, for the caller's own company", async () => {
+    const w = gatewayWorld(undefined, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: ANSWERS_MODEL });
+    const result = await w.post(A, "ada");
+    expect(StartSuggestResponseSchema.parse(result.body)).toEqual({ kind: "large_change", classifier: "ok", pick: "full" });
+    expect(w.seen).toHaveLength(1);
+    expect(claimsOf(tokenOf(w.seen[0]!))).toMatchObject({ cid: A, pid: "alpha", stp: "rovara-answers-call", mdl: [ANSWERS_MODEL] });
+    expect((JSON.parse(w.seen[0]!.init.body as string) as { model: string }).model).toBe(ANSWERS_MODEL);
+    expect((await w.post(B, "ada")).status).toBe(200);
+    expect(w.seen.map((seen) => claimsOf(tokenOf(seen)).cid)).toEqual([A, B]);
+  });
+
+  it("set to something the answers purpose cannot serve: the classifier is unavailable, never a silent fall back to the agent model", async () => {
+    for (const bad of ["zai.glm-5", "us.anthropic.claude-haiku-4-5", "claude-haiku-4-5,am=x", "Claude-Haiku"]) {
+      const w = gatewayWorld(undefined, { ...ENV, ROVARA_CORE_ANSWERS_MODEL: bad });
+      const result = await w.post(A, "ada");
+      expect(result.body, bad).toMatchObject({ classifier: "unavailable" });
+      expect(w.seen, bad).toEqual([]);
+    }
   });
 });

@@ -14,7 +14,7 @@ type Resource = { Type: string; Properties: Record<string, unknown> };
 export function withoutCoreEngine(template: unknown): unknown {
   const synthesized = template as { Parameters: Record<string, unknown>; Conditions: Record<string, unknown>; Resources: Record<string, Resource> };
   expect(synthesized.Parameters.CoreEngine).toMatchObject({ Type: "String", Default: "off" });
-  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreModelGatewayHost", "CoreAgentModel"]) delete synthesized.Parameters[name];
+  for (const name of ["CoreEngine", "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel"]) delete synthesized.Parameters[name];
   const conditions = Object.keys(synthesized.Conditions).filter((id) => id.startsWith("CoreEngineJobs"));
   expect(conditions).toHaveLength(1);
   delete synthesized.Conditions[conditions[0]!];
@@ -80,8 +80,15 @@ export function withoutCoreEngine(template: unknown): unknown {
   const variables = (brokers[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
   // Core switch-on blocker (2026-11-17): the switch and the gateway settings are packed in the broker's settings.
   const settingsJoin = JSON.stringify(variables.AGENTX_SETTINGS);
-  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["ac", "am", "cd", "cl", "ct", "gw", "sw"]);
+  for (const [code, parameter] of [["sw", "CoreEngine"], ["gw", "CoreModelGatewayHost"], ["am", "CoreAgentModel"], ["aa", "CoreAnswersModel"], ["lt", "Ec2WorkerLaunchTemplateId"]] as const) expect(settingsJoin, code).toMatch(new RegExp(`${code}=",\\{"Ref":"${parameter}"\\}`, "u"));
+  // L4-AM (room in the broker's 4 KB for the answers model): a named broker packs the launch template id (`lt`) and its parameter is constrained so it can be. Both are put back as the
+  // pre-L4-AM template had them (a variable of its own, an unconstrained parameter), so the recorded snapshot proves nothing else moved.
+  const launchTemplate = synthesized.Parameters.Ec2WorkerLaunchTemplateId as Record<string, unknown>;
+  expect(launchTemplate).toMatchObject({ Type: "String", AllowedPattern: "^lt-[0-9a-f]{8,17}$" });
+  delete launchTemplate.AllowedPattern;
+  expect(variables).not.toHaveProperty("EC2_WORKER_LAUNCH_TEMPLATE_ID");
+  variables.EC2_WORKER_LAUNCH_TEMPLATE_ID = { Ref: "Ec2WorkerLaunchTemplateId" };
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ac", "am", "cd", "cl", "ct", "gw", "lt", "sw"]);
   delete variables.ROVARA_POLICY_HOOK;
   delete variables.ROVARA_CORE_ALLOWED_COMPANIES;
 

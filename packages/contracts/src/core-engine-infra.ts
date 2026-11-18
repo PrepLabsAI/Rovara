@@ -82,6 +82,21 @@ export function isCoreAgentModelId(value: string): boolean {
   return /claude|anthropic/u.test(value) ? CORE_CLAUDE_AGENT_MODEL.test(value) : true;
 }
 /**
+ * DEC 254zzn(2) (lead 4, L4-AM): the hosted ANSWERS model, a stack parameter of its own (`CoreAnswersModel`, the broker's ROVARA_CORE_ANSWERS_MODEL, packed `aa`). Empty (the default) means
+ * hosted answers and the hosted start-box classifier run on the install's agent model exactly as before; set, they run on this model and ONLY they do (a coding task or any other core step
+ * keeps ROVARA_CORE_AGENT_MODEL). The gateway's answers purpose runs on the company's own Anthropic account, so the value is a Claude engine name (never a Bedrock `us.anthropic....` id, never a
+ * non-Claude model): the pattern is the stack's own last check and keeps out every packing separator. Whether the gateway OFFERS it is the gateway's to say, as for the agent model's Claude
+ * branch (the gateway refuses at run time and the answer is then "unavailable"). The length is `claude-` plus CORE_CLAUDE_AGENT_MODEL's 32 characters, which is all the broker's 4 KB needs.
+ */
+export const CORE_ANSWERS_MODEL_VARIABLE = "ROVARA_CORE_ANSWERS_MODEL";
+export const CORE_ANSWERS_MODEL_PARAMETER = "CoreAnswersModel";
+export const CORE_ANSWERS_MODEL_PATTERN = "^(claude-[a-z0-9][a-z0-9.-]{0,31})?$";
+export const CORE_ANSWERS_MODEL_MAX_LENGTH = 39;
+/** Whether `value` is a well-formed answers model id: a Claude engine name that is also a well-formed core agent model id. No trimming or case folding; empty is not an id (it means "use the agent model"). */
+export function isCoreAnswersModelId(value: string): boolean {
+  return typeof value === "string" && value.length <= CORE_ANSWERS_MODEL_MAX_LENGTH && new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u").test(value) && value !== "" && isCoreAgentModelId(value);
+}
+/**
  * DEC 254g: the broker's admin read of the models the model gateway offers the caller's company (`OfferedAgentModels`), for `agentx config set coreEngine.agentModel`. Only the broker
  * may sign the gateway's service token (the task key's policy permits only its role), so the CLI asks the broker with its admin sign-in.
  */

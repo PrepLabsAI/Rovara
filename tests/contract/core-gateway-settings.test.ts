@@ -4,7 +4,7 @@
 // so the core then refused work. The synthesized templates are checked in core-engine-infrastructure.test.ts ("the model gateway settings").
 import { describe, expect, it } from "vitest";
 import {
-  BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId,
+  BROKER_SETTINGS, BROKER_SETTING_VALUE, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_AGENT_MODEL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OFFERED_MODELS_ADMIN_PATH, isCoreAgentModelId,
 } from "@agentx/contracts";
 import { hydrateBrokerEnvironment, hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-environment.js";
 import { gatewayModelKeysModules, readGatewayModelAccess } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -378,5 +378,103 @@ describe("agentx config set", () => {
     const cloudFormation = fakeCloudFormation({ parameters: { CoreEngine: "off" } });
     await expect(updateStackParameters({ cloudFormation, stackName: "agentx-staging-control-plane", roleArn: "arn:aws:iam::123456789012:role/x", changes: { CoreModelGatewayHost: HOST }, label: "config", confirm: async () => true, write: () => undefined }))
       .rejects.toThrow("stack agentx-staging-control-plane has no CoreModelGatewayHost parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
+  });
+});
+
+// L4-AM (DEC 254zzn(2)): the hosted answers model, `agentx config set coreEngine.answersModel`. Empty = the agent model answers (today's behaviour).
+describe("coreEngine.answersModel (the hosted answers model)", () => {
+  const ANSWERS_KEY = "coreEngine.answersModel";
+  const ANSWERS_MODEL = "claude-haiku-4-5";
+  const ANSWERS_ALLOWED = `${ANSWERS_KEY} must be empty (none: answers use the agent model) or an Anthropic model id this Rovara knows, such as claude-haiku-4-5 (not a Bedrock us.anthropic. id, and not a model other than Claude: the answers run on the company's own Anthropic account; lowercase letters, digits and . - only, at most ${CORE_ANSWERS_MODEL_MAX_LENGTH} characters)`;
+  const controlPlane = (parameters: Record<string, string>) => stacks({ "agentx-staging-control-plane": { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: MODEL, CoreAnswersModel: "", ...parameters } });
+
+  it("is the stack parameter CoreAnswersModel of the control plane, empty by default, with no model role and no live gateway check", () => {
+    const entry = configKey(ANSWERS_KEY);
+    expect(entry).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreAnswersModel" }, defaultValue: "" });
+    expect(entry.model).toBeUndefined();
+    expect(entry.gatewayOffered).toBeUndefined();
+    expect(entry.corePairedWith).toBeUndefined();
+    expect(whereText(entry.target, ENV)).toBe("stack parameter CoreAnswersModel on agentx-staging-control-plane");
+    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("CoreAnswersModel");
+  });
+
+  it.each(["", "none", " none "])("reads %j as empty (the agent model answers)", (value) => {
+    expect(configKey(ANSWERS_KEY).parse(value)).toBe("");
+  });
+
+  it("accepts an Anthropic model id the catalog knows, trimmed, and stores only what the stack parameter admits", () => {
+    for (const value of [ANSWERS_MODEL, MODEL, "claude-sonnet-4-5-20250929"]) {
+      const stored = configKey(ANSWERS_KEY).parse(` ${value} `);
+      expect(stored).toBe(value);
+      expect(new RegExp(CORE_ANSWERS_MODEL_PATTERN, "u").test(stored)).toBe(true);
+    }
+  });
+
+  it.each([
+    "claude-made-up-9", "us.anthropic.claude-haiku-4-5", "anthropic.claude-haiku-4-5-v1:0", "Claude-Haiku-4-5", "claude sonnet", `claude-${"a".repeat(80)}`, "claude-",
+    GLM, "zai.glm-9", "deepseek.v3.2", "https://evil.example/claude-haiku-4-5", "claude-haiku-4-5,am=x", "claude-haiku-4-5\nam=x", "u:p@claude-haiku-4-5",
+  ])("refuses %j, without echoing it", (value) => {
+    let message = "";
+    try { configKey(ANSWERS_KEY).parse(value); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain(ANSWERS_ALLOWED);
+    expect(message).not.toContain("evil.example");
+  });
+
+  it("sets only CoreAnswersModel, with the previous template and every other parameter kept, and asks the gateway nothing", async () => {
+    const cloudFormation = fakeCloudFormation({ parameters: { CoreEngine: "off", CoreModelGatewayHost: HOST, CoreAgentModel: MODEL, CoreAnswersModel: "" } });
+    const asked: string[] = [];
+    const recorder = fakeChangeRecorder();
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => { asked.push(String(input instanceof Request ? input.url : input)); return await recorder(input, init); }) as typeof fetch;
+    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({}), fetch: fetchImpl });
+    expect((await runConfigSet(run, ENV, { key: ANSWERS_KEY, value: ANSWERS_MODEL, yes: true })).changed).toBe(true);
+    expect(run.lines).toContain(`${ANSWERS_KEY}: CoreAnswersModel  -> ${ANSWERS_MODEL} on agentx-staging-control-plane`);
+    const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>>; UsePreviousTemplate?: boolean };
+    expect(create.UsePreviousTemplate).toBe(true);
+    expect(create.Parameters.filter((parameter) => parameter["ParameterValue"] !== undefined)).toEqual([{ ParameterKey: "CoreAnswersModel", ParameterValue: ANSWERS_MODEL }]);
+    expect(create.Parameters).toEqual(expect.arrayContaining([{ ParameterKey: "CoreAgentModel", UsePreviousValue: true }, { ParameterKey: "CoreModelGatewayHost", UsePreviousValue: true }]));
+    expect(asked.filter((url) => url.includes(CORE_OFFERED_MODELS_ADMIN_PATH))).toEqual([]);
+    expect(run.lines.some((line) => line.startsWith("Note:"))).toBe(false);
+  });
+
+  it("clears with none (back to the agent model), changing only CoreAnswersModel", async () => {
+    const cloudFormation = fakeCloudFormation({ parameters: { CoreModelGatewayHost: HOST, CoreAgentModel: MODEL, CoreAnswersModel: ANSWERS_MODEL } });
+    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreAnswersModel: ANSWERS_MODEL }) });
+    expect((await runConfigSet(run, ENV, { key: ANSWERS_KEY, value: "none", yes: true })).changed).toBe(true);
+    const create = cloudFormation.calls.find((call) => call.name === "CreateChangeSetCommand")!.input as { Parameters: Array<Record<string, unknown>> };
+    expect(create.Parameters.filter((parameter) => parameter["ParameterValue"] !== undefined)).toEqual([{ ParameterKey: "CoreAnswersModel", ParameterValue: "" }]);
+  });
+
+  it("refuses a Bedrock id, a non-Claude model, an unknown model and a malformed id before any AWS call", async () => {
+    for (const value of ["us.anthropic.claude-haiku-4-5", GLM, "claude-made-up-9", "claude-haiku-4-5,am=x"]) {
+      const cloudFormation = fakeCloudFormation();
+      await expect(runConfigSet(services({ store: await seeded(), cloudFormation, stacks: controlPlane({}) }), ENV, { key: ANSWERS_KEY, value, yes: true }), value).rejects.toThrow("nothing changed");
+      expect(cloudFormation.calls, value).toEqual([]);
+    }
+  });
+
+  it("says nothing changes when the stack already has the value", async () => {
+    const cloudFormation = fakeCloudFormation();
+    const run = services({ store: await seeded(), cloudFormation, stacks: controlPlane({ CoreAnswersModel: ANSWERS_MODEL }) });
+    expect((await runConfigSet(run, ENV, { key: ANSWERS_KEY, value: ANSWERS_MODEL, yes: true })).changed).toBe(false);
+    expect(cloudFormation.calls).toEqual([]);
+  });
+
+  it("shows empty when unset or when the stack predates the parameter, and the value when set", async () => {
+    const store = await seeded();
+    expect((await runConfigGet(services({ store, stacks: controlPlane({}) }), ENV, ANSWERS_KEY)).value).toBe("");
+    expect((await runConfigGet(services({ store, stacks: stacks({ "agentx-staging-control-plane": { CoreEngine: "off" } }) }), ENV, ANSWERS_KEY)).value).toBe("");
+    expect((await runConfigGet(services({ store, stacks: controlPlane({ CoreAnswersModel: ANSWERS_MODEL }) }), ENV, ANSWERS_KEY)).value).toBe(ANSWERS_MODEL);
+  });
+
+  it("is read by the broker (packed aa) and nothing else changes: the agent model and the gateway read back as before", () => {
+    expect(BROKER_SETTINGS.coreAnswersModel).toEqual({ code: "aa", variable: CORE_ANSWERS_MODEL_VARIABLE });
+    const env = { AGENTX_SETTINGS: `aa=${ANSWERS_MODEL},am=${MODEL},gw=${HOST}`, AGENTX_NAMES: "", AGENTX_ENV: ENV, AGENTX_ACCOUNT_ID: "123456789012", AWS_REGION: "us-west-2" } as Record<string, string | undefined>;
+    hydrateBrokerEnvironment(env);
+    expect(env[CORE_ANSWERS_MODEL_VARIABLE]).toBe(ANSWERS_MODEL);
+    expect(readGatewayModelAccess(env)).toMatchObject({ gatewayUrl: GATEWAY, route: { alias: MODEL, catalog: MODEL } });
+    const empty = { ...env, AGENTX_SETTINGS: `aa=,am=${MODEL},gw=${HOST}` } as Record<string, string | undefined>;
+    delete empty[CORE_ANSWERS_MODEL_VARIABLE];
+    hydrateBrokerEnvironment(empty);
+    expect(empty[CORE_ANSWERS_MODEL_VARIABLE]).toBe("");
   });
 });
