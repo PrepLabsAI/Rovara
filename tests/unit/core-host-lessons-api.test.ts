@@ -380,7 +380,7 @@ describe("the Keep answer to a quiet lesson (L4-LP12b)", () => {
     expect(await call(target, "a-maint", "POST", `${P}/lessons/les_quiet001/keep`, {})).toEqual({ ok: true, body: { project: "payments", lessonId: "les_quiet001", kept: true } });
     expect(await expiryOf(w, A, "les_quiet001")).toBe(now() + 90 * 86_400_000);
     expect(await call(target, "a-admin", "POST", `${P}/lessons/les_quiet002/keep`, {})).toMatchObject({ ok: true, body: { kept: true } });
-    expect(w.world.audit.filter((event) => event.action === "lesson.kept").map((event) => [event.actor.id, event.subject.id])).toEqual([["a-maint", "les_quiet001"], ["a-admin", "les_quiet002"]]);
+    expect(w.world.audit.filter((event) => event.action === "lesson.kept").map((event) => [event.actor.id, event.subject?.id])).toEqual([["a-maint", "les_quiet001"], ["a-admin", "les_quiet002"]]);
     expect(await w.lessons.get(A)!.runtime.evidence.readFade(key(A), "les_quiet001")).toMatchObject({ renewals: 0 });
     // The question is answered: pressing it again is a clear refusal, and the lesson is as the first answer left it.
     expect(await call(target, "a-maint", "POST", `${P}/lessons/les_quiet001/keep`, {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
