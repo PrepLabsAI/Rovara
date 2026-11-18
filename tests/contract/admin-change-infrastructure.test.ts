@@ -80,7 +80,8 @@ describe("admin change infrastructure", () => {
     const broker = statementsOf(named, "BrokerServiceRole");
     const changes = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("CHANGE#"));
     expect(changes).toEqual([{ Effect: "Allow", Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"], Resource: tableRef(named, "TurnRecords"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } } }]);
-    const emails = broker.filter((statement) => JSON.stringify(keysOf(statement) ?? []).includes("EMAIL#"));
+    // Batch 16+17 (#1014, owner DEC 254zzz32): the company import read's ORG#<org>#EMAIL#* key is its own statement (pinned in developer-signin-infrastructure); this is the broker's own sign-in table read.
+    const emails = broker.filter((statement) => ((keysOf(statement) ?? []) as unknown[]).includes("EMAIL#*"));
     expect(emails).toEqual([{ Effect: "Allow", Action: "dynamodb:GetItem", Resource: tableRef(named, "DeveloperSignInTable"), Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"] } } }]);
   });
 

@@ -101,7 +101,15 @@ describe("(b) passkeys", () => {
   it("turns passkeys on in named environments, and the function's Query and DeleteItem reach only PASSKEYS# and the sign-in clients' partition", () => {
     expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBe("enabled");
     expect(JSON.stringify(legacy)).not.toContain("DEVELOPER_PASSKEYS");
-    const scoped = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action === "dynamodb:Query" || action === "dynamodb:DeleteItem"));
+    const all = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action === "dynamodb:Query" || action === "dynamodb:DeleteItem"));
+    // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here); the passkey ones are unchanged.
+    const companyGrant = (statement: (typeof all)[number]) => /SIGNIN_LINKS#|#MEMBERS"|COMPANY_INVITE_CODES|#PREAPPROVAL"|#COMPANY"|COMPANY_MEMBER#/u.test(JSON.stringify(statement.Condition));
+    expect(all.filter(companyGrant).map((statement) => [actionsOf(statement), statement.Condition])).toEqual([
+      [["dynamodb:Query"], { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS", "ORG#org_????????????????????#PREAPPROVAL", "COMPANY_INVITE_CODES", "SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }],
+      [["dynamodb:DeleteItem"], { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }],
+      [["dynamodb:DeleteItem"], { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#COMPANY", "ORG#org_????????????????????#MEMBERS", "COMPANY_MEMBER#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }],
+    ]);
+    const scoped = all.filter((statement) => !companyGrant(statement));
     expect(scoped.map((statement) => statement.Condition)).toEqual([
       { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } },
       { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
