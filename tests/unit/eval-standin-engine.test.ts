@@ -245,9 +245,10 @@ describe("the summary", () => {
     const result = evalStandInResultOf({ recorded: 2, generated: 1, generatedNoContract: 1, newConnections: 1, served: 9, gapCalls: 3, saturated: false }, 4);
     expect(result).toEqual({ recorded: 2, generated: 1, generatedNoContract: 1, newConnections: 1, notCompared: 4, saturated: false });
     const line = evalStandInLine(result);
-    expect(line).toContain("3 answers made by Rovara");
-    expect(line).toContain("4 questions not compared");
-    expect(line).toContain("never count as change proof");
+    // L4-EINT (E9): the owner's words: "N answers were made up", "not compared".
+    expect(line).toContain("3 answers were made up");
+    expect(line).toContain("4 questions were not compared");
+    expect(line).toContain("Both runs got the same answers.");
     expect(line).not.toMatch(/https?:|\/v2/u);
   });
 });

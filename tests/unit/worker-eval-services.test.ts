@@ -67,7 +67,7 @@ function stubStarter(services: { alias: string; slotIndex: number; env: Array<[s
       log.push(`start ${net.name}`);
       return {
         hosts: services.map((service) => ({ alias: service.alias, address: runNetworkHelperIp(net.slot, service.slotIndex) })), env: services.flatMap((service) => service.env), secrets: services.flatMap((service) => service.secrets ?? []),
-        started: services.map((service) => ({ id: service.alias, address: runNetworkHelperIp(net.slot, service.slotIndex), ports: [5432] })), unsupported: [],
+        started: services.map((service) => ({ id: service.alias, address: runNetworkHelperIp(net.slot, service.slotIndex), ports: [5432] })), targets: [], unsupported: [],
         stop: async () => { log.push(`stop ${net.name}`); },
       } satisfies EvalServicesStarted;
     },
@@ -113,10 +113,10 @@ describe("E1: the sandbox's arguments (allow-list)", () => {
 
   it("refuses to build arguments when a service name is not a plain name or is at an address outside the helper range (.16 to .47) of the round", async () => {
     const daemon = fakeEvalDaemon();
-    const w = await world(daemon, { services: { start: async (net2) => ({ hosts: [{ alias: "Bad Name!", address: runNetworkHelperIp(net2.slot, 0) }], env: [], secrets: [], started: [], unsupported: [], stop: async () => undefined }) } });
+    const w = await world(daemon, { services: { start: async (net2) => ({ hosts: [{ alias: "Bad Name!", address: runNetworkHelperIp(net2.slot, 0) }], env: [], secrets: [], started: [], targets: [], unsupported: [], stop: async () => undefined }) } });
     await expect(w.sandbox().run(w.input())).rejects.toThrow();
     expect(daemon.everStarted.some((container) => container.name.endsWith("-eval"))).toBe(false);
-    const outside = await world(fakeEvalDaemon(), { services: { start: async (net2) => ({ hosts: [{ alias: "postgres", address: runNetworkAddresses(net2.slot).gateway }], env: [], secrets: [], started: [], unsupported: [], stop: async () => undefined }) } });
+    const outside = await world(fakeEvalDaemon(), { services: { start: async (net2) => ({ hosts: [{ alias: "postgres", address: runNetworkAddresses(net2.slot).gateway }], env: [], secrets: [], started: [], targets: [], unsupported: [], stop: async () => undefined }) } });
     await expect(outside.sandbox().run(outside.input())).rejects.toThrow();
     expect(outside.daemon.everStarted.some((container) => container.name.endsWith("-eval"))).toBe(false);
   });
@@ -159,6 +159,14 @@ describe("E1: a sealed run with services", () => {
     // everything is gone: no container, no network
     expect(daemon.containers).toEqual([]);
     expect(daemon.networks).toEqual([]);
+  });
+
+  it("review M1: with the stand-in switch off a services round reports NOTHING of stand-ins (no `standIns`, no 'Ran against' databases); with it on the run names the databases", async () => {
+    const stub = () => stubStarter([{ alias: "postgres", slotIndex: 0, env: [["DATABASE_URL", "postgres://app:pw@postgres:5432/app"]] }]);
+    const off = await world(fakeEvalDaemon(), { services: stub() });
+    expect((await off.sandbox().run(off.input())).standIns).toBeUndefined();
+    const on = await world(fakeEvalDaemon(), { services: stub(), reportStandInDatabases: true });
+    expect((await on.sandbox().run(on.input())).standIns).toMatchObject({ hitGap: false, databases: ["Postgres"] });
   });
 
   it("the old side and the new side each get a FRESH copy: two networks, two starts, two stops, never one shared (mutant: share the starter's result)", async () => {

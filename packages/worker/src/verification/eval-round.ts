@@ -1,9 +1,10 @@
 // Final-check eval orchestration: saved three-run baseline, fresh re-asks, exact rule.
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
+import type {
+  EVAL_STAND_IN_RAN_AGAINST_ENGINES} from "@agentx/contracts";
 import {
-  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation,
-  evalStandInNotCompared, evalStandInResultOf, type EvalStandInCounts, type EvalStandInResult,
+  captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation, evalStandInMostDropped, evalStandInNotCompared, evalStandInResultOf, type EvalStandInCounts, type EvalStandInResult, type EvalStandInRunReport,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
@@ -64,7 +65,7 @@ export interface EvalQuestionPlan {
     readonly calls: number; readonly costMicros: number; readonly changedPromptCalls: number;
     readonly attestation?: EvalBaseAttestation;
     /** L4-E56: only when the round has outside-HTTP stand-ins: whether this run hit a gap (Rovara made up an answer; an unreadable stand-in counts as a hit) and the round's counts as they stand. */
-    readonly standIns?: { readonly hitGap: boolean; readonly counts: EvalStandInCounts };
+    readonly standIns?: EvalStandInRunReport;
   }>;
   /**
    * L4-E34 (E3): the one fill-and-re-ask pass for stand-in databases. Called ONCE, after the change's first run on `ids`, with the ids just asked. It writes the rows that lookups found missing to BOTH sides' databases and returns the
@@ -212,7 +213,9 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   const gapRuns: { side: "old" | "new"; ids: readonly string[]; hitGap: boolean }[] = [];
   let standInCounts: EvalStandInCounts | undefined;
   const notCompared = new Set<string>();
-  const standInResult = (): EvalStandInResult | undefined => (standInCounts === undefined ? undefined : evalStandInResultOf(standInCounts, notCompared.size));
+  // L4-EINT: the fixed telemetry entries answered `OK`, the planned outside hosts and the databases stood in, as the runs reported them (worker-made, never the repository's).
+  const standInTelemetry = new Set<string>(); const standInHosts = new Set<string>(); const standInDatabases = new Set<(typeof EVAL_STAND_IN_RAN_AGAINST_ENGINES)[number]>();
+  const standInResult = (): EvalStandInResult | undefined => (standInCounts === undefined ? undefined : evalStandInResultOf(standInCounts, notCompared.size, { telemetry: [...standInTelemetry], ranAgainst: { databases: [...standInDatabases], hosts: [...standInHosts] } }));
   let cacheState: "hit" | "not_used" = "not_used";
   const finish = (result: EvalCheckResult): EvalRoundOutput => {
     const count = excluded.length;
@@ -298,7 +301,12 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
       if (output.calls === 0 && output.facts.notRun > 0 && (output.facts.byClass.cap ?? 0) > 0) { stop = "cap"; return undefined; }
       if (side === "old" && (!isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit)) { stop = "base_round_unattested"; return undefined; }
       if (!whole(output.calls) || !whole(output.changedPromptCalls) || output.changedPromptCalls > output.calls) { stop = "invalid_question_data"; return undefined; }
-      if (output.standIns !== undefined) { gapRuns.push({ side, ids: [...ids], hitGap: output.standIns.hitGap === true }); standInCounts = output.standIns.counts; }
+      if (output.standIns !== undefined) {
+        gapRuns.push({ side, ids: [...ids], hitGap: output.standIns.hitGap === true }); standInCounts = output.standIns.counts;
+        for (const name of output.standIns.telemetry ?? []) standInTelemetry.add(name);
+        for (const host of output.standIns.hosts ?? []) standInHosts.add(host);
+        for (const engine of output.standIns.databases ?? []) standInDatabases.add(engine);
+      }
       calls += output.calls;
       if (whole(output.costMicros)) cost += output.costMicros; else costKnown = false;
       usage = { calls: calls - initialCalls, ...(costKnown ? { costMicros: cost - initialCost } : {}) };
@@ -326,14 +334,19 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   // L4-E56: a question that failed in a run that hit a gap (the LATEST run that asked it on a side: a re-ask of few questions clears what the first big run could not tell apart) is dropped from BOTH sides: a gap in Rovara's stand-in is
   // never the customer's regression, so it can never be "Worse on eval". A gap that changed no outcome costs nothing. Applied before every verdict.
   const failedSomewhere = (q: EvalQuestionComparison): boolean => [...q.old, q.first, ...(q.freshOld ?? []), ...(q.freshNew ?? []), ...(q.moreNew ?? [])].some(sample => !sample.pass);
-  const dropGaps = (): void => {
-    if (gapRuns.length === 0) return;
+  /** Drops the gap-affected failing questions from both sides. True when MOST of the failing questions are dropped (DEC 254zzz71): what is left is not a comparison, so the round is "Not run: outside calls were made up". */
+  const dropGaps = (): boolean => {
+    if (gapRuns.length === 0) return false;
     const dropped = evalStandInNotCompared(gapRuns, new Set(questions.filter(failedSomewhere).map(q => q.id)));
-    if (dropped.size === 0) return;
-    for (const id of dropped) { if (!notCompared.has(id)) { notCompared.add(id); excluded = [...excluded, { id: inertEvidenceText(id, 160), reason: "stand_in_gap" as const }]; } }
-    questions = questions.filter(q => !dropped.has(q.id));
+    if (dropped.size > 0) {
+      for (const id of dropped) { if (!notCompared.has(id)) { notCompared.add(id); excluded = [...excluded, { id: inertEvidenceText(id, 160), reason: "stand_in_gap" as const }]; } }
+      questions = questions.filter(q => !dropped.has(q.id));
+    }
+    // Failing questions in all: the ones dropped (counted once, whenever) and the ones that still fail. More than half dropped is a majority.
+    const stillFailing = questions.filter(failedSomewhere).length;
+    return evalStandInMostDropped(notCompared.size, stillFailing);
   };
-  const judge = (): EvalCheckResult => { dropGaps(); if (questions.length === 0) { comparisonQuestions = undefined; return evalNotRunResult({ roundKind: input.roundKind, reason: "too_few_questions", hiddenSetUsed: hidden }); } comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
+  const judge = (): EvalCheckResult => { if (dropGaps()) { comparisonQuestions = undefined; return evalNotRunResult({ roundKind: input.roundKind, reason: "outside_calls_made_up", hiddenSetUsed: hidden }); } if (questions.length === 0) { comparisonQuestions = undefined; return evalNotRunResult({ roundKind: input.roundKind, reason: "too_few_questions", hiddenSetUsed: hidden }); } comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
   // L4-E34 (E3): the fill-and-re-ask pass, once, only for a runner that can ask a subset. It is OPTIONAL work: it never stops the round. It runs only when the budget has room for it AND for the suspect re-asks it could cause, and a
   // pass that fails (a refused hold, a provider error) is dropped and the round goes on with what it had. The old side is asked afresh (three runs, the shape of a saved baseline) because its saved answers were given on data
   // without these rows. The questions it re-asks are measured on the filled data (the fill pass only fills keys the old code also asked for: see `createFillPass`).

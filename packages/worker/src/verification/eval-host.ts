@@ -25,6 +25,10 @@ export interface EvalHostCapabilities {
   readonly modelAccess: EvalModelAccess;
   readonly exec: EvalSandboxExec;
   readonly meter?: EvalMeterOptions | undefined;
+  /** L4-EINT (E4): the version of the stand-in set this check's sandboxes run against (`prepareEvalStandIns`), or undefined. Absent: no version in any key, byte-identical to before. */
+  readonly standInSetVersion?: EvalFinalCheckPorts["standInSetVersion"] | undefined;
+  /** L4-EINT (E3): the round's one fill-and-re-ask pass, when the services' wiring has an observer. */
+  readonly fillMissingRows?: EvalFinalCheckPorts["fillMissingRows"] | undefined;
 }
 
 const has = (owner: unknown, key: string): boolean => typeof owner === "object" && owner !== null && typeof (owner as Record<string, unknown>)[key] === "function";
@@ -41,5 +45,7 @@ export function createEvalFinalCheckPorts(host: EvalHostCapabilities | undefined
     baselines: host.baselines,
     meter: createEvalMeter(host.modelAccess, host.meter),
     runner: createEvalRunner(host.exec),
+    ...(host.standInSetVersion === undefined ? {} : { standInSetVersion: host.standInSetVersion }),
+    ...(host.fillMissingRows === undefined ? {} : { fillMissingRows: host.fillMissingRows }),
   };
 }

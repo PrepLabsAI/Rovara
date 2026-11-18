@@ -825,7 +825,7 @@ describe("L4-E12: the free dry run of the drafted eval goes through the same cal
   const tracked = new Map([["web", new Set(["package.json", ".github/workflows/ci.yml", "evals/demo/q1.txt", "evals/demo/score.txt"])]]);
   const scan = { repositories: [], setup: [], tests: [], checks: [], knowledge: [], sources: [], foundNotUsed: [], notes: [] };
   const LIST = { version: 1, modelCalls: 0, ended: "failed", databases: [{ port: 5432, engine: "postgres" }], hosts: [], envVars: [] };
-  const evalWorld = async (dry?: (report: unknown) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
+  const evalWorld = async (dry?: (report: unknown, signal: AbortSignal) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
     const t = await world({ final: options.final ?? block({ ...ANSWER, eval: EVAL }), ...(options.files === undefined ? {} : { files: options.files }) });
     t.input.ports.beforeStart = async () => ({ scan, tracked });
     t.input.evalImage = IMAGE;
@@ -877,6 +877,32 @@ describe("L4-E12: the free dry run of the drafted eval goes through the same cal
     const result = await runSetupAgent(t.input);
     expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
     expect(result.setupProposal).toBeDefined();
+  });
+
+  it("L4-E12-STOP: a person's Stop reaches the dry run (its signal aborts, a run that waits for it ends at once) and no list is sent for a stopped run", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let sawAborted = false;
+    // A dry run that would go on for ten minutes: it ends only when its signal says Stop.
+    const t = await evalWorld((_report, signal) => new Promise((resolve) => { signal.addEventListener("abort", () => { sawAborted = true; resolve(LIST); }, { once: true }); setTimeout(() => { void control?.abort(); }, 20); }));
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); } };
+    const started = Date.now();
+    await runSetupAgent(t.input);
+    expect(sawAborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    // The dry run's answer arrived after the Stop: it is not sent (a stopped run reports nothing new).
+    expect(kinds(t)).not.toContain("eval_dry_run");
+  });
+
+  it("L4-E12-STOP: a Stop before the dry run starts means it never starts (mutant: the cancelled gate)", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let calls = 0;
+    const t = await evalWorld(async () => { calls += 1; return LIST; });
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); }, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") await control?.abort(); return ports.callback(body); } };
+    await runSetupAgent(t.input);
+    expect(calls).toBe(0);
+    expect(kinds(t)).not.toContain("eval_dry_run");
   });
 
   it("without a dry-run host nothing changes: the callbacks are exactly the report's (a host that cannot run one sends nothing)", async () => {

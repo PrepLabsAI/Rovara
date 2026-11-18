@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { OPENAPI_FAKE_LIMITS, answerOpenApiFake, reviveOpenApiFake, serializeOpenApiFake, type OpenApiFake, type SerializedOpenApiFake } from "./openapi-fake.js";
 import type { ServiceMockJsonSchema } from "./service-mocks.js";
+import { STANDIN_LIMITS, pickStandInIndex } from "./standin-writer.js";
 
 /** The classes of an answer. `recorded` is the repository's own (a cassette): not a gap. The other three are made up by the stand-in, weakest last. */
 export const EVAL_STAND_IN_CLASSES = ["recorded", "generated", "generated_no_contract", "new_connection"] as const;
@@ -217,7 +218,11 @@ export interface EvalStandInHostPlan {
   readonly types?: readonly EvalStandInTypeRoute[] | undefined;
   /** Field paths the caller reads in the answer: `data.user.display_name`, `items[].id`. The weakest shape. */
   readonly reads?: readonly string[] | undefined;
+  /** L4-EINT (E7 into E6): the stand-in writer's sample answers for an operation. A request that matches picks one of them by hashing its key (same request, same answer, on both sides). Strongest, so first. */
+  readonly pools?: readonly EvalStandInPoolRoute[] | undefined;
 }
+/** One operation's pool of written answers (each a JSON object). */
+export interface EvalStandInPoolRoute { readonly method: string; readonly template: string; readonly answers: readonly Record<string, unknown>[] }
 export type EvalStandInPlan = readonly EvalStandInHostPlan[];
 
 /** The storable form of one host's plan. */
@@ -226,6 +231,7 @@ export interface SerializedEvalStandInHostPlan {
   openapi?: SerializedOpenApiFake;
   types?: { method: string; template: string; schema: ServiceMockJsonSchema }[];
   reads?: string[];
+  pools?: { method: string; template: string; answers: Record<string, unknown>[] }[];
 }
 
 export function serializeEvalStandInPlan(plan: EvalStandInPlan): SerializedEvalStandInHostPlan[] | undefined {
@@ -247,6 +253,10 @@ export function serializeEvalStandInPlan(plan: EvalStandInPlan): SerializedEvalS
       if (entry.reads.length > EVAL_STAND_IN_MAX_READ_FIELDS) return undefined;
       serialized.reads = [...entry.reads];
     }
+    if (entry.pools !== undefined) {
+      if (entry.pools.length > EVAL_STAND_IN_MAX_TYPE_ROUTES) return undefined;
+      serialized.pools = entry.pools.map((route) => ({ method: route.method, template: route.template, answers: route.answers.map((answer) => ({ ...answer })) }));
+    }
     out.push(serialized);
   }
   return out;
@@ -265,7 +275,7 @@ export function reviveEvalStandInPlan(value: unknown): EvalStandInPlan | undefin
   for (const entry of value as unknown[]) {
     if (!object(entry) || typeof entry.host !== "string" || !isEvalStandInPlanHost(entry.host) || seen.has(entry.host)) return undefined;
     seen.add(entry.host);
-    const unknown = Object.keys(entry).filter((key) => !["host", "openapi", "types", "reads"].includes(key));
+    const unknown = Object.keys(entry).filter((key) => !["host", "openapi", "types", "reads", "pools"].includes(key));
     if (unknown.length > 0) return undefined;
     let openapi: OpenApiFake | undefined;
     if (entry.openapi !== undefined) {
@@ -286,7 +296,17 @@ export function reviveEvalStandInPlan(value: unknown): EvalStandInPlan | undefin
       if (!Array.isArray(entry.reads) || entry.reads.length > EVAL_STAND_IN_MAX_READ_FIELDS || !entry.reads.every((field) => typeof field === "string" && FIELD_PATH.test(field))) return undefined;
       reads = [...(entry.reads as string[])];
     }
-    out.push({ host: entry.host, ...(openapi === undefined ? {} : { openapi }), ...(types === undefined ? {} : { types }), ...(reads === undefined ? {} : { reads }) });
+    let pools: EvalStandInPoolRoute[] | undefined;
+    if (entry.pools !== undefined) {
+      if (!Array.isArray(entry.pools) || entry.pools.length > EVAL_STAND_IN_MAX_TYPE_ROUTES) return undefined;
+      pools = [];
+      for (const route of entry.pools as unknown[]) {
+        if (!object(route) || typeof route.method !== "string" || !METHODS.has(route.method) || typeof route.template !== "string" || !TEMPLATE.test(route.template)
+          || !Array.isArray(route.answers) || route.answers.length < 1 || route.answers.length > STANDIN_LIMITS.answersPerOperation || !route.answers.every((answer) => object(answer) && byteLength(JSON.stringify(answer)) <= STANDIN_LIMITS.answerBytes)) return undefined;
+        pools.push({ method: route.method, template: route.template, answers: route.answers as Record<string, unknown>[] });
+      }
+    }
+    out.push({ host: entry.host, ...(openapi === undefined ? {} : { openapi }), ...(types === undefined ? {} : { types }), ...(reads === undefined ? {} : { reads }), ...(pools === undefined ? {} : { pools }) });
   }
   return out;
 }
@@ -421,6 +441,10 @@ export function generateEvalStandInAnswer(plan: EvalStandInPlan, request: EvalSt
   const generator = generatorFor(key);
   const method = request.method.toUpperCase();
   if (entry !== undefined) {
+    // The writer's own sample answers first: one is picked by the request key (the path with its ids is the same on both sides).
+    for (const route of entry.pools ?? []) {
+      if (route.method === method && templateMatcher(route.template).test(request.path.split(/[?#]/u)[0]!)) return toAnswer(200, route.answers[pickStandInIndex(key, route.answers.length)], "generated");
+    }
     if (entry.openapi !== undefined) {
       const served = answerOpenApiFake(entry.openapi, method, request.path);
       if (served.kind === "served") return toAnswer(served.status, served.body, "generated");
@@ -456,6 +480,12 @@ export function evalStandInNotCompared(runs: readonly { readonly side: "old" | "
   for (const [id, state] of latest) if ((state.old === true || state.new === true) && failed.has(id)) out.add(id);
   return out;
 }
+
+/**
+ * DEC 254zzz71: whether MOST of the failing questions were dropped as "not compared". `dropped` failing questions were dropped (counted once, whenever); `stillFailing` still fail. More than half dropped means what is left is
+ * not a comparison of the failures that matter: the eval reads "Not run: outside calls were made up". Exactly half is not a majority. Pure.
+ */
+export const evalStandInMostDropped = (dropped: number, stillFailing: number): boolean => Number.isSafeInteger(dropped) && Number.isSafeInteger(stillFailing) && dropped > 0 && stillFailing >= 0 && dropped * 2 > dropped + stillFailing;
 
 // ---- limits for tests and refusals
 export const EVAL_STAND_IN_LIMITS = { hosts: EVAL_STAND_IN_MAX_HOSTS, recorded: EVAL_STAND_IN_MAX_RECORDED, book: EVAL_STAND_IN_BOOK_MAX_ENTRIES, operations: OPENAPI_FAKE_LIMITS.operations } as const;

@@ -144,7 +144,7 @@ export async function serveEvalStandIn(args: EvalStandInServeArguments, options:
     return {
       schemaVersion: 1, trusted: true, workspaceId: args.workspaceId, operationId: args.operationId, digest: args.digest,
       counts: { ...counts, saturated: counts.saturated || additionsDropped },
-      foreign: stats.foreign, refused: stats.refused, tlsFailed: stats.tlsFailed, additions: withAdditions ? additionsOf() : [], gaps: stats.gaps, newHosts: stats.newHosts,
+      foreign: stats.foreign, refused: stats.refused, tlsFailed: stats.tlsFailed, additions: withAdditions ? additionsOf() : [], gaps: stats.gaps, newHosts: stats.newHosts, ...(stats.telemetry.length === 0 ? {} : { telemetry: stats.telemetry }),
     };
   };
   /** The small summary (everything but the additions: no snapshot is taken for it) on every call and, only when the book grew, the additions. Written BEFORE the answer is sent: a summary read after an answer arrived always includes it. */

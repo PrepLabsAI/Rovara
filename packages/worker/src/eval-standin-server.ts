@@ -15,7 +15,7 @@ import type { Socket } from "node:net";
 import { createSecureContext, type SecureContext } from "node:tls";
 import {
   EVAL_STAND_IN_BODY_MAX_BYTES, EVAL_STAND_IN_CLASS_HEADER, EVAL_STAND_IN_GAP_NAMES_MAX, EVAL_STAND_IN_LABEL, EVAL_STAND_IN_LABEL_HEADER, EVAL_STAND_IN_NEW_HOSTS_MAX,
-  answerEvalStandInRequest, evalStandInPathName, isEvalStandInHostName,
+  EVAL_TELEMETRY_ANSWER, EVAL_TELEMETRY_CLASS, answerEvalStandInRequest, evalStandInPathName, evalTelemetryEntryOf, isEvalStandInHostName,
   type EvalAnswerBook, type EvalStandInGapName, type EvalStandInPlan, type EvalStandInRequest,
 } from "@agentx/contracts/eval-standin-helper";
 import type { LeafMinter } from "./run-ca.js";
@@ -28,6 +28,8 @@ export interface EvalStandInServerStats {
   gaps: EvalStandInGapName[];
   /** The first distinct hosts nobody had named. */
   newHosts: string[];
+  /** L4-EINT: the entries of the FIXED telemetry list a call was answered `OK` for (never a gap, never in the book). */
+  telemetry: string[];
 }
 
 export interface EvalStandInServersOptions {
@@ -61,7 +63,7 @@ export function hostOfRequest(header: string | undefined): string | null {
 }
 
 export function createEvalStandInServers(options: EvalStandInServersOptions): EvalStandInServers {
-  const stats: EvalStandInServerStats = { foreign: 0, refused: 0, tlsFailed: 0, gaps: [], newHosts: [] };
+  const stats: EvalStandInServerStats = { foreign: 0, refused: 0, tlsFailed: 0, gaps: [], newHosts: [], telemetry: [] };
   const seenGaps = new Set<string>();
 
   const changed = (): void => { options.beforeSend?.(); };
@@ -85,6 +87,16 @@ export function createEvalStandInServers(options: EvalStandInServersOptions): Ev
       method: (request.method ?? "GET").toUpperCase(), host: hostOfRequest(request.headers.host), path: url.path, query: url.query,
       contentType: String(request.headers["content-type"] ?? ""), body,
     };
+    // L4-EINT (DEC 254zzz71): a host of the FIXED telemetry list gets a plain `OK` before anything else (not from the book, not a gap, not a new connection). Only the fixed list decides: the plan and the book cannot add a host.
+    const telemetry = standIn.host === null ? undefined : evalTelemetryEntryOf(standIn.host);
+    if (telemetry !== undefined) {
+      if (!stats.telemetry.includes(telemetry)) stats.telemetry.push(telemetry);
+      changed();
+      const sent = EVAL_TELEMETRY_ANSWER;
+      response.writeHead(sent.status, { "content-type": sent.contentType, [EVAL_STAND_IN_LABEL_HEADER]: EVAL_STAND_IN_LABEL, [EVAL_STAND_IN_CLASS_HEADER]: EVAL_TELEMETRY_CLASS, "content-length": String(sent.body.length), connection: "close" });
+      response.end(standIn.method === "HEAD" ? undefined : sent.body);
+      return;
+    }
     const result = answerEvalStandInRequest(options.book, options.plan, standIn);
     note(standIn, result.cls);
     changed();
@@ -172,5 +184,5 @@ export function createEvalStandInServers(options: EvalStandInServersOptions): Ev
     harden(tls);
     tls.on("tlsClientError", () => { stats.tlsFailed += 1; changed(); });
   }
-  return { http, tls, stats: () => ({ ...stats, gaps: [...stats.gaps], newHosts: [...stats.newHosts] }) };
+  return { http, tls, stats: () => ({ ...stats, gaps: [...stats.gaps], newHosts: [...stats.newHosts], telemetry: [...stats.telemetry] }) };
 }

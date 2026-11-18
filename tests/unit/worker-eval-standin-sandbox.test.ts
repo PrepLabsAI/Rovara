@@ -119,7 +119,8 @@ describe("with standIns", () => {
     expect(values(dns, "--host")).toEqual(expect.arrayContaining([`open.tiktokapis.com=${standInIp}`, `api.vendor.test=${standInIp}`]));
     expect(w.daemon.containers).toEqual([]); expect(w.daemon.networks).toEqual([]);
     expect(leftovers(w)).toEqual([]);
-    expect(result.standIns).toEqual({ hitGap: true, counts: expect.objectContaining({ generated: 1, served: 2, gapCalls: 1 }) as EvalStandInCounts });
+    // L4-EINT: the run also names what it was stood in for (planned hosts, no database here, no telemetry answered).
+    expect(result.standIns).toEqual({ hitGap: true, counts: expect.objectContaining({ generated: 1, served: 2, gapCalls: 1 }) as EvalStandInCounts, telemetry: [], hosts: expect.arrayContaining(["open.tiktokapis.com", "api.vendor.test"]) as string[], databases: [] });
   });
   it("puts the planned vendor names and the sinkhole in the box's hosts file (all at the stand-in), the name server as its resolver, and pins nothing with --add-host", async () => {
     const w = await world();

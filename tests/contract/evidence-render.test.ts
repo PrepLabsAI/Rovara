@@ -485,6 +485,8 @@ describe("no callers", () => {
     expect(wired.stdout.trim().split("\n").sort()).toEqual([
       `${dir}/sagemaker-contract.ts`, `${dir}/sagemaker-mock.ts`, `${dir}/service-contract-mock.ts`, `${dir}/service-contract.md`, `${dir}/service-contract.ts`,
       "packages/contracts/src/index.ts", "packages/contracts/src/openapi-fake.ts", "packages/contracts/src/service-contract-mock.ts", "packages/contracts/src/service-contract.ts",
+      // L4-E7: a comment naming the finder's answer shape (the writer's `StandInShape` is a structural subset of it); no import.
+      "packages/contracts/src/standin-writer.ts",
     ].sort());
   });
 });

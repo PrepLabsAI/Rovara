@@ -1012,7 +1012,8 @@
                 "checks_failed",
                 "stopped",
                 "questions_changed",
-                "eval_run_failed"
+                "eval_run_failed",
+                "outside_calls_made_up"
               ]
             },
             "runFailure": {

@@ -14,7 +14,7 @@ import { realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
-import { EVAL_INSTALL_STEP_MAX_MS, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInCounts, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import { createModelBridge } from "../model-bridge.js";
 import { createModelBridgeLedger } from "../model-bridge-ledger.js";
@@ -57,7 +57,7 @@ export interface FreshEvalSandboxResult {
   /** The old side only: made by `attestRovaraOnlyBaseCheckout` after the base commit ran in a Rovara-only checkout. A plain object is not an attestation. */
   readonly attestation?: EvalBaseAttestation | undefined;
   /** L4-E56: only when the round has stand-ins: whether this run hit a gap (a made-up answer; an unreadable helper counts as a hit) and the round's counts as they stand. */
-  readonly standIns?: { readonly hitGap: boolean; readonly counts: EvalStandInCounts } | undefined;
+  readonly standIns?: EvalStandInRunReport | undefined;
 }
 /**
  * The check round's own sandbox: started new for the run (a network of its own, the model helper at its fixed address, nothing mounted from the working sandbox), the
@@ -339,6 +339,11 @@ export interface FreshEvalSandboxConfig {
   readonly standIns?: { readonly round: EvalStandInRound; readonly start?: typeof startEvalStandIns | undefined } | undefined;
   /** L4-NETG: the name server an install step is given (`--dns`), set only on a worker whose sandboxes go through the egress gateway (the gateway's address on the shared network). Default: none (the network's own resolver, as before). */
   readonly installDns?: string | undefined;
+  /**
+   * L4-EINT (review M1): true only when the operator's stand-in switch is on. Then the run names the databases it was stood in for (and the PR says "Ran against stand-ins for Postgres"). Absent: a services round reports
+   * nothing of the kind, byte for byte as before the switch existed (those services are real software, not stand-ins, when the switch is off).
+   */
+  readonly reportStandInDatabases?: boolean | undefined;
 }
 
 const configProblem = (config: FreshEvalSandboxConfig): boolean => {
@@ -363,6 +368,7 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
     if (c.services !== undefined && typeof c.services?.start !== "function") return true;
     if (c.sealedDns !== undefined && typeof c.sealedDns !== "boolean") return true;
     if (c.installDns !== undefined && isIP(c.installDns) !== 4) return true;
+    if (c.reportStandInDatabases !== undefined && typeof c.reportStandInDatabases !== "boolean") return true;
     return false;
   } catch { return true; }
 };
@@ -918,7 +924,12 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           await writeFile(target, bytes, { mode: 0o600 });
         }
         // 8. L4-E56: the stand-in's summary, read while the helper is still up and after the sandbox's last exit (the helper writes it before it sends each answer). An unreadable one says nothing, so the run counts as having hit a gap.
-        const standInResult = config.standIns === undefined || standIn === undefined ? undefined : config.standIns.round.absorb(await standIn.summary().catch(() => undefined));
+        // L4-EINT: what this run was stood in for: databases by engine (the services' own ports), planned outside hosts, and the fixed telemetry entries answered `OK`. A database-only round reports no gap and empty counts.
+        const databases = config.reportStandInDatabases !== true ? [] : [...new Set((servicesRun?.started ?? []).flatMap((entry) => entry.ports.map((port) => evalStandInEngineOfPort(port))).filter((engine): engine is NonNullable<typeof engine> => engine !== undefined))];
+        const absorbed = config.standIns === undefined || standIn === undefined ? undefined : config.standIns.round.absorb(await standIn.summary().catch(() => undefined));
+        const standInResult: EvalStandInRunReport | undefined = absorbed !== undefined && config.standIns !== undefined
+          ? { ...absorbed, telemetry: config.standIns.round.telemetry(), hosts: config.standIns.round.plannedHosts(), databases }
+          : databases.length > 0 ? { hitGap: false, counts: EMPTY_EVAL_STAND_IN_COUNTS, databases } : undefined;
         finished = true;
         return {
           report: { root: reportRoot, cwd: config.report.cwd, argument: config.report.argument, notBeforeMs: Math.min(notBeforeMs, firstRun.notBeforeMs) },
