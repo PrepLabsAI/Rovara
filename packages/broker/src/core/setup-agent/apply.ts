@@ -98,7 +98,9 @@ export async function waitingSetupApply(store: Pick<DocumentStore, "get">, orgId
 /** L4-T5: the sentence for "another setup is waiting", by what that setup's check says now. Never throws: a check that cannot be read gets the neutral sentence. */
 export async function waitingSetupWords(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<string> {
   try {
-    const status = (await readSetupApply(deps, project))?.checkState.status;
+    const row = await readSetupApply(deps, project);
+    // Only a setup that is waiting (no decision yet) has anything to say; any other row is the neutral sentence.
+    const status = row?.state === "checking" ? row.checkState.status : undefined;
     return status === "ready" ? SETUP_WAITING_WORDS.ready : status === "checking" ? SETUP_WAITING_WORDS.checking : status === "failed" ? SETUP_WAITING_WORDS.failed : SETUP_CONFIRM_WORDS.waiting;
   } catch {
     return SETUP_CONFIRM_WORDS.waiting;

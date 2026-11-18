@@ -6,6 +6,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 // never named at all: a host ask is credited to the starter the broker recorded on the task (`requestHostAsk` reads it itself). The body is a strict union:
 //   journal       the commands the run ran, in order (at most 20 a call; the broker reads each again and keeps the first for a position);
 //   host          a website the run could not reach: the name only (and where it came from): the broker decides whether it is refused, already allowed, joined or a new ask. Nothing is granted;
+//   alive         the worker is still here while the run ends (nothing is handed over or answered);
 //   poll          "anything for me?": the next command the owner typed (handed over once), and where each host this run asked for stands (open, approved, refused);
 //   command_done  a person's command finished, with the journal position of its result;
 //   eval_discovery  DEC 253n(1): the eval questions the run found (suites, their question files and categories, the command, judge pins, model catalog row and image), kept once per run and
@@ -51,6 +52,8 @@ export const SetupAgentCallbackBodySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("journal"), entries: z.array(z.unknown()).min(1).max(SETUP_JOURNAL_BATCH_MAX) }).strict(),
   HostSchema,
   z.object({ kind: z.literal("poll") }).strict(),
+  // L4-T5: "I am still here", said while the run finishes (the poll has stopped, a person's command may still run). Takes nothing and answers nothing: it only notes the time.
+  z.object({ kind: z.literal("alive") }).strict(),
   z.object({ kind: z.literal("command_done"), seq: z.number().int().min(1).max(20), journalN: z.number().int().min(1).max(400).optional() }).strict(),
   // The report itself is checked by `recordEvalDiscovery` (`SetupEvalDiscoveryReportSchema`), so a bad report gets its own fixed refusal.
   z.object({ kind: z.literal("eval_discovery"), report: z.unknown() }).strict(),
@@ -81,7 +84,7 @@ async function noteSetupRunSeen(deps: Pick<SetupAgentCallbackDeps, "store" | "no
   await deps.store.update({ key: taskKey(run.taskId), ops: [change.set("setupAgentSeenAt", new Date(deps.now()).toISOString())], condition: when.present() }).catch(() => undefined);
 }
 
-/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of the five shapes. */
+/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of its shapes. */
 export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, operation: SetupAgentOperation, rawBody: unknown): Promise<object> {
   const run = await setupRunOfOperation(deps, operation);
   if (run === undefined) throw agentXError("CALLBACK_FORBIDDEN", "the setup callback is limited to a running setup run");
@@ -89,7 +92,11 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the setup callback body is not one of its shapes");
   const body = parsed.data;
   const table = { store: deps.store, now: deps.now };
+  // L4-T5: any word from a live worker is noted, so a run that is journaling, answering or finishing never reads as stopped.
+  await noteSetupRunSeen(deps, run);
   switch (body.kind) {
+    case "alive":
+      return {};
     case "journal":
       return appendSetupJournal(table, run, body.entries);
     case "host": {
@@ -103,7 +110,6 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
       return { outcome: outcome.outcome, ...(outcome.outcome === "refused" ? { reason: outcome.reason } : {}) };
     }
     case "poll": {
-      await noteSetupRunSeen(deps, run);
       const command = await takeSetupCommand(table, run, deps.mayStillRun);
       const asks = (await listHostAsks(table, run.orgId, run.project, ["open", "approved", "refused"])).filter((ask) => ask.taskId === run.taskId).slice(0, 20);
       return { ...(command === undefined ? {} : { command: { seq: command.seq, command: command.command } }), hosts: asks.map((ask) => ({ host: ask.host, state: ask.state })) };

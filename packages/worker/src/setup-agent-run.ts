@@ -59,6 +59,8 @@ export interface SetupRunPorts {
   now?: () => number;
   /** How often the run talks to the broker. Default 3 s. */
   tickMs?: number;
+  /** How often the run says it is alive between the end of its talk and its result. Default 30 s. */
+  aliveMs?: number;
   /** How often a parked run (waiting for an administrator) talks to the broker. Default 15 s. */
   parkTickMs?: number;
 }
@@ -205,6 +207,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   const network = await ports.startNetwork();
   let sandbox: TaskSandbox | undefined;
   let tick: ReturnType<typeof setInterval> | undefined;
+  /** L4-T5: the bare "alive" beat after the talk stops (see below). */
+  let alive: ReturnType<typeof setInterval> | undefined;
   let unregister: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   try {
@@ -368,6 +372,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     }
     if (tick !== undefined) clearInterval(tick);
     tick = undefined;
+    // L4-T5: from here to the end nothing polls, yet a person's command may still run for up to an hour and the end has work to do. A bare "alive" tells the broker the worker is still here (it takes no
+    // command, as a poll does), so a run that is going never reads as stopped. Cleared with the rest in `finally`.
+    alive = setInterval(() => { void ports.callback({ kind: "alive" }).catch(() => undefined); }, ports.aliveMs ?? 30_000);
+    alive.unref?.();
     await runner.settled();
     if (failed && governor.ended() === undefined) governor.stop("infrastructure");
 
@@ -417,6 +425,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     return { workflowMode: "SETUP_AGENT", ...(proposal === undefined ? {} : { setupProposal: proposal }), setupRunSummary: summary };
   } finally {
     if (tick !== undefined) clearInterval(tick);
+    if (alive !== undefined) clearInterval(alive);
     unsubscribe?.();
     unregister?.();
     session?.dispose();

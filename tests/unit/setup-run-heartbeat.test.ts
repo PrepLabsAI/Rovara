@@ -39,6 +39,23 @@ describe("the worker's poll is noted on the run's task (L4-T5)", () => {
     expect(await r.seen()).toBe(new Date(START + SETUP_RUN_SEEN_EVERY_MS).toISOString());
   });
 
+  it("every kind of word from a live worker is noted (journal, host, command_done, eval_discovery refused or not), and a bare 'alive' only notes and answers nothing", async () => {
+    const r = await run(A);
+    const send = (body: unknown) => handleSetupAgentCallback({ store: r.store, companyId: A, now: () => r.clock.now }, r.operation, body);
+    await expect(send({ kind: "alive" })).resolves.toEqual({});
+    expect(await r.seen()).toBe(new Date(START).toISOString());
+    r.clock.now = START + SETUP_RUN_SEEN_EVERY_MS;
+    await send({ kind: "command_done", seq: 1 });
+    expect(await r.seen()).toBe(new Date(START + SETUP_RUN_SEEN_EVERY_MS).toISOString());
+    r.clock.now = START + 2 * SETUP_RUN_SEEN_EVERY_MS;
+    await expect(send({ kind: "eval_discovery", report: { nonsense: true } })).rejects.toThrow();
+    expect(await r.seen()).toBe(new Date(START + 2 * SETUP_RUN_SEEN_EVERY_MS).toISOString());
+    // Anything that is not one of the shapes is refused before it can note anything.
+    r.clock.now = START + 3 * SETUP_RUN_SEEN_EVERY_MS;
+    await expect(send({ kind: "alive", extra: true })).rejects.toThrow(/not one of its shapes/u);
+    expect(await r.seen()).toBe(new Date(START + 2 * SETUP_RUN_SEEN_EVERY_MS).toISOString());
+  });
+
   it("a store that cannot write the note does not fail the poll", async () => {
     const r = await run(A);
     const update = r.store.update.bind(r.store);
