@@ -178,6 +178,9 @@ export * from "./agent-directory-view.js";
 export * from "./app-projects.js";
 export * from "./public-suffix.js";
 export * from "./default-allow-domains.js";
+// L4-NETG: the sandbox-side registry deny list and the worker sandbox egress setting. Additive.
+export * from "./sandbox-deny-domains.js";
+export * from "./worker-sandbox-egress.js";
 export * from "./egress.js";
 export * from "./refusal-words.js";
 export * from "./agent-sessions-node.js";

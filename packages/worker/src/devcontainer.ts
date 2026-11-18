@@ -21,6 +21,7 @@ import {
   WORKER_STATE_VISIBLE,
   containerProblems,
   devcontainerConfigRefusal,
+  walledNetworkProblem,
   localDevcontainerRefusal,
   parseJsonc,
   hostPathResolver,
@@ -29,7 +30,7 @@ import {
 import { inertContextText } from "./context-text.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
-import { sandboxNetworkFromEnvironment } from "./task-sandbox.js";
+import { gatewayEgressFor, sandboxNetworkFromEnvironment } from "./task-sandbox.js";
 import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
@@ -202,6 +203,11 @@ export interface DevcontainerFullConfiguration {
 export interface DevcontainerChecks {
   fullConfiguration(target: DevcontainerTarget): Promise<DevcontainerFullConfiguration>;
   inspect(containerId: string): Promise<ContainerInspection>;
+  /**
+   * L4-NETG: the ids of every container (running or stopped) the devcontainer CLI made for this target (its `devcontainer.local_folder` label). On a walled worker `ensureDevcontainer` removes one that is not on the walled network
+   * BEFORE `up`, because Docker's data root survives on the workspace volume: a container made in `bridge` mode would otherwise be restarted on the open default bridge, with the repository's lifecycle commands, before any check ran.
+   */
+  existing?(target: DevcontainerTarget): Promise<string[]>;
   /** Stops and deletes the container. */
   remove(containerId: string): Promise<void>;
   /** Deletes volumes by name, once their container is gone; one already gone or still in use is left. */
@@ -275,6 +281,13 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   let hidden = await hiddenWorkspaceDirectories(target.rootPath);
   // The network is made (or made again) before any container can join it.
   await cli.walledNetwork?.ensure();
+  // L4-NETG: a container of this target that is not on the walled network (made before the worker was walled, or in `bridge` mode on a volume that has since moved to `gateway`) is removed before `up` can restart it on a bridge with a way out.
+  if (walledNetwork !== undefined && cli.checks?.existing !== undefined) {
+    for (const id of await cli.checks.existing(target)) {
+      const found = await cli.checks.inspect(id).catch(() => undefined);
+      if (found === undefined || walledNetworkProblem(found, walledNetwork)) await removeStartedContainer(cli.checks, id);
+    }
+  }
   const started = await start(hidden);
   if (cli.checks === undefined) return started;
   let { problems, volumes } = await startedContainerProblems(cli.checks, started.containerId, target, hidden, walledNetwork);
@@ -879,16 +892,32 @@ function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): Con
 }
 
 /** The `devcontainer` CLI bundled with the worker, run with this Node. */
-export function createDevcontainerCli(options: { dockerPath?: string } = {}): DevcontainerCli {
+/**
+ * L4-NETG (DEC 254zzz77): the docker program a gateway-mode worker hands the devcontainer CLI (`--docker-path`). It puts `--network <the internal network> --dns <the gateway> --cap-drop NET_RAW` on every `docker run` and
+ * `docker create` the CLI makes and passes everything else through (packages/worker/ec2/devcontainer-docker.sh, which ships in the worker image beside boot.sh's stages).
+ */
+export const DEVCONTAINER_GATEWAY_DOCKER = "/opt/agentx/packages/worker/ec2/devcontainer-docker.sh";
+
+/** The network a gateway-mode devcontainer must be on: it exists, is a bridge and is internal (no route out). Refuses (RUNTIME_UNAVAILABLE) and never starts a container on anything else. */
+export async function ensureGatewayNetwork(name: string, run: (args: readonly string[]) => Promise<string> = async (args) => (await execFile("docker", [...args], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS })).stdout): Promise<void> {
+  const answer = await run(["network", "inspect", "--format", "{{.Driver}}|{{.Internal}}", name]).then((text) => text.trim(), () => "");
+  if (answer !== "bridge|true") throw agentXError("RUNTIME_UNAVAILABLE", "this worker's dev containers must go through the egress gateway, but its internal network is missing or not internal, so AgentX did not start the dev container");
+}
+
+export function createDevcontainerCli(options: { dockerPath?: string; environment?: NodeJS.ProcessEnv } = {}): DevcontainerCli {
   const require = createRequire(import.meta.url);
   const script = resolve(dirname(require.resolve("@devcontainers/cli/package.json")), "devcontainer.js");
-  const docker = options.dockerPath ?? "docker";
+  // A gateway-mode worker: every container the CLI starts joins the internal network through the wrapper, whatever else a caller asked for. Half-configured (the network or the name server is missing): refuses here.
+  const gateway = gatewayEgressFor(options.environment ?? process.env);
+  const dockerPath = gateway === undefined ? options.dockerPath : DEVCONTAINER_GATEWAY_DOCKER;
+  const docker = dockerPath ?? "docker";
   const run: DevcontainerCli["run"] = (args, runOptions) => runCollected(process.execPath, [
     script,
-    ...(options.dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", options.dockerPath, ...args.slice(1)]),
+    ...(dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", dockerPath, ...args.slice(1)]),
   ], runOptions);
   return {
     run,
+    ...(gateway === undefined ? {} : { walledNetwork: { name: gateway.network, ensure: () => ensureGatewayNetwork(gateway.network) } }),
     // The same `docker` the devcontainer CLI runs.
     checks: {
       async fullConfiguration(target) {
@@ -900,6 +929,10 @@ export function createDevcontainerCli(options: { dockerPath?: string } = {}): De
         const parsed: unknown = JSON.parse(stdout);
         if (!Array.isArray(parsed) || parsed.length !== 1 || parsed[0] === null || typeof parsed[0] !== "object") throw new Error("docker inspect did not describe one container");
         return parsed[0] as ContainerInspection;
+      },
+      async existing(target) {
+        const { stdout } = await execFile(docker, ["ps", "--all", "--quiet", "--no-trunc", "--filter", `label=devcontainer.local_folder=${target.workspaceFolder}`], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
+        return stdout.split("\n").map((line) => line.trim()).filter((line) => /^[a-f0-9]{12,64}$/u.test(line));
       },
       async remove(containerId) {
         // With its anonymous volumes (an image's own VOLUME lines): a container AgentX refuses must not leave one behind on every start. A named volume is never removed by this.

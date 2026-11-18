@@ -29,7 +29,7 @@ describe("config keys (FR-048)", () => {
       "models.orchestrator", "models.classifier", "models.worker", "models.e2eAgent", "models.fallback", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
-      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "savedEnvironments.switch", "coreEngine.answersModel", "coreEngine.learningModel", "mcp.confirmElicitation",
+      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "savedEnvironments.switch", "workerSandboxEgress", "coreEngine.answersModel", "coreEngine.learningModel", "mcp.confirmElicitation",
       // DEC 254zg (a), 254zk: Code's company layer, self-serve create and per-company Slack bots.
       "company.signIn", "company.selfServe", "slack.companyWorkspaces",
       // Live switches check 2026-11-18: the per-company model choice (DEC 254n(1)), which nothing set before.

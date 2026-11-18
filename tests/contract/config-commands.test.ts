@@ -53,7 +53,8 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "savedEnvironments.switch")).toMatchObject({ where: "stack parameter SavedEnvironments on agentx-staging-control-plane" });
     // Live switches check 2026-11-18: the per-company model choice, off until set.
     expect(rows.find((row) => row.key === "coreEngine.agentModelChoice")).toMatchObject({ value: "off", where: "stack parameter CoreAgentModelChoice on agentx-staging-control-plane" });
-    expect(rows).toHaveLength(29);
+    // L4-NETG (DEC 254zzz77): workerSandboxEgress.
+    expect(rows).toHaveLength(30);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

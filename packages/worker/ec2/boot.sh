@@ -417,6 +417,12 @@ test_services_stage() {
   timeout "$(try_seconds 60)" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/test-services-stage.sh >"$f" && . "$f" && test_services_stage_main "$1"
 }
 
+# L4-NETG (DEC 254zzz77): only for AGENTX_SANDBOX_EGRESS=gateway. The stage ships in the worker image (pulled by digest); sandboxes and dev containers get an internal network whose only exit is the host's egress gateway. Unlike the stage above, ANY failure fails the boot.
+sandbox_egress_stage() {
+  local f=/run/agentx-se-stage.sh
+  timeout "$(try_seconds 60)" docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint cat "$AGENTX_WORKER_IMAGE" /opt/agentx/packages/worker/ec2/sandbox-egress.sh >"$f" && . "$f" && sandbox_egress_main
+}
+
 # Opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): its own unit, so it cannot fail the boot.
 write_e2e_qualification_script() {
   install -d -o root -g root -m 0755 /usr/local/libexec
@@ -538,6 +544,7 @@ main() {
   write_worker_environment "$region"
   write_worker_unit "$region" "$instance_id"
   [[ ${AGENTX_TEST_SERVICES:-} != 1 ]] || test_services_stage "$region" || log "no test services on this worker (not fatal)"
+  if [[ ${AGENTX_SANDBOX_EGRESS:-} == gateway ]]; then BOOT_STEP="set up the sandbox egress gateway"; sandbox_egress_stage || fail "could not set up the sandbox egress gateway"; fi
   systemctl daemon-reload
   systemctl enable --now "$WORKER_UNIT"
   log "worker started"

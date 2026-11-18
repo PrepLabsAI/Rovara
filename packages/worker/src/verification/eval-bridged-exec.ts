@@ -11,6 +11,7 @@
 // `changedPrompt` classifier names. An absent, unreadable or undecidable classification counts as changed.
 import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { isIP } from "node:net";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
 import { EVAL_INSTALL_STEP_MAX_MS, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInCounts, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
@@ -26,7 +27,7 @@ import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT } from "../
 import { CHECK_SANDBOX_HOSTNAME, SINKHOLE_ALIAS, checkSandboxHostsFile, checkSandboxNames, checkSandboxResolvConf, readSealedDnsRecord, sealedDnsHelperRunArgs, waitForSealedDnsHelper, type RunHostEntry, type SealedDnsRecord } from "../check-sandbox.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkHelperIp, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../swebench/containers.js";
-import { SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_WORKSPACE_LABEL, sandboxNetworkFromEnvironment } from "../task-sandbox.js";
+import { SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_WORKSPACE_LABEL, gatewayEgressFor, sandboxNetworkFromEnvironment } from "../task-sandbox.js";
 import { readContainedReport } from "./report-file.js";
 import { EVAL_PYTHON_USER_BASE, useSavedEnvironment, type UseSavedEnvironmentInput } from "./eval-environment.js";
 import { EvalSandboxRunFailure, diagnoseEvalFailure } from "./eval-run-diagnostic.js";
@@ -336,6 +337,8 @@ export interface FreshEvalSandboxConfig {
    * catch-all (never stop). The ONE `round` is shared by both sides and every re-ask (one answer book). The box trusts the round's authority through environment variables only. `start` is a test seam (default: `startEvalStandIns`).
    */
   readonly standIns?: { readonly round: EvalStandInRound; readonly start?: typeof startEvalStandIns | undefined } | undefined;
+  /** L4-NETG: the name server an install step is given (`--dns`), set only on a worker whose sandboxes go through the egress gateway (the gateway's address on the shared network). Default: none (the network's own resolver, as before). */
+  readonly installDns?: string | undefined;
 }
 
 const configProblem = (config: FreshEvalSandboxConfig): boolean => {
@@ -359,6 +362,7 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
     if (c.installNetwork !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(c.installNetwork)) return true;
     if (c.services !== undefined && typeof c.services?.start !== "function") return true;
     if (c.sealedDns !== undefined && typeof c.sealedDns !== "boolean") return true;
+    if (c.installDns !== undefined && isIP(c.installDns) !== 4) return true;
     return false;
   } catch { return true; }
 };
@@ -590,6 +594,8 @@ const INSTALL_NETWORK_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u;
 export interface EvalInstallArgsInput {
   /** The machine's shared sandbox network (`agentx-task`, or the one `AGENTX_SANDBOX_NETWORK` names). Never the round's network. */
   readonly network: string;
+  /** L4-NETG: the one name server (an IPv4 address), set only when the shared network is the gateway-mode internal network. Absent: no `--dns`, byte-identical to before. */
+  readonly dns?: string | undefined;
   readonly image: string;
   readonly name: string;
   readonly checkout: string;
@@ -610,7 +616,7 @@ export function evalInstallRunArgs(input: EvalInstallArgsInput): string[] {
   const args = [
     "run", "--detach", "--pull=never", "--name", input.name, "--stop-timeout", "1",
     "--label", `${TASK_SANDBOX_LABEL}=${input.taskId}`, "--label", `${TASK_SANDBOX_WORKSPACE_LABEL}=${input.workspace}`,
-    "--network", input.network, ...modelHostAddHostArgs(installModelBlock()),
+    "--network", input.network, ...(input.dns === undefined ? [] : ["--dns", input.dns]), ...modelHostAddHostArgs(installModelBlock()),
     "--user", INSTALL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "1024",
     "--log-driver", "json-file", ...INSTALL_LOG_OPTIONS.flatMap(option => ["--log-opt", option]),
@@ -621,15 +627,15 @@ export function evalInstallRunArgs(input: EvalInstallArgsInput): string[] {
     "--entrypoint", SANDBOX_INIT,
     input.image, "--", input.command.executable, ...input.command.args,
   ];
-  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
+  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network, ...(input.dns === undefined ? {} : { dns: input.dns }) }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
   return args;
 }
 
-const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
+const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--dns", "--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
 const INSTALL_SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 
 /** Reads an install step's `docker run` arguments back and names every way they are unsound, in fixed words. Allow-list: a flag the install box does not take (an env file, a second mount, a published port, a device, a DNS server, an address, a capability) is a problem. */
-export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string }): string[] {
+export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string; readonly dns?: string | undefined }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -652,6 +658,8 @@ export function evalInstallArgProblems(args: readonly string[], expected: { read
   const only = (flag: string, wanted: string): boolean => (flags.get(flag) ?? []).length === 1 && flags.get(flag)![0] === wanted;
   if (image === undefined || !/^(?:[A-Za-z0-9][A-Za-z0-9._/:-]{0,200}@sha256:[a-f0-9]{64}|sha256:[a-f0-9]{64})$/u.test(image)) problems.push("the install box must run the worker's pinned image");
   if (!INSTALL_NETWORK_NAME.test(expected.network) || !only("--network", expected.network)) problems.push("the install box must be on the shared sandbox network and on no other network");
+  // L4-NETG: a name server only when the caller expects exactly that one (the gateway's address); otherwise any `--dns` is a flag the install box does not take, as before.
+  if (expected.dns === undefined ? flags.has("--dns") : isIP(expected.dns) !== 4 || !only("--dns", expected.dns)) problems.push("a flag the install box does not take");
   if (!only("--cap-drop", "ALL")) problems.push("the install box must drop every capability");
   if (!only("--security-opt", "no-new-privileges")) problems.push("the install box must have no-new-privileges and no other security option");
   if (!flags.has("--read-only")) problems.push("the install box's root must be read-only");
@@ -754,7 +762,10 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         } else if (environment?.kind === "install") installs = environment.commands;
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // Only a plan with install steps reads the network setting (a plan without an environment is byte-identical to before).
-        const installNetwork = installs.length === 0 ? "" : config.installNetwork ?? sandboxNetworkFromEnvironment(config.environment ?? process.env) ?? TASK_SANDBOX_NETWORK;
+        // L4-NETG: on a worker whose sandboxes go through the egress gateway the install box joins the gateway's internal network with the gateway as its only name server (it never falls back to the open bridge).
+        const gateway = installs.length === 0 ? undefined : gatewayEgressFor(config.environment ?? process.env);
+        const installNetwork = installs.length === 0 ? "" : gateway?.network ?? config.installNetwork ?? sandboxNetworkFromEnvironment(config.environment ?? process.env) ?? TASK_SANDBOX_NETWORK;
+        const installDns = gateway?.dns ?? config.installDns;
         const taskHash = createHash("sha256").update(`eval-install\0${config.taskId}`).digest("hex").slice(0, 12);
         let step = 0;
         for (const command of installs) {
@@ -763,7 +774,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           installBoxes.push(name);
           installing = name;
           installed = true;
-          const started = await call(evalInstallRunArgs({ network: installNetwork, image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
+          const started = await call(evalInstallRunArgs({ network: installNetwork, ...(installDns === undefined ? {} : { dns: installDns }), image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
           if (started.exitCode !== 0) throw new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "install", output: started.stderr, secrets }));
           const waited = await call(["wait", name], Math.min(EVAL_INSTALL_STEP_MAX_MS, remainingMs()));
           if (input.signal.aborted) throw new Error("eval stage stopped");
