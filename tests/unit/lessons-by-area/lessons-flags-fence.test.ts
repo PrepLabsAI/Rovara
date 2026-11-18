@@ -276,7 +276,7 @@ describe.each(factories)("the tries run out (%s)", (_name, make) => {
 });
 
 describe("no other writer of the flags row", () => {
-  const walk = (dir: string): string[] => readdirSync(dir).flatMap((name) => { const path = join(dir, name); return statSync(path).isDirectory() ? walk(path) : path.endsWith(".ts") ? [path] : []; });
+  const walk = (dir: string): string[] => readdirSync(dir).filter((name) => name !== "dist" && name !== "node_modules").flatMap((name) => { const path = join(dir, name); return statSync(path).isDirectory() ? walk(path) : path.endsWith(".ts") ? [path] : []; });
   const files = walk(join(__dirname, "../../../packages")).map((file) => ({ name: file.slice(file.indexOf("packages/")), text: readFileSync(file, "utf8") }));
   const count = (text: string, pattern: RegExp): number => text.match(pattern)?.length ?? 0;
   it("setFlags (the unconditional seed) is only DEFINED in the two stores and called nowhere else", () => {
