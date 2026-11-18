@@ -39,6 +39,9 @@ describe("company-layout keys", () => {
     expect(((await namedCompanyLatestRevisionRow(db, "S", A, "p"))?.definition as { revision: number }).revision).toBe(2);
     db.set({ pk: `ORG#${A}#PROJECT_CATALOG`, sk: "PROJECT#p", latestRevision: 1 });
     expect(((await namedCompanyLatestRevisionRow(db, "S", A, "p"))?.definition as { revision: number }).revision).toBe(1);
+    // An approved setup moves the catalog onto its candidate revision, which keeps `candidate: true` (core/setup-agent/apply.ts): the pointer wins, as in the core.
+    db.set({ pk: `ORG#${A}#PROJECT_CATALOG`, sk: "PROJECT#p", latestRevision: 3 });
+    expect(((await namedCompanyLatestRevisionRow(db, "S", A, "p"))?.definition as { revision: number }).revision).toBe(3);
     // Another company's partition is never read; a row naming another company is not this one's.
     expect(await namedCompanyLatestRevisionRow(db, "S", B, "p")).toBeUndefined();
     db.delete(`ORG#${A}#PROJECT_CATALOG`, "PROJECT#p");

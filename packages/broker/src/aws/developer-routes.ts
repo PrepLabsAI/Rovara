@@ -3,7 +3,8 @@ import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBin
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
-import { Membership, membershipKey, boundedCompanyReads, companyReadActions, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
+import { Membership, membershipKey, boundedCompanyReads, companyReadActions, ownPartitionRow, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
+import { namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived } from "./company-layout.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -57,7 +58,9 @@ import {
   TaskPeopleDisplayReadResponseSchema,
   agentXError,
   developerTaskPolicy,
+  workspaceProjectIndexValue,
   workspaceRecordFields,
+  type OrgId,
   type ChannelByNameRequest,
   type ChannelByNameResponse,
   type ChannelInfoRequest,
@@ -250,11 +253,11 @@ export interface DeveloperRouteDependencies {
   /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`). It does not depend on the lessons switch. Absent: its route is not found. */
   lessonsSlackSwitch?: Pick<LessonsSlackSwitchApi, "answer">;
   /** Spec 065b: a project from one GitHub repository, as a sign-in client's signed-in Rovara administrator. */
-  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
+  createClientProject?: (developerId: string, input: CreateClientProjectRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number; companyId?: string }>;
   /** Spec 065b: the repositories the GitHub App can reach, to choose one for a new project. */
   clientRepositories?: (developerId?: string) => Promise<ClientRepositoriesResponse["installations"]>;
   /** Guided onboarding PR 6: one project from several repositories (all on the caller's company's installations, or nothing is created). */
-  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number }>;
+  createClientProjects?: (developerId: string, input: CreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<{ name: string; latestRevision: number; companyId?: string }>;
   /** Guided onboarding PR 6: one project per repository, with one result row each. */
   createClientProjectsBulk?: (developerId: string, input: BulkCreateClientProjectsRequest, naming?: ClientProjectNaming) => Promise<BulkCreateClientProjectsResponse>;
   /** Guided onboarding PR 6: the repository picker: the company's connected repositories, each marked with the company's projects that hold it. */
@@ -835,6 +838,9 @@ async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) 
 
 /** The latest revision's number and task policy: the only fields read, so only they are fetched. */
 async function latestDefinition(deps: DeveloperRouteDependencies, project: string, companyId?: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  // DEC 254zzz80: a named company's projects live only in its own partition.
+  const named = namedCompany(companyId);
+  if (named !== undefined) return namedCompanyDefinition(deps, named, project);
   // T4a's project provider owns company identity; the legacy policy projection may be unstamped.
   let storageCompanyId = companyId;
   if (companyId !== undefined && deps.workspaces?.getProject !== undefined) {
@@ -855,6 +861,20 @@ async function latestDefinition(deps: DeveloperRouteDependencies, project: strin
   })) as { Items?: Array<{ definition: { revision: number; developerTasks?: unknown } }> };
   const row = response.Items?.[0];
   return recordInCompany(row, storageCompanyId) ? row?.definition : undefined;
+}
+
+/**
+ * DEC 254zzz80: a named company's project's latest revision (the core's order, company-layout.ts) and its task policy. An archived project (its META row) stays listed but takes no
+ * new work, as the core engine refuses it: its policy is a stored null, which developerTaskPolicy reads as tasks and channel access off (fail closed).
+ */
+async function namedCompanyDefinition(deps: DeveloperRouteDependencies, company: OrgId, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
+  const [row, archived] = await Promise.all([
+    namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, company, project),
+    namedCompanyProjectArchived(deps.documentClient, deps.tableName, company, project),
+  ]);
+  if (row === undefined) return undefined;
+  const definition = row.definition as { revision: number; developerTasks?: unknown };
+  return { revision: definition.revision, developerTasks: archived ? null : definition.developerTasks };
 }
 
 /** Each named project's latest revision and task policy; projects with no revision are left out. */
@@ -1227,12 +1247,14 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
   if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   const mine = access.projects.find((entry) => entry.name === project);
   if (mine === undefined) throw agentXError("NOT_FOUND", "project not found");
-  const response = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
-  const row = response.Items?.[0];
-  if (!recordInCompany(row, companyId)) throw agentXError("NOT_FOUND", "project not found");
+  // DEC 254zzz80: a named company's revision from its own partition (company-layout.ts checks the partition); the legacy row keeps its stored-company check.
+  const named = namedCompany(companyId);
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown } } | undefined
+    : (await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> }).Items?.[0];
+  if (named === undefined ? !recordInCompany(row, companyId) : row === undefined) throw agentXError("NOT_FOUND", "project not found");
   scope?.check();
   const definition = row?.definition;
   if (definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
@@ -1454,13 +1476,15 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const scope = boundedCompanyReads(deps.documentClient, deps.now);
   const companyId = await resolveCompany(deps.companies, person.developerId);
-  const latest = await scope.client.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> };
-  const row = latest.Items?.[0];
+  // DEC 254zzz80: a named company's revision from its own partition; the legacy row keeps its stored-company check.
+  const named = namedCompany(companyId);
+  const row = named !== undefined ? await namedCompanyLatestRevisionRow(scope.client, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown } } | undefined
+    : (await scope.client.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown } }> }).Items?.[0];
   const definition = row?.definition;
-  if (!recordInCompany(row, companyId) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
+  if ((named === undefined ? !recordInCompany(row, companyId) : row === undefined) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
   // With no company layer there is no company to belong to: the person must be one who may use the project.
   if (companyId === undefined) {
     const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, person.developerId, undefined);
@@ -1570,6 +1594,9 @@ async function companyManagesProject(deps: DeveloperRouteDependencies, caller: {
   const membership = await reader.membershipOf(caller.developerId);
   if (membership === undefined || (membership.role !== "owner" && membership.role !== "admin")) return false;
   if (caller.companyId !== undefined && caller.companyId !== membership.companyId) return false;
+  // DEC 254zzz80: a named company's project is one with a revision in its own partition.
+  const named = namedCompany(membership.companyId);
+  if (named !== undefined) return await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, named, project) !== undefined;
   const latest = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
@@ -1641,14 +1668,15 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
       logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
         ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
-      return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+      // DEC 254zzz80: read back where the create wrote: a named company's own partition (the company the create resolved from live membership), else as before.
+      return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
     }
     if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
     const parsed = CreateClientProjectRequestSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
     const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
     console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
-    return readClientProject(deps, creator.developerId, created.name, creator.companyId);
+    return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
   }
   // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first (project-lifecycle-routes.ts).
   const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
@@ -1680,10 +1708,14 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   // the project belongs to, grant or not.
   const own = await projectGrant(actions, project, caller.developerId);
   if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
-  const registered = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,
-  })) as { Items?: unknown[] };
+  // DEC 254zzz80: the caller's company (live membership, checked at sign-in) decides where the project is: a named company's own partition, else the legacy rows.
+  const namedCaller = namedCompany(caller.companyId);
+  const registered = namedCaller !== undefined
+    ? { Items: [await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, namedCaller, project)].filter((row) => row !== undefined) }
+    : await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,
+    })) as { Items?: unknown[] };
   if ((registered.Items ?? []).length === 0) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
   const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
   if (request.method === "GET" && members[2] === undefined) {
@@ -1806,8 +1838,12 @@ export async function checkProjectAccess(
  * Only a workspace's own fields are read; the index carries the whole item, so no second get is
  * needed per workspace.
  */
-async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string): Promise<DeveloperWorkspace[]> {
+async function projectWorkspaces(deps: DeveloperRouteDependencies, project: string, company?: OrgId): Promise<DeveloperWorkspace[]> {
   const items: Array<Record<string, unknown>> = [];
+  // DEC 254zzz80: a named company's workspaces are listed from its own index partition (`workspaceProjectIndexValue`), never the bare name another company's project may share;
+  // an item there must name this company (`orgId` or `companyId`) and no other: one that names another company, or none, is drift and left out.
+  const ownCompany = (item: Record<string, unknown>) => company === undefined
+    || ((item.orgId === company || item.companyId === company) && ownPartitionRow(item, company) && item[WORKSPACE_PROJECT_INDEX.partitionKey] === workspaceProjectIndexValue(company, project));
   let start: Record<string, unknown> | undefined;
   do {
     const response = await deps.documentClient.send(new QueryCommand({
@@ -1815,14 +1851,14 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
       IndexName: WORKSPACE_PROJECT_INDEX.name,
       KeyConditionExpression: "#project = :project",
       ExpressionAttributeNames: { "#project": WORKSPACE_PROJECT_INDEX.partitionKey },
-      ExpressionAttributeValues: { ":project": project },
+      ExpressionAttributeValues: { ":project": company === undefined ? project : workspaceProjectIndexValue(company, project) },
       // Newest first, and never more than one page past the cap: a project with thousands of
       // thread workspaces must not turn one page load into an unbounded scan.
       ScanIndexForward: false,
       Limit: DEVELOPER_WORKSPACES_PER_PROJECT,
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
     })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
-    items.push(...(response.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER"));
+    items.push(...(response.Items ?? []).filter((item) => item.entityType !== "WORKSPACE_COMPANY_POINTER" && ownCompany(item)));
     start = items.length >= DEVELOPER_WORKSPACES_PER_PROJECT ? undefined : response.LastEvaluatedKey;
   } while (start !== undefined);
 
@@ -1854,9 +1890,15 @@ async function projectWorkspaces(deps: DeveloperRouteDependencies, project: stri
  * membership only where the project's developerTasks policy allows it, failing closed).
  */
 async function listWorkspaces(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperWorkspacesResponse> {
-  const listing = await listProjects(deps, caller);
+  // DEC 254zzz80: the caller's company as listProjects resolves it (live membership); a named company's listing and workspaces are read under one bounded company budget.
+  const companyId = companySlackMode(deps) ? await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId) : undefined;
+  const company = namedCompany(companyId);
+  const scope = company === undefined ? undefined : boundedCompanyReads(deps.documentClient, deps.now);
+  if (scope !== undefined) deps = { ...deps, documentClient: scope.client };
+  const listing = await listProjects(deps, caller, companyId);
   const workspaces: DeveloperWorkspace[] = [];
-  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name));
+  for (const project of listing.projects) workspaces.push(...await projectWorkspaces(deps, project.name, company));
+  scope?.check();
   // Across projects, still newest first, so the page's list reads as one timeline.
   workspaces.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   return { ...listing, workspaces };

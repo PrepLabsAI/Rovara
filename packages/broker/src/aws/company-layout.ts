@@ -9,7 +9,7 @@
 // The company always comes from the caller's LIVE membership (or, for a stored record, the company the record itself names), never from a request.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectPk, projectRevisionKey,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, PROJECT_REVISION_SK_PREFIX, ProjectDefinitionSchema, memberGrantsPk, orgProjectCatalogKey, orgScoped, projectMetaKey, projectPk, projectRevisionKey,
   type OrgId,
 } from "@agentx/contracts";
 import { ownPartitionRow } from "./company-check.js";
@@ -60,12 +60,14 @@ export function projectMemberRowKeyFor(companyId: string | undefined, project: s
 
 /**
  * A named company's project's latest revision row, in the core's own order (core/task-flow/project-source.ts): the catalog row's pointer, else the newest
- * revision that is not a candidate (a setup waiting for approval). A row that does not parse as a project, or that names another company, is absent.
+ * revision that is not a candidate (a setup waiting for approval). The pointer's row is taken even when it still says `candidate`: an approved setup moves
+ * the catalog onto its candidate revision and leaves that flag on the row (core/setup-agent/apply.ts), and the core reads it the same way. A row that does
+ * not parse as a project, or that names another company, is absent.
  */
 export async function namedCompanyLatestRevisionRow(client: Client, tableName: string, company: OrgId, project: string): Promise<Record<string, unknown> | undefined> {
   const pk = projectPk(company, project);
   const usable = (row: Record<string, unknown> | undefined) =>
-    row !== undefined && row.pk === pk && row.candidate !== true && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
+    row !== undefined && row.pk === pk && ownPartitionRow(row, company) && ProjectDefinitionSchema.safeParse(row.definition).success
     && typeof (row.definition as { revision?: unknown }).revision === "number" ? row : undefined;
   const get = async (key: Key) => (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
   const catalogKey = orgProjectCatalogKey(company, project);
@@ -80,6 +82,18 @@ export async function namedCompanyLatestRevisionRow(client: Client, tableName: s
     ExpressionAttributeValues: { ":pk": pk, ":rev": PROJECT_REVISION_SK_PREFIX }, ScanIndexForward: false, Limit: 20, ConsistentRead: true,
   })) as { Items?: Array<Record<string, unknown>> } | undefined;
   return usable((response?.Items ?? []).find((item) => item.candidate !== true));
+}
+
+/**
+ * Whether a named company's project is archived: its META row (`projectMetaKey`) says `archived`, as the core's own project source reads it
+ * (core/task-flow/project-source.ts). An archived project stays readable (so it can be restored) but takes no new work. A META row that names
+ * another company is drift and counts as archived (fail closed). The legacy layout has no archive state.
+ */
+export async function namedCompanyProjectArchived(client: Client, tableName: string, company: OrgId, project: string): Promise<boolean> {
+  const key = projectMetaKey(company, project);
+  const row = (await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> } | undefined)?.Item;
+  if (row === undefined) return false;
+  return row.status === "archived" || !ownPartitionRow(row, company);
 }
 
 /**

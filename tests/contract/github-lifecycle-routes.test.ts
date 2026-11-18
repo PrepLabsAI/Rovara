@@ -2,7 +2,7 @@
 // real App client's mint check. Two companies throughout: A (acme, installation 101) and B (beta, installation 202).
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { AgentXError, GITHUB_DISCONNECTED_MESSAGE } from "@agentx/contracts";
+import { AgentXError, GITHUB_DISCONNECTED_MESSAGE, orgProjectCatalogKey, type OrgId } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -11,6 +11,8 @@ import { CONNECTION_NOT_FOUND, DISCONNECT_OWNER_ONLY, DISCONNECT_STEP_UP, DISCON
 import { PROJECT_SCAN_MAX, repositoryUsesInstallation } from "../../packages/broker/src/aws/github-lifecycle.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
+import { namedCompany, revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
 
 beforeAll(loadSlackBroker);
@@ -25,9 +27,10 @@ const D1 = "550e8400-e29b-41d4-a716-446655440011";
 const D2 = "550e8400-e29b-41d4-a716-446655440012";
 
 function project(db: FakeDynamoDb, name: string, companyId: string | undefined, repositories: unknown[]) {
-  db.set({ pk: "PROJECT_CATALOG", sk: `PROJECT#${name}`, entityType: "PROJECT_CATALOG", name, latestRevision: 2 });
-  db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 1, repositories: [] } });
-  db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000002", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 2, repositories } });
+  // DEC 254zzz80: a named company's project lives in its own partition (its catalog and revisions); the built-in company's and an unstamped one in the install's.
+  db.set(namedCompany(companyId) !== undefined ? { ...orgProjectCatalogKey(companyId as OrgId, name), entityType: "PROJECT_CATALOG", name, latestRevision: 2 } : { pk: "PROJECT_CATALOG", sk: `PROJECT#${name}`, entityType: "PROJECT_CATALOG", name, latestRevision: 2 });
+  db.set(companyProjectRow(companyId, name, 1, { repositories: [] }));
+  db.set(companyProjectRow(companyId, name, 2, { repositories }));
 }
 const repo = (url: string, installationId?: number) => ({ name: "r", url, path: "r", defaultBranch: "main", credentialRef: "github-app", ...(installationId === undefined ? {} : { installationId }) });
 
@@ -143,10 +146,10 @@ describe("disconnect", () => {
   it("an unreadable project counts as using it; too many projects to check refuses", async () => {
     const h = await world(); h.stepUp();
     project(h.db, "odd", A, [repo("https://github.com/acme/x")]);
-    h.db.set({ ...h.db.get("PROJECT#odd", "REV#000000000002")!, definition: { name: "odd", revision: 2 } });
+    h.db.set({ ...h.db.get(revisionKeyFor(A, "odd", 2).pk, "REV#000000000002")!, definition: { name: "odd", revision: 2 } });
     expect((await h.disconnect(101)).status).toBe(409);
     const many = await world(); many.stepUp();
-    for (let i = 0; i <= PROJECT_SCAN_MAX; i++) many.db.set({ pk: "PROJECT_CATALOG", sk: `PROJECT#p${i}`, entityType: "PROJECT_CATALOG", latestRevision: 1 });
+    for (let i = 0; i <= PROJECT_SCAN_MAX; i++) many.db.set({ ...orgProjectCatalogKey(A, `p${i}`), entityType: "PROJECT_CATALOG", latestRevision: 1 });
     expect(await many.disconnect(101)).toEqual(refusal(503, "RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE));
     expect(binding(many.db, 101)).toBeDefined();
   });

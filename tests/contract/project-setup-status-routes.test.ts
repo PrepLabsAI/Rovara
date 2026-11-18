@@ -21,6 +21,7 @@ import { journalKey, setupAgentKey } from "../../packages/broker/src/core/setup-
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 import { OPERATION_SK_PREFIX, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 import { CLIENT_MEMBERS_NOT_ALLOWED } from "../../packages/broker/src/aws/developer-routes.js";
 import { LinearConnections, linearConnectionKey, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
 import type { LinearConnectWiring } from "../../packages/broker/src/aws/linear-connect-routes.js";
@@ -71,7 +72,7 @@ function harness(options: HarnessOptions = {}) {
   const as = (id: string, sid: string) => { claims.sub = id; claims.sid = sid; };
   const join = (id: string, companyId: string, role: Role) => db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME });
   const project = (name: string, companyId?: string, repositories: unknown[] = [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }]) =>
-    db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 1, repositories } });
+    db.set(companyProjectRow(companyId, name, 1, { repositories })); // DEC 254zzz80: a named company's project in its own partition
   const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
   const ok = async (path = PATH()) => { const answer = await call("GET", path); expect(answer.status).toBe(200); return ProjectSetupChecklistSchema.parse(answer.body); };
   return { db, claims, deps, call, as, join, project, grant, ok };
@@ -184,13 +185,18 @@ describe("the checklist's rows, each from its own records", () => {
   });
 
   it("repos: a project with no readable repository is not done; a long list is cut at 32", async () => {
-    const h = companyA();
-    h.project("empty", A, [{ nope: true }]);
+    // A legacy project of the built-in company (its row is read as stored). DEC 254zzz80: in a named company's own partition such a row does not parse as a project at
+    // all (as the core reads it), so it is not found (below).
+    const h = harness(); h.join(ADA, IMPLICIT_COMPANY_ID, "admin");
+    h.project("empty", IMPLICIT_COMPANY_ID, [{ nope: true }]);
     expect((await h.ok(PATH("empty"))).repos).toEqual({ state: "needs_you", count: 0, items: [] });
-    h.project("wide", A, Array.from({ length: 40 }, (_, i) => ({ name: `r${i}`, url: `https://example.com/r${i}`, defaultBranch: "main" })));
+    h.project("wide", IMPLICIT_COMPANY_ID, Array.from({ length: 40 }, (_, i) => ({ name: `r${i}`, url: `https://example.com/r${i}`, defaultBranch: "main" })));
     const wide = (await h.ok(PATH("wide"))).repos;
     expect(wide.count).toBe(32);
     expect(wide.items[0]).toEqual({ name: "r0", defaultBranch: "main" });
+    const named = companyA();
+    named.db.set({ pk: `ORG#${A}#PROJECT#empty`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "empty", revision: 1, repositories: [{ nope: true }] } });
+    expect((await named.call("GET", PATH("empty"))).status).toBe(404);
   });
 
   it("setup run: running", async () => {

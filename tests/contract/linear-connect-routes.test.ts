@@ -15,6 +15,7 @@ import { handleLinearAppWebhook, LINEAR_WEBHOOK_WINDOW_MS, WEBHOOK_REFUSED, type
 import { linearCompanyApiAccess } from "../../packages/broker/src/aws/linear-wiring.js";
 import { LINEAR_SCOPES } from "../../packages/broker/src/aws/linear-oauth-client.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 
 const PERSON_B = "e".repeat(64);
 const PERSON_C = "c".repeat(64);
@@ -73,6 +74,7 @@ function world() {
   };
   const projectOf = (name: string, companyId: string, grants: Array<{ personId: string; role: "administrator" | "developer" }> = []) => {
     h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
+    h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project readers read its own partition
     for (const grant of grants) h.db.set({ pk: `MEMBER#${grant.personId}`, sk: `PROJECT#${name}`, projectName: name, role: grant.role, companyId });
   };
   const stored = () => JSON.stringify([...h.db.items.values()]);

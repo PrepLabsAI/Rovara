@@ -7,6 +7,7 @@ import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/compa
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { CODE_SETTINGS_BODY, LOOSEN_ON_A_PAGE, NOT_A_PROJECT_ADMIN, codeSettingsKey, codeSettingsReader, loosens } from "../../packages/broker/src/aws/project-code-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 
 const NOW = Date.parse("2026-11-15T12:00:00.000Z");
 const TIME = "2026-11-01T09:00:00.000Z";
@@ -25,7 +26,7 @@ function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
     db.set({ pk: `SESSION#${sid}`, sk: "META", sessionId: sid, developerId: id, amr: "slack", clientId: "web-app", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
   }
   const join = (id: string, companyId: string, role: "admin" | "member") => db.set({ pk: `COMPANY_MEMBER#${id}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME });
-  const project = (name: string, companyId?: string) => db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", ...(companyId === undefined ? {} : { companyId }), definition: { name, revision: 1 } });
+  const project = (name: string, companyId?: string) => db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project in its own partition
   const grant = (id: string, name: string, role: "administrator" | "developer") => db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, grantedAt: TIME });
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   const deps: DeveloperRouteDependencies = {
