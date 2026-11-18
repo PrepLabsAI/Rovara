@@ -151,6 +151,19 @@ export async function taskCapOf(deps: { store: DocumentStore; settings: HostedAd
   return limit < install ? { micros: limit, project: true } : { micros: install, project: false };
 }
 
+/**
+ * L4-TA6: the cap one task is held to now, in dollars, for the flow's `taskCapUsd` (automatic fixing holds its rounds to it): the very value Admission, the per-run stop and the owner's round read (`taskCapOf`: the install's
+ * task cap lowered to the project's own per-task limit), read fresh on every call for ONE company. No caps on this install (`settings` undefined), a task of another company, or a project or limit that cannot be read: throws,
+ * so the flow asks the owner; it never answers a larger or invented figure.
+ */
+export function hostedTaskCapUsd(deps: { store: DocumentStore; companyId: string; settings: HostedAdmissionSettings | undefined; projectTaskCap?: ProjectTaskCap | undefined }): (task: { companyId: string; taskId: string; project: string }) => Promise<number> {
+  return async (task) => {
+    if (deps.settings === undefined || task.companyId !== deps.companyId) throw new Error("the task cap is unavailable");
+    const cap = await taskCapOf({ store: deps.store, settings: deps.settings, projectTaskCap: deps.projectTaskCap }, deps.companyId, task.taskId, task.project);
+    return cap.micros / 1_000_000;
+  };
+}
+
 /** What a model call of unknown cost holds (an Ask, a diagnosis): never nothing, so a full day refuses it. */
 export const UNKNOWN_CALL_HOLD_MICROS = 1_000_000;
 

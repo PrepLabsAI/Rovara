@@ -92,6 +92,19 @@ async function proposedCheckOriginals(deps: TaskFlowDeps, workflow: WorkflowSnap
   return Object.fromEntries(Object.entries(view.tried).map(([checkId, result]) => [checkId, result === "passed" ? "passed" as const : result === "failed" ? "failed" as const : "cannot-run" as const]));
 }
 
+/**
+ * L4-TA6: the dollar cap one more automatic round is held to. Where the install holds a per-task limit (`deps.taskCapUsd`: the value Admission and the run stop enforce, read now) it is that limit, lowered to the
+ * install's own automatic-fixing cap when one is set, never above it; a task with a $1 limit is never held to the $15 default. A limit that cannot be read (a throw, nothing, or not a finite non-negative number)
+ * is NaN, which the policy reads as missing money inputs and asks the owner about (fail closed, like an unknown spend). No `taskCapUsd`: the install holds no per-task limit, and the cap is the configured one (default 15).
+ */
+async function autofixCapUsd(deps: TaskFlowDeps, task: TaskRecord, configured: number | undefined): Promise<number> {
+  if (deps.taskCapUsd === undefined) return configured ?? AUTO_FIX_DEFAULT_CAP_USD;
+  let live: number | undefined;
+  try { live = await deps.taskCapUsd(task); } catch { return Number.NaN; }
+  if (typeof live !== "number" || !Number.isFinite(live) || live < 0) return Number.NaN;
+  return configured === undefined ? live : Math.min(live, configured);
+}
+
 /** Looks at one blocked VERIFY or REVIEW once, and acts or asks. Never throws for a task that moved on. */
 export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; workflowRevision: number }): Promise<StepStart> {
   const done = async (result: AutofixOutcome): Promise<StepStart> => {
@@ -109,7 +122,7 @@ export async function runAutofix(deps: TaskFlowDeps, row: { taskId: string; work
   // The whole task's spend, when it can be told; nothing priced counts as nothing spent, and the count limits alone then bound the rounds.
   let spent: number | undefined;
   try { spent = deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0; } catch { spent = undefined; }
-  const spend: WorkflowAutoSpend = { spentUsd: wholeTaskSpendUsd(spent ?? Number.NaN), roundEstimateUsd: config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, capUsd: config.capUsd ?? AUTO_FIX_DEFAULT_CAP_USD };
+  const spend: WorkflowAutoSpend = { spentUsd: wholeTaskSpendUsd(spent ?? Number.NaN), roundEstimateUsd: config.roundEstimateUsd ?? AUTOFIX_ROUND_ESTIMATE_USD, capUsd: await autofixCapUsd(deps, task, config.capUsd) };
   const nowMs = (deps.now?.() ?? new Date()).getTime();
   // How the block came about when no finished run wrote it (the row says so): a lost run is the infrastructure's, one automatic retry, never a send back to coding; a merged base is rechecked at once.
   const row_ = fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)));
