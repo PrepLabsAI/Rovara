@@ -145,6 +145,28 @@ describe("suggestions from fixtures", () => {
     const full = db();
     await seedLoads(full, { loads: 30, budget: 8, perLoad: 8, words: wordsAt(0.3, 0.006), leftOut: () => [sample("les_left1", 0.9, null)] });
     expect(suggestion(await report(full), "stepLessonCap")).toMatchObject({ status: "keep", current: 8, suggested: 8 });
+    // A budget above the ceiling is kept, never lowered (review finding 1).
+    const big = db();
+    await seedLoads(big, { loads: 30, budget: 10, perLoad: 10, words: wordsAt(0.3, 0.006), leftOut: () => [sample("les_left1", 0.9, null)] });
+    expect(suggestion(await report(big), "stepLessonCap")).toMatchObject({ status: "keep", current: 10, suggested: 10 });
+    // A budget of zero never counts as the cap binding.
+    const zero = db();
+    await seedLoads(zero, { loads: 30, budget: 0, perLoad: 0, leftOut: () => [sample("les_left1", 0.9, null)] });
+    expect(suggestion(await report(zero), "stepLessonCap")).toMatchObject({ status: "keep", current: 0, suggested: 0 });
+  });
+
+  it("only loads made with the current budget decide whether it binds; a caller's own budget is the one compared", async () => {
+    const documents = db();
+    // Twenty loads with budget 5 that did not bind, plus ten older ones with budget 3 that all did: the modal budget is 5 and the binding loads of the other budget do not count.
+    await seedLoads(documents, { loads: 20, budget: 5, words: wordsAt(0.3, 0.006), leftOut: () => [sample("les_left1", 0.1, null)] });
+    const sink = documentMeasureSink(documents, A, () => NOW);
+    for (let i = 0; i < 10; i += 1) {
+      await sink.load({ workspaceId: A, project: "payments", taskId: `old-${String(i)}`, stage: "IMPLEMENT", round: 1, at: NOW - 1_000_000 - i * 60_000, budgetLessons: 3, activeCount: 50, eligibleCount: 50,
+        loaded: [sample("les_0001", 0.5, null), sample("les_0002", 0.5, null), sample("les_0003", 0.5, null)], leftOut: [sample("les_left1", 0.9, null)] });
+    }
+    expect(suggestion(await report(documents), "stepLessonCap")).toMatchObject({ status: "keep", current: 5, suggested: 5 });
+    // The operator says the budget in force is 3: now those ten loads are the ones that count, and they all bound.
+    expect(suggestion(await report(documents, { current: { stepLessonCap: 3 } }), "stepLessonCap")).toMatchObject({ status: "suggested", current: 3, suggested: 4 });
   });
 
   it("the cap share has a threshold: a quarter of the loads binds, fewer does not", async () => {
@@ -206,7 +228,9 @@ describe("suggestions from fixtures", () => {
     const r = await report(documents, { current: { fitFloorWords: 0.5, priorWeightUses: 8, weeklyPicks: 3, fitFloorCosine: Number.NaN, stepLessonCap: -1 } });
     expect(suggestion(r, "fitFloorWords")).toMatchObject({ current: 0.5, suggested: 0.35 });
     expect(suggestion(r, "fitFloorCosine").current).toBe(0.72);
+    // A caller's budget that is not usable leaves the most common budget the loads had (5).
     expect(suggestion(r, "stepLessonCap").current).toBe(5);
+    expect(suggestion(await report(documents, { current: { stepLessonCap: 7 } }), "stepLessonCap")).toMatchObject({ current: 7 });
     expect(suggestion(r, "weeklyPicks")).toMatchObject({ current: 3, suggested: null });
     expect(suggestion(r, "weeklyPicks").message).toContain("keep 3");
   });
