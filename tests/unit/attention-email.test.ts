@@ -110,8 +110,8 @@ describe("the switch", () => {
     expect(root).toContain("...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey })");
     expect(root).not.toContain("client-sesv2");
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
-    // Batch 14: the email seams travel together with the upkeep notice's (#959) in one notification object.
-    expect(broker).toContain("...(wiring.notification === undefined && wiring.upkeep === undefined ? {} : { notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }) } })");
+    // Batch 14: the email seams travel together with the upkeep notice's (#959) in one notification object; batch 17 (#995): the admin-notice reader rides in it too, so it is always given.
+    expect(broker).toContain("notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true }");
     expect(broker).not.toContain("attention-email-sender");
     const sender = readFileSync("packages/broker/src/aws/attention-email-sender.ts", "utf8");
     expect(sender).toContain("new SESv2Client({ maxAttempts: 1 })");
