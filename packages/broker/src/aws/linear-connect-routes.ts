@@ -98,8 +98,8 @@ const isAdmin = (member: z.infer<typeof Membership>) => member.role === "admin" 
 
 /** Revokes tokens Linear just issued that Rovara will not keep (best effort; logged by name only). */
 async function discard(ctx: LinearConnectContext, companyId: string, tokens: LinearTokens): Promise<void> {
-  for (const token of [tokens.access, tokens.refresh]) {
-    if (!await revokeLinearToken({ fetch: ctx.wiring.fetch, token })) ctx.wiring.log({ companyId, event: "linear.revoke_failed" });
+  for (const [token, hint] of [[tokens.refresh, "refresh_token"], [tokens.access, "access_token"]] as const) {
+    if (!await revokeLinearToken({ fetch: ctx.wiring.fetch, token, hint })) ctx.wiring.log({ companyId, event: "linear.revoke_failed" });
   }
 }
 
