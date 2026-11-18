@@ -1,6 +1,7 @@
 // Hosted reviewers use only the gateway's current company attestation. A catalog listing alone grants nothing.
+import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
-import { DesignReviewBindingSchema, SecondReviewerSchema, agentModelIdentity, agentModelName, configuredSecondReviewMode, designReviewActive, type ModelIdentifier, type OrgId, type RegistryView } from "@agentx/contracts";
+import { parseTaskTokenClaims, DesignReviewBindingSchema, SecondReviewerSchema, agentModelIdentity, agentModelName, configuredSecondReviewMode, designReviewActive, type ModelIdentifier, type OrgId, type RegistryView } from "@agentx/contracts";
 import { taskPayerOf } from "../core/model-gateway/describer.js";
 import { RUN_START_ACTION } from "../core/task-flow/money-stop.js";
 import { SPEND_STOP_REASON } from "../core/task-flow/money-stop.js";
@@ -9,10 +10,10 @@ import { estimateSecondReviewUsd, SECOND_REVIEW_TYPICAL_REVIEW_TOKENS } from "..
 import { readSecondReviewSettings } from "../core/second-review/settings.js";
 import { secondOpinionOfTask } from "../core/second-review/store.js";
 import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
-import { workspaceKeys } from "../core/task-flow/workspace-location.js";
+import { readTaskTokenRecords } from "../core/model-gateway/records.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
-import type { TaskTokenDescriber } from "../core/model-gateway/token.js";
-import { bindingSlotOf, putSlotKey, readSlotCeiling, slotKeyRowExists } from "../core/design-review/slot-keys.js";
+import type { TaskTokenDescriber, TaskTokenDescription } from "../core/model-gateway/token.js";
+import { bindingSlotOf, putSlotKey, readSlotCeiling, readSlotKeyRecord, slotKeyRowExists } from "../core/design-review/slot-keys.js";
 import { gatewayRouteOf } from "./gateway-model-selection.js";
 import { reviewerAuthority } from "./reviewer-authority.js";
 import { usdPerMillion } from "../core/cost/price-table.js";
@@ -95,20 +96,33 @@ export function createHostedReviewers(options: HostedReviewerOptions) {
   };
 
   const grants: Pick<TaskTokenDescriber, "describeReviewer" | "reviewerMinted"> = {
-    async describeReviewer(_scope, records, slot) {
+    async describeReviewer(scope, records, slot) {
       const { operation, task, workspace } = records;
       if (operation.kind !== "task" || operation.companyId !== companyId || task.companyId !== companyId || workspace.companyId !== companyId) return undefined;
-      const access = await authority();
-      if (access === undefined || !await admitted(task)) return undefined;
+      if (scope.workspaceId !== workspace.id || scope.operationId !== operation.id || operation.workspaceId !== workspace.id || task.workspaceId !== workspace.id || task.project !== workspace.projectName
+        || operation.status !== "RUNNING" || task.closedAt !== undefined || task.releasedAt !== undefined || task.stopRequest !== undefined || workspace.closedAt !== undefined
+        || ["CLOSING", "CLOSED", "STOPPED"].includes(workspace.status) || ["CLOSED", "MERGED"].includes(task.workflow?.stage ?? "")) return undefined;
+      const keyScope = { orgId: companyId, operationId: operation.id, slot };
+      const exists = await slotKeyRowExists(flow.store, keyScope);
+      const saved = exists ? await readSlotKeyRecord(flow.store, keyScope) : undefined;
+      const first = saved?.reviewerGrant;
+      const now = Math.floor((flow.now?.() ?? new Date()).getTime() / 1000);
+      if (exists && (first?.reviewer === undefined || saved!.askedAgain > 0 || now < first.iat || now + 120 > first.iat + 600 || saved!.expiresAt <= now * 1000)) return undefined;
+      // The gateway already holds the original ceiling. A renewal is no new admission or reservation;
+      // the gateway still checks provider access and session room on every turn.
+      const access = first === undefined ? await authority() : undefined;
+      if (first === undefined && (access === undefined || !await admitted(task))) return undefined;
       let kind: "second_review" | "design_review", alias: string | undefined, ceilingUsd: number | undefined;
-      if (slot === "second_review" && operation.workflowMode === "REVIEW" && operation.designReview === undefined) {
+      if (slot === "second_review" && operation.workflowMode === "REVIEW" && task.workflow?.stage === "REVIEW" && operation.designReview === undefined) {
         const second = SecondReviewerSchema.safeParse(operation.dispatch?.payload?.["workflowSecondReviewer"]);
         if (!second.success || second.data.candidates.length !== 1 || second.data.candidates[0]?.keySlot !== slot || operation.secondReviewPlan?.candidateDigest !== task.workflow?.candidate?.digest) return undefined;
         alias = second.data.candidates[0].modelRoute?.alias;
-        const primary = operation.modelChoice?.route.alias ?? (await flow.modelAccess?.route())?.alias;
-        const provider = access.models.find((entry) => entry.model === primary)?.provider;
-        const other = access.models.find((entry) => entry.model === alias)?.provider;
-        if (provider === undefined || other === undefined || provider === other) return undefined;
+        if (first === undefined) {
+          const primary = operation.modelChoice?.route.alias ?? (await flow.modelAccess?.route())?.alias;
+          const provider = access!.models.find((entry) => entry.model === primary)?.provider;
+          const other = access!.models.find((entry) => entry.model === alias)?.provider;
+          if (provider === undefined || other === undefined || provider === other) return undefined;
+        }
         ceilingUsd = alias === undefined ? undefined : operation.secondReviewPlan?.caps?.[alias]?.capUsd;
         kind = "second_review";
       } else {
@@ -118,26 +132,39 @@ export function createHostedReviewers(options: HostedReviewerOptions) {
         const found = bindingSlotOf(binding.data, slot);
         if (found === undefined) return undefined;
         alias = found.modelRoute?.alias ?? agentModelName(found.model);
-        if (await slotKeyRowExists(flow.store, { orgId: companyId, operationId: operation.id, slot })) return undefined;
         ceilingUsd = await readSlotCeiling(flow.store, { orgId: companyId, operationId: operation.id, slot });
         kind = "design_review";
       }
-      if (alias === undefined || !access.models.some((entry) => entry.model === alias) || ceilingUsd === undefined || !Number.isFinite(ceilingUsd) || ceilingUsd <= 0) return undefined;
-      const room = await options.taskRoomUsd(task);
+      if (alias === undefined || (first === undefined && !access!.models.some((entry) => entry.model === alias)) || ceilingUsd === undefined || !Number.isFinite(ceilingUsd) || ceilingUsd <= 0) return undefined;
+      const room = first?.reviewer?.ceilingUsd ?? await options.taskRoomUsd(task);
       if (!(room > 0) || !Number.isFinite(room)) return undefined;
-      if (await slotKeyRowExists(flow.store, { orgId: companyId, operationId: operation.id, slot })) return undefined;
       const resolved = await taskPayerOf(flow, records);
       if (resolved === undefined) return undefined;
       const { payer, person, origin } = resolved;
-      return { companyId, project: workspace.projectName, payer, ...(person === undefined ? {} : { person }), ...(origin === undefined ? {} : { origin }), taskId: task.taskId, step: kind, models: [alias], reviewer: { kind, slot, ceilingUsd: Math.min(ceilingUsd, access.companyLimitUsd, room) } };
+      const description: TaskTokenDescription = { companyId, project: workspace.projectName, payer, ...(person === undefined ? {} : { person }), ...(origin === undefined ? {} : { origin }), taskId: task.taskId, step: kind, models: [alias], reviewer: { kind, slot, ceilingUsd: Math.min(ceilingUsd, first?.reviewer?.ceilingUsd ?? access!.companyLimitUsd, room) } };
+      if (first?.reviewer === undefined) return description;
+      if (first.reviewer.ceilingUsd > ceilingUsd) return undefined;
+      const original: TaskTokenDescription = { companyId: first.cid, project: first.pid, taskId: first.tid, step: first.stp, payer: first.pay,
+        ...(first.per === undefined ? {} : { person: first.per }), ...(first.src === undefined ? {} : { origin: first.src }), models: first.mdl, reviewer: first.reviewer };
+      if (first.ws !== scope.workspaceId || first.op !== scope.operationId || !isDeepStrictEqual(description, original)) return undefined;
+      return { ...description, reviewerGrant: first };
     },
     async reviewerMinted(operation, description, token, expiresAt) {
       const reviewer = description.reviewer;
       if (reviewer === undefined) return;
-      const stored = await flow.store.get((await workspaceKeys(flow, operation.workspaceId)).operationKey(operation.operationId));
-      const binding = reviewer.kind === "design_review" ? DesignReviewBindingSchema.parse(stored?.["designReview"]) : undefined;
+      // Re-read after signing: a task closed or rebound during key I/O must not get a renewal.
+      const records = await readTaskTokenRecords(flow, operation);
+      const current = await grants.describeReviewer!(operation, records, reviewer.slot);
+      if (current === undefined || !isDeepStrictEqual(current, description)) throw new Error("reviewer access ended");
+      const claims = parseTaskTokenClaims(JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()));
+      if (claims?.reviewer === undefined || claims.exp * 1000 !== expiresAt) throw new Error("invalid reviewer grant");
+      if (description.reviewerGrant !== undefined) {
+        if (claims.jti !== description.reviewerGrant.jti) throw new Error("reviewer identity changed");
+        return;
+      }
+      const binding = reviewer.kind === "design_review" ? DesignReviewBindingSchema.parse(records.operation.designReview) : undefined;
       const slot = binding === undefined ? undefined : bindingSlotOf(binding, reviewer.slot);
-      const kept = await putSlotKey(flow.store, { orgId: companyId, operationId: operation.operationId, slot: reviewer.slot, purpose: slot?.purpose ?? "reviewer", round: binding?.round ?? 1, keyId: createHash("sha256").update(token).digest("hex"), expiresAt, budgetUsd: reviewer.ceilingUsd, alias: description.models[0]!, nowMs: (flow.now?.() ?? new Date()).getTime() });
+      const kept = await putSlotKey(flow.store, { orgId: companyId, operationId: operation.operationId, slot: reviewer.slot, purpose: slot?.purpose ?? "reviewer", round: binding?.round ?? 1, keyId: createHash("sha256").update(token).digest("hex"), expiresAt: (claims.iat + 600) * 1000, budgetUsd: reviewer.ceilingUsd, alias: description.models[0]!, nowMs: claims.iat * 1000, reviewerGrant: claims });
       if (!kept) throw new Error("reviewer key already issued");
     },
   };

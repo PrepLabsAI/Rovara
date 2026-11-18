@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import { agentXError, taskTokenClaimsFor, TASK_TOKEN_ALGORITHM, TASK_TOKEN_SIGNING_INPUT_MAX_BYTES, TASK_TOKEN_TYP, TASK_KEY_PURPOSE, type Payer, type WorkOrigin, type TaskTokenClaims } from "@agentx/contracts";
 import type { TokenSigner } from "../../developer/tokens.js";
@@ -6,7 +7,7 @@ import type { TaskTokenDeadline } from "./deadline.js";
 
 export type TaskTokenSigner = TokenSigner;
 export interface TaskTokenOperation { workspaceId: string; operationId: string; fence: number; reviewerSlot?: string }
-export interface TaskTokenDescription { companyId: string; project: string; person?: string; payer: Payer; taskId: string; step: string; origin?: WorkOrigin; models: string[]; reviewer?: TaskTokenClaims["reviewer"] }
+export interface TaskTokenDescription { companyId: string; project: string; person?: string; payer: Payer; taskId: string; step: string; origin?: WorkOrigin; models: string[]; reviewer?: TaskTokenClaims["reviewer"]; /** Server-side first issuance, never request input. */ reviewerGrant?: TaskTokenClaims }
 export interface TaskTokenDescriber {
   /** The route passes its checked records so the default describer reads each record only once per request. */
   describe(operation: TaskTokenOperation, records?: TaskTokenRecords): Promise<TaskTokenDescription | undefined>;
@@ -33,13 +34,17 @@ export async function mintTaskToken(deps: TaskTokenDeps, operation: TaskTokenOpe
     if (typeof deps.issuer !== "string" || Buffer.byteLength(deps.issuer) > TASK_TOKEN_SIGNING_INPUT_MAX_BYTES) throw invalidModelAccess();
     const iat = Math.floor((deps.now?.() ?? Date.now()) / 1000);
     const claims = taskTokenClaimsFor({
-      iss: deps.issuer, jti: randomUUID(), iat, cid: description.companyId, pid: description.project,
+      iss: deps.issuer, jti: description.reviewerGrant?.jti ?? randomUUID(), iat, cid: description.companyId, pid: description.project,
       ...(description.person === undefined ? {} : { per: description.person }), pay: description.payer, tid: description.taskId,
       ws: operation.workspaceId, op: operation.operationId, stp: description.step,
       ...(description.origin === undefined ? {} : { src: description.origin }), mdl: description.models,
       ...(description.reviewer === undefined ? {} : { reviewer: description.reviewer }),
     });
     if (claims === undefined) throw invalidModelAccess();
+    const first = description.reviewerGrant;
+    // A renewal changes only the clock. Its whole 120 s lifetime must fit in the original session.
+    if (first !== undefined && (description.reviewer === undefined || iat < first.iat || claims.exp > first.iat + 600
+      || !isDeepStrictEqual({ ...claims, iat: first.iat, nbf: first.nbf, exp: first.exp }, first))) throw invalidModelAccess();
     const key = await deps.signer.publicJwk();
     deadline?.check();
     if (key.rovara_purpose !== TASK_KEY_PURPOSE || key.kty !== "RSA" || key.alg !== "RS256" || key.use !== "sig" || typeof key.kid !== "string" || !/^[A-Za-z0-9_-]{16}$/u.test(key.kid)) throw invalidModelAccess();
