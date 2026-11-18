@@ -38,7 +38,7 @@ export const fitPk = (companyId: string, project: string): string => companyScop
 /** The partition of a project's merged and reverted task rows. */
 export const mergePk = (companyId: string, project: string): string => companyScoped(companyId, `LESSON_MERGE#${project}`);
 /** Times are written as 16 digits, so the sort key orders by time. */
-const timeSk = (at: number): string => String(Math.max(0, Math.floor(at))).padStart(16, "0");
+export const timeSk = (at: number): string => String(Math.max(0, Math.floor(at))).padStart(16, "0");
 
 export type FitSample = {
   id: string;

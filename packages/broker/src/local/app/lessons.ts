@@ -37,7 +37,8 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
 import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanFacts, type RevertedChange } from "../../lessons/host-glue.js";
+import { RECENT_PLAN_BYTES_MAX, cachedRecentTasks } from "../../lessons/recent-tasks.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../../lessons/area-check-hosts.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -172,6 +173,14 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     owner: { id: ownerId, name: owner.displayName }, taskProject, projectRepoScopes: repositories.scopes(), model, spend, learning: options.learning,
     // A reason that was recorded is cleared when it is read once its cause is gone (a provider was connected).
     pauseStillApplies: async (_workspaceId, _project, code) => (code === "no_provider" ? (await options.model.choice()) === undefined : true),
+    // "Would have applied to N tasks last month" (the weekly list's tie-break): the project's tasks of the last 30 days from its own load rows, each read from its own record and plan, as the loader reads them.
+    recentTasks: cachedRecentTasks({
+      documents: flow.store, companyId, now,
+      ports: {
+        task: async (taskId) => { const task = await readTask(flow, taskId); return task === undefined || task.companyId !== companyId ? undefined : { project: task.project, files: (await taskPlanFacts((objectKey, max) => readText(objectKey, Math.min(max, RECENT_PLAN_BYTES_MAX)), task))?.files ?? [] }; },
+        repositories: async (project) => { const latest = await flow.projects.latest(project); return latest === undefined ? undefined : codeRepositoriesOf(latest.definition).map((repository) => repository.name); },
+      },
+    }),
   });
 
   // The lessons file of each repository: off per repository until the owner switches it on, then one weekly pull request that proposes the lessons learned only from that repository's own words.

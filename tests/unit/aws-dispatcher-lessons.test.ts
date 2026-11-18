@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, orgProjectCatalogKey, projectRevisionKey, lessonKey, lessonSetKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
-import { createDispatcherLearned, DISPATCHER_LESSONS_UNAVAILABLE, DISPATCHER_LESSONS_LIMITS } from "../../packages/broker/src/aws/worker-machines/dispatcher-lessons.js";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, companyScoped, orgProjectCatalogKey, projectRevisionKey, lessonKey, lessonSetKey, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { createDispatcherLearned, DISPATCHER_LESSONS_UNAVAILABLE, DISPATCHER_LESSONS_LIMITS, DISPATCHER_SIGNALS_LIMITS } from "../../packages/broker/src/aws/worker-machines/dispatcher-lessons.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
+import { documentEvidenceSink } from "../../packages/broker/src/lessons/evidence.js";
+import { SIGNALS_TTL_MS } from "../../packages/broker/src/lessons/scoring-settings.js";
+import { documentMeasureSink } from "../../packages/broker/src/lessons/measure.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -14,6 +17,7 @@ const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const WS = "11111111-1111-4111-8111-111111111111";
 const TASK = "22222222-2222-4222-8222-222222222222";
 const now = 1_800_000_000_000;
+const DAY = 86_400_000;
 const request = { workspaceId: WS, operationId: TASK, workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] };
 const definition: ProjectDefinition = { name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "demo", url: "https://example.test/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }] };
 afterEach(() => { vi.useRealTimers(); setLearnedLessonsGate(undefined); });
@@ -279,5 +283,144 @@ describe("read-only dispatcher lessons: the knowledge briefing (lead 4 L4-AK2)",
     expect(answer.knowledgeContext).toBeUndefined();
     // An older worker (no knowledge feature) is not sent the plan check's lessons: it gets exactly what it always did.
     expect(await w.learned({ ...request, workflowMode: "PLAN_CRITIQUE" })).toEqual({});
+  });
+});
+
+describe("read-only dispatcher lessons: the project's signals rank lessons as the broker's loader does (L4-LP12b)", () => {
+  const SECOND = "les_aaaa2222";
+  const key = { workspaceId: A, project: "payments" };
+  /** Two lessons that fit the task about as well as each other (so what separates them is the signals), neither a twin of the other. */
+  async function pair(w: Awaited<ReturnType<typeof world>>, over: { second?: Partial<Parameters<typeof lessonRecord>[0]> } = {}) {
+    const lessons = new DocumentLessonStore(w.store, () => now);
+    const first = (await lessons.get(key, "les_aaaa1111"))!;
+    const second = lessonRecord({ ...first, id: SECOND, title: "Retry network calls", body: "Wrap every network call in withRetry, and log each attempt.", approvals: first.approvals, ...over.second });
+    expect((await lessons.commit(key, await lessons.setVersion(key), [second], now)).ok).toBe(true);
+    for (const write of w.writes) write.mockClear();
+  }
+  const order = async (w: Awaited<ReturnType<typeof world>>): Promise<string[]> => ((await w.learned(request)).learnedContext?.lessons ?? []).map((lesson) => lesson.id);
+  const questionRow = (company: string, lessonId: string, taskId: string) => ({ pk: companyScoped(company, "LESSON_QUESTION#payments"), sk: `Q#${lessonId}#${taskId}`, entityType: "LESSON_QUESTION", project: "payments", lessonId, taskId, at: now - DAY, keepUntil: now + 30 * DAY });
+
+  it("both lessons load with no signals; the order is the loader's with no evidence (the baseline for the tests below)", async () => {
+    const w = await world();
+    await pair(w);
+    expect((await order(w)).sort()).toEqual(["les_aaaa1111", SECOND]);
+  });
+
+  it("a lesson under question ranks below the one that is not, as on the broker path; another company's question changes nothing", async () => {
+    const w = await world();
+    await pair(w);
+    const [first] = await order(w);
+    const other = first === "les_aaaa1111" ? SECOND : "les_aaaa1111";
+    // Another company's partition names the lesson: no effect.
+    await w.store.put({ item: questionRow(B, first!, "t-1") });
+    expect((await order(w))[0]).toBe(first);
+    await w.store.put({ item: questionRow(A, first!, "t-1") });
+    const after = await createDispatcherLearned(w.options)(request);
+    expect(after.learnedContext?.lessons.map((lesson) => lesson.id)[0]).toBe(other);
+  });
+
+  it("the strength prior is centred on the project's clean-merge rate: the same evidence ranks a lesson differently where merges are clean and where they are mostly reverted", async () => {
+    const rank = async (reverted: number) => {
+      const w = await world();
+      await pair(w);
+      const measure = documentMeasureSink(w.store, A, () => now);
+      for (let i = 0; i < 10; i += 1) {
+        await measure.merged({ workspaceId: A, project: "payments", taskId: `task-m-${String(i)}`, at: now - 20 * DAY });
+        if (i < reverted) await measure.reverted({ workspaceId: A, project: "payments", taskId: `task-m-${String(i)}`, at: now - 10 * DAY });
+      }
+      // One lesson has an even record (2 for, 2 against); the other has none, so it is worth the prior.
+      const evidence = documentEvidenceSink(w.store, A);
+      for (const [kind, n] of [["for", 2], ["against", 2]] as const) for (let i = 0; i < n; i += 1) await evidence.note({ workspaceId: A, project: "payments", lessonId: SECOND, kind, weight: 1, at: now - DAY, id: `${kind}-${String(i)}` });
+      for (const write of w.writes) write.mockClear();
+      const ids = await order(w);
+      for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+      return ids;
+    };
+    // Clean merges (prior 0.9): the untried lesson is worth more than an even record. Mostly reverted (prior 0.1): the even record is worth more than nothing.
+    expect((await rank(1))[0]).toBe("les_aaaa1111");
+    expect((await rank(9))[0]).toBe(SECOND);
+  });
+
+  it("the signals have a share of their own and never fail the lessons: a store that cannot answer queries, one that never answers, and rows past the share all give the neutral ranking", async () => {
+    const baseline = await world();
+    await pair(baseline);
+    const expected = await order(baseline);
+    const failing = await world();
+    await pair(failing);
+    vi.spyOn(failing.store, "query").mockRejectedValue(new Error("private backend cause"));
+    expect(await order(failing)).toEqual(expected);
+    const hanging = await world();
+    await pair(hanging);
+    vi.spyOn(hanging.store, "query").mockImplementation(() => new Promise(() => undefined));
+    expect(await order(hanging)).toEqual(expected);
+    // A project with more rows than the share is ranked on the neutral prior, not on a part of its rows, and the lessons still load: rows past the item share, reads past the read share, bytes past the byte share.
+    const evidenceFor = async (w: Awaited<ReturnType<typeof world>>, rows: number) => {
+      const evidence = documentEvidenceSink(w.store, A);
+      for (let i = 0; i < rows; i += 1) await evidence.note({ workspaceId: A, project: "payments", lessonId: expected[0]!, kind: "against", weight: 1, at: now - DAY, id: `row-${String(i)}` });
+      for (const write of w.writes) write.mockClear();
+    };
+    const crowded = await world();
+    await pair(crowded);
+    await evidenceFor(crowded, DISPATCHER_SIGNALS_LIMITS.items + 100);
+    expect(await order(crowded)).toEqual(expected);
+    // The same rows within the share DO rank the lesson down (so the cut above is what kept the neutral order, not an absence of evidence).
+    const within = await world();
+    await pair(within);
+    await evidenceFor(within, 40);
+    expect((await order(within))[0]).not.toBe(expected[0]);
+    const limits = DISPATCHER_SIGNALS_LIMITS as { -readonly [K in keyof typeof DISPATCHER_SIGNALS_LIMITS]: number };
+    const saved = { ...limits };
+    try {
+      for (const cut of [{ reads: 3 }, { bytes: 200 }] as const) {
+        Object.assign(limits, saved, cut);
+        const cutWorld = await world();
+        await pair(cutWorld);
+        await evidenceFor(cutWorld, 40);
+        expect(await order(cutWorld), JSON.stringify(cut)).toEqual(expected);
+      }
+    } finally { Object.assign(limits, saved); }
+  });
+
+  it("it reads only this company's partitions for this project, never writes, and reads nothing when nothing loads", async () => {
+    const w = await world();
+    await pair(w);
+    const asked = vi.spyOn(w.store, "query");
+    await order(w);
+    expect(asked.mock.calls.length).toBeGreaterThan(0);
+    for (const [request] of asked.mock.calls) expect(request.pk).toContain(A);
+    for (const [request] of asked.mock.calls) expect(request.pk).toContain("payments");
+    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    // A project whose mode does not load reads no signals.
+    const off = await world();
+    await pair(off);
+    const none = vi.spyOn(off.store, "query");
+    expect(await createDispatcherLearned({ ...off.options, lessonsSwitch: { mode: "off" } })(request)).toEqual({});
+    expect(none).not.toHaveBeenCalled();
+  });
+
+  it("an answer is kept for a while per project (the next dispatch of the same project does not read the rows again) and each company has its own", async () => {
+    const w = await world();
+    await pair(w);
+    const learned = createDispatcherLearned(w.options);
+    const asked = vi.spyOn(w.store, "query");
+    await learned(request);
+    const first = asked.mock.calls.length;
+    expect(first).toBeGreaterThan(0);
+    await learned(request);
+    expect(asked.mock.calls.length).toBe(first);
+    // Past its time the answer is read again.
+    let at = now;
+    const timed = createDispatcherLearned({ ...w.options, now: () => at });
+    await timed(request);
+    expect(asked.mock.calls.length).toBe(first * 2);
+    at += SIGNALS_TTL_MS - 1;
+    await timed(request);
+    expect(asked.mock.calls.length).toBe(first * 2);
+    at += 2;
+    await timed(request);
+    expect(asked.mock.calls.length).toBe(first * 3);
+    const another = createDispatcherLearned(w.options);
+    await another(request);
+    expect(asked.mock.calls.length).toBe(first * 4);
   });
 });

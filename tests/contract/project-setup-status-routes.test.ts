@@ -781,11 +781,11 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
 
 describe("what did not change", () => {
   it("the route table keeps every existing row exactly; the three new rows are full-access only", () => {
-    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none"];
+    const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep"];
     const rows = DEV_ROUTES.map((route) => `${route.method} ${route.path} ${route.requires}`);
     for (const row of added) expect(rows).toContain(`${row} full`);
     const existing = rows.filter((row) => !added.some((path) => row === `${path} full`));
-    expect(existing).toHaveLength(DEV_ROUTES.length - 3);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 4);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
   });
@@ -819,5 +819,6 @@ describe("what did not change", () => {
 // Batch 12 (rule D): and for #869's 6 new connected sign-in rows (/v1/dev/me/sign-ins*, /v1/dev/company/members/{personId}/sign-ins*; all added, none changed; removing exactly
 // those 6 rows still gives 0a31f2f4...).
 // Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
+// L4-LP12b (rule D): one new row, POST /v1/dev/projects/{project}/lessons/{lessonId}/keep (full; the answer to the weekly list's "Keep it?" card): added, none changed, so the digest of every other row is unchanged (it still gives the value below with this row removed).
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
 const EXISTING_ROUTES_DIGEST = "8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80";
