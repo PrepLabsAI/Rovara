@@ -184,6 +184,8 @@ describe("which company a Slack workspace is", () => {
     expect(await companyOf({ channel: "slack", tenant: TEAM_C })).toBeUndefined();
     expect(await companyOf({ channel: "teams", tenant: TEAM_A })).toBeUndefined();
     expect(await companyOf({ channel: "slack", tenant: "not-a-team" })).toBeUndefined();
+    // Even where the bindings would answer for anything, a value that is not a Slack team id is nobody's.
+    expect(await hostedSlackCompanyOf({ workspaces: { requireCompany: async () => A }, legacyTeamId: TEAM_A })({ channel: "slack", tenant: "not-a-team" })).toBeUndefined();
   });
   it("without company mode, only the install's own team, and it is the implicit company's; never every tenant", async () => {
     const companyOf = hostedSlackCompanyOf({ workspaces: undefined, legacyTeamId: TEAM_A });
@@ -200,7 +202,7 @@ describe("the broker and the core root hand the Slack source over", () => {
   const body = call.slice(0, call.indexOf("builtCoreRoot = coreRoot;"));
   const rootSource = readFileSync(new URL("../../packages/broker/src/aws/core-engine-root.ts", import.meta.url), "utf8");
   it("the broker passes lessonsSlack from the deployment's adapter, its secrets client, the company-mode bindings and the install's team", () => {
-    expect(body).toMatch(/lessonsSlack: slack[\s\S]*hostedLessonsSlack\(\{ env: process\.env, secretsManager, workspaces: slackCompany\?\.workspaces, legacyTeamId: process\.env\.SLACK_TEAM_ID \?\? process\.env\.SLACK_ADAPTER_TEAM_ID \}\)/u);
+    expect(body).toMatch(/lessonsSlack: slack[\s\S]*hostedLessonsSlack\(\{ env: process\.env, secretsManager, workspaces: slackCompany\?\.workspaces, legacyTeamId: process\.env\.SLACK_TEAM_ID \|\| process\.env\.SLACK_ADAPTER_TEAM_ID \}\)/u);
   });
   it("the core root gives each company's lessons its own company map and command", () => {
     expect(rootSource).toMatch(/channelCompanyOf: slack\.companyOf, slackThreadCommand: slack\.command \}\)\)\(inputs\.lessonsSlack\?\.\(companyId\)\)/u);

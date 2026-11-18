@@ -81,7 +81,12 @@ async function world() {
       throw new Error("unknown table");
     }),
   };
-  const peopleFor = (company: string, signInTableName: string | undefined | null = SIGN_IN) => createDispatcherLessonsPeople({ documentClient, stateTableName: STATE, signInTableName: signInTableName === null ? undefined : signInTableName, now: () => now })(company, { store: async () => store });
+  // ONE factory per sign-in setting, as the deployment has: every company's port comes from it.
+  const factories = new Map<string | null | undefined, ReturnType<typeof createDispatcherLessonsPeople>>();
+  const peopleFor = (company: string, signInTableName: string | undefined | null = SIGN_IN) => {
+    if (!factories.has(signInTableName)) factories.set(signInTableName, createDispatcherLessonsPeople({ documentClient, stateTableName: STATE, signInTableName: signInTableName === null ? undefined : signInTableName, now: () => now }));
+    return factories.get(signInTableName)!(company, { store: async () => store });
+  };
   const flowFor = (company: typeof A | typeof B, signInTableName: string | undefined | null = SIGN_IN) => hostedDispatcherFlow({ ROVARA_CORE_LESSONS: `on:${A}:${B}` }, { companyId: company, documentClient: documentClient as never, tableName: STATE, store, people: peopleFor(company, signInTableName), now: () => now })!;
   const writes = [vi.spyOn(store, "put"), vi.spyOn(store, "update"), vi.spyOn(store, "delete"), vi.spyOn(store, "transact")];
   return { store, signIn, sent, documentClient, peopleFor, flowFor, writes };
@@ -204,6 +209,8 @@ describe("the client the port reads through", () => {
       get(STATE, "TASK#x", "META"),
       get(STATE, "MEMBER#x", "OTHER#payments"),
       get("other-table", "MEMBER#x", "PROJECT#payments"),
+      get("other-table", "COMPANY_MEMBER#x", "COMPANY"),
+      get("other-table", "DEVELOPER#x", "META"),
     ]) await expect(client.send(command)).rejects.toMatchObject({ message: `RUNTIME_UNAVAILABLE: ${NO_PEOPLE_HERE}` });
     expect(inner.send).not.toHaveBeenCalled();
   });
