@@ -271,9 +271,9 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     }
     if (route === "replay") {
       if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-      const authorized = await mayChange();
-      if (!onRoster && role !== "owner" && role !== "admin") throw notFound(NO_SUCH_PROJECT);
-      if (!authorized) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
+      // The measure read's rule (DEC 254zzz34): on the project's roster like every lesson read, then a maintainer, company admin or owner.
+      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
+      if (!(await mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
       const params = Object.fromEntries(request.query?.entries() ?? []);
       if (Object.keys(params).some((name) => name !== "tasks") || (request.query?.getAll("tasks").length ?? 0) > 1) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
       const rawTasks = request.query?.get("tasks") ?? undefined;

@@ -18,7 +18,7 @@ import { createDocumentMilestones, type DocumentMilestones } from "../core/miles
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
-import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanLoadFacts, type LessonsHost } from "../lessons/host-glue.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
@@ -241,7 +241,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   const projectExists = async (project: string): Promise<boolean> => (await deps.projects.latest(project)) !== undefined;
 
   const replay = async (project: string, limit: number): Promise<ReturnType<typeof compareLessonReplay>> =>
-    (await import("../lessons/replay-project.js")).replayProjectLessons({ companyId, project, limit, store: deps.store, projects: deps.projects, runtime, now });
+    (await import("../lessons/replay-project.js")).replayProjectLessons({ companyId, project, limit, store: deps.store, projects: deps.projects, runtime, now, planFacts: (task) => taskPlanLoadFacts(readText, task) });
 
   return { companyId, runtime, host, milestones, sources: { source: sources.source, rows: sources.rows }, readTask: readOwnTask, projectExists, replay, attach, service };
 }

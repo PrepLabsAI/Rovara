@@ -28,6 +28,9 @@ export function registerLessonsReplayCommand(program: Command, context: { home: 
         throw agentXError(response.status === 401 ? "AUTH_REQUIRED" : response.status === 403 ? "FORBIDDEN" : response.status === 404 ? "NOT_FOUND" : "RUNTIME_UNAVAILABLE", message);
       }
       if (options.json === true || globals.json) context.stdout.write(`${JSON.stringify({ ok: true, data: body })}\n`);
-      else context.stdout.write(`${body.project}: ${body.totals.changedTasks} changed tasks, ${body.totals.lessonsGained} lessons gained, ${body.totals.lessonsLost} lost.\n`);
+      else {
+        const lines = body.tasks.filter((load) => load.changed).map((load) => `  ${load.taskId} ${load.stage} round ${load.round}: gained ${load.gained.join(", ") || "none"}; lost ${load.lost.join(", ") || "none"}`);
+        context.stdout.write(`${body.project}: ${body.totals.changedTasks} changed tasks, ${body.totals.lessonsGained} lessons gained, ${body.totals.lessonsLost} lost.\n${lines.map((line) => `${line}\n`).join("")}`);
+      }
     });
 }

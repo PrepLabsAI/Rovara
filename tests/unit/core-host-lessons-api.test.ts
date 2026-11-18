@@ -172,11 +172,13 @@ describe("lessons replay route", () => {
     expect((a.ok && b.ok) ? [a.body.tasks, b.body.tasks] : []).toEqual([[expect.objectContaining({ taskId: "task-a" })], [expect.objectContaining({ taskId: "task-b" })]]);
   });
 
-  it("allows a company admin to replay without project roster membership", async () => {
+  it("refuses a company admin who is not on the project's roster, like the measure read", async () => {
     const w = await setUp();
     vi.spyOn(w.people, "onProjectRoster").mockImplementation(async (companyId, project, personId) => personId !== "a-admin" && project === "payments" && (companyId === A || companyId === B));
-    vi.spyOn(w.lessons.get(A)!, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
-    expect((await call(api(w).api, "a-admin", "GET", PATH)).ok).toBe(true);
+    const replay = vi.spyOn(w.lessons.get(A)!, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
+    expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, status: 404 });
+    expect((await call(api(w).api, "a-admin", "GET", `${P}/lessons/measure`)).ok).toBe(false);
+    expect(replay).not.toHaveBeenCalled();
   });
 
   it("replays a similarity-eligible task from stored data without embeddings, model calls, or writes", async () => {

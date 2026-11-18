@@ -37,7 +37,7 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
 import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
-import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanLoadFacts, type RevertedChange } from "../../lessons/host-glue.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../../lessons/area-check-hosts.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -435,7 +435,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
   const replay: LocalLessons["replay"] = async (project, limit) => {
     const { replayProjectLessons } = await import("../../lessons/replay-project.js");
-    return replayProjectLessons({ companyId, project, limit, store: flow.store, projects: flow.projects, runtime, now });
+    return replayProjectLessons({ companyId, project, limit, store: flow.store, projects: flow.projects, runtime, now, planFacts: (task) => taskPlanLoadFacts(readText, task) });
   };
 
   return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, replay, command, tick, noteReverted, noteSentBack };
