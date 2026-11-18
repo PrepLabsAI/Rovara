@@ -44,7 +44,7 @@ const identity: Pick<IdentityProvider, "resolveExternalAccount"> = {
 const careless: Pick<IdentityProvider, "resolveExternalAccount"> = {
   async resolveExternalAccount(_companyId, account) { const found = MEMBERS[account.accountId]; return found === undefined ? undefined : principalOf(found.companyId, found.personId); },
 };
-const people = (over: { roster?: string[]; erased?: string[] } = {}): HostedLessonPeople => ({
+const people = (over: { roster?: readonly string[]; erased?: readonly string[] } = {}): HostedLessonPeople => ({
   async approvers() { return { complete: true, membershipVersion: 1, ownerIds: [], eligibleIds: [], lastEligibleLossAtMs: null }; },
   async onProjectRoster(company, _project, personId) { return personId === localOwnerPrincipal({ companyId: company }).personId || (over.roster ?? ["member-rae"]).includes(personId); },
   async linkedAccounts() { return []; }, async displayName() { return undefined; }, async isErased(_company, personId) { return (over.erased ?? []).includes(personId); },
@@ -53,7 +53,7 @@ const people = (over: { roster?: string[]; erased?: string[] } = {}): HostedLess
 interface Company { runtime: CoreRuntime; lessons: CoreLessons; taskId: string }
 interface Setup { fake: FakeWorld; a: Company; b: Company; model: ScriptedModel; spend: Spend; entries: Array<Record<string, unknown>>; branch: string; rovara: string; number: number; url: string; push(head: string, over?: Partial<HumanEditPush>): HumanEditPush }
 
-async function setup(over: { learning?: boolean; people?: Parameters<typeof people>[0]; replies?: string[]; identity?: Pick<IdentityProvider, "resolveExternalAccount"> | null } = {}): Promise<Setup> {
+async function setup(over: { learning?: boolean; people?: { roster?: readonly string[]; erased?: readonly string[] }; replies?: string[]; identity?: Pick<IdentityProvider, "resolveExternalAccount"> | null } = {}): Promise<Setup> {
   const fake = createFakeWorld();
   const env = { [CORE_LESSONS_VARIABLE]: "on" };
   setCoreLessonsGate(env);

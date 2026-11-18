@@ -8,6 +8,9 @@
 //     a mixed push (a bot's, a merge's, an unlinked identity's) is left out: only the person's commits are read.
 //  3. BOUND  the person's commits together: a diff the host cut, or over the line or file limits, is `diff_too_large` and nothing of it is read; what is read is cut to a total of changed lines and files, each line redacted.
 //  4. IGNORE what teaches nothing (the source's own list): lockfiles, generated and vendored files, renames with no change, whitespace-only changes, and an edit under 3 changed lines in all (`trivial`).
+// Known and accepted limits (review L4-LM1c): no signature is required, so a writer who spoofs a member's commit email, or automation that commits as a member (the host's web committer also commits API edits made with
+// a member's token; an Actions job may commit as its actor), can have its lines credited to that member. What comes out is only a DRAFT lesson, and a person approves a lesson before an agent uses it. A merge's second-parent
+// commits are not read (lines are lost, never misattributed). Each new head is read from Rovara's last push, so a second person's push re-reads the first one's commits (bounded by the commit walk and the learning spend cap).
 // The changed lines are returned for the caller to hand on ONCE, in memory; nothing here stores them, and the reasons below are the only thing a caller may keep.
 import { redactText, type CodeHost, type HostScope, type PageBudget, type RepositoryRef, type ChangeRequestFile, type CommitChanges } from "@agentx/contracts";
 import type { HumanEditFile } from "./capture-types.js";
