@@ -43,6 +43,13 @@ describe("the default allow-list", () => {
     expect([...DEFAULT_AGENT_ALLOW_DOMAINS]).toEqual([...EXACT_LIST, ...VERTEX_GROUP_HOSTS]);
   });
 
+  it("pins the Vertex AI locations by hand: the list is not whatever the catalog constant holds", () => {
+    expect(VERTEX_LOCATIONS).toHaveLength(45);
+    expect([...VERTEX_LOCATIONS].sort().join(" ")).toBe(
+      "africa-south1 asia-east1 asia-east2 asia-northeast1 asia-northeast2 asia-northeast3 asia-south1 asia-south2 asia-southeast1 asia-southeast2 australia-southeast1 australia-southeast2 eu europe-central2 europe-north1 europe-north2 europe-southwest1 europe-west1 europe-west10 europe-west12 europe-west2 europe-west3 europe-west4 europe-west6 europe-west8 europe-west9 me-central1 me-central2 me-west1 northamerica-northeast1 northamerica-northeast2 northamerica-south1 southamerica-east1 southamerica-west1 us us-central1 us-east1 us-east4 us-east5 us-south1 us-west1 us-west2 us-west3 us-west4 us-west8",
+    );
+  });
+
   it("holds Google's Vertex AI and Gemini names as one named group of exact hosts, each with a reason, and nothing broad", () => {
     expect(DEFAULT_AGENT_ALLOW_GROUPS.map((group) => group.id)).toEqual(["google-vertex-ai"]);
     expect(GOOGLE_VERTEX_AI_ALLOW_GROUP.name).toBe("Google Vertex AI");

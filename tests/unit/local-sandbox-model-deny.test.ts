@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, PluginConfigSchema, builtinModelCatalog, type CheckEntry } from "@agentx/contracts";
+import { GOOGLE_VERTEX_AI_ALLOW_GROUP, IMPLICIT_COMPANY_ID, MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, PluginConfigSchema, builtinModelCatalog, type CheckEntry } from "@agentx/contracts";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
 import { gatewayConfig, type GatewayInput } from "../../packages/broker/src/local/isolation/stack.js";
 import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
@@ -222,6 +222,10 @@ describe("the default list's Google Vertex AI group at the egress gateway (owner
       expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "worker")), `${host} worker`).toBe(3);
       expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "sandbox")), `${host} sandbox`).toBe(3);
     }
+  });
+  it("every host of the group except the three token hosts is on the laptop's sandbox deny list", () => {
+    for (const { host } of GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts) if (!SANDBOX_DENY_LEAVES_OUT.includes(host)) expect(laptopSandboxDenyList(), host).toContain(host);
+    expect(GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.filter(({ host }) => SANDBOX_DENY_LEAVES_OUT.includes(host)).map(({ host }) => host).sort()).toEqual([...SANDBOX_DENY_LEAVES_OUT]);
   });
   it("the sandbox still cannot reach the model hosts (the sandbox deny wins) while the token hosts stay reachable, as before", async () => {
     const gateway = await load(DEFAULT_ONLY);
