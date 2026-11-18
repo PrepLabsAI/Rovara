@@ -295,6 +295,19 @@ describe("the last owner and the fences", () => {
     expect(h.audits(A)).toEqual([]);
   });
 
+  it("the store's own transaction fences the successor: removed after its read, before its write, nothing changes", async () => {
+    const h = world();
+    const store = new CompanySignInStore({ documentClient: h.db, tableName: "SignIn", now: () => NOW });
+    const send = h.db.send.bind(h.db);
+    h.db.send = (async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name === "TransactWriteCommand") h.join(PEER, A, "member", { revokedAt: TIME });
+      return send(command as never);
+    });
+    await expect(store.setRevoked(A, LEAVER, true, ADMIN, { expectedRole: "member", successorId: PEER })).rejects.toMatchObject({ response: { message: SUCCESSOR_INVALID } });
+    h.db.send = send;
+    expect(h.revoked(LEAVER)).toBe(false);
+  });
+
   it("the store refuses to remove a sole owner even for an operator naming a successor", async () => {
     const h = world();
     const store = new CompanySignInStore({ documentClient: h.db, tableName: "SignIn", now: () => NOW });
@@ -305,6 +318,8 @@ describe("the last owner and the fences", () => {
   it("a role that is not the one the remover saw is refused, at the route and inside the transaction", async () => {
     const h = world(); h.agent(A, "agt_one", LEAVER);
     expect(await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "admin" })).toEqual(refusal(409, "CHANGE_STALE", REMOVAL_CHANGED));
+    // The route refuses it itself: nothing is started or forwarded.
+    expect(h.forwarded).toEqual([]); expect(h.db.find((item) => item.entityType === "COMPANY_MEMBER_REMOVAL")).toEqual([]);
     // The role changes between the route's read and the identity side's write.
     const helper = h.ctx.members;
     h.ctx.members = { ...helper, revoke: async (caller, request) => { h.join(LEAVER, A, "admin"); return helper.revoke(caller, request); } };
@@ -404,6 +419,18 @@ describe("a STARTED record ends a membership only as its own prompt retry (revie
 });
 
 describe("bounds", () => {
+  it("closed tasks never count: 600 closed index rows and 250 closed co-owned tasks still preview and remove (review M3)", async () => {
+    const h = world(); h.task(TASK1);
+    for (let i = 0; i < 600; i++) h.db.set({ pk: `DEVELOPER#${LEAVER}`, sk: `TASK#${TIME}#c${String(i).padStart(4, "0")}`, entityType: "DEVELOPER_TASK_INDEX", taskId: `c${String(i)}`, status: "CLOSED" });
+    for (let i = 0; i < 250; i++) {
+      const taskId = `${String(i).padStart(8, "0")}-1111-4111-8111-111111111111`;
+      h.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: OWNER, companyId: A, project: "alpha", createdAt: TIME, closedAt: TIME, workflow: { revision: 1, stage: "CLOSED" } });
+      h.db.set({ pk: `ORG#${A}#INVOLVED#${LEAVER}`, sk: `TASK#${TIME}#${taskId}`, entityType: "TASK_INVOLVED", companyId: A, personId: LEAVER, taskId, createdAt: TIME, addedAt: TIME });
+    }
+    expect((await h.preview(LEAVER, PEER)).body["handOver"]).toMatchObject({ tasks: 1, tasksLeft: 0 });
+    expect((await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).body["moved"]).toMatchObject({ tasks: 1 });
+  });
+
   it("open tasks count toward the one transaction BEFORE anyone is removed (review H1)", async () => {
     const h = world();
     for (let i = 0; i < 25; i++) h.task(`${String(i).padStart(8, "0")}-0000-4000-8000-000000000000`);

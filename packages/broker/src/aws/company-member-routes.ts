@@ -57,7 +57,8 @@ const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> aga
 const REQUEST_INVALID = "the request is not valid";
 
 /** Total bounds for one preview: rows read per index, open tasks looked at, and the members one page names. */
-export const COMPANY_MEMBER_ROUTE_LIMITS = { projectRows: 500, taskRows: 500, openTasks: 200, page: 100 } as const;
+// taskRows: the person's whole task index (closed tasks included), so a long-tenured person can still be previewed (DEC 254zzz84 (5) review); the 200 open-task bound is unchanged.
+export const COMPANY_MEMBER_ROUTE_LIMITS = { projectRows: 500, taskRows: 5_000, openTasks: 200, page: 100 } as const;
 
 export type CompanyMemberActions = ReturnType<typeof companyMemberActionsThroughLambda>;
 
