@@ -266,7 +266,7 @@ describe("the hosted answer route with the engine's briefing join (lead 4 L4-AK2
     };
     const model = scriptedModel([answer([goodSentence])]);
     const wiringOf = (runtimeCompany: OrgId): HostedAnswersWiring => ({
-      standing: async (personId, companyId, project) => { const access = roles[`${companyId}/${project}/${personId}`]; return access === undefined ? undefined : { access, basis: access === "manage" ? "company-admin" : "project-grant" } as never; },
+      standing: async (personId, companyId, project) => { const access = roles[`${companyId}/${project}/${personId}`]; return access === "manage" ? { access, basis: "company-admin" } : { access: access ?? "none" }; },
       repositories: async () => ({ names: ["demo"], handles: [{ name: "demo", defaultBranch: "main", repository: { url: "https://github.com/example/demo.git" }, scope: { orgId: runtimeCompany }, host: { baseBranchHead: async () => HEAD, fileAtRevision: async () => REFUND_TS } }] }),
       model: () => model,
       briefing: answersBriefingOf(runtimeCompany, hostOf),
