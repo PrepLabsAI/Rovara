@@ -13,7 +13,7 @@ import {
   workflowFindingAccepted,
 } from "@agentx/contracts";
 import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
-import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
+import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../developer/pull-request-feedback-section.js";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { documentSummaryLines } from "../../developer/workflow-messages.js";
 import { breakLinearKeys } from "./linear-close.js";
@@ -29,6 +29,9 @@ export interface PullRequestBodyTask {
 }
 
 const WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES = 30_000;
+/** The closing drawer of a version 2 description, which holds the plan summary and the record (pull-request-body.ts). */
+const RECORD_DRAWER_START = "<details>";
+const RECORD_DRAWER_END = "</details>";
 const WORKFLOW_PLAN_SUMMARY_LINE_MAX = 500;
 /** At most this many accepted findings are listed in the pull request description. */
 const WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED = 20;
@@ -52,11 +55,23 @@ const byteLength = (text: string): number => Buffer.byteLength(text, "utf8");
 const cutBytes = (text: string, max: number): string => Buffer.from(text, "utf8").subarray(0, max).toString("utf8").replace(/\uFFFD+$/u, "");
 
 /**
- * The body within the cap. A body that is over it (hiding an address can lengthen a line) loses the end of its summary, in front of the marked status block, before anything is cut from the end:
- * the block's end marker, the session link and the closing line stay, so the status updates and the Linear close line can still find the block.
+ * The body within the cap. A body that is over it (hiding an address can lengthen a line) first loses the plan of the closing "Plan and record" drawer (a version 2 description) or the end of its summary in front of the marked
+ * block (a version 1 description), before anything is cut from the end: the block's end marker, the closing line, and for version 2 the quote, the heading and the six lines stay, so the status updates and the Linear close line
+ * can still find the block.
  */
 export function fitPullRequestBody(body: string): string {
   if (byteLength(body) <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return body;
+  const rovaraEnd = body.indexOf(ROVARA_STATUS_END);
+  const drawerAt = rovaraEnd === -1 ? -1 : body.indexOf(RECORD_DRAWER_START, rovaraEnd);
+  if (drawerAt !== -1) {
+    const closeAt = body.indexOf(RECORD_DRAWER_END, drawerAt);
+    if (closeAt !== -1) {
+      const stub = `${RECORD_DRAWER_START}\n<summary>Plan and record</summary>\n\nThe plan and the record are on the task page.\n\n`;
+      const shortened = `${body.slice(0, drawerAt)}${stub}${body.slice(closeAt)}`;
+      if (byteLength(shortened) <= WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES) return shortened;
+      body = shortened;
+    }
+  }
   const markers = [PULL_REQUEST_STATUS_START, ROVARA_STATUS_START].map((marker) => body.indexOf(marker)).filter((index) => index > 0);
   const start = markers.length === 0 ? -1 : Math.min(...markers);
   if (start > 0) {

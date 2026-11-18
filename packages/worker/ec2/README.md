@@ -45,3 +45,37 @@ which the worker reads as the same mark). The sandbox mounts the workspace at th
 worker does, which is why the worker's own mount keeps the host and container paths equal. The
 sandbox has no Docker socket, no extra group, no capabilities and `no-new-privileges`, and joins a
 plain user-defined bridge network (`agentx-task`); its network walls are a separate step.
+
+## Notes moved out of boot.sh (user data limit)
+
+boot.sh is EC2 user data and sits at its size budget (tests/contract/ec2-boot-config.test.ts keeps 1.5 KB free), so these notes, which were comments in it, live here (DEC 254zm made room for the test-services hook):
+
+- The provisioner validates the prepended configuration and gzip-compresses this script (#229).
+- Boot failures exit non-zero and report on /ping so the provisioner can stop the session (#211).
+- The node user of environments/base/Dockerfile, which the worker container runs as.
+- Docker's data root, on the workspace volume: it survives an idle stop (#121).
+- The provisioner attaches the volume after the instance is running, so it may appear late.
+- Where /sys and /dev/disk are; tests set it.
+- Network steps try 5 times (2, 4, 8, 16 s waits plus jitter): at most 45 s per step.
+- No try runs past this many seconds from boot start, so failures show within /ping's 10 minutes.
+- The worker's port, which the provisioner probes; a failed boot answers there instead.
+- Where fail records its reason, since it may run in a command substitution's subshell.
+- The time limit for one network try: LIMIT seconds, or less when the boot deadline is closer.
+- retry DESCRIPTION COMMAND... retries with bounded backoff, then fails with DESCRIPTION.
+- Commands in an until condition must return their own failures under set -e.
+- Reports any non-zero exit: fail's reason, or the step that stopped (set -e).
+- A reason left by an earlier run of this script in the same boot is not this run's.
+- Prints the value only once whole, so a failed try leaves nothing behind.
+- Prints "NAME SERIAL" for each NVMe disk in sysfs, without the serial's padding.
+- A failed try may leave stale mirror metadata (#211): dropped before the next try.
+- A oneshot unit re-applies the rules after Docker rebuilds its chains.
+- This optional preload is bounded; failure leaves ordinary worker service available.
+- Optional until EXECUTOR_IMAGE is set; without it only end-to-end checks are withheld.
+- The web/API runtime's browser executor; docker exec agentx-worker processes read it here too.
+- Status objects also carry the executor image and /ping's features (test-deploy --check).
+- The preload is optional but the qualification needs the executor image: pull it if missing.
+- The instance ID is the one boot read from instance metadata.
+
+## Test services on Code's workers (DEC 254zm)
+
+A launch carries `AGENTX_TEST_SERVICES=1` only while the install's TestServiceImages setting is `mirrored` (the five starter copies were made and checked, `scripts/test-services-mirror.ts`). boot.sh then copies `test-services-stage.sh` out of the worker image it pulled by digest (no network, no capability) and runs it after the worker environment is written and before the worker starts. The stage never stops the boot: any failure leaves the worker without test services, and the worker launcher mounts the run directory into the worker only while it is mounted.

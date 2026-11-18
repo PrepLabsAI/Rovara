@@ -34,6 +34,13 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/access", requires: "none" },
   // #634: the person chooses their own name.
   { method: "PUT", path: "/v1/dev/me/name", requires: "profile:name" },
+  // DEC 254w: connected sign-ins. Full access only (the web app); DeveloperIdentity also checks the session, the step-up and the person.
+  { method: "GET", path: "/v1/dev/me/sign-ins", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/sign-ins/link", requires: "full" },
+  { method: "POST", path: "/v1/dev/me/sign-ins/link/finish", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/me/sign-ins/{method}", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/members/{personId}/sign-ins", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/members/{personId}/sign-ins/{method}", requires: "full" },
   // Spec 065b: a project from a repository the GitHub App can reach.
   { method: "POST", path: "/v1/dev/client/projects", requires: "projects:create" },
   { method: "GET", path: "/v1/dev/client/repositories", requires: "projects:create" },
@@ -61,6 +68,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/client/projects/{project}/archive", requires: "full" },
   { method: "GET", path: "/v1/dev/client/projects/{project}/restore-preview", requires: "full" },
   { method: "POST", path: "/v1/dev/client/projects/{project}/restore", requires: "full" },
+  // L2-5 c: "no evals" for the project's latest finished setup run (the same people as the skips); full access only.
+  { method: "PUT", path: "/v1/dev/client/projects/{project}/setup-status/eval-none", requires: "full" },
   // Tasks: read.
   { method: "GET", path: "/v1/dev/projects", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
@@ -93,6 +102,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/send-back", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/review-findings", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/workflow/feedback-retry", requires: "tasks:act" },
+  // S3: the owner's answers to Understand's questions (a core task's; a workflow task has none to answer). The route keeps it to the task's owner.
+  { method: "POST", path: "/v1/dev/tasks/{taskId}/answers", requires: "tasks:act" },
   // #644: a comment, or steering the running step (which the route itself keeps to the task's owner).
   { method: "POST", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:act" },
   { method: "POST", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:act" },
@@ -150,9 +161,22 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "PUT", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/slack/projects/{project}/channel", requires: "full" },
   { method: "POST", path: "/v1/dev/company/slack/projects/{project}/channel/check", requires: "full" },
+  // Guided onboarding PR 7: connect Linear by OAuth (live owner/admin), the connection's status (any member), disconnect (live owner, fresh step-up), and a project's Linear team
+  // (owner/admin or the project's admin).
+  { method: "POST", path: "/v1/dev/company/linear/connect", requires: "full" },
+  { method: "POST", path: "/v1/dev/company/linear/complete", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear", requires: "full" },
+  { method: "GET", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
+  { method: "DELETE", path: "/v1/dev/company/linear/projects/{project}", requires: "full" },
   // Guided onboarding PR 14 (DEC 254n item 1): the company's own engine model (read: any member; change: live owner/admin, checked against the gateway's live list for the company).
   { method: "GET", path: "/v1/dev/company/engine-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/engine-model", requires: "full" },
+  // L2-4: a project's waiting tickets (Linear app intake on the core); full access only (the route also checks the company owner/admin or the project's admin, live).
+  { method: "GET", path: "/v1/dev/projects/{project}/intake", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/start", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/intake/{itemId}/dismiss", requires: "full" },
   // The CLI's own routes, which no named scope opens.
   { method: "GET", path: "/v1/dev/workspaces", requires: "full" },
   { method: "GET", path: "/v1/dev/channel-links", requires: "full" },
@@ -178,6 +202,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "DELETE", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/unfollow", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/presence", requires: "tasks:read" },
+  // The in-app inbox (web task channel C7): the person's own attention rows and marking them read; each row is checked against the person's session access again before it is shown.
+  { method: "GET", path: "/v1/app/inbox", requires: "tasks:read" },
+  { method: "POST", path: "/v1/app/inbox/read", requires: "tasks:read" },
   // Acting on a session's task (each also needs the person's session level).
   { method: "POST", path: "/v1/app/sessions/{sessionId}/stop", requires: "tasks:act" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/retry", requires: "tasks:act" },
@@ -194,12 +221,27 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // How we work (read only): no named scope reads a project's settings, so full access only.
   { method: "GET", path: "/v1/app/projects/{project}/how-we-work", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/playbook", requires: "full" },
+  // DEC 254z-amend3: a project's test environment state (read only: whether test services are on, why they are not available here, the catalog). Like how we work, no named scope reads it: full access only.
+  { method: "GET", path: "/v1/app/projects/{project}/test-environment", requires: "full" },
   // Guided onboarding L2-3: a project's setup run (it spends model money and runs the repository's commands): full access only, then a live company owner or admin, or the project's
   // administrator, to change; a project user may read it.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/stop", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/journal", requires: "full" },
+  // Wiki W0: a project's free file map (code host listings only: no model call, nothing spent or stored): full access only, then a live company owner or admin, or the project's administrator, to make one;
+  // any person with a role on the project reads a kept one.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/wiki-map", requires: "full" },
+  // Lead 4 W2: the project wiki's reads (core-host/wiki-routes.ts): full access only, then any live role on the project (a company owner or admin, or a project grant). No writes here.
+  { method: "GET", path: "/v1/app/projects/{project}/wiki", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
+  { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
+  // medium risk, a company owner or admin for high).
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/discard", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/decide", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

@@ -5,6 +5,8 @@ import { SlackWorkspaceRefused, slackWorkspaceTeam, type SlackWorkspaceBindings 
 export interface SlackWorkspaceTokens {
   tokenForEvent(teamId: string): Promise<{ companyId: string; token: string } | undefined>;
   tokenForCompany(companyId: string, teamId: string): Promise<string | undefined>;
+  /** L2-2 PR 18c: drop this process's cached token for the team (the verified removal event, #836); the next call reads the binding and secret again. */
+  forget?(teamId: string): void;
 }
 export interface SlackTokenDependencies {
   bindings: Pick<SlackWorkspaceBindings, "requireCompany">;
@@ -50,6 +52,10 @@ export function createSlackWorkspaceTokens(deps: SlackTokenDependencies): SlackW
     } catch { return undefined; }
   };
   return {
+    forget(team) {
+      if (!slackWorkspaceTeam(team)) return;
+      for (const key of [...cache.keys()]) if (key.endsWith(`/${team}`)) cache.delete(key);
+    },
     tokenForEvent: (team) => load(team),
     async tokenForCompany(company, team) {
       if (!OrgIdSchema.safeParse(company).success) return undefined;

@@ -13,6 +13,7 @@ import {
 import { Construct } from "constructs";
 import { environmentRolePath } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
+import { TestServiceMirror } from "./test-service-mirror.js";
 
 /** The worker's HTTP port: /ping for health probes, /invocations for signed work (#80). */
 export const EC2_WORKER_PORT = 8080;
@@ -101,6 +102,8 @@ export class Ec2WorkerFoundation extends Construct {
         resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`],
       }));
     }
+    // DEC 254zm: a named environment holds its own copies of the test-service starter images, which its workers read (test-service-mirror.ts).
+    if (naming.env !== undefined) new TestServiceMirror(this, "TestServiceMirror", { env: naming.env, workerRole: this.instanceRole });
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "BedrockModelInvocation",
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],

@@ -46,7 +46,9 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "tests-contract-l-p", directories: ["tests/contract/l*.ts", "tests/contract/m*.ts", "tests/contract/n*.ts", "tests/contract/o*.ts", "tests/contract/p*.ts"] },
   { name: "tests-contract-r-s", directories: ["tests/contract/r*.ts", "tests/contract/s*.ts"] },
   { name: "tests-contract-t-z", directories: ["tests/contract/t*.ts", "tests/contract/u*.ts", "tests/contract/v*.ts", "tests/contract/w*.ts"] },
-  { name: "tests-unit-a-d-f", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/c*.ts", "tests/unit/d*.ts", "tests/unit/f*.ts"] },
+  // Batch 13: a-d-f outgrew the 4 GB heap on CI (the batch's new core-host, citation and wiki test files), so it is split in two.
+  { name: "tests-unit-a-b-d-f", directories: ["tests/unit/a*.ts", "tests/unit/b*.ts", "tests/unit/d*.ts", "tests/unit/f*.ts"] },
+  { name: "tests-unit-c", directories: ["tests/unit/c*.ts"] },
   { name: "tests-unit-e", directories: ["tests/unit/e*.ts"] },
   { name: "tests-unit-g-q", directories: ["tests/unit/g*.ts", "tests/unit/h*.ts", "tests/unit/i*.ts", "tests/unit/j*.ts", "tests/unit/k*.ts", "tests/unit/l*.ts", "tests/unit/m*.ts", "tests/unit/n*.ts", "tests/unit/o*.ts", "tests/unit/p*.ts", "tests/unit/q*.ts"] },
   { name: "tests-unit-r-v", directories: ["tests/unit/r*.ts", "tests/unit/s*.ts", "tests/unit/t*.ts", "tests/unit/u*.ts", "tests/unit/v*.ts"] },

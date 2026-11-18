@@ -83,9 +83,18 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "CoreAllowedCompanies", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons",
     // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
     "CoreModelGatewayHost", "CoreAgentModel",
+    // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
+    "TestServices",
+    // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
+    "TestServiceImages",
     // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
-    "StepUpEmailSender"],
-  slack: ["SlowTurnMinutes", "ModelFallback"],
+    "StepUpEmailSender",
+    // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
+    "CompanySignIn", "CompanySelfServe",
+    // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
+    "SlackCompanyWorkspaces"],
+  // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
+  slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
 };
 
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
@@ -339,6 +348,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
         ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),
+        // L2-2 PR 18d: Slack company mode's inputs (the control plane always outputs them, DEC 254zk). The switch itself (SlackCompanyWorkspacesState) is the operator's, set with
+        // agentx config set slack.companyWorkspaces and kept across upgrades (OPERATOR_PARAMETERS), so an upgrade never turns it off behind the control plane's back.
+        SlackCompanyStateTableName: "", SlackCompanyTeamId: "",
+        ...optionalOutputs(outputs, "control-plane", ["SlackCompanyStateTableName", "SlackCompanyTeamId"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),
         TurnRecordsTableName: required(outputs, "control-plane", "TurnRecordsTableName", answers.env),
         ThreadSessionBucketName: required(outputs, "control-plane", "SlackThreadSessionBucketName", answers.env),

@@ -42,6 +42,7 @@ import { noteBranchHead } from "../branch-sync/branch-writers.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
 import { judgeProofHold, type ProofHoldSource } from "./proof-hold.js";
 import { ownCheckSourceOf, stopSummaryChecks, syncSummaryCheck, type SummaryCheckSource } from "./summary-check.js";
+import { ciFixComment, postCiFixComment } from "./pr-comments.js";
 import { SWEEP_INTERVAL_MS, type MergeReadBudget, type MergeRecoveryResult } from "./budget.js";
 import { humanApprovalOf, latestReviewers, linkedAmong, nonWritersAmong, requesterHostIds, type RepositoryPermission } from "./approval.js";
 import { approvalReviewsOf, changeRequestRef, rateLimitRetryAt, type RepositoryResolver } from "./host-port.js";
@@ -928,6 +929,8 @@ async function trackOne(
     }
     // TE-E0 option A: the results that landed, told once on the pull request (the entries were written `announced` in this commit), and their durations kept for the next wait. Best effort.
     if (pipeline !== undefined && !unchanged) await pipeline.afterCommit(told);
+    // L4-C B5: the two comments of the CI fix loop (a round after the pull request is out of draft, and a stop), once, after the commit that made them true. Never for good news.
+    await postCiFixComment(codeHost, ref, ciFixComment(action, { draft: status.draft && !markedReady, rounds: workflowFixRounds(action?.workflow ?? task.workflow).ci, failing: deciding.failingChecks }), scope, budget, deps.log === undefined ? undefined : (event, logged) => deps.log?.(event, logged));
     await observeOutcomes();
     if (capped) throw new TrackingRequestCapError();
     return { changed: true, notOpen: status.state !== "open", acted: action !== undefined, ...(ci.recheckAt === undefined ? {} : { recheckAt: ci.recheckAt }) };

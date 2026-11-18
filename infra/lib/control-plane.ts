@@ -9,6 +9,7 @@ import {
   Duration,
   Fn,
   RemovalPolicy,
+  SecretValue,
   Stack,
   type StackProps,
   Token,
@@ -31,19 +32,21 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE } from "@agentx/contracts";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
-import { CoreEngine } from "./core-engine.js";
+import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
-import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./broker-names.js";
+import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
+import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
 import { swebenchNames } from "./swebench-eval.js";
+import { SLACK_BINDING_READ_KEYS, SLACK_COMPANY_WORKSPACES_VARIABLE, SlackCompanyWorkspaces } from "./slack-company-workspaces.js";
 import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
@@ -107,6 +110,21 @@ export class ControlPlaneStack extends Stack {
       minLength: 32,
       description: "Random secret used to scope and authenticate worker callbacks",
     });
+    // The callback signing key as a secret, so no Lambda's environment holds it: the stack creates this secret from the NoEcho parameter's value (an upgrade passes the parameter's previous
+    // value, so the key carries over without anyone reading or printing it). Each function gets only the secret's NAME (shorter than the key, so no environment grows) and a GetSecretValue on
+    // exactly this secret's ARN. A named environment's name is under agentx/<env>/, so the operator role's secrets scope covers it, and it is not agentx/<env>/callback-signing-key, which the CLI
+    // keeps as its own copy and a stack cannot take over. Retained, as the Slack secret is: `agentx destroy` removes a retained secret under agentx/<env>/ that carries the environment's tag.
+    const callbackSigningKeySecretName = `agentx/${naming.env ?? "production"}/callback-key`;
+    const callbackSigningKeySecret = new secretsmanager.Secret(this, "CallbackSigningKeySecret", {
+      secretName: callbackSigningKeySecretName,
+      description: "The callback signing key (a copy the stack made from its CallbackSigningKey parameter); Lambdas read it by name",
+      secretStringValue: SecretValue.cfnParameter(callbackSigningKey),
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    // Who reads it: the broker, the eval tick and (named environments) the reconciler, by the secret's own resource policy, which costs no byte of the functions' role policies (the broker's has
+    // no room left: tests/contract/developer-signin-infrastructure.test.ts). The dispatcher's read is an identity statement under the core switch's condition (core-engine.ts). The one
+    // statement is added after the functions exist, at the end of this constructor's wiring.
+    const callbackSigningKeyReaders: iam.IRole[] = [];
     const adminClaim = new CfnParameter(this, "AdminClaim", {
       type: "String",
       default: "cognito:groups",
@@ -195,7 +213,8 @@ export class ControlPlaneStack extends Stack {
 
     // ENV-ROOM (infra/lib/broker-names.ts): a named environment's broker gets its generated names packed (AGENTX_NAMES) and derives what the environment's name decides; the legacy
     // template passes every variable whole, as before.
-    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
+    // ENV-ROOM 2: the entry reads a named environment's broker names from their SSM parameter before it loads broker.ts (packages/broker/src/aws/broker-handler.ts).
+    const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker-handler.ts", {
       ...(naming.env !== undefined ? {} : {
         STATE_TABLE_NAME: state.tableName,
         AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
@@ -205,7 +224,7 @@ export class ControlPlaneStack extends Stack {
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
       ADMIN_VALUES: adminValues.valueAsString,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
       GITHUB_APP_ID: githubAppId.valueAsString,
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
@@ -223,9 +242,10 @@ export class ControlPlaneStack extends Stack {
     }
     const connectorSecretsArn = this.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `${naming.connectorSecretPrefix}*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
     if (naming.env !== undefined) {
-      // Exactly the two grantReadWriteData statements' action/resource cross product.
+      // The two grantReadWriteData statements' action/resource cross product, less dynamodb:GetRecords and dynamodb:GetShardIterator (ENV-ROOM 2, IAM room for the names
+      // parameter): those act only on a stream ARN (`table/<name>/stream/<label>`), which neither resource here is, so on these resources they granted nothing.
       broker.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable", "dynamodb:GetRecords", "dynamodb:GetShardIterator"],
+        actions: ["dynamodb:BatchGetItem", "dynamodb:Query", "dynamodb:GetItem", "dynamodb:Scan", "dynamodb:ConditionCheckItem", "dynamodb:BatchWriteItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:DescribeTable"],
         resources: [state.tableArn, `${state.tableArn}/index/*`],
       }));
       // Keep the existing grantReadWrite action strings and both resources verbatim.
@@ -241,6 +261,7 @@ export class ControlPlaneStack extends Stack {
       broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
       broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["secretsmanager:GetSecretValue"], resources: [connectorSecretsArn] }));
     }
+    callbackSigningKeyReaders.push(broker.role!);
     // A rotated OAuth refresh token is written back to its own secret. Only secrets that
     // `agentx admin credential authorize` tagged for it are writable, never other connector secrets.
     broker.addToRolePolicy(new iam.PolicyStatement({
@@ -274,14 +295,18 @@ export class ControlPlaneStack extends Stack {
       ...Object.entries(WORKER_SETTING_PARAMETERS).filter(([key]) => key !== "e2eAgentModel" && key !== "modelFallback").map(([, name]) => `${naming.ec2.workerSettingsPrefix}${name}`),
     ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
     const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
-    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    // ENV-ROOM 2: a named broker reads its names from their one SSM parameter (infra/lib/broker-names.ts) with this same action, so the parameter's ARN joins this statement
+    // rather than adding one (the broker's inline policy has little room: tests/contract/developer-signin-infrastructure.test.ts, broker IAM headroom).
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: naming.env === undefined ? swebenchParameterArns : [...swebenchParameterArns, brokerNamesParameterArn(naming.env)] }));
+    // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
+    if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
     // Spec 061: a stored plan's cited code is read from GitHub in the background, with retries, so a slow or failing
     // GitHub never holds up the plan. The broker starts the job right after the plan commits (an async invoke), and
     // its recovery sweep starts any row that is due; the job needs nothing from the broker. 150 seconds: the code is
     // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
     // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
+    let planEvidenceFunction: lambda.Function | undefined;
     if (naming.env !== undefined) {
       const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
         STATE_TABLE_NAME: state.tableName,
@@ -317,7 +342,8 @@ export class ControlPlaneStack extends Stack {
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvidenceBundles", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("private/*/plan-documents/*.evidence.*.json")] }));
       // The GitHub App's key, to read files as the broker does.
       planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
-      planEvidence.grantInvoke(broker);
+      // Named only (this block): the broker's invoke of this function and of the sign-in function are one statement, added with the sign-in function below (ENV-ROOM 2 room).
+      planEvidenceFunction = planEvidence;
       addBrokerName(broker, naming, "planEvidenceFunction", planEvidence.functionName, planEvidence.functionName);
     }
 
@@ -816,6 +842,13 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Guided onboarding PR 7: the Linear OAuth app signs its webhook bodies itself; the broker verifies the HMAC, the timestamp and the workspace's binding. Named environments only.
+    if (naming.env !== undefined) new apigwv2.CfnRoute(this, "LinearWebhookRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/linear/webhooks",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
     new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
       apiId: api.ref,
@@ -935,23 +968,70 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
+    // DEC 254zg (a): the company layer's switch (CompanySignIn), named environments only; every function that reads COMPANY_SIGNIN gets it from here, and every company-only
+    // grant is a policy under its condition (company-signin.ts).
+    const companySignIn = naming.env === undefined || signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
+    // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
+    // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
+    // sign-in, so its grants and its "enabled" exist only with both switches on.
+    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    if (slackCompany !== undefined) {
+      // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
+      // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
+      for (const [id, fn] of [["SlackIngress", slackIngress], ["ChannelApi", channelAdapters.ingress]] as const) {
+        slackCompany.grant(id, fn.role!, [
+          slackCompany.tokenRead(),
+          slackCompany.stateReads(state, "ReadSlackWorkspaceBindingsAndLinks", [...SLACK_BINDING_READ_KEYS, "ORG#*#CHANNEL_LINK#slack/*"]),
+          // Only a revision's company (company-check.ts recordInCompany): never a project's definition or runtime binding.
+          new iam.PolicyStatement({ sid: "ReadProjectCompany", actions: ["dynamodb:Query"], resources: [state.tableArn],
+            conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PROJECT#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId"] },
+              StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } }),
+        ]);
+        fn.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+      }
+      // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
+      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
+      // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
+      addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
+      // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
+      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+    }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
+        ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
+      // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
+      // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
+      if (naming.env !== undefined) {
+        if (planEvidenceFunction === undefined) throw new Error("a named control plane has the plan evidence function");
+        const invoked = [planEvidenceFunction, developerSignIn.function];
+        broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: invoked.flatMap((fn) => [fn.functionArn, `${fn.functionArn}:*`]) }));
+      }
+      // The Slack Lambda and the channel API Lambda (Slack company mode reads it: lead 2, #873).
+      if (companySignIn !== undefined) for (const fn of [slackIngress, channelAdapters.ingress]) companySignIn.addTo(fn);
       // Spec 063 FR-005: the admin client's own rule for who is an administrator, read at company sign-in.
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
       if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
-        new TaskPersonProof(this, "TaskPersonProof", {
+        const proof = new TaskPersonProof(this, "TaskPersonProof", {
           naming,
           enabled: taskPersonProofEnabled,
           slackTeamId: signInParameters.slackTeamId,
           slackSecret,
           developerSignInTable: developerSignIn.table,
           dispatcher,
+          // DEC 254zc (6): the proof's switch variables come with the infrastructure switch (they change the version the dispatcher pins).
+          ...(companySignIn === undefined || slackCompany === undefined ? {} : { companySwitches: {
+            COMPANY_SIGNIN: companySignIn.value, SLACK_COMPANY_WORKSPACES: slackCompany.value,
+            STATE_TABLE_NAME: Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")),
+          } }),
         });
+        if (slackCompany !== undefined) {
+          slackCompany.grant("TaskPersonProof", proof.role, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)], proof.install);
+        }
       }
       addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
       addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
@@ -977,6 +1057,7 @@ export class ControlPlaneStack extends Stack {
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, ...(naming.env === undefined ? {} : { coreBroker: broker }), controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, taskPeopleChangesEnabled: taskParameters.taskPeopleChangesEnabled, notifyOperator });
+      if (companySignIn !== undefined) companySignIn.addTo(notifier.function);
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
@@ -1001,6 +1082,23 @@ export class ControlPlaneStack extends Stack {
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],
       }));
       channelAdapters.connectSlackPoster(notifier.function, signInParameters.slackTeamId.valueAsString);
+      if (slackCompany !== undefined) {
+        // The notifier: binding and token for each post; a ChatGPT fallback's workspace pointer row (ORG#<c>#WORKSPACE#<id>).
+        // L2-2 PR 18d: the pointer row's key narrowed to a company id's exact shape (org_ + 20 characters), so the pattern cannot match another key that merely contains #WORKSPACE#.
+        slackCompany.grant("DeveloperTaskNotifier", notifier.function.role!, [slackCompany.tokenRead(),
+          slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#org_????????????????????#WORKSPACE#*"])]);
+        notifier.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+        // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
+        slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+        developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+        developerSignIn.function.addEnvironment("STATE_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")));
+        // The Slack Lambda and the channel API resolve the linked person's company membership on the sign-in table (company-check.ts membershipKey), reads only.
+        for (const [id, fn] of [["SlackIngressMembers", slackIngress], ["ChannelApiMembers", channelAdapters.ingress]] as const) {
+          slackCompany.grant(id, fn.role!, [slackCompany.stateReads(developerSignIn.table, "ReadCompanyMemberships", ["COMPANY_MEMBER#*"])]);
+          fn.addEnvironment("DEVELOPER_SIGNIN_TABLE_NAME", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, developerSignIn.table.tableName, "")));
+        }
+      }
       // Phase 7c1b: sign-in's Slack directory reads (task access, channel names, the health check).
       channelAdapters.connectSlackPoster(developerSignIn.function, signInParameters.slackTeamId.valueAsString);
       // Phase 7c2: the channel API's Slack router posts through the adapter too.
@@ -1120,6 +1218,12 @@ export class ControlPlaneStack extends Stack {
     // Spec 065b: a project a sign-in client creates runs on the foundation's workers: the broker builds its binding from
     // the zone=subnet pairs and the launch template, with no AWS call.
     const foundationParameter = (name: string) => (this.node.findChild(name) as CfnParameter).valueAsString;
+    // DEC 254z-amend3: the session steps read the test services switch whole (named environments, where CoreEngine declares it): on, a launch's boot configuration carries `testServices`.
+    // DEC 254zm: and whether the starter copies are in place; only with both does a launch carry `testServices` (aws/hosted-test-services.ts).
+    if (naming.env !== undefined) {
+      sessions.steps.addEnvironment(TEST_SERVICES_SETTING_VARIABLE, foundationParameter(TEST_SERVICES_PARAMETER));
+      sessions.steps.addEnvironment(TEST_SERVICE_IMAGES_SETTING_VARIABLE, foundationParameter(TEST_SERVICE_IMAGES_PARAMETER));
+    }
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
@@ -1130,8 +1234,20 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
-    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
+    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKeySecretName);
     if (naming.env !== undefined) channelAdapters.connectSlackPoster(sessions.reconciler, signInParameters.slackTeamId.valueAsString);
+    if (slackCompany !== undefined) {
+      // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
+      slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
+      sessions.reconciler.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
+      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
+      slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
+      // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set
+      // slack.companyWorkspaces, which sets the slack stack's own switch (SlackCompanyWorkspacesState), finds them in place from the last deploy.
+      for (const [id, value] of [["SlackCompanyStateTableName", state.tableName], ["SlackCompanyTeamId", signInParameters.slackTeamId.valueAsString]] as const) new CfnOutput(this, id, { value });
+    }
+    if (companySignIn !== undefined) companySignIn.addTo(sessions.reconciler);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
@@ -1215,11 +1331,12 @@ export class ControlPlaneStack extends Stack {
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
+    if (naming.env !== undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [sessions.deleter.stateMachineArn, swebenchStateMachineArn] }));
     // Lane E2 step 4: the dispatcher is the core dispatch queue's consumer (named environments only: the core engine construct exists only there, so the legacy template is unchanged).
     const coreEngine = this.node.tryFindChild("CoreEngineJobs");
     if (naming.env !== undefined && coreEngine instanceof CoreEngine) {
       coreEngine.connectDispatcher(dispatcher, {
-        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKey: callbackSigningKey.valueAsString,
+        deleterArn: sessions.deleter.stateMachineArn, callbackSigningKeySecret: { secretName: callbackSigningKeySecretName, secretArn: callbackSigningKeySecret.secretArn },
         workerSubnets: foundationParameter("Ec2WorkerSubnets"), workerLaunchTemplateId: foundationParameter("Ec2WorkerLaunchTemplateId"),
       });
     }
@@ -1235,10 +1352,19 @@ export class ControlPlaneStack extends Stack {
     const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      CALLBACK_SIGNING_KEY_SECRET_ID: callbackSigningKeySecretName,
       SWEBENCH_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
     }, Duration.seconds(90));
     state.grantReadWriteData(evalBatchTick);
+    callbackSigningKeyReaders.push(evalBatchTick.role!);
+    if (naming.env !== undefined) callbackSigningKeyReaders.push(sessions.reconciler.role!);
+    callbackSigningKeySecret.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "ReadCallbackSigningKey",
+      principals: callbackSigningKeyReaders.map((role) => new iam.ArnPrincipal(role.roleArn)),
+      actions: ["secretsmanager:GetSecretValue"],
+      // In a secret's own policy, "*" is this secret.
+      resources: ["*"],
+    }));
     // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: evalSettingArns }));

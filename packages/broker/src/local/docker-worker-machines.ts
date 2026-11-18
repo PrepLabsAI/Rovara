@@ -28,6 +28,8 @@ import {
   ANSWERED_INVOCATION_KINDS,
   BUILD_SYSTEM_PROFILES_ENV,
   MachineError,
+  TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE,
+  TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE,
   WORKER_PING_FEATURES_FIELD,
   serializeBuildSystemProfiles,
   type BuildSystemProfile,
@@ -42,6 +44,7 @@ import {
 } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 import { type LocalTestServices, localTestServicesDigestPart, testServicesEnvironment } from "./test-services.js";
+import { createLazyServiceImages, type LazyServiceImages } from "./lazy-service-images.js";
 import type { InvokeSigner } from "./invoke-signer.js";
 import { MODEL_PROXY_PREFIX } from "./model-proxy/proxy.js";
 import { WORKSPACES_DIRECTORY_NAME, ensurePrivateDirectory } from "./state-directory.js";
@@ -62,6 +65,11 @@ export const GATEWAY_ADDRESS_LABEL = "rovara.local.gwaddr";
 /** The label the worker puts on the sandboxes it starts (`TASK_SANDBOX_WORKSPACE_LABEL`). */
 /** The guard's folder for the copies of a worker's run files: next to the run folder, never inside it. */
 const bindDirectoryOf = (runDirectory: string): string => `${runDirectory}-binds`;
+/** What the guard is told about the resource ceilings: the owner's limits when the install resolved them (DEC 254zm 2), otherwise only the old per-worker helper memory knob. Nothing else: the guard's defaults apply. */
+function guardLimitsOf(services: LocalTestServices): { maxContainers?: number; maxMemoryMiB?: number; maxMemoryPercent?: number } {
+  if (services.limits !== undefined) return { maxContainers: services.limits.containers, maxMemoryMiB: services.limits.helperMemoryMiB, maxMemoryPercent: services.limits.memoryPercent };
+  return services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: services.maxMemoryMiB };
+}
 
 const SANDBOX_WORKSPACE_LABEL = "agentx.workspace";
 const MACHINE_NAME = /^rovara-worker-[0-9a-f]{24}$/;
@@ -130,6 +138,8 @@ const RESERVED_ENVIRONMENT = new Set([
   "AGENTX_TEST_SERVICES_RUN_DIR",
   "AGENTX_TEST_SERVICES_EDITION",
   "AGENTX_TEST_SERVICES_MAX_MEM_MIB",
+  TEST_SERVICES_WORKER_MAX_CONTAINERS_VARIABLE,
+  TEST_SERVICES_WORKER_MAX_HELPER_MEMORY_VARIABLE,
   "AGENTX_TEST_SERVICES_NOT_PULLED",
   "AGENTX_TEST_SERVICES_OWNER_IMAGES",
   "AGENTX_WORKER_IMAGE",
@@ -203,6 +213,8 @@ export interface DockerWorkerMachinesOptions {
    * guard lets start) and the run folder. Absent: the worker is not told about test services and the guard is the plain one. A change re-creates an idle machine, like any other change of its configuration.
    */
   testServices?: LocalTestServices | undefined;
+  /** Fixed-word events of the lazy service-image pulls (family only, never a reference). Absent: not logged. */
+  testServicesLog?: ((entry: Record<string, unknown>) => void) | undefined;
   /**
    * More websites for machines that START from now on, read at each start with the name of the project the machine is for: the hosts the owner approved for a setup run of THAT project. A change makes the machine's digest differ, so its next start remakes the machine with the new list
    * (keeping its workspace); a machine that is running is not touched. A name the cloud would refuse is not added (it is left out, never passed on).
@@ -260,9 +272,15 @@ export class DockerWorkerMachines implements WorkerMachines {
   readonly #allowed: string[];
   #socketGroup: Promise<string> | undefined;
   #queue: Promise<unknown> = Promise.resolve();
+  /** DEC 254z-amend3: owner-list images are pulled the first time a step needs them (local/lazy-service-images.ts). Absent unless the install's test services are lazy. */
+  readonly #lazyImages: LazyServiceImages | undefined;
 
   constructor(options: DockerWorkerMachinesOptions) {
     this.#options = options;
+    const services = options.testServices;
+    this.#lazyImages = services?.lazyPulls === true && services.ownerImages !== undefined
+      ? createLazyServiceImages({ docker: options.docker, ownerImages: services.ownerImages, ...(options.testServicesLog === undefined ? {} : { log: options.testServicesLog }) })
+      : undefined;
     this.#workspacesRoot = resolve(options.stateDirectory, WORKSPACES_DIRECTORY_NAME);
     this.#socket = options.dockerSocketPath ?? "/var/run/docker.sock";
     this.#stateKey = createHash("sha256").update(resolve(options.stateDirectory)).digest("hex").slice(0, 16);
@@ -391,7 +409,7 @@ export class DockerWorkerMachines implements WorkerMachines {
       await createGuard(run, {
         image, labels: [...baseLabels, gatewayLabel], names, socketPath: this.#socket, socketGroup: group, workspaceDirectory,
         workspaceKey: createHash("sha256").update(resolve(workspaceDirectory)).digest("hex").slice(0, 16), owner: hash, sandboxDns: addresses.sandbox,
-        ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : { services: { images: services.images, guardImage: imageId, runDirectory, bindDirectory: bindDirectoryOf(runDirectory), socketGroup: Number(group), ...(services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: services.maxMemoryMiB }) } }),
+        ...(services === undefined || runDirectory === undefined || imageId === undefined ? {} : { services: { images: services.images, guardImage: imageId, runDirectory, bindDirectory: bindDirectoryOf(runDirectory), socketGroup: Number(group), ...guardLimitsOf(services) } }),
         devcontainerRegistries: this.#devcontainerRegistries(),
         ...(browserExecutor === undefined ? {} : { browserEvidence: { image: browserExecutor.imageId, seccomp: browserExecutor.seccomp } }),
       });
@@ -602,6 +620,8 @@ export class DockerWorkerMachines implements WorkerMachines {
     if (found.status !== "running" || found.hostPort === undefined) throw new MachineError("not_ready", `the machine is ${found.status === "running" ? "starting" : found.status}`);
     const ping = await this.#ping(found.hostPort);
     if (ping === undefined) throw new MachineError("not_ready", "the worker does not answer yet");
+    // Lazy test services: a step whose plan names an owner-list image that is not here yet waits (the dispatcher comes back) while it is pulled by digest; a pull that failed does not hold it.
+    if (this.#lazyImages !== undefined && (await this.#lazyImages.prepare(invocation)) === "pulling") throw new MachineError("not_ready", "a service image this step needs is being pulled");
 
     let response: Response;
     try {

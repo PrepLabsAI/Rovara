@@ -129,10 +129,11 @@ describe("what the evidence never says", () => {
     expect(evidenceLines(context({ pack: scan }), CODE.digest, 0).lines[0]).toBe("Checks by kind: security scan ✓: 3 new (1 high or critical) · migrations: 2 applied, rollback failed");
   });
   it("shows nothing for a pack that is for other code, or none", () => {
-    expect(evidenceLines(context({ pack: pack({ candidateDigest: "f".repeat(64) }) }), CODE.digest, 0)).toEqual({ lines: [], notTested: [] });
-    expect(evidenceLines(context({ pack: undefined }), CODE.digest, 0)).toEqual({ lines: [], notTested: [] });
-    expect(evidenceLines(undefined, CODE.digest, 0)).toEqual({ lines: [], notTested: [] });
-    expect(evidenceLines(context(), undefined, 0)).toEqual({ lines: [], notTested: [] });
+    const nothing = { lines: [], notTested: [], checks: [], setup: [] };
+    expect(evidenceLines(context({ pack: pack({ candidateDigest: "f".repeat(64) }) }), CODE.digest, 0)).toEqual(nothing);
+    expect(evidenceLines(context({ pack: undefined }), CODE.digest, 0)).toEqual(nothing);
+    expect(evidenceLines(undefined, CODE.digest, 0)).toEqual(nothing);
+    expect(evidenceLines(context(), undefined, 0)).toEqual(nothing);
   });
   it("makes every repository-written word inert: no mention, link, image, cross-reference or secret", () => {
     const hostile = pack({

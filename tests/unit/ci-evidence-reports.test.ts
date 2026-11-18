@@ -220,7 +220,8 @@ describe("per-test reports in a tracking pass", () => {
     setChecks(w, [unit, e2e()]);
     await trackTask(deps, TASK_ID);
     expect(await entry(w)).toMatchObject({ state: "passed", report: "read", counts: { passed: 3, failed: 0, skipped: 0 }, proven: 1, added: 1 });
-    expect(comments(w)[0]).toContain("3 passed, 0 failed, 1 proven (failed on the base run)");
+    // The counts and the change proof are in the description and the Check (a pass is not told in a comment, L4-C B5): the entry carries them.
+    expect(comments(w)).toEqual([]);
     // Read once per run.
     w.now.value += MIN;
     await trackTask(deps, TASK_ID);

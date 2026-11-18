@@ -98,6 +98,9 @@ export const landedEntries = (entries: readonly MarkedEntry[]): MarkedEntry[] =>
 /** The most characters a pull request comment of Rovara's own may have (the code host refuses longer, and any `@` or control character). */
 export const LANDED_LINE_MAX = 200;
 
+/** Whether a landed result is told in a pull request comment: a failure always; a pass only when it reverses a failure told earlier (`reversals`). Everything else is the description's and the Check's to say, silently (L4-C B5). */
+export const commentWorthy = (entry: Pick<MarkedEntry, "state">, reversals: ReadonlySet<unknown> = new Set()): boolean => entry.state === "failed" || reversals.has(entry);
+
 /** The line a landed result is said with on the pull request: the shared words, with no `@` or control character, cut to fit (the customer's words are shortened first, never the run or the commit). */
 export function landedLine(entry: MarkedEntry, marked: MarkedCheck, commit: string): string {
   const say = (calledAs: string, check: string): string => realCheckLine({ calledAs, check, outcome: entry.state === "passed" ? "passed" : "failed", attempt: entry.attempt, commit, counts: entry.counts, proven: entry.proven, flaky: entry.flaky?.length })
@@ -265,6 +268,7 @@ export async function ciEvidencePass(input: {
     reportPending: (entry) => reportsOn(input) && entry.workflowRunId !== undefined && (entry.report === undefined || ((entry.report === "none" || entry.report === "unreadable") && (entry.reportTries ?? 0) < REPORT_TRIES_MAX)),
   });
   const markedNames = input.settings.markedChecks;
+  const reversals = new Set<MarkedEntry>();
   return {
     fields: { ciMarked: entries, ...(rovaraStart === undefined || !Number.isFinite(rovaraStart) ? { ciMarkedSince: new Date(ownSince).toISOString() } : {}) },
     ...(recheck === undefined ? {} : { recheckAt: recheck }),
@@ -277,12 +281,17 @@ export async function ciEvidencePass(input: {
     }),
     toTell(current) {
       const held = current?.headSha === head ? current.ciMarked ?? [] : [];
+      // L4-C B5: which of the told results are worth a comment (a notification): a failure, or a result that reverses one told earlier for the same check on this head. A pass updates the description and the Check, and is silent.
+      reversals.clear();
+      for (const entry of landed) if (entry.state === "passed" && held.some((other) => other.announced === true && other.name === entry.name && other.source === entry.source && other.state === "failed")) reversals.add(entry);
       return landed.filter((entry) => !held.some((other) => other.announced === true && other.name === entry.name && other.source === entry.source && other.state === entry.state && other.runId === entry.runId));
     },
     async afterCommit(told) {
       for (const entry of told) {
         const marked = input.settings.markedChecks.find((candidate) => candidate.name === entry.name && candidate.source === entry.source);
         if (marked === undefined || input.host.postComment === undefined) continue;
+        // A passed result is not told in a comment unless it reverses a failure told before; its timings below are still kept.
+        if (!commentWorthy(entry, reversals)) continue;
         try {
           await input.host.postComment(input.ref, landedLine(entry, marked, head), input.scope, input.budget);
         } catch (error) {

@@ -10,7 +10,8 @@ import { withoutCoreModelAccessRoute } from "../support/core-model-access-templa
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { removePackedPieces, unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
+import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 
 skipLambdaBundling();
 
@@ -24,7 +25,7 @@ function namedTemplate(env: string, account = "944937319445", region = "us-east-
   const rendered: unknown = Template.fromStack(new ControlPlaneStack(new App(), `Proof-${env}-${account}-${region}`, {
     env: { account, region }, naming: environmentNaming(env),
   })).toJSON();
-  return rendered as TemplateJson;
+  return withoutSlackCompanyMode(rendered, { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function proofEntries(template: TemplateJson) {
@@ -43,7 +44,7 @@ function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
   const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
   // ENV-ROOM: a named broker derives both catalog ids from AGENTX_ENV (tests/support/broker-environment-template.ts gives the derived literal).
-  return { broker: unpackedBrokerVariables(brokerVariables.Variables), dispatcher: dispatcherVariables.Variables };
+  return { broker: unpackedBrokerVariables(brokerVariables.Variables, template as never), dispatcher: dispatcherVariables.Variables };
 }
 
 function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
@@ -60,7 +61,7 @@ function appControlPlane(env: string): TemplateJson {
   const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
   const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
   if (stack === undefined) throw new Error(`expected the real ${env} control-plane stack`);
-  return Template.fromStack(stack).toJSON();
+  return withoutSlackCompanyMode(Template.fromStack(stack).toJSON(), { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function parentRemainderDigest(template: TemplateJson): string {
@@ -117,7 +118,8 @@ function realAppControlPlane(env?: string): TemplateJson {
   const stackName = env === undefined ? "AgentXControlPlane" : `agentx-${env}-control-plane`;
   const stack = stacks.find((candidate) => candidate.stackName === stackName);
   if (stack === undefined) throw new Error(`expected actual app control-plane stack ${stackName}`);
-  return Template.fromStack(stack).toJSON();
+  const template = Template.fromStack(stack).toJSON();
+  return env === undefined ? template : withoutSlackCompanyMode(template, { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
 function normalizeSingleton(value: unknown): unknown {
@@ -204,7 +206,7 @@ describe("the named TEST proof-only installation gate", () => {
       expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
       const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
       // ENV-ROOM: in a named Broker the flag is the parameter's piece of AGENTX_SETTINGS.
-      expect(unpackedBrokerVariables(variables.Variables).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+      expect(unpackedBrokerVariables(variables.Variables, template as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
     }
     expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy (production) has the workflow gate parameter, off").toMatchObject({ Default: "false" });
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
@@ -221,24 +223,32 @@ describe("the named TEST proof-only installation gate", () => {
     // core-gateway-settings.test.ts and verified: with the variable passed as before, the old pins hold); legacy unchanged.
     // Guided onboarding PR 4 (#836, DEC 254r item 2): named and foreign re-pinned for the sign-in Lambda's one Slack workspace token statement (secretsmanager CreateSecret,
     // PutSecretValue, GetSecretValue on agentx/<env>/slack-workspaces/*; developer-signin-infrastructure.test.ts pins it exactly). Verified: with only that statement removed, the old pins hold; legacy unchanged.
+    // DEC 254za: all six re-pinned for the callback signing key's secret (legacy included): the secret, its resource policy, the CALLBACK_SIGNING_KEY_SECRET_ID variables and the dispatcher's conditional read.
+    // Batch 12 (second-merge re-pin of #872 over #865, plus #871's Linear webhook route; DEC 254za, DEC 254y, rule D): named and foreign re-pinned. Verified on this tree: with only
+    // LinearWebhookRoute and #865's one slack-workspaces statement removed, #872's approved pins hold exactly (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393); legacy unchanged.
+    // DEC 254zg (a), owner-approved re-pin (#891): #865's slack-workspaces statement now lives only in a policy under CompanySignIn's condition (tests/support/company-signin-template.ts
+    // asserts and removes it with the rest of the switch). Batch 13 measured code/next + #891 alone: named 92a9b3f3/594a31af, foreign ceee7bbe/11c5f75a; with LinearWebhookRoute also
+    // removed those are exactly #872's approved pins (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393). Batch 13 (rule D; #886/#906, DEC 254z-amend3 / 254zm): and re-pinned for
+    // test services' additions only (TestServices and TestServiceImages parameters, td/ti in the broker's and the dispatcher's AGENTX_SETTINGS, the session steps' two variables).
+    // Verified on this tree: with exactly those taken out, the code/next + #891 values above hold. Legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "56585ffd2c1581b2920df568a77dfbcf6504d7fa41714a9baf824753185cc947",
-        withoutRoute: "f52329983db36a52bc1e2e90c98908fee2dc152a6891647adcdd9045e1ed29ac",
+        withRoute: "bfaeec0be69165a797add99c89111629b3b0461600c39a5f4800391756ab83b2",
+        withoutRoute: "bdf5fe0ee2b1f890357d82e40d33cefc0040b86f2b82f82eb694b4c72546910c",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "feb9693bf3da472c9a060e4c87221a9ae2b0a661ec4b0a9935f1b25663e76f8b",
-        withoutRoute: "524270619e97c8bd495ff0f6e56e52108dbed3a656829a0d32fd9de2b947c311",
+        withRoute: "c1e861032104271daeb6f062e953c509c9ad87378b0a01b6cfe8d23293314c12",
+        withoutRoute: "5b025719156499cad762121451e545c5df08161f67419cc78f74a649e6310e99",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "c9cd4a7890c9d0502fa0df7e5e06a28f87c0dba8de4fa439db39c7099874c201",
-        withoutRoute: "c8e40514d7a4fb8486ec1c0c8a6ccb36c0468cbef00c7ca48a4c6a76e8b334ea",
+        withRoute: "4f2ed4957fd06301c6f9875da12ed59f4a53c3a641be42c8728eaedfc2173e43",
+        withoutRoute: "f7dbb84a614daa78c400aa943fa7dd97ab738ae75da0a5f8013e9be15e7f157b",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
@@ -266,7 +276,8 @@ describe("the named TEST proof-only installation gate", () => {
         },
       });
       // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
-      const pinned = label === "legacy" ? template : withoutGithubSignIn(structuredClone(template), label === "named" ? "agentxlivetest123" : "staging");
+      // ENV-ROOM 2's additions (the broker names parameter and the IAM room made for it) are asserted and taken out first (tests/support/broker-environment-template.ts).
+      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(structuredClone(template)), label === "named" ? "agentxlivetest123" : "staging");
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
@@ -411,7 +422,7 @@ describe("the named TEST proof-only installation gate", () => {
       const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
       expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
     }
-    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables);
+    const brokerVars = unpackedBrokerVariables((broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables, { Resources: resources });
     expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
     expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
     const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
