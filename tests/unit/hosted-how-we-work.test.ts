@@ -216,7 +216,7 @@ describe("a task keeps the rules it started under (the pin)", () => {
 });
 
 describe("a hosted start writes nothing of the repository's file into the company's stored How we work", () => {
-  it("a file that carries a design review setting (or none) leaves the stored item and its audit as they were; the laptop's own sync still writes", async () => {
+  it("a file that carries a design review setting (or none) leaves the stored item and its audit as they were", async () => {
     const file = `${FILE}designReview:\n  mode: never\n  tier: light\n  allowSkip: true\n  capUsdPerTask: 1\n  highRiskApprover:\n    kind: maintainers\n`;
     const { h, dispatcher, broker } = await setup({ file, company: [RULES] });
     const before = JSON.stringify(await h.store.get(projectPlaybookKey(COMPANY, "payments")) ?? null);
@@ -233,7 +233,7 @@ describe("a hosted start writes nothing of the repository's file into the compan
   it("a file that parses but fails the recipe's own guards refuses the start with the reason, and a stored pin like it ends the step with the fixed sentence (never a raw error)", async () => {
     const emoji = "😀";
     const { h, dispatcher } = await setup({ file: `version: 1\nrules: "${emoji.repeat(3_900)}"`, company: [RULES] });
-    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: expect.stringMatching(/PROCESS_UNAVAILABLE|CONFIG_INVALID/u) as string });
+    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: "PROCESS_UNAVAILABLE" });
     expect((await h.flow.list(h.owner)).tasks).toEqual([]);
     await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { playbook: { commit: "a".repeat(40), file: { version: 1, rules: emoji.repeat(3_900) } } } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
