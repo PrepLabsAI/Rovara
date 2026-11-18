@@ -1106,7 +1106,7 @@ async function hostedRig(options: { consent?: boolean; upkeep?: boolean; enforce
   // L4-SR2b: with `cap`, the room is the gateway's own answer through the production reader function (the SAME reader as the night's), never a number the test hands over.
   const reader = options.cap === undefined ? undefined : capReader(options.cap, () => w.h.clock.now, orgId);
   const capSource: UpkeepCapReader | undefined = options.capWith ?? reader;
-  const capRoom = capSource === undefined ? undefined : (project: string): Promise<number | undefined> => upkeepRoomCentsOf(capSource, project, w.h.clock.now, orgId);
+  const capRoom = options.cap === undefined && options.capWith === undefined ? undefined : (project: string): Promise<number | undefined> => upkeepRoomCentsOf(capSource, project, w.h.clock.now, orgId);
   // The REAL hosted access rule over the same store: the system owner is accepted for a setup run only with its marks.
   w.h.deps.access = hostedTaskAccess({
     companyId: orgId, storage: async () => w.h.store, systemRunsOn: () => gate.enabled(), upkeepOn: (project) => upkeepIsOn({ store: w.h.store, companyId: orgId }, project),
