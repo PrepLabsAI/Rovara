@@ -172,17 +172,6 @@ export interface LessonLocalToolsView {
   projects: Array<{ project: string; enabled: boolean; own?: boolean; reason?: "company_stays" | "regulated" | "project_setting" }>;
 }
 
-/** One project's `.rovara/lessons.md` switches, as the lessons page shows them. Fixed sentences only. */
-export interface LessonReposView {
-  project: string;
-  canEnable: boolean;
-  repos: Array<{ repo: string; enabled: boolean; fileDeleted: boolean; pointer: "not_yet" | "added" | "missing" | "declined"; notices: string[];
-    /** Present while a person is asked to retire or keep the lessons that went missing from the file in one change: how many, and the digest the answer must carry back. */
-    retireConfirm?: { missing: number; digest: string } }>;
-  /** The project's repositories not switched on yet. */
-  available: string[];
-}
-
 export interface ProofRowView {
   claim: string;
   check: string;
@@ -470,8 +459,6 @@ export interface LocalPageData {
   /** An image of a design review; the page checks its type again before sending it. */
   readMockup(taskId: string, mockupId: string): Promise<{ contentType: string; bytes: Uint8Array } | undefined>;
   listLessons(): Promise<LessonView[]>;
-  /** The repository lessons file switches of each project. Absent: the page shows none. */
-  listLessonRepos?(): Promise<LessonReposView[]>;
   /** The local coding tools switches (decision 46b). Absent: the page shows none. */
   listLessonLocalTools?(): Promise<LessonLocalToolsView | undefined>;
   getProofReport(taskId: string): Promise<ProofReportView | undefined>;
@@ -572,10 +559,8 @@ export interface LocalPageActions {
   addComment(input: { taskId: string; target: string; text: string; revision: number }): Promise<LocalActionResult>;
   /** `wrong`: the lesson did not apply or was harmful; it is retired and the reason kept. */
   lessonAction(input: { lessonId: string; action: "approve" | "retire" | "wrong"; /** For an approval: what the form was bound to, and the proof the page signed over it. */ offer?: NonNullable<LessonView["offer"]>; proof?: ApprovalProof }): Promise<LocalActionResult>;
-  /** One switch of a project's repository lessons file. `fresh`: the page session was opened in the last few minutes (switching on needs it). Absent: the switches are not on this page. */
   /** One local coding tools switch from the lessons page: a project's own (`enabled`), or the company's "lessons stay in Rovara" (`stays`). */
   lessonLocalToolsAction?(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
-  lessonRepoAction?(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep"; /** The digest of the missing set the person saw: required for `retire_confirm` and `retire_keep`, absent for the rest. */ held?: string; fresh: boolean }): Promise<LocalActionResult>;
   /** Lane L12: runs a blocked step again. `revision` is the revision the owner was looking at; a task that moved on refuses it. */
   retry?(input: { taskId: string; revision: number }): Promise<LocalActionResult>;
   /** Lane L12: the owner says a task's plan is posted on an issue or pull request, so a writer's comment there can decide it. */

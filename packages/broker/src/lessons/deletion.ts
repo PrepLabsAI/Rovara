@@ -20,7 +20,6 @@ import { randomUUID } from "node:crypto";
 import { nextVersion, type DeletionIntent, type LessonStore, type ScopeKey } from "./store.js";
 import { ERASED_MARK, idIn, peopleOf, recordIdsOf, sameId, type Lesson, type LessonCitation } from "./types.js";
 import { scrubLesson, stripAudienceIds } from "./scrub.js";
-import { notifyLessonGone } from "./repo-file-hook.js";
 export { ERASED_MARK, scrubLesson };
 
 export type DeletionCause = "sources_deleted" | "source_deleted" | "person_erased";
@@ -130,8 +129,6 @@ export function lessonDeletionPort(deps: DeletionDeps): LessonDeletionPort {
     }
     intent.finished = true;
     await deps.store.putIntent(k, intent);
-    // A lesson that is only an add in Rovara's open lessons pull request comes out of it at once.
-    if (intent.outcome === "withdraw" || intent.outcome === "purge") await notifyLessonGone(k, intent.lessonId);
     if (intent.outcome === "withdraw" || intent.outcome === "purge") {
       await emitAudit(deps.audit, { action: "lesson.withdrawn", workspaceId: k.workspaceId, project: k.project, lessonId: intent.lessonId, facts: { cause: intent.cause, ...(intent.outcome === "purge" ? { purged: true } : {}) } });
     }

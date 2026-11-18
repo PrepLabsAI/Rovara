@@ -30,7 +30,6 @@ import type { PresetDeps } from "./preset-setting.js";
 import type { CorrectionJudge, LearningSpend, LessonAuditSink, PipelineModel } from "./ports.js";
 import type { ProcessDeps } from "./process.js";
 import { projectRepoScopesOf, withProjectRepoScopes, type ProjectRepoScopesPort } from "./project-repo-audience.js";
-import type { RepoFileRuntime } from "./repo-file-job.js";
 import type { LessonStore } from "./store.js";
 import { localLessonAudiencePort, withLessonAudiences } from "./task-audience.js";
 import { createHostedLessonParts, type HostedLessonPeople, type HostedTaskReader } from "./hosted-people.js";
@@ -98,8 +97,6 @@ export interface LessonsRuntime {
   readonly edition: Edition;
   /** What the loader is told about a task besides its title: a summary of the approved plan and the files it names (`plan-facts.ts`). Absent: the title and request alone. */
   planFacts?: (task: { orgId?: string | undefined; taskId: string; workflow?: unknown }) => Promise<{ summary: string; files: readonly string[] } | undefined>;
-  /** The weekly file pass and its routes. Set where the project's repositories and their code hosts can be reached. */
-  repoFile?: RepoFileRuntime;
 }
 
 const noModel = (): never => { throw new Error("no learning model is set up in this install"); };

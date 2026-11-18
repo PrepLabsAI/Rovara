@@ -64,15 +64,11 @@ async function namePeople(deps: LessonViewDeps, orgId: OrgId, me: string, ids: r
     }));
   }
   return (id) => {
-    // A lesson written in the repository file is approved by the repository edit, not by a person (read-back): shown as that.
-    if (id === REPOSITORY_APPROVER) return { name: "repository edit" };
     const name = found.get(normId(id));
     return name === undefined ? { name: FORMER } : { name, ...(sameId(id, me) ? { you: true as const } : {}) };
   };
 }
 
-/** The `by` of the approval read-back gives (`repo-file-readback.ts`). */
-const REPOSITORY_APPROVER = "system:repository-edit";
 const personIdsOf = (lesson: Lesson): string[] => [...lesson.provenance.authors, ...lesson.approvals.map((a) => a.by)];
 
 /** What a pending lesson still needs: the people the policy asks for, who approved first, and the groups not yet represented. */
@@ -159,7 +155,7 @@ async function queuedCount(deps: LessonViewDeps, key: ScopeKey, viewer: Identity
  * The Lessons tab. `surface: "home"` is Home's card: it needs only the lessons waiting for this person, so only those are read and checked (the other lists come back empty). Either way each status is
  * read on its own, the lists are ranked BEFORE the visibility check and checked a page at a time until one more than the list's cap survives, and one reader serves the whole request (no task is read twice).
  */
-export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCaller, project: string, options: { surface?: "tab" | "home"; /** Tests: the whole tab's deadline (default `TAB_DEADLINE_MS`). */ deadlineMs?: number } = {}): Promise<LessonsViewAnswer> {
+export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCaller, project: string, options: { surface?: "tab" | "home"; /** Cut every list at this many lessons (never above its own cap): the API route shows at most one page. */ listMax?: number; /** Tests: the whole tab's deadline (default `TAB_DEADLINE_MS`). */ deadlineMs?: number } = {}): Promise<LessonsViewAnswer> {
   const key = keyOf(caller, project);
   const [resolved, raw, state] = await Promise.all([
     resolveLearning(deps.settings, key.workspaceId, key.project),
@@ -201,20 +197,21 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
     return result.kept;
   };
   // People who do not decide read the active lessons only: the approval queue, who approved and what waits are for the people who can act on them. What waits for a decision is read first.
-  const waitingAll = state.canDecide ? await top("waiting", ["pending"], byValue, WAITING_MAX) : [];
-  const activeAll = home ? [] : await top("active", ["active", "stale"], byValue, ACTIVE_MAX);
+  const waitingMax = Math.min(WAITING_MAX, options.listMax ?? WAITING_MAX), activeMax = Math.min(ACTIVE_MAX, options.listMax ?? ACTIVE_MAX), removedMax = Math.min(REMOVED_MAX, options.listMax ?? REMOVED_MAX);
+  const waitingAll = state.canDecide ? await top("waiting", ["pending"], byValue, waitingMax) : [];
+  const activeAll = home ? [] : await top("active", ["active", "stale"], byValue, activeMax);
   const queued = state.canDecide && !home ? await queuedCount(deps, key, state.viewer, deadlineAt, legacyHeld) : 0;
-  const removedAll = state.canDecide && !home ? await top("removed", ["retired", "expired", "rejected"], byUpdated, REMOVED_MAX) : [];
-  const waiting = waitingAll.slice(0, WAITING_MAX), active = activeAll.slice(0, ACTIVE_MAX), removed = removedAll.slice(0, REMOVED_MAX);
+  const removedAll = state.canDecide && !home ? await top("removed", ["retired", "expired", "rejected"], byUpdated, removedMax) : [];
+  const waiting = waitingAll.slice(0, waitingMax), active = activeAll.slice(0, activeMax), removed = removedAll.slice(0, removedMax);
   const person = await namePeople(deps, caller.orgId, caller.developerId, [...waiting, ...active, ...removed].flatMap(personIdsOf));
   const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
 
   const setVersion = await deps.store.setVersion(key);
   const snapshots = state.canDecide && !home ? (await deps.store.snapshots(key)).filter((s) => s.setVersion !== setVersion).slice(-SNAPSHOTS_MAX).map((s) => ({ setVersion: s.setVersion, at: s.at, lessons: s.members.length })) : [];
   const truncated: Array<"waiting" | "active" | "removed"> = [];
-  if (waitingAll.length > WAITING_MAX || cut.has("waiting")) truncated.push("waiting");
-  if (activeAll.length > ACTIVE_MAX || cut.has("active")) truncated.push("active");
-  if (removedAll.length > REMOVED_MAX || cut.has("removed")) truncated.push("removed");
+  if (waitingAll.length > waitingMax || cut.has("waiting")) truncated.push("waiting");
+  if (activeAll.length > activeMax || cut.has("active")) truncated.push("active");
+  if (removedAll.length > removedMax || cut.has("removed")) truncated.push("removed");
   return {
     // `mode` is the project's own setting (after the company's lock); while the install's lessons switch is off the pipeline runs as Collect whatever it says, which `lessonsSwitchedOff` tells the people who decide.
     project, mode: resolved.chosenMode, lockedByCompany, ...(resolved.switchedOff && state.canDecide ? { lessonsSwitchedOff: true as const } : {}), preset: resolved.preset, presetLockedByCompany: companyPresetLocks(raw),
@@ -236,7 +233,8 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
 export const LESSON_PAGE_LISTS = ["proposed", "approved", "retired"] as const;
 export type LessonPageList = (typeof LESSON_PAGE_LISTS)[number];
 const PAGE_STATUSES: Record<LessonPageList, Lesson["status"][]> = { proposed: ["pending"], approved: ["active", "stale"], retired: ["retired", "expired", "rejected"] };
-export const LESSON_PAGE_MAX = 100;
+/** One page of a list: at most 50 lessons (owner decision 2026-11-17: lessons are read a few at a time). */
+export const LESSON_PAGE_MAX = 50;
 /** Where the next page starts: just after this lesson, in the list's order (newest change first, then id). Opaque to the caller. */
 export interface LessonPageCursor { list: LessonPageList; updatedAt: number; id: string }
 export interface LessonsPageAnswer {

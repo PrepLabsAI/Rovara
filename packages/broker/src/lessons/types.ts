@@ -203,10 +203,10 @@ export const LessonProvenanceSchema = z.object({
   /**
    * Set by code (`repoVisibilityOf`, repo-eligibility.ts) only when EVERY input the reflector was given (the task's start, its steering, every span it read, the
    * lessons loaded into the task) was readable by everyone who can read this ONE repository (`place`, `<source>:repo/<id>`). Merges AND it (`mergedRepoVisibility`: a merged lesson keeps it only when both sides carry
-   * it for the same repository). Absent is false: a lesson learned before this field, or one with an input of unknown kind or place, is never eligible for a repository's file.
+   * it for the same repository). Absent is false: a lesson learned before this field, or one with an input of unknown kind or place, is never repo-only.
    */
   repoOnly: z.object({ place: z.string().min(3).max(300) }).strict().optional(),
-  /** Why `repoOnly` is not set: fixed codes, no text, no names (the eligibility measurement counts these). Set by code with `repoOnly` absent; merges union them. Absent with `repoOnly` absent: learned before this field. */
+  /** Why `repoOnly` is not set: fixed codes, no text, no names (nothing reads them but tests today). Set by code with `repoOnly` absent; merges union them. Absent with `repoOnly` absent: learned before this field. */
   repoBlockCodes: z.array(z.enum(REPO_BLOCK_CODES)).max(REPO_BLOCK_CODES.length).optional(),
 }).strict();
 export type LessonProvenance = z.infer<typeof LessonProvenanceSchema>;
@@ -281,7 +281,7 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.tier0_setting_proposed", "lesson.tier0_setting_changed", "lesson.tier0_setting_cancelled", "lesson.tier0_setting_refused_retryable",
   "lesson.sole_owner_switch_proposed", "lesson.sole_owner_switch_changed", "lesson.model_set",
   "lesson.trial_started", "lesson.trial_retired", "lesson.trial_stable", "lesson.harm_reversed", "lesson.proposal_withdrawn", "lesson.preset_changed", "lesson.preset_proposed", "lesson.mode_changed", "lesson.trial_offer_answered", "lesson.digest_switched",
-  "lesson.repo_file_pr_opened", "lesson.repo_file_pr_closed", "lesson.repo_file_switched", "lesson.local_tools_switched", "lesson.repo_file_retire_decided",
+  "lesson.local_tools_switched",
   "lesson.replay_started", "lesson.replay_read", "lesson.snapshot_created",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];

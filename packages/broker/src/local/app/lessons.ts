@@ -9,8 +9,8 @@
 // library's approval run. A comment cannot approve a lesson: it can only mark one "wrong" or "right" for the task it was used in, as its own author, or ask for one to be retired (the owner confirms on the page);
 // loading at the dispatch of a step (understand, plan, code, review) the library picks the lessons that fit the task, writes what it loaded as the task's load record, and hands the worker a `learnedContext`
 // (ids and versions are checked again when the step is delivered, so a lesson retired meanwhile is not sent);
-// repository the lessons that were learned only from a repository's own review comments may be proposed to that repository as `.rovara/lessons.md`, in a pull request, by the weekly pass (off per repository).
-import { createHash, randomUUID } from "node:crypto";
+// repository Rovara never writes lessons into a customer's repository: what it learns stays in Rovara and is read here, a few at a time.
+import { createHash } from "node:crypto";
 import {
   IMPLICIT_COMPANY_ID, codeRepositoriesOf, companyScoped, orgProjectCatalogKey,
   type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
@@ -19,7 +19,7 @@ import type { ModelProviderBook } from "../model-proxy/types.js";
 import type { LocalModelChoice } from "../model-choice.js";
 import type { ProviderEndpoints } from "../model-proxy/providers.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
-import type { LessonLocalToolsView, LessonReposView, LocalActionResult, LessonView as PageLessonView } from "../../core/local-pages/views.js";
+import type { LessonLocalToolsView, LocalActionResult, LessonView as PageLessonView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
@@ -32,12 +32,9 @@ import { readVisible } from "../../lessons/read-visible.js";
 import { requireAudit, setLearnedLessonsGate } from "../../lessons/policy.js";
 import { createLessonsRuntime, type LessonsRuntime } from "../../lessons/runtime.js";
 import { buildLessonsView } from "../../lessons/view.js";
-import { repoFileAction, repoFileStatus } from "../../lessons/repo-file-routes.js";
 import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../../lessons/local-tools-setting.js";
 import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
-import { documentRepoFileStore } from "../../lessons/document-repo-file.js";
-import type { RepoFileRuntime } from "../../lessons/repo-file-job.js";
 import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
@@ -94,10 +91,6 @@ export interface LocalLessons {
   list(): Promise<LocalLessonView[]>;
   /** One decision from the owner's page. `proof` is the page's signed proof for an approval. */
   act(input: { lessonId: string; action: "approve" | "retire" | "wrong"; proof?: ApprovalProof | undefined; offer?: LessonOffer | undefined }): Promise<LocalActionResult>;
-  /** The repository lessons file switches of each project, for the lessons page. */
-  repoSwitches(): Promise<LessonReposView[]>;
-  /** One switch from the lessons page. Switching on needs `fresh`: a page session opened in the last few minutes. */
-  repoSwitch(input: { project: string; repo: string; action: "on" | "off" | "resume" | "pointer_add" | "pointer_decline" | "retire_confirm" | "retire_keep"; held?: string | undefined; fresh: boolean }): Promise<LocalActionResult>;
   /** The local coding tools switches (decision 46b) for the lessons page. Undefined when the company's switch cannot be read. */
   localToolsSwitches(): Promise<LessonLocalToolsView | undefined>;
   /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
@@ -171,18 +164,6 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     // A reason that was recorded is cleared when it is read once its cause is gone (a provider was connected).
     pauseStillApplies: async (_workspaceId, _project, code) => (code === "no_provider" ? (await options.model.choice()) === undefined : true),
   });
-
-  // The lessons file of each repository: off per repository until the owner switches it on, then one weekly pull request that proposes the lessons learned only from that repository's own words.
-  const repoFile: RepoFileRuntime = {
-    deps: {
-      store: runtime.store, state: documentRepoFileStore(flow.store, { onUnreadable: (what) => log("repo_file_item_unreadable", { what }) }), settings: runtime.settings, audit: runtime.audit, now, log: (event, fields) => log(event, fields),
-      // The people a lesson could name are the owner and the accounts its words came from; a name that cannot be read stops the pass, so the owner's is always given.
-      names: async () => [owner.displayName],
-    },
-    newHolder: () => `local-${randomUUID()}`,
-    targets: (_workspaceId, project) => repositories.targets(project),
-  };
-  runtime.repoFile = repoFile;
 
   // ---- capture, loading, the pull request and the upkeep: the same for every host (`lessons/host-glue.ts`)
 
@@ -310,36 +291,6 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     return { ok: true, message: approved.status === "active" ? "Approved. Rovara will use this lesson." : "Approved. It needs one more person before it is used." };
   }
 
-  // ---- the repository lessons file, on the page
-
-  async function repoSwitches(): Promise<LessonReposView[]> {
-    const repoFile = runtime.repoFile;
-    if (repoFile === undefined) return [];
-    const views: LessonReposView[] = [];
-    for (const project of await projectNames()) {
-      try {
-        const status = await repoFileStatus(repoFile, { workspaceId: companyId, project });
-        views.push({ project, canEnable: status.canEnable, repos: status.repos.map((row) => ({ repo: row.repo, enabled: row.enabled, fileDeleted: row.fileDeleted, pointer: row.pointer, notices: row.notices, ...(row.retireConfirm === undefined ? {} : { retireConfirm: { missing: row.retireConfirm.missing, digest: row.retireConfirm.digest } }) })), available: status.available });
-      } catch { /* a project whose repositories cannot be read now shows no switches */ }
-    }
-    return views;
-  }
-
-  async function repoSwitch(input: Parameters<LocalLessons["repoSwitch"]>[0]): Promise<LocalActionResult> {
-    const repoFile = runtime.repoFile;
-    if (repoFile === undefined) return refuse("Lessons are not available for this project.", "not_found");
-    // Switching on makes Rovara open pull requests in a repository: it needs the owner's page opened a few minutes ago (a form with a fresh session), never the API token.
-    if (input.action === "on" && !input.fresh) return refuse("Switching this on needs a page you opened in the last few minutes.");
-    // Retiring or keeping lessons that went missing from a file is the owner's answer (this page is the owner's); the library records who. Retiring needs the fresh page the server checked.
-    if (input.action === "retire_confirm" && !input.fresh) return refuse("Retiring these lessons needs a page you opened in the last few minutes.");
-    const result = await repoFileAction(repoFile, { workspaceId: companyId, project: input.project }, { action: input.action, repo: input.repo, ...(input.held === undefined ? {} : { held: input.held }) }, input.action === "retire_confirm" || input.action === "retire_keep" ? { developerId: ownerId } : undefined);
-    if (result.ok) return { ok: true, message: "Saved." };
-    return refuse(({
-      not_found: "No such repository in this project.", unreadable: "Rovara cannot read this project's repositories right now. Try again.", host_cannot_write: "This repository's code host cannot take a pull request from Rovara.",
-      audit_unavailable: "That could not be recorded, so nothing changed.", conflict: "This setting changed while you were looking at it. Read the page again.", not_permitted: "Only the owner can decide this.",
-    } as const)[result.code], result.code === "not_found" ? "not_found" : result.code === "conflict" ? "stale" : "refused");
-  }
-
   // ---- loading, at the dispatch of a step
 
   async function localToolsSwitches(): Promise<LessonLocalToolsView | undefined> {
@@ -440,5 +391,5 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
   const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, repoSwitches, repoSwitch, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
 }

@@ -1,10 +1,9 @@
-// The repositories of a project as lessons see them: each one's PLACE (`<host kind>:repo/<the host's own repository id>`, the name capture gives a repository's words and the lessons file gives its watch row), the code host
+// The repositories of a project as lessons see them: each one's PLACE (`<host kind>:repo/<the host's own repository id>`, the name capture gives a repository's words), the code host
 // that serves it and the scope to call it in. The id is the host's immutable one, asked of the host (`repositoryIdentity`), never the project's name for it, so a rename or a repository another project calls the same cannot
 // stand in for it. An answer is kept for a few minutes; a host that cannot say leaves the repository out (nothing is then treated as a project repository).
 import { PROJECT_REVISION_SK_PREFIX, codeRepositoriesOf, orgProjectCatalogKey, projectPk, type CodeHost, type HostScope, type OrgId, type RegistryView, type RepositoryRef } from "@agentx/contracts";
 import { providerOf } from "../../plugins/routing.js";
 import type { ProjectRepoScopesPort } from "../../lessons/project-repo-audience.js";
-import type { RepoFileTarget } from "../../lessons/repo-file-pass.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createRepositoryResolver } from "./tracking.js";
 import { normalizeRemote } from "../../lessons/repo-remote.js";
@@ -33,8 +32,6 @@ export interface LessonRepositories {
   ofTask(project: string, startingRevision: number, name: string): Promise<LessonRepository | undefined>;
   /** The project's repositories as places (the port the lessons' audience rules read). */
   scopes(): ProjectRepoScopesPort;
-  /** The repositories as targets for the lessons file pass. */
-  targets(project: string): Promise<RepoFileTarget[]>;
 }
 
 export function createLessonRepositories(input: { flow: Pick<TaskFlowDeps, "projects" | "store">; registry: RegistryView; companyId: OrgId; now: () => number }): LessonRepositories {
@@ -102,8 +99,5 @@ export function createLessonRepositories(input: { flow: Pick<TaskFlowDeps, "proj
         return (await ofProject(project)).find((repository) => repository.place === home.place)?.place;
       },
     }),
-    async targets(project) {
-      return (await ofProject(project)).map((repository) => ({ name: repository.name, place: repository.place, repository: repository.repository, scope: repository.scope, host: repository.codeHost }));
-    },
   };
 }

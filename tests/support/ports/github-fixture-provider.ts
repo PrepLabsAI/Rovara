@@ -10,7 +10,6 @@ import type {
   GitHubCodeHostProvider, GitHubFeedbackComment, GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult,
   GitHubPullRequestUpdate, GitHubRepositoryCredential, GitHubRepositoryIdentity, MergePullRequestResult, PullRequestCheck, PullRequestStatus, WorkingBranchPage,
 } from "../../../packages/broker/src/plugins/code-host/github/provider.js";
-import type { CommitFilesRequest } from "../../../packages/broker/src/plugins/code-host/github/commit-files.js";
 import type { FakeChangeRequest, FakeHostModel } from "@agentx/broker/fakes";
 
 export const GITHUB_OWNER = "acme";
@@ -52,7 +51,7 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     return {
       number: Number(cr.id), url: this.model.crUrl(cr.id), state: cr.state, headBranch: cr.sourceBranch, baseBranch: cr.targetBranch, headCommit: this.model.headRevisionOf(cr),
       ...(cr.mergeRevision === undefined ? {} : { mergeCommit: cr.mergeRevision }), ...(cr.mergedAt === undefined ? {} : { mergedAt: cr.mergedAt }), ...(cr.mergedBy === undefined ? {} : { mergedBy: cr.mergedBy }),
-      title: cr.title, body: cr.body, authorLogin: cr.author, baseRepositoryId: this.model.id, authoredByApp: cr.author === `${APP_SLUG}[bot]`,
+      title: cr.title, body: cr.body,
     };
   }
 
@@ -96,19 +95,6 @@ export class GitHubFixtureProvider implements GitHubCodeHostProvider {
     if (files.has(path)) return "file";
     for (const name of found.entries.keys()) if (name.startsWith(`${path}/`)) return "dir";
     return "none";
-  }
-  async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: HostScope): Promise<{ revision: string; changed: boolean }> {
-    this.serve("commitFilesToBranch", repositoryUrl, scope);
-    return this.model.commitLessonFiles({ repository: { url: repositoryUrl }, ...request, files: [...request.files], ...(request.previous === undefined ? {} : { previous: [...request.previous] }) } as never);
-  }
-  async findLessonsPullRequest(repositoryUrl: string, branch: string, scope: HostScope): Promise<{ number: number; url: string } | undefined> {
-    this.serve("findLessonsPullRequest", repositoryUrl, scope);
-    const found = this.model.changeRequestForLessonBranch(branch);
-    return found === undefined ? undefined : { number: Number(found.id), url: this.model.crUrl(found.id) };
-  }
-  async deleteLessonsBranch(repositoryUrl: string, branch: string, scope: HostScope): Promise<"deleted" | "gone"> {
-    this.serve("deleteLessonsBranch", repositoryUrl, scope);
-    return this.model.deleteLessonBranch(branch);
   }
   async getCommitTree(repositoryUrl: string, commitSha: string, scope: HostScope): Promise<string> {
     this.serve("getCommitTree", repositoryUrl, scope);

@@ -1,8 +1,7 @@
 import { createHash, createSign } from "node:crypto";
 import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
-import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
-import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -241,11 +240,6 @@ export interface GitHubPullRequestDetails {
   mergedBy?: string;
   title: string;
   body: string;
-  /** The login of the account that created it, and the id of the repository it is against, when GitHub says. */
-  authorLogin?: string;
-  baseRepositoryId?: string;
-  /** Whether that account is this App's own bot (set by `getPullRequest` only; absent when the App's login cannot be read). */
-  authoredByApp?: boolean;
 }
 
 /** What a merge came to (Plan 6 Task 19): merged (by the method asked, or the other one when the repository does not allow it), merged already, or refused for a fixed reason. */
@@ -659,11 +653,7 @@ export class GitHubAppCredentialProvider {
       contents: "read",
       pull_requests: "read",
     }, scope);
-    const details = await this.getPullRequestWithToken(repository, number, token);
-    // Whose pull request it is: only asked when GitHub named an author (the App's own login is a lookup of its own).
-    if (details.authorLogin === undefined) return details;
-    const own = await this.ownBotLogin();
-    return own === undefined ? details : { ...details, authoredByApp: details.authorLogin.toLowerCase() === own };
+    return this.getPullRequestWithToken(repository, number, token);
   }
 
   /**
@@ -1956,38 +1946,6 @@ export class GitHubAppCredentialProvider {
       if (reached) { await reader.cancel().catch(() => undefined); break; }
     }
     return new TextDecoder().decode(Buffer.concat(chunks));
-  }
-
-  /** Lessons in the repo: puts text files on a `rovara/lessons-` working branch with the same `contents: write` scope a worker's push uses (`github-commit-files.ts`). */
-  async commitFilesToBranch(repositoryUrl: string, request: CommitFilesRequest, scope: GitHubTokenScope): Promise<{ revision: string; changed: boolean }> {
-    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
-    const token = await this.createInstallationToken(repository, { contents: "write" }, scope);
-    return commitFilesOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, request);
-  }
-
-  /** Lessons in the repo: the pull request (any state) made from one of Rovara's own `rovara/lessons-` branches, or undefined. No other branch name is looked up. */
-  async findLessonsPullRequest(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined> {
-    if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
-    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
-    const token = await this.createInstallationToken(repository, { pull_requests: "read" }, scope);
-    const query = new URLSearchParams({ state: "all", head: `${repository.owner}:${branch}`, per_page: "1" });
-    const response = await this.fetchImplementation(
-      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls?${query.toString()}`,
-      { headers: githubHeaders(token), redirect: "error", signal: AbortSignal.timeout(8_000) },
-    );
-    if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request lookup failed with HTTP ${response.status}`); }
-    const value: unknown = await response.json();
-    const first = Array.isArray(value) ? (value[0] as { number?: unknown; html_url?: unknown } | undefined) : undefined;
-    if (first === undefined) return undefined;
-    if (typeof first.number !== "number" || !Number.isSafeInteger(first.number)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
-    return { number: first.number, url: typeof first.html_url === "string" && first.html_url.startsWith("https://") ? first.html_url : "" };
-  }
-
-  /** Lessons in the repo: deletes one of Rovara's own `rovara/lessons-` branches (no other name is accepted). */
-  async deleteLessonsBranch(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<"deleted" | "gone"> {
-    const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
-    const token = await this.createInstallationToken(repository, { contents: "write" }, scope);
-    return deleteBranchOn({ fetch: this.fetchImplementation, owner: repository.owner, name: repository.name, token }, branch);
   }
 
   /**
@@ -3290,17 +3248,6 @@ function mergedByLogin(value: unknown): string | undefined {
   return typeof login === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}(?:\[bot\])?$/u.test(login) ? login : undefined;
 }
 
-/** The login of the account in a pull request's `user`, when GitHub gives one. */
-function userLoginOf(user: unknown): string | undefined {
-  const login = user !== null && typeof user === "object" ? (user as Record<string, unknown>).login : undefined;
-  return typeof login === "string" && login.length > 0 && login.length <= 100 ? login : undefined;
-}
-/** The id of a repository object (`base.repo`), as text, when GitHub gives a whole number. */
-function repositoryIdOf(repo: unknown): string | undefined {
-  const id = repo !== null && typeof repo === "object" ? (repo as Record<string, unknown>).id : undefined;
-  return typeof id === "number" && Number.isSafeInteger(id) && id > 0 ? String(id) : undefined;
-}
-
 function parsePullRequestDetails(
   value: unknown,
   repository: InstalledRepository,
@@ -3342,8 +3289,6 @@ function parsePullRequestDetails(
     ...(candidate.merged === true && typeof mergedByLogin(candidate.merged_by) === "string" ? { mergedBy: mergedByLogin(candidate.merged_by)! } : {}),
     title: candidate.title,
     body: candidate.body ?? "",
-    ...(userLoginOf(candidate.user) === undefined ? {} : { authorLogin: userLoginOf(candidate.user)! }),
-    ...(repositoryIdOf((base as Record<string, unknown>).repo) === undefined ? {} : { baseRepositoryId: repositoryIdOf((base as Record<string, unknown>).repo)! }),
   };
 }
 

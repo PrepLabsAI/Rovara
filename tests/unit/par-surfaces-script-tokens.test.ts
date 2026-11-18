@@ -24,6 +24,7 @@ import { LocalPageSessions, MAX_SESSIONS } from "../../packages/broker/src/core/
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
+import { LOCAL_ALL_REFUSED } from "../../packages/broker/src/local/app/lessons-routes.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -374,7 +375,7 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect((await h.api("/v1/local/pages/open", { method: "POST", body: { path: "/", fresh: true } })).status).toBe(200);
   });
 
-  it("the lessons page may ask for a new page session (switching a repository's lessons file on needs one), and the home page may not", async () => {
+  it("the lessons page may ask for a new page session (letting lessons leave Rovara for every project needs one), and the home page may not", async () => {
     const h = await launch();
     const first = await h.browse("/lessons", true);
     const second = await h.browse("/lessons", true);
@@ -448,6 +449,8 @@ describe("rovara up: making a token on a page, and using it", () => {
     expect(await start(h, made.secret, 50)).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/dev/tasks?project=payments")).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons", { method: "POST", body: {} })).toMatchObject({ status: 200, body: { status: "ok", project: "payments", lessons: [] } });
+    // There is no "all lessons" request: the bulk flag is refused for a token too, with one fixed sentence.
+    expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons", { method: "POST", body: { all: true } })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: LOCAL_ALL_REFUSED } } });
     // Another project, another method and the owner's lessons routes stay closed.
     expect(await h.call(made.secret, "/v1/dev/projects/billing/lessons", { method: "POST", body: {} })).toMatchObject(refused);
     expect(await h.call(made.secret, "/v1/dev/projects/payments/lessons")).toMatchObject(refused);

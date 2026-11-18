@@ -16,7 +16,6 @@ import type { RevertedTasksReader } from "./task-outcome-rows.js";
 import { sweepExpired } from "./expiry.js";
 import { retireLesson } from "./curate.js";
 import { mergeKeepsRepoOnly } from "./repo-eligibility.js";
-import { lessonsRepoFilePublishJob, lessonsRepoFileSweepJob, type RepoFileRuntime } from "./repo-file-job.js";
 import { contradictedByMemberCard, isTrialLesson, memberCardsOf, promoteStableTrials, type StableDeps } from "./trial.js";
 
 /** 72 hours. The rows are found by their event time, and a revert can reach the record late (GitHub redelivers for three days); the worker's once-claim on `LEARN#<task>#reverted` makes a repeat free. */
@@ -38,8 +37,6 @@ export interface LessonsJobDeps {
   pinned?: ((orgId: string, project: string) => Promise<ReadonlySet<string>>) | undefined;
   /** Where the passes remember their starting project and each project's grace window. Absent: the document store's own item. */
   state?: NightlyStateStore | undefined;
-  /** The weekly file pass. Absent: it does not run. */
-  repoFile?: RepoFileRuntime | undefined;
   /** Tries every unfinished deletion of the project (`LessonDeletionPort.resumeAll`): one that fails never stops the ones after it. */
   resume(orgId: string, project: string): Promise<{ finished: number; failed: number }>;
   now(): number;
@@ -283,14 +280,10 @@ export async function lessonsExpireJob(deps: Pick<LessonsJobDeps, "store" | "set
 /** The nightly run: the revert re-reflection with the first half of the budget, then the expiry sweep, the trial repair and the trial promotion with what is left, so neither can starve the other. */
 export async function lessonsNightlyJob(deps: LessonsJobDeps, orgId: string, projects: readonly string[], budgetMs: number): Promise<Record<string, number>> {
   const started = deps.now();
-  // The erasure sweep comes FIRST and has a share of the night's budget of its own (a fifth), so no other pass can starve it.
-  const sweep = deps.repoFile === undefined ? {} : await lessonsRepoFileSweepJob(deps.repoFile, orgId, projects, budgetMs / 5, Math.floor(deps.now() / 86_400_000));
   const reverts = await lessonsRevertJob(deps, orgId, projects, budgetMs / 2);
   const expiries = await lessonsExpireJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 2));
   // The repair of a trial lesson a card contradicts comes before the promotion: a contradicted lesson is not made stable first.
   const repairs = await lessonsTrialRepairJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 4));
   const promotions = await lessonsPromoteJob(deps, orgId, projects, Math.max(0, (budgetMs - (deps.now() - started)) / 2));
-  // The weekly lessons file pass comes last, with what is left: it opens a pull request only after the sweep above has retired and expired what should go.
-  const repoFile = deps.repoFile === undefined ? {} : await lessonsRepoFilePublishJob(deps.repoFile, orgId, projects, Math.max(0, budgetMs - (deps.now() - started)), Math.floor(deps.now() / 86_400_000));
-  return { ...sweep, ...reverts, ...expiries, ...repairs, ...promotions, ...repoFile };
+  return { ...reverts, ...expiries, ...repairs, ...promotions };
 }

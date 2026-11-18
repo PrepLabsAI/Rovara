@@ -1,8 +1,7 @@
-// Which lessons may ever go into one repository's file. Every kind of input the reflector can be given, the AND of a merge, an old lesson, and the eligibility rule.
+// Which lessons are repo-only. Every kind of input the reflector can be given, the AND of a merge, and an old lesson.
 import { describe, expect, it } from "vitest";
-import { isRepoFileEligible, mergedRepoVisibility, repoFileBlockers, repoVisibilityOf, type RepoInputSpan } from "../../../packages/broker/src/lessons/repo-eligibility.js";
+import { mergedRepoVisibility, repoVisibilityOf, type RepoInputSpan } from "../../../packages/broker/src/lessons/repo-eligibility.js";
 import { SPAN_KINDS, type Audience } from "../../../packages/broker/src/lessons/types.js";
-import { lessonRecord } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";
 const B = "github:repo/2002";
@@ -120,70 +119,5 @@ describe("mergedRepoVisibility: the AND of a merge", () => {
       const both = "repoOnly" in left && "repoOnly" in right && left.repoOnly.place === right.repoOnly.place;
       expect(merged.repoOnly !== undefined).toBe(both);
     }
-  });
-});
-
-describe("isRepoFileEligible: the rule", () => {
-  const stable = { state: "stable" as const, startedAt: 1, stableAt: 2 };
-  const eligible = (over: Parameters<typeof lessonRecord>[0] = {}, prov: Record<string, unknown> = {}) => {
-    const base = lessonRecord({ trial: stable, ...over });
-    return { ...base, provenance: { ...base.provenance, repoOnly: { place: A }, audience: open, ...prov } };
-  };
-  const names = ["Ann Ng"];
-
-  it("accepts an active, stable lesson that is repository-only for that repository and names nobody", () => {
-    expect(isRepoFileEligible(eligible(), A, names)).toBe(true);
-    expect(repoFileBlockers(eligible(), A, names)).toEqual([]);
-  });
-  it("accepts a person-approved lesson that never went on trial, by any of the three person approval modes", () => {
-    for (const mode of ["one", "second_person", "sole_owner_exception"] as const) {
-      expect(isRepoFileEligible(eligible({ trial: undefined, approvals: [{ approvalId: "a", by: "p1", at: 1, mode }] }), A, names), mode).toBe(true);
-    }
-  });
-  it("accepts a lesson restricted to the readers of that one repository", () => {
-    expect(isRepoFileEligible(eligible({}, { audience: readersOf(A) }), A, names)).toBe(true);
-  });
-
-  const refused: Array<[string, ReturnType<typeof eligible>, string]> = [
-    ["a lesson with no repoOnly (learned before the field)", (() => { const l = eligible(); delete (l.provenance as { repoOnly?: unknown }).repoOnly; return l; })(), "not_repo_only"],
-    ["a lesson that is repository-only for another repository", eligible({}, { repoOnly: { place: B } }), "other_repo"],
-    ["a lesson on trial", eligible({ trial: { state: "trial", startedAt: 1 } }), "on_trial"],
-    ["an auto-applied lesson that is not stable", eligible({ trial: undefined, approvals: [{ approvalId: "a", by: "system:auto", at: 1, mode: "auto" }] }), "not_stable_or_approved"],
-    ["a lesson nobody approved", eligible({ trial: undefined, approvals: [] }), "not_stable_or_approved"],
-    ["a trial approval is not a person's", eligible({ trial: undefined, approvals: [{ approvalId: "a", by: "system:trial", at: 1, mode: "trial" }] }), "not_stable_or_approved"],
-    ["a retired lesson", eligible({ status: "retired" }), "not_active"],
-    ["a pending lesson", eligible({ status: "pending" }), "not_active"],
-    ["a lesson restricted to another repository's readers", eligible({}, { audience: readersOf(B) }), "restricted_audience"],
-    ["a lesson restricted to named people", eligible({}, { audience: { kind: "restricted", acl: { source: "slack", scope: "slack:channel/C1", principals: ["u1"], capturedAt: "t", liveCheck: "none" } } }), "restricted_audience"],
-    ["a lesson restricted to two sources including the repository", eligible({}, { audience: readersOf(`${A}+${B}`) }), "restricted_audience"],
-    ["a lesson whose text names a person (display name)", eligible({ body: "Ask Ann Ng before changing retries." }), "names_a_person"],
-    ["a lesson whose text names a person (handle)", eligible({ description: "Ping @ann-ng for the schema." }), "names_a_person"],
-    ["a lesson whose text names a person (e-mail)", eligible({ title: "Mail ann@example.com" }), "names_a_person"],
-    ["a tier 2 lesson", eligible({ tier: 2 }), "needs_review"],
-    ["a lesson that needs review", eligible({ reviewRequired: true }), "needs_review"],
-    ["a lesson with a retire proposal", eligible({ retireProposedAt: 5 }), "needs_review"],
-    ["a lesson with a thumbs-down", eligible({ counters: { loaded: 3, helpful: 0, harmful: 1, citationStale: 0 } }), "needs_review"],
-    ["a lesson with a stale citation", eligible({ citationChecks: [{ index: 0, result: "stale", at: 1 }] }), "needs_review"],
-  ];
-  for (const [name, lesson, blocker] of refused) {
-    it(`refuses ${name}`, () => {
-      expect(isRepoFileEligible(lesson, A, names)).toBe(false);
-      expect(repoFileBlockers(lesson, A, names)).toContain(blocker);
-    });
-  }
-  it("a tier 2 lesson whose text is the team's own (read back from the file) is not held back for its tier, but every other review reason still applies", () => {
-    expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["escalation_words", "team_file_text"] }), A, names)).toEqual([]);
-    expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["team_file_text"], reviewRequired: true }), A, names)).toContain("needs_review");
-    expect(repoFileBlockers(eligible({ tier: 2, tierReasons: ["escalation_words"] }), A, names)).toContain("needs_review");
-  });
-  it("refuses a repository argument that is not a repository place, and repoOnly with a different place spelling", () => {
-    expect(repoFileBlockers(eligible(), "not a place", names)).toEqual(["repo_unknown"]);
-    expect(isRepoFileEligible(eligible(), "github:repo/1001 ", names)).toBe(false);
-    expect(isRepoFileEligible(eligible(), "github:repo/10010", names)).toBe(false);
-  });
-  it("is eligible for A and not for B (the repository-only rule)", () => {
-    const lesson = eligible({}, { audience: readersOf(A) });
-    expect(isRepoFileEligible(lesson, A, names)).toBe(true);
-    expect(isRepoFileEligible(lesson, B, names)).toBe(false);
   });
 });

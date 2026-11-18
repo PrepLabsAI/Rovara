@@ -16,22 +16,18 @@ export const LocalLessonsBodySchema = z.object({
   task: z.string().max(LOCAL_LESSONS_TASK_MAX).optional(),
   files: z.array(z.string().min(1).max(400).refine(NoControl, "must not contain control characters")).max(LOCAL_LESSONS_FILES_MAX).optional(),
   stage: LocalLessonsStageSchema.optional(),
-  /** The whole allowed set for the repository in one block (at most 300 lessons and 64 KB), for a tool that wants one block at session start. */
-  all: z.boolean().optional(),
-  /** The tool reads the repository's `.rovara/lessons.md`: leave out the lessons already merged into it. Without this, those lessons are returned and marked `inRepoFile`. */
-  skipRepoFile: z.boolean().optional(),
 }).strict();
 export type LocalLessonsBody = z.infer<typeof LocalLessonsBodySchema>;
 
 export const LOCAL_LESSONS_OFF_REASONS = ["install_switch", "company_stays", "learning_off", "regulated", "project_setting"] as const;
 export const LocalLessonSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{4,64}$/u), advice: z.string().max(400),
-  why: z.string().max(400).optional(), citation: z.string().max(260).optional(), inRepoFile: z.literal(true).optional(),
+  why: z.string().max(400).optional(), citation: z.string().max(260).optional(),
 }).strict();
 export const LocalLessonsResponseSchema = z.object({
   status: z.enum(["ok", "off"]), reason: z.enum(LOCAL_LESSONS_OFF_REASONS).optional(), message: z.string().max(400),
   project: z.string().max(100), repo: z.string().max(400).optional(),
-  lessons: z.array(LocalLessonSchema).max(300), markdown: z.string().max(100_000), complete: z.boolean(),
+  lessons: z.array(LocalLessonSchema).max(50), markdown: z.string().max(100_000), complete: z.boolean(),
 }).strict();
 export type LocalLessonsResponse = z.infer<typeof LocalLessonsResponseSchema>;
 /** What a client reads of the answer: a newer server's extra fields are kept, not refused. */
@@ -47,8 +43,6 @@ export const LOCAL_LESSONS_NO_PROJECT_LINE = "No Rovara lessons: say which Rovar
 export const LOCAL_LESSONS_AMBIGUOUS_LINE = "No Rovara lessons: this repository is in more than one of your Rovara projects. Pass the project you mean. Continue without them.";
 /** The most projects a client asks, one by one, when it was not told which project the checkout belongs to. */
 export const LOCAL_LESSONS_PROJECTS_MAX = 25;
-/** The lessons file a team merges into a repository (decision 50a); a tool that finds it in the checkout asks for the lessons that are not already in it. */
-export const LOCAL_LESSONS_REPO_FILE = ".rovara/lessons.md";
 
 /**
  * The description given to AI tools for the lessons tool (MCP) and the line for AGENTS.md (decision 51's setup lines). One text in one place, so the tool, the docs and a test say the same thing.

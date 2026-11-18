@@ -1,25 +1,17 @@
-// Which lessons may ever go into ONE repository's `.rovara/lessons.md`.
+// Which lessons were learned ONLY from inputs that everyone who can read ONE repository could read (`provenance.repoOnly`).
 //
-// The rule (50a.1): a lesson is eligible for repository R only if EVERY input the reflector was given was readable by everyone who can read R, and its text names nobody. Checked by code, fail closed: an input of an
-// unknown kind or an unknown place makes the lesson not eligible. Nothing in this file calls a model or reads a store: every function is pure.
+// The rule (50a.1): a lesson is repo-only for repository R only if EVERY input the reflector was given was readable by everyone who can read R. Checked by code, fail closed: an input of an unknown kind or an unknown place
+// makes the lesson not repo-only. Nothing in this file calls a model or reads a store: every function is pure.
 //   - `repoVisibilityOf`: at reflection, from the task's own inputs and every span the reflector was given, sets `provenance.repoOnly` (and the fixed codes of what blocked it, `repoBlockCodes`).
 //   - `mergedRepoVisibility`: at a merge (`curate.ts#mergeInto`, which a person's merge `foldDuplicate` also uses), the AND of the two sides: kept only when both carry it for the SAME repository.
-//   - `isRepoFileEligible` / `repoFileBlockers`: whether a stored lesson may go into repository R's file now.
 // The table of inputs (one kind of span each):
 //   pr_comment, human_edit, outcome, fact, and a CI result or an intent that carries a repository place  -> yes, if the place is ONE repository and the span's audience is that repository's readers (or the project, a public repository)
 //   send_back, remembered, close_reason, plan_comment, design_comment (typed in Rovara)                                              -> never
 //   plan, review_finding, ci_failure written by Rovara (no person)                                       -> only if everything else passes (they are derived from the task's inputs)
 //   a person's words in a plan / finding, a span from Slack, a tracker, MCP or Rovara itself, a loaded lesson, another repository, an unknown kind -> never
 //   a task's own start and steering that are not spans (typed task text, answers, notes, connections)     -> never, unless the subject source PROVED them repository-visible (`ReflectSubject.repoInputs`)
-import { hasStaleCitation, namesAPerson } from "./trial.js";
 import { REPO_PLACE, repoOnlyScopes } from "./project-repo-audience.js";
 import { REPO_BLOCK_CODES, SPAN_KINDS, type Audience, type Lesson, type LessonCitation, type LessonProvenance, type RepoBlockCode } from "./types.js";
-
-/** What the eligibility rule reads of a lesson: a `Lesson` fits, and so does the reduced item the measurement script reads (it never needs the rest). */
-export type RepoEligibilityLesson = Pick<Lesson, "status" | "tier" | "trial" | "approvals" | "reviewRequired" | "retireProposedAt" | "counters" | "citationChecks" | "title" | "description" | "body"> & {
-  provenance: Pick<LessonProvenance, "audience" | "repoOnly" | "repoBlockCodes">;
-  tierReasons?: Lesson["tierReasons"];
-};
 
 /** Whether a text is a repository place (`<source>:repo/<id>`), the shape the Team record names a code-host repository with. */
 export const isRepoPlace = (place: string): boolean => REPO_PLACE.test(place);
@@ -181,52 +173,15 @@ export function mergedRepoVisibility(target: Pick<LessonProvenance, "repoOnly" |
   return { repoBlockCodes: inCodeOrder(codes) };
 }
 
-/** The tier reason read-back (`repo-file-readback.ts`) puts on a lesson whose text is the team's own, merged into the repository's file. */
-export const TEAM_FILE_TEXT = "team_file_text";
-
 /** The approvals a PERSON gave (not the trial's or the automatic path's): the lessons that count as "person-approved". */
 const PERSON_APPROVAL_MODES: ReadonlySet<string> = new Set(["one", "second_person", "sole_owner_exception"]);
 
 /** Whether a PERSON approved the lesson (a lesson counts as "person-approved" only then: not the trial, not the automatic path). The Regulated preset proposes only these. */
 export const hasPersonApproval = (lesson: Pick<Lesson, "approvals">): boolean => lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
 
-export type RepoFileBlocker =
-  | "repo_unknown" | "not_repo_only" | "other_repo" | "not_active" | "on_trial" | "not_stable_or_approved" | "restricted_audience" | "names_a_person" | "needs_review";
-
-/**
- * Everything that keeps a lesson out of repository `repo`'s file now (empty: eligible). `repo` is its place (`<source>:repo/<id>`); `names` are the display names of the people the lesson could name, REQUIRED as for
- * `isPublishable` (an empty list is a statement that the caller found none; an @handle or an e-mail address always counts). Pure; every doubt is a blocker.
- */
-export function repoFileBlockers(lesson: RepoEligibilityLesson, repo: string, names: readonly string[]): RepoFileBlocker[] {
-  const blockers: RepoFileBlocker[] = [];
-  if (!isRepoPlace(repo)) return ["repo_unknown"];
-  const only = lesson.provenance.repoOnly;
-  if (only === undefined) blockers.push("not_repo_only");
-  else if (only.place !== repo) blockers.push("other_repo");
-  if (lesson.status !== "active") blockers.push("not_active");
-  // Stable after trial, or approved by a person. A lesson still on trial, or one that went live without any person, waits.
-  const stable = lesson.trial?.state === "stable";
-  const onTrial = lesson.trial?.state === "trial";
-  const approvedByPerson = lesson.trial === undefined && lesson.approvals.some((approval) => PERSON_APPROVAL_MODES.has(approval.mode));
-  if (onTrial) blockers.push("on_trial");
-  else if (!stable && !approvedByPerson) blockers.push("not_stable_or_approved");
-  // No restriction except "the readers of this very repository".
-  const audience = lesson.provenance.audience;
-  const readers = repoOnlyScopes(lesson);
-  if (audience.kind !== "project" && !(readers !== undefined && readers.every((reader) => reader === repo))) blockers.push("restricted_audience");
-  if (namesAPerson([lesson.title, lesson.description, lesson.body].join("\n"), names)) blockers.push("names_a_person");
-  // The same soundness `isPublishable` asks of a lesson that leaves Rovara's store.
-  // Tier 2 (words about tests, checks, security...) asks for two people before Rovara PROPOSES a lesson. Text the team itself merged into the file (read back from the file) is not Rovara's proposal: its tier never takes the team's own block out.
-  if ((lesson.tier >= 2 && !(lesson.tierReasons ?? []).includes(TEAM_FILE_TEXT)) || lesson.reviewRequired === true || lesson.retireProposedAt !== undefined || lesson.counters.harmful > 0 || hasStaleCitation(lesson)) blockers.push("needs_review");
-  return blockers;
-}
-
-/** Whether the lesson may go into repository `repo`'s `.rovara/lessons.md`. Pure; see `repoFileBlockers` for the reasons. */
-export const isRepoFileEligible = (lesson: RepoEligibilityLesson, repo: string, names: readonly string[]): boolean => repoFileBlockers(lesson, repo, names).length === 0;
-
 /**
  * A person's edit-and-approve (`approve.ts`) is text typed in Rovara: an input that the readers of the repository cannot see ("text typed in Rovara: never"). The edited lesson is no longer repository-only,
- * whatever its inputs were; hand edits come into a repository's file through the read-back, which is repository-visible by construction. Pure.
+ * whatever its inputs were; Pure.
  */
 export function afterPersonEdit<P extends Pick<LessonProvenance, "repoOnly" | "repoBlockCodes">>(provenance: P): P {
   const { repoOnly: _only, repoBlockCodes: earlier, ...rest } = provenance;

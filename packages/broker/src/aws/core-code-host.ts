@@ -201,12 +201,6 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   // The optional methods, only where the client has them (the adapter then offers the matching CodeHost method), each with the same check.
   const getPathKindAtCommit = client.getPathKindAtCommit?.bind(client);
   if (getPathKindAtCommit !== undefined) scoped.getPathKindAtCommit = async (url, path, commit, scope, kindOptions) => getPathKindAtCommit(url, path, commit, await companyScope(url, scope), kindOptions);
-  const commitFilesToBranch = client.commitFilesToBranch?.bind(client);
-  if (commitFilesToBranch !== undefined) scoped.commitFilesToBranch = async (url, request, scope) => commitFilesToBranch(url, request, await companyScope(url, scope));
-  const findLessonsPullRequest = client.findLessonsPullRequest?.bind(client);
-  if (findLessonsPullRequest !== undefined) scoped.findLessonsPullRequest = async (url, branch, scope) => findLessonsPullRequest(url, branch, await companyScope(url, scope));
-  const deleteLessonsBranch = client.deleteLessonsBranch?.bind(client);
-  if (deleteLessonsBranch !== undefined) scoped.deleteLessonsBranch = async (url, branch, scope) => deleteLessonsBranch(url, branch, await companyScope(url, scope));
   const listTreeAtCommit = client.listTreeAtCommit?.bind(client);
   if (listTreeAtCommit !== undefined) scoped.listTreeAtCommit = async (url, commit, scope, treeOptions) => listTreeAtCommit(url, commit, await companyScope(url, scope), treeOptions);
   const listDirectoryAtCommit = client.listDirectoryAtCommit?.bind(client);

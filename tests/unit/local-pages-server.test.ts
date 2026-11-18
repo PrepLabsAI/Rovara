@@ -313,36 +313,14 @@ describe("lessons", () => {
     expect(world.actions.calls).toHaveLength(1);
   });
 
-  it("shows the repository lessons file switches, and a switch needs its own form token", async () => {
+  it("has no repository lessons file: the page shows no switch for one, and its old form address is not a route", async () => {
     const page = (await get(`${base}/lessons`)).body;
-    expect(page).toContain("Lessons in the repository");
-    const { action, fields } = formOf(page, "/lessons/repo");
-    expect(fields).toMatchObject({ project: "payments", repo: "api", action: "on" });
-    expect(String((await post(action, { ...fields, action: "off" })).headers.location)).toContain("n=form");
-    expect(String((await post(action, { ...fields, repo: "other" })).headers.location)).toContain("n=form");
+    expect(page).not.toContain("Lessons in the repository");
+    expect(page).not.toContain("/lessons/repo");
+    expect(page).not.toContain(".rovara/lessons.md");
+    const answer = await post(`${base}/lessons/repo`, { project: "payments", repo: "api", action: "on" });
+    expect(answer.status).toBe(404);
     expect(world.actions.calls).toEqual([]);
-    expect(String((await post(action, fields)).headers.location)).toContain("n=lessonrepo");
-    expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { project: "payments", repo: "api", action: "on", fresh: true } });
-  });
-
-  it("switching a repository's lessons file on needs a page opened in the last few minutes; switching off does not", async () => {
-    let clock = Date.parse("2026-11-10T10:00:00.000Z");
-    const aged = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
-    try {
-      const agedBase = `/s/${aged.sessions.mint().token}`;
-      const aHost = new URL(aged.origin).host;
-      const getAged = (path: string) => raw(aged.origin, { path, headers: { host: aHost } });
-      const postAged = (path: string, fields: Record<string, string>) => raw(aged.origin, { method: "POST", path, body: formBody(fields), headers: { host: aHost, origin: aged.origin, "content-type": "application/x-www-form-urlencoded" } });
-      const on = formOf((await getAged(`${agedBase}/lessons`)).body, "/lessons/repo");
-      clock += 11 * 60 * 1000;
-      expect(String((await postAged(on.action, on.fields)).headers.location)).toContain("n=lessonfresh");
-      expect(world.actions.calls).toEqual([]);
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [{ repo: "api", enabled: true, fileDeleted: false, pointer: "not_yet", notices: [] }], available: [] }];
-      const off = formOf((await getAged(`${agedBase}/lessons`)).body, "/lessons/repo");
-      expect(off.fields["action"]).toBe("off");
-      expect(String((await postAged(off.action, off.fields)).headers.location)).toContain("n=lessonrepo");
-      expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { action: "off", fresh: false } });
-    } finally { await aged.close(); }
   });
 
   describe("lessons for local coding tools (decision 46b)", () => {
@@ -393,75 +371,6 @@ describe("lessons", () => {
         const [stay] = localForms((await getAged(`${agedBase}/lessons`)).body);
         expect(String((await postAged(stay!.action, stay!.fields)).headers.location)).toContain("n=lessonlocal");
         expect(world.actions.calls.map((call) => call.input)).toEqual([{ scope: "project", project: "payments", enabled: false }, { scope: "company", stays: true }]);
-      } finally { await aged.close(); }
-    });
-  });
-
-  describe("lessons that went missing from a file", () => {
-    const DIGEST = "0123456789abcdef";
-    const missingRow = (over: Record<string, unknown> = {}) => ({ repo: "api", enabled: true, fileDeleted: false, pointer: "added" as const, notices: [], retireConfirm: { missing: 7, digest: DIGEST }, ...over });
-    /** Every form on the page that posts to /lessons/repo, with its hidden fields. */
-    const repoForms = (page: string) => [...page.matchAll(/<form[^>]*action="([^"]+\/lessons\/repo)"[^>]*>([\s\S]*?)<\/form>/g)].map((match) => {
-      const fields: Record<string, string> = {};
-      for (const input of (match[2] ?? "").matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) fields[input[1] ?? ""] = input[2] ?? "";
-      return { action: match[1] ?? "", fields };
-    });
-
-    it("shows how many are missing with Retire and Keep, each carrying the digest of the set the owner saw", async () => {
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
-      const page = (await get(`${base}/lessons`)).body;
-      expect(page).toContain("7 lessons are missing from this file. Retire them, or keep them?");
-      const forms = repoForms(page);
-      expect(forms.map((form) => form.fields["action"])).toEqual(["retire_confirm", "retire_keep", "off"]);
-      expect(forms[0]!.fields["held"]).toBe(DIGEST);
-      expect(forms[1]!.fields["held"]).toBe(DIGEST);
-      expect(forms[2]!.fields["held"]).toBeUndefined();
-      // No card while nothing waits for an answer.
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow({ retireConfirm: undefined })], available: [] }];
-      expect((await get(`${base}/lessons`)).body).not.toContain("missing from this file");
-    });
-
-    it("keep and retire reach the action with the digest; the form token binds that digest and the action", async () => {
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
-      const [retire, keep] = repoForms((await get(`${base}/lessons`)).body);
-      expect(String((await post(keep!.action, keep!.fields)).headers.location)).toContain("n=lessonretire");
-      expect(world.actions.calls[0]).toMatchObject({ name: "lessonRepoAction", input: { project: "payments", repo: "api", action: "retire_keep", held: DIGEST } });
-      expect(String((await post(retire!.action, retire!.fields)).headers.location)).toContain("n=lessonretire");
-      expect(world.actions.calls[1]).toMatchObject({ input: { action: "retire_confirm", held: DIGEST, fresh: true } });
-      const calls = world.actions.calls.length;
-      // The keep token cannot retire, and a digest of another set is not the one the token was made for.
-      expect(String((await post(keep!.action, { ...keep!.fields, action: "retire_confirm" })).headers.location)).toContain("n=form");
-      expect(String((await post(keep!.action, { ...keep!.fields, held: "f".repeat(16) })).headers.location)).toContain("n=form");
-      expect(world.actions.calls).toHaveLength(calls);
-    });
-
-    it("refuses a missing or malformed digest on these two answers, and a digest on any other action", async () => {
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
-      const [retire, , off] = repoForms((await get(`${base}/lessons`)).body);
-      for (const held of [undefined, "nope", "0123456789ABCDEF", `${DIGEST}0`]) {
-        const { held: _drop, ...rest } = retire!.fields;
-        void _drop;
-        expect(String((await post(retire!.action, held === undefined ? rest : { ...rest, held })).headers.location), String(held)).toContain("n=invalid");
-      }
-      expect(String((await post(off!.action, { ...off!.fields, held: DIGEST })).headers.location)).toContain("n=invalid");
-      expect(world.actions.calls).toEqual([]);
-    });
-
-    it("retiring needs a page opened in the last few minutes; keeping does not", async () => {
-      world.data.lessonRepos = [{ project: "payments", canEnable: true, repos: [missingRow()], available: [] }];
-      let clock = Date.parse("2026-11-10T10:00:00.000Z");
-      const aged = await createLocalPagesServer({ data: world.data, actions: world.actions, now: () => clock });
-      try {
-        const agedBase = `/s/${aged.sessions.mint().token}`;
-        const aHost = new URL(aged.origin).host;
-        const page = (await raw(aged.origin, { path: `${agedBase}/lessons`, headers: { host: aHost } })).body;
-        const postAged = (path: string, fields: Record<string, string>) => raw(aged.origin, { method: "POST", path, body: formBody(fields), headers: { host: aHost, origin: aged.origin, "content-type": "application/x-www-form-urlencoded" } });
-        const [retire, keep] = repoForms(page);
-        clock += 11 * 60 * 1000;
-        expect(String((await postAged(retire!.action, retire!.fields)).headers.location)).toContain("n=lessonfresh");
-        expect(world.actions.calls).toEqual([]);
-        expect(String((await postAged(keep!.action, keep!.fields)).headers.location)).toContain("n=lessonretire");
-        expect(world.actions.calls[0]).toMatchObject({ input: { action: "retire_keep", fresh: false } });
       } finally { await aged.close(); }
     });
   });
