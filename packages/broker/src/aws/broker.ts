@@ -660,7 +660,7 @@ interface AwsBrokerDependencies {
      * Guided onboarding PR 6: which installation serves a repository and whether it is suspended, read from GitHub now (no cache). Every create
      * checks it against the company's bindings; absent while bindings are on, the multi-repository and bulk creates refuse every repository.
      */
-    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>;
+    repositoryInstallation?(url: string): Promise<LiveRepositoryInstallation>; /** gh-bindings: the company GitHub bindings for THESE routes only (`withClientGithubBindings`), used where a membership reader is wired. */ bindings?: GithubInstallationBindings;
   };
   /**
    * Lanes AU and EV: the company audit and event reads for a company administrator (`/v1/dev/client/company/*`): the company's document store, the host's company
@@ -14575,9 +14575,9 @@ function linkingRouteDependencies(dependencies: AwsBrokerDependencies, linking: 
 const CLIENT_PROJECT_INSTRUCTIONS = "Delegate every repository read, edit, shell command, build and test to the remote AgentX worker. Before reporting a change done, run the project's test commands.";
 
 /** Spec 065b: a sign-in client's signed-in Rovara administrator creates a project from one GitHub repository. Guided onboarding PR 6: or from several, or one per repository. */
-function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyProjectCreator" | "companyReads"> {
-  const clientProjects = dependencies.clientProjects;
-  if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
+function clientProjectRouteDependencies(brokerDependencies_: AwsBrokerDependencies): Pick<DeveloperRouteDependencies, "createClientProject" | "createClientProjects" | "createClientProjectsBulk" | "clientRepositories" | "clientRepositoryChoices" | "companyProjectCreator" | "companyReads"> {
+  const dependencies = withClientGithubBindings(brokerDependencies_);
+  const clientProjects = dependencies.clientProjects; if (clientProjects === undefined) return dependencies.companyReads === undefined ? {} : { companyReads: dependencies.companyReads };
   const rules = { ...(dependencies.githubBindings === undefined ? {} : { bindings: dependencies.githubBindings }),
     ...(clientProjects.repositoryInstallation === undefined ? {} : { live: (url: string) => clientProjects.repositoryInstallation!(url) }) };
   const projectExists = async (name: string) => ((await dependencies.documentClient.send(new QueryCommand({
@@ -15695,6 +15695,8 @@ function buildBrokerHandler(callbackSigningKey: string) {
       repositoryDefaults: (url: string) => githubCredentials.repositoryDefaults(url),
       repositories: () => githubCredentials.installedRepositories(),
       repositoryInstallation: (url: string) => githubCredentials.repositoryInstallation(url),
+      // gh-bindings (batch 20): the client project routes filter and check repositories by the company's own bindings (withClientGithubBindings); the rest of the broker is unchanged.
+      bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")),
       workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
     } } : {}),
     projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
@@ -15828,4 +15830,18 @@ export function clientProjectDependenciesForTests(input: AwsBrokerInput): Return
   const brokerInput: Omit<AwsBrokerInput, "core"> = { ...input };
   delete (brokerInput as AwsBrokerInput).core;
   return clientProjectRouteDependencies(brokerDependencies(brokerInput));
+}
+
+/**
+ * gh-bindings (batch 20): the client project routes (repository list, picker, single, multi and bulk creates) with the company GitHub bindings the deployed broker
+ * gives them in `clientProjects.bindings`, and the live membership reader the sign-in configuration already holds (top-level `companies` is unset on hosted).
+ * With them, the list and picker show only the caller's company's bound installations, a create checks every repository against that company's bindings, and a
+ * live company owner or admin may create (`companyProjectCreatorOf`). Only these routes: the broker-wide `githubBindings` (webhooks, their recovery partitions,
+ * mints, the administrator's own registration) stays as the host set it. Without a membership reader (no company layer) nothing changes.
+ */
+function withClientGithubBindings(dependencies: AwsBrokerDependencies): AwsBrokerDependencies {
+  const bindings = dependencies.clientProjects?.bindings;
+  const companies = dependencies.companies ?? (dependencies.developer ?? dependencies.linking)?.companies;
+  if (bindings === undefined || dependencies.githubBindings !== undefined || companies === undefined) return dependencies;
+  return { ...dependencies, githubBindings: bindings, companies };
 }
