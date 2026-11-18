@@ -9,7 +9,7 @@ import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../../core/answers/code-source.js";
 import type { AnswerModel } from "../../core/answers/ports.js";
-import { createAnswerService } from "../../core/answers/service.js";
+import { createAnswerService, type AnswerServiceDeps } from "../../core/answers/service.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import { createWikiStore } from "../../core/wiki/store.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
@@ -26,6 +26,8 @@ export interface LocalProjectAnswersOptions {
   store: DocumentStore;
   companyId?: OrgId | undefined;
   model: AnswerModel;
+  /** Lead 4 L4-AK2b: this install's team knowledge briefing for an answer (`LocalLessons.answerBriefing`). Absent: none. */
+  briefing?: AnswerServiceDeps["briefing"] | undefined;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -45,7 +47,7 @@ export function createLocalProjectAnswers(options: LocalProjectAnswersOptions): 
         let body: unknown;
         try { body = request.body === undefined || request.body === "" ? {} : JSON.parse(request.body) as unknown; } catch { body = undefined; }
         const service = createAnswerService({
-          companyId, store: options.store, wiki: createWikiStore({ store: options.store, companyId, now: options.now }), now: options.now, log: options.log, model: options.model,
+          companyId, store: options.store, wiki: createWikiStore({ store: options.store, companyId, now: options.now }), now: options.now, log: options.log, model: options.model, briefing: options.briefing,
           access: { mayAsk: async () => isOwner(caller) },
           async code(name) {
             const latest = await options.flow.projects.latest(name);
