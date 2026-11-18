@@ -387,7 +387,8 @@ async function approvalRead(input: SetupStatusInput, client: Client, companyId: 
  */
 function setupRowState(run: { status: "ready"; proposalWaiting: boolean } | { status: "none" }, approval: ApprovalRead): { state: SetupRowState; newerProposal?: NewerProposal } {
   if (approval.approval === "approved") {
-    const newer = approval.newer ?? (run.status === "ready" && run.proposalWaiting ? "needs_you" : undefined);
+    // A run's proposal nobody has used is the newest one, whatever happened to an older candidate.
+    const newer = run.status === "ready" && run.proposalWaiting ? "needs_you" : approval.newer;
     const state = approval.check?.status === "checking" ? "running" : approval.check?.status === "ready" ? "done" : "needs_you";
     return { state, ...(newer === undefined ? {} : { newerProposal: newer }) };
   }

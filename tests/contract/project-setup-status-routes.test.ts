@@ -539,7 +539,7 @@ describe("Done means approved (L4-T2)", () => {
       for (const over of [{ project: "beta" }, { orgId: B }]) {
         const h = companyA();
         setupRun(h, A, "alpha", READY());
-        rejected(h, "rejected", { ...earlierApproval(h, A, "alpha", "ready"), ...over } as never);
+        rejected(h, "rejected", { ...earlierApproval(h, A, "alpha", "ready"), ...over });
         expect((await h.ok()).setupRun, JSON.stringify(over)).toMatchObject({ state: "needs_you", approval: "none" });
       }
       const h = companyA();
@@ -549,6 +549,13 @@ describe("Done means approved (L4-T2)", () => {
       h.db.set({ ...projectRevisionKey(A, "alpha", 2), entityType: "PROJECT", definition: { ...stored.definition, revision: 9 } });
       rejected(h, "rejected", earlier);
       expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    });
+
+    it("a re-run that started after the rejected candidate has its own unused proposal: that is the newer one named", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      setupApply(h, A, "alpha", { state: "rejected", check: "ready", revision: 3, candidateGone: true, madeAt: new Date(NOW - 600_000).toISOString(), row: earlierApproval(h, A, "alpha", "ready") });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "done", approval: "approved", newerProposal: "needs_you" });
     });
 
     it("a malformed earlier approval is ignored, never guessed", async () => {

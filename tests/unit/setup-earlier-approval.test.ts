@@ -12,7 +12,7 @@ const base: ProjectDefinition = {
 };
 const candidateOf = (revision: number): ProjectDefinition => ({ ...base, revision });
 
-const depsOf = (h: Harness): SetupApplyDeps => ({ flow: h.deps, store: h.store, companyId: h.deps.companyId, now: () => h.clock.now, starter: undefined, latest: async () => undefined } as unknown as SetupApplyDeps);
+const depsOf = (h: Harness): SetupApplyDeps => (({ flow: h.deps, store: h.store, companyId: h.deps.companyId, now: () => h.clock.now, starter: undefined, latest: async () => undefined }));
 const rowOf = async (h: Harness): Promise<Record<string, unknown> | undefined> => h.store.get(setupApplyKey(h.deps.companyId, "payments"));
 const propose = (h: Harness, baseRevision: number) => storeSetupCandidate(depsOf(h), { project: "payments", by: "local-owner", requestId: newRequestId(), taskId: "", baseRevision, candidate: candidateOf(baseRevision + 1), replyExtra: {}, alsoTransact: [] });
 
@@ -109,7 +109,7 @@ describe("a new candidate keeps the setup a person approved earlier", () => {
     const mine = await harnessWithProject();
     await propose(mine, 1);
     await approve(mine, 2, "2026-11-09T10:30:00.000Z");
-    const theirs = createHarness({ companyId: OTHER_COMPANY as never });
+    const theirs = createHarness({ companyId: OTHER_COMPANY });
     await theirs.registerProject(base);
     await propose(theirs, 1);
     expect((await rowOf(theirs))?.["earlierApproval"]).toBeUndefined();
