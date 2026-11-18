@@ -75,7 +75,7 @@ function draftOf(input: ProposeInput, proposal: KnowledgeProposal, text: { title
       authors: proposer.kind === "tool" ? [proposer.personId] : [], ...(proposer.kind === "tool" ? { readFrom: [proposer.personId] } : {}),
       supportTasks: proposer.kind === "agent" ? [proposer.taskId] : [], sources, inputSources: sources, measured: false,
       minTrust: "system", audience: { kind: "project" }, reflectorRun: "proposal", model: "none",
-      memberSignal: false, repoBlockCodes: ["no_repo_evidence"],
+      memberSignal: false,
     },
   };
 }
