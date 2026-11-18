@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, companyScoped, orgProjectCatalogKey, projectRevisionKey,
+  AgentXError, scriptTokenKey, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE, LOCAL_KNOWLEDGE_NO_BULK_MESSAGE, companyScoped, orgProjectCatalogKey, projectRevisionKey,
   type AuditSink, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole,
 } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -156,8 +156,13 @@ async function makeToken(w: World, personId: string, over: { permissions?: Array
   const principal = (await identityOf(w).getPrincipal(companyId, personId))!;
   const made = await createScriptToken(
     { store: w.world.store, audit: w.audits.get(companyId)!, now: () => w.world.clock.now },
-    { developerId: developerIdOf(principal), personId, orgId: companyId, orgRole: ROLE[personId]!.role },
+    // Only a company owner or admin may create a token (code/next, ecb56780a), so a token is made as an admin and the stored record then says the creator's role as the fixture has it (a plain member's, for the
+    // contributor and maintainer cases): the live creator check compares the two, and what the API serves is what that creator may read.
+    { developerId: developerIdOf(principal), personId, orgId: companyId, orgRole: "admin" },
     { requestId: randomUUID(), name: "tool", projects: over.projects ?? ["payments"], permissions: over.permissions ?? ["lessons"] }, async () => undefined);
+  const key = scriptTokenKey(companyId, made.token.tokenId);
+  const stored = (await w.world.store.get(key))!;
+  await w.world.store.put({ item: { ...stored, createdRole: ROLE[personId]!.role } });
   return made.secret;
 }
 const knowledgeAudit = (w: World) => w.world.audit.filter((event) => event.action === "lesson.knowledge_read");
@@ -697,7 +702,7 @@ describe("the MCP tools against a hosted install (the CLI client targets the sam
       if (method === "GET" && url.pathname === "/v1/dev/projects") return json(200, { developer: { id: "a".repeat(64), name: "Ada", provider: "oidc" }, projects: [{ name: "billing", latestRevision: 1, access: "granted", channels: [] }, { name: "payments", latestRevision: 1, access: "granted", channels: [] }], notices: [] });
       try { return json(200, await b.api.answer({ method, path: url.pathname, body: typeof init?.body === "string" ? init.body : "{}" }, person(personId))); }
       catch (error) { if (!(error instanceof AgentXError)) throw error; return json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } }); }
-    }) as typeof fetch;
+    });
   }
   const contextOf = (b: Built, personId: string, seen: string[]): ToolContext => ({
     client: httpControlPlaneClient({ session: async () => ({ baseUrl: "https://api.hosted.test", accessToken: "cli-token-for-the-test", signInCommand: "x" }), fetch: hostedFetch(b, personId, seen), sleep: async () => undefined }),

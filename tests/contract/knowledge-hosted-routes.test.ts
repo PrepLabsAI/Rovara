@@ -108,5 +108,5 @@ describe("the knowledge routes at the developer router", () => {
   });
 });
 
-/** The digest of every DEV_ROUTES row except the two knowledge rows, as of the base this lane stacked on (code/next with #976): a changed, removed or loosened existing row changes it. */
-const OTHER_ROWS_DIGEST = "5c60bc5ab4cb16fa1e80e0f4287984608e730774f797a1e78a122c3466d67bb2";
+/** The digest of every DEV_ROUTES row except the two knowledge rows, as of the base this lane stacked on (code/next with #976 and the hosted LessonsPeople port #997; re-pinned in L4-MCPA after #997 landed under it, no existing row changed: removing the two knowledge rows and the three setup-status rows still gives #997's e585a614... in project-setup-status-routes.test.ts): a changed, removed or loosened existing row changes it. */
+const OTHER_ROWS_DIGEST = "7892ce99c68a2f86320d08574dc81760b7f09f0380977801848423e2edeafe7d";

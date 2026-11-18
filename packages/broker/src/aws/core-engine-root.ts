@@ -922,7 +922,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // Who is told about an unusual amount of reading: the company's owners and admins now (`adminNoticeIdsOf`; a list that cannot be completed tells nobody, the audit record still says it).
       const adminsOf = async (companyId: OrgId): Promise<string[]> => await adminNoticeIdsOf(lessonsPeople(companyId), (await app.registry()).require("identity"), companyId);
       // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
-      adminNotice = async (orgId, developerId) => (await adminsOf(orgId as OrgId)).includes(developerId);
+      adminNotice = async (orgId, developerId) => (await adminsOf(orgId)).includes(developerId);
       knowledge = createKnowledgeApi({
         lessonsSwitch: switchValue,
         companyOf: async (caller) => await membershipOf(caller.personId),
