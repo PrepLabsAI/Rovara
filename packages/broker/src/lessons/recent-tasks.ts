@@ -7,7 +7,7 @@
 // task is also "not known" (not "applied to 0 tasks"). The answer is kept for `RECENT_TASKS_TTL_MS` per project (numbers and names of repositories and files only; at most `RECENT_TASKS_CACHE_MAX` projects).
 // The plan reads are capped per object (`RECENT_PLAN_BYTES_MAX`, applied by the two wirings): a legacy Markdown plan over the cap is cut, fails its digest check and counts as a task with no named files (an undercount of "would have applied" for file-scoped lessons), never an error.
 import type { DocumentStore, OrgId } from "@agentx/contracts";
-import { fitPk, timeSk } from "./measure.js";
+import { fitPk } from "./measure.js";
 import { WOULD_HAVE_APPLIED_DAYS } from "./scoring-settings.js";
 import type { ScopeKey } from "./store.js";
 import type { TaskScope } from "./weekly-order.js";
@@ -62,17 +62,20 @@ async function readRecentTaskScopesWhole(deps: RecentTasksDeps, key: ScopeKey): 
     for (let cursor: string | undefined; taskIds.length < RECENT_TASKS_MAX;) {
       const take = Math.min(PAGE, RECENT_ROWS_MAX - read);
       if (take <= 0 || expired()) return undefined;
-      const page = await deps.documents.query({ pk, sk: { op: "gte", value: `L#${timeSk(since)}` }, descending: true, limit: take, ...(cursor === undefined ? {} : { cursor }) });
+      const page = await deps.documents.query({ pk, descending: true, limit: take, ...(cursor === undefined ? {} : { cursor }) });
       read += Math.max(1, page.items.length);
+      let reachedOlder = false;
       for (const row of page.items) {
         const id = row["taskId"];
+        // The rows are in time order, newest first (their sort key starts with the time): the first one before the window ends the read.
+        if (typeof row["at"] === "number" && row["at"] < since) { reachedOlder = true; break; }
         if (row["pk"] !== pk || row["entityType"] !== "LESSON_FIT" || row["project"] !== key.project || typeof id !== "string" || typeof row["at"] !== "number" || row["at"] < since || row["at"] > now
           || typeof row["keepUntil"] !== "number" || row["keepUntil"] <= now || seen.has(id)) continue;
         seen.add(id);
         if (taskIds.length < RECENT_TASKS_MAX) taskIds.push(id);
       }
       cursor = page.cursor;
-      if (cursor === undefined) break;
+      if (cursor === undefined || reachedOlder) break;
     }
     if (taskIds.length === 0) return undefined;
     const repos = await deps.ports.repositories(key.project);
