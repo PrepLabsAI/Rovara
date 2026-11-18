@@ -237,7 +237,7 @@ export interface TaskFlowDeps {
    * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
-  systemRuns?: { enabled(): boolean | Promise<boolean> };
+  systemRuns?: { enabled(): boolean | Promise<boolean> } | undefined;
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */
