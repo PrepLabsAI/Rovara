@@ -74,7 +74,7 @@ export type PauseSourceOutcome = { ok: true; paused: boolean; changed: boolean }
  * A person pauses or resumes one row. Pausing records the person's action FIRST (no record, no change) and then stops every kind of the row; resuming records first too and then clears each kind's stop. A resume
  * re-settles nothing and brings nothing back: what was not read while paused does not exist. Idempotent. Who may do it is the caller's check (a project admin, or a company owner or admin, read live).
  * Lead 4 L4-LP3Wd: the write is a conditional read-modify-write of the flags row (`flags-fence.ts`), so a flood-guard hold or an erasure written at the same moment does not drop the stop. If it cannot settle, a PAUSE fails
- * closed (the kinds read as stopped in this process, `noteFailedStop`, and the call throws so the person is told it was not saved); a RESUME that cannot settle leaves the stop in place and throws.
+ * closed (the kinds read as stopped in this process, `noteFailedStop`, and the call throws so the person is told it was not saved); a RESUME that cannot settle leaves the stop in place and throws (its audit line was already written, as for any failed write: the person retries and a second line follows).
  */
 export async function setLearningSourcePause(deps: { store: LessonStore; audit: LessonAuditSink; now: () => number; log?: FlagsLog | undefined; metrics?: { count(name: string, tags?: Record<string, string>): void } | undefined }, key: ScopeKey, actor: string, sourceKey: LearningSourceKey, paused: boolean): Promise<PauseSourceOutcome> {
   const kinds = SOURCE_KINDS[sourceKey];
