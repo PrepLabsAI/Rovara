@@ -15,7 +15,6 @@ import type { ReflectQueue } from "./reflect-queue.js";
 import type { RevertedTasksReader } from "./task-outcome-rows.js";
 import { sweepExpired } from "./expiry.js";
 import { retireLesson } from "./curate.js";
-import { mergeKeepsRepoOnly } from "./repo-eligibility.js";
 import { contradictedByMemberCard, isTrialLesson, memberCardsOf, promoteStableTrials, type StableDeps } from "./trial.js";
 
 /** 72 hours. The rows are found by their event time, and a revert can reach the record late (GitHub redelivers for three days); the worker's once-claim on `LEARN#<task>#reverted` makes a repeat free. */
@@ -204,8 +203,6 @@ export async function lessonsTrialRepairJob(deps: Pick<LessonsJobDeps, "store" |
         examined += 1;
         const other = await deps.maintain.store.get(key, card.contradictsWith!);
         if (other === undefined || !isTrialLesson(other) || other.status !== "active") continue;
-        // A card across the repo-only line is for a person; the nightly repair never retires a trial lesson on it (as curate does not).
-        if (!mergeKeepsRepoOnly(other, card)) continue;
         try {
           if (await retireLesson(deps.maintain, key, other.id, "contradicted", undefined, "lesson.trial_retired")) { retired += 1; done += 1; } else refused += 1;
         } catch { failed += 1; deps.log("lessons_job.trial_repair_failed", {}); }

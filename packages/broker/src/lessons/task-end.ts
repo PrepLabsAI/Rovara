@@ -22,7 +22,7 @@ import { isEvalRunMark } from "./eval-run.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { ReflectSubject } from "./reflect-input.js";
 import type { ReflectQueue } from "./reflect-queue.js";
-import { attachCapLadder, noteTaskHeld, readTaskHeld, reflectRepoOnly, type RepoChangeRequest } from "./repo-reflect.js";
+import { attachCapLadder, noteTaskHeld, readTaskHeld } from "./task-held.js";
 import type { OutcomeRowReader } from "./task-outcome-rows.js";
 import { lessonTaskRefs } from "./live-visibility.js";
 import type { LessonStore, ScopeKey } from "./store.js";
@@ -40,11 +40,6 @@ export interface TaskSubjectBase {
   facts: Omit<TaskSubjectFacts, "sendBacks" | "revert">;
   /** The request ids of the task's human send-backs (the task's own decision history); each one's row is read for who and what. */
   sendBackRequestIds: readonly string[];
-  /**
-   * The task's merged change requests, each described without naming a code host (`repo-reflect.ts`), produced by the code host's adapter. The repo-only reflection runs on the ones with a
-   * repository-visible correction. Absent or empty: no second reflection.
-   */
-  repoChanges?: readonly RepoChangeRequest[];
 }
 export interface TaskSubjectSource {
   /**
@@ -281,7 +276,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     await countOutcome(deps, base, subject, input, tally, "before");
     // Review: Public's per-task cap is one total across this run and the human-edit job, in either order: a merged task starts from what the job already held.
     const taskCap = learningCaps(deps.reflect.edition, deps.reflect.capsOverride).perTaskUsd;
-    if (taskCap !== undefined && subject.outcome === "merged" && (base.repoChanges?.length ?? 0) > 0) {
+    if (taskCap !== undefined && subject.outcome === "merged") {
       // Review: every paid call of this run reserves its hold on the task's shared ladder before it is made, so the job running at the same time cannot take the cap twice.
       attachCapLadder(tally, deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, input.taskId, taskCap);
       try { tally.heldUsd = Math.max(tally.heldUsd, await readTaskHeld(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, input.taskId, taskCap)); } catch { deps.log?.("learning.task_hold_unreadable", { task: logRef(input.workspaceId, input.taskId) }); }
@@ -327,14 +322,8 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     } finally {
       await countOutcome(deps, base, subject, input, tally, "after");
     }
-    // A merged pull request's SECOND reflection, over the repository's own words only. After the first one and after the outcome judge (review: the judge's marks decide "stable", so the
-    // repo-only call takes what is left of the task's budget, not the other way round), in the same attempt and lease, on the same task tally. It runs whatever the first reflection came to, a retry included (review: its own once-key decides, so a retried delivery does not repeat it). It never makes the result retry (a retry would run the first reflection again, which the
-    // lease forbids once its call started) and never holds the end of the work back. The task end ALWAYS runs this (the comments reflection); a pull request with human edits gets a separate edits reflection from the human-edit job, with its own once-key.
-    if (subject.outcome === "merged" && (base.repoChanges?.length ?? 0) > 0) {
-      await reflectRepoOnly({ reflect: deps.reflect, process: deps.process, settings: deps.settings, ...(deps.log === undefined ? {} : { log: deps.log }) }, subject, base.repoChanges!, tally, { kind: "comments" });
-    }
     // What this run held counts against the task's one Public cap for the human-edit job too, which runs later (or earlier) as another run of the same task.
-    if ((base.repoChanges?.length ?? 0) > 0 && taskCap !== undefined && subject.outcome === "merged") {
+    if (taskCap !== undefined && subject.outcome === "merged") {
       try { await noteTaskHeld(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, input.taskId, tally.heldUsd, taskCap); } catch { deps.log?.("learning.task_hold_not_noted", { task: logRef(input.workspaceId, input.taskId) }); }
     }
     return reflected;

@@ -13,7 +13,6 @@ import { approversRequired, emitAudit, modeAllows, requireAudit, resolveLearning
 import { lessonValue } from "./value.js";
 import type { ApproverDirectory, LessonDeps, LessonVectors } from "./ports.js";
 import { foldDuplicate, retireLesson } from "./curate.js";
-import { afterPersonEdit } from "./repo-eligibility.js";
 import { dropVector } from "./similarity.js";
 import { nextVersion, type LessonStore, type ScopeKey } from "./store.js";
 import { classifyTier } from "./tier.js";
@@ -138,7 +137,7 @@ export async function approveLesson(deps: ApproveDeps, input: ApproveInput): Pro
       if (decision.tier === "never") return { ok: false, code: "tier_never" };
       // The editor is recorded as an EDITOR, not an author: the author rule (who may approve alone) is about who wrote the evidence, so a one-tap edit keeps working, but erasure counts
       // an editor as a writer of the text (a lesson an erased person rewrote is hard-deleted).
-      working = { ...working, tier: decision.tier, tierReasons: decision.reasons, provenance: { ...afterPersonEdit(working.provenance), editors: distinctIds([...(working.provenance.editors ?? []), input.approverId]) } };
+      working = { ...working, tier: decision.tier, tierReasons: decision.reasons, provenance: { ...working.provenance, editors: distinctIds([...(working.provenance.editors ?? []), input.approverId]) } };
       // A person's edit is a new lesson text: approvals given to the old text do not carry over, and a higher tier needs its people again.
       approvals = [];
     }

@@ -14,7 +14,6 @@ import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/ho
 import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
 import { buildReflectorInput } from "../../../packages/broker/src/lessons/reflect-input.js";
 import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js";
-import { repoVisibilityOf } from "../../../packages/broker/src/lessons/repo-eligibility.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { LessonProvenanceSchema, SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
 import { buildTaskReflectSubject } from "../../../packages/broker/src/lessons/task-subject.js";
@@ -206,17 +205,6 @@ describe("the reflector: untrusted data, a strong source, never a measured outco
     if (!input.eligible) throw new Error("expected eligible");
     expect(input.allowedTypes).toEqual(["pitfall"]);
     expect(buildReflectorInput(subject([planSpan(USE_HELPER, { trust: "system" })], { outcome: "closed" }))).toMatchObject({ eligible: false, reason: "no_member_reason" });
-  });
-
-  it("a lesson that rests on a plan comment is never eligible for a repository's own file (typed in Rovara)", () => {
-    const task = { kind: "task", repoInputs: { place: "github:repo/1", repository: "api", linkPrefix: "https://github.com/acme/api/pull/" }, repositories: ["api"], links: [] };
-    const repoSpan = { kind: "pr_comment", trust: "member", authorId: "rae", scopes: ["github:repo/1"], audience: { kind: "project" as const } };
-    expect(repoVisibilityOf(task, [repoSpan]).repoOnly).toBeDefined();
-    for (const kind of ["plan_comment", "design_comment"]) {
-      const result = repoVisibilityOf(task, [repoSpan, { ...repoSpan, kind }]);
-      expect(result.repoOnly, kind).toBeUndefined();
-      expect(result.blocked, kind).toContain("typed_in_rovara");
-    }
   });
 });
 

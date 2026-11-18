@@ -8,7 +8,6 @@ import { emitAudit, learningCaps, modeAllows, resolveLearning, type Edition, typ
 import type { Clock, LearningSpend, LessonAuditSink, Metrics, PipelineModel } from "./ports.js";
 import { repoOnlyScopes } from "./project-repo-audience.js";
 import { buildReflectorInput, type MarkedSpan, type ReflectSubject } from "./reflect-input.js";
-import { citationsStayIn, repoVisibilityOf, type RepoVisibility } from "./repo-eligibility.js";
 import { NO_REASON_TEXT } from "./task-subject.js";
 import { lessonClaimsSupported } from "./trial.js";
 import {
@@ -192,15 +191,12 @@ export async function reflectSubject(deps: ReflectDeps, subject: ReflectSubject,
   await noteRecovered(deps.pause, subject.workspaceId, subject.project);
 
   const runId = (deps.newId ?? randomUUID)();
-  // Whether EVERY input the reflector was given is readable by the readers of one repository. One answer per reflection, from the input and not from what the model cited. No model is called for it.
-  const visibility = repoVisibilityOf(subject, input.spans.values());
-  deps.metrics?.count("learning.reflect_repo_visible", { visible: visibility.repoOnly === undefined ? "false" : "true" });
   const drafts: LessonDraft[] = [];
   for (const raw of output.candidates) {
     // No flat cap: every valid candidate is collected (the prompt asks for at most 3; the output schema bounds a runaway reply at 20).
     const parsed = LessonCandidateSchema.safeParse(raw);
     if (!parsed.success) continue;
-    const draft = await toDraft(deps, subject, input.spans, input.allowedTypes, parsed.data, runId, reply.model, visibility);
+    const draft = await toDraft(deps, subject, input.spans, input.allowedTypes, parsed.data, runId, reply.model);
     if (draft !== undefined) drafts.push(draft);
   }
   return { status: "ok", reason: drafts.length === 0 ? "no_candidates" : "candidates", drafts, costUsd: cost };
@@ -221,7 +217,7 @@ export function copiedCodeLines(text: string): number {
 
 async function toDraft(
   deps: ReflectDeps, subject: ReflectSubject, spans: Map<string, MarkedSpan>, allowedTypes: readonly LessonType[],
-  candidate: ReturnType<typeof LessonCandidateSchema.parse>, runId: string, model: string, visibility: RepoVisibility,
+  candidate: ReturnType<typeof LessonCandidateSchema.parse>, runId: string, model: string,
 ): Promise<LessonDraft | undefined> {
   if (!allowedTypes.includes(candidate.type)) return undefined;
   // C1 again, in code: every cited span must exist and must not be an outsider's.
@@ -236,8 +232,7 @@ async function toDraft(
   const evidence = cited.filter((s) => s.kind !== "loaded_lesson");
   if (evidence.length === 0) return undefined;
   if (subject.requireEvidenceKind !== undefined) {
-    const required: readonly string[] = typeof subject.requireEvidenceKind === "string" ? [subject.requireEvidenceKind] : subject.requireEvidenceKind;
-    if (!evidence.some((s) => required.includes(s.kind))) return undefined;
+    if (!evidence.some((s) => s.kind === subject.requireEvidenceKind)) return undefined;
   }
   const title = cleanForLearning(candidate.title, 80);
   const description = cleanForLearning(candidate.description, 160);
@@ -322,9 +317,6 @@ async function toDraft(
       }),
       // true: every source was project-wide when reflected; false: it was not (a merge keeps that); unset: not known (never read, or unreadable).
       ...(subject.sharedTask === undefined ? {} : { fromSharedTask: subject.sharedTask }),
-      // Set only when every input was one repository's; otherwise the fixed codes of what blocked it (never text).
-      // A kept citation in another repository (or a pull request that is not the repository's) puts the lesson's text beyond that repository's readers: the citations are the model's output, so they are judged here.
-      ...(visibility.repoOnly !== undefined && citationsStayIn(subject.repoInputs, citations) ? { repoOnly: visibility.repoOnly } : { repoBlockCodes: visibility.repoOnly === undefined ? visibility.blocked : ["other_repo" as const] }),
     },
   };
 }

@@ -220,17 +220,6 @@ describe("a trial lesson a member's card contradicts is retired by the nightly r
     expect(await lessonsTrialRepairJob(deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
     expect(audit.events.filter((event) => event.action === "lesson.trial_retired")).toHaveLength(1);
   });
-  it("a card across the repo-only line (a repo-only card against a lesson that is not, or the reverse) is for a person: the nightly repair retires nothing, as curate does not; a card on the same side still retires", async () => {
-    const only = { ...lessonRecord().provenance, memberCorrection: true, repoOnly: { place: "github:repo/1001" } };
-    const across = await repair([trialOld(), card({ provenance: only })]);
-    expect(await lessonsTrialRepairJob(across.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
-    expect((await across.store.get(KEYW, "les_old1"))!.status).toBe("active");
-    const reverse = await repair([trialOld({ provenance: { ...lessonRecord().provenance, repoOnly: { place: "github:repo/1001" } } }), card()]);
-    expect(await lessonsTrialRepairJob(reverse.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 0 });
-    expect((await reverse.store.get(KEYW, "les_old1"))!.status).toBe("active");
-    const same = await repair([trialOld({ provenance: { ...lessonRecord().provenance, repoOnly: { place: "github:repo/1001" } } }), card({ provenance: only })]);
-    expect(await lessonsTrialRepairJob(same.deps, ORG_A, ["web"], 10_000)).toMatchObject({ trialsRetiredByCard: 1 });
-  });
   it("only the rule curate applies: a card that is not from a member's correction, a lesson that is not live on trial, a card that is not pending, or a card naming nothing leaves everything as it was", async () => {
     for (const lessons of [
       [trialOld(), card({}, false)],

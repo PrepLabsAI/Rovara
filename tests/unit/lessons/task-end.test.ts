@@ -12,6 +12,7 @@ import type { SendBackFact, TaskSubjectFacts } from "../../../packages/broker/sr
 import type { CounterDeps } from "../../../packages/broker/src/lessons/counters.js";
 import type { CorrectionJudge } from "../../../packages/broker/src/lessons/ports.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
+import { readTaskHeld } from "../../../packages/broker/src/lessons/task-held.js";
 import { Alerts, Audit, BASE, Clock, MERGED, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, candidateJson, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, verifier } from "./lesson-helpers.js";
 
 /** A judge on an install whose model path answers nothing for a rating (usable, but every rating fails): a correction in scope stays unjudged. */
@@ -473,10 +474,12 @@ describe("the outcome is counted on every path, before the reflection", () => {
     expect(await learnFromEndedTask(off.deps, merged)).toBe("off");
     expect(await off.queued()).toEqual([]);
     const w = await counted();
-    w.deps.reflect.model = { complete: async () => { noteLearningFault("retryable"); throw new Error("model down"); } };
+    // The models quote a small price (a model that cannot quote holds the task's whole Public cap, and two failed attempts would then leave no room for the third).
+    const quote = async () => ({ ok: true as const, usd: 0.01 });
+    w.deps.reflect.model = { complete: async () => { noteLearningFault("retryable"); throw new Error("model down"); }, quote };
     await withLearningAttempt(attempt(), () => learnFromEndedTaskTyped(w.deps, merged));
     await withLearningAttempt(attempt(), () => learnFromEndedTaskTyped(w.deps, merged));
-    w.deps.reflect.model = new ScriptedModel([reply(candidateJson({ type: "fact", evidenceSpanIds: ["S1"] }))]);
+    w.deps.reflect.model = Object.assign(new ScriptedModel([reply(candidateJson({ type: "fact", evidenceSpanIds: ["S1"] }))]), { quote });
     expect(await learnFromEndedTask(w.deps, merged)).toBe("reflected");
     expect(await w.queued()).toEqual([MARK]);
     expect((await w.store.get(KEY, "les_used0001"))!.counters.helpful).toBe(0);
@@ -607,5 +610,27 @@ describe("a judge that always fails still pauses the project, one task at a time
     await noteModelFailure(handle, WS, PROJECT, "judge");
     await noteModelFailure(handle, WS, PROJECT, "judge");
     expect(inner.counts.judge).toBe(1);
+  });
+});
+
+describe("a merged pull request is reflected on once", () => {
+  const correction = memberSpan("Please use withRetry here instead of a hand-rolled loop.", { kind: "pr_comment", eventId: "acme/api#pr7:review_comment11", scopes: ["github:repo/1001"], audience: { kind: "project" } });
+  const mergedBase = (): TaskSubjectBase => ({
+    facts: baseFacts({ rest: { initiatorTrust: "member", steeringTrust: ["member"], intentTrust: "member", links: ["https://github.com/acme/api/pull/7"], spans: [memberSpan("Use withRetry for HTTP retries in api.", { eventId: "ev-p" }), correction] } }),
+    sendBackRequestIds: [],
+  });
+  it("one model call for the task, whatever the pull request's review comments say (there is no second, repository-only reflection)", async () => {
+    // Two replies are ready: a second call would use the second one.
+    const model = new ScriptedModel([reply(candidateJson({ type: "fact", evidenceSpanIds: ["S1"] })), reply(candidateJson({ type: "fact", evidenceSpanIds: ["S1"] }))]);
+    const w = setup({ model, base: mergedBase() });
+    expect(await learnFromEndedTask(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "merged" })).toBe("reflected");
+    expect(model.calls).toHaveLength(1);
+    expect(model.replies).toHaveLength(1);
+  });
+  it("what a merged task held counts against Public's one per-task cap for the human-edit job that runs later", async () => {
+    const model = Object.assign(new ScriptedModel([reply(candidateJson({ type: "fact", evidenceSpanIds: ["S1"] }))]), { quote: async () => ({ ok: true as const, usd: 0.01 }) });
+    const w = setup({ model, base: mergedBase() });
+    expect(await learnFromEndedTask(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "merged" })).toBe("reflected");
+    expect(await readTaskHeld(w.store, { workspaceId: WS, project: PROJECT }, "task-1")).toBeGreaterThan(0);
   });
 });

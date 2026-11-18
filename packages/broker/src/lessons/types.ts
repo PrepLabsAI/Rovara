@@ -135,18 +135,6 @@ export const ReflectorOutputSchema = z.object({ candidates: z.array(z.unknown())
 export const MAX_READ_FROM = 100;
 export const MAX_CO_AUTHORED = 20;
 
-/**
- * Why a lesson's inputs are not all readable by the readers of one repository (see `repoVisibilityOf`). One code per KIND of blocking input, never text:
- * `task_inputs_unproved` the task's own start and steering are not proved repository-visible (typed task text, a connected source), `typed_in_rovara` a send-back, "remember this" note, close reason or a person's text in a plan or finding,
- * `intent_not_repo` the task description / start message is not from a repository place, `other_place` a span from a place that is not a repository (Slack, a tracker, MCP, Rovara itself), `missing_place` a repository kind of span with no place,
- * `other_repo` inputs from more than one repository, `audience_not_repo` a repository span whose readers are narrower than the repository's, `loaded_lesson` a lesson was loaded into the task, `no_repo_evidence` nothing that came from a repository,
- * `unknown_input` an input of a kind this build does not know, `ci_author` a CI result tied to a person (who pushed the failing revision), `predates_field` learned before this field existed.
- */
-export const REPO_BLOCK_CODES = [
-  "task_inputs_unproved", "typed_in_rovara", "intent_not_repo", "other_place", "missing_place", "other_repo", "audience_not_repo", "loaded_lesson", "no_repo_evidence", "unknown_input", "predates_field", "ci_author",
-] as const;
-export type RepoBlockCode = (typeof REPO_BLOCK_CODES)[number];
-
 export const LessonProvenanceSchema = z.object({
   sourceEvents: z.array(z.string().max(100)).max(50), sourceKinds: z.array(StoredSpanKindSchema).max(20),
   /** Developer ids of the members whose words or edits the lesson comes from. */
@@ -200,18 +188,10 @@ export const LessonProvenanceSchema = z.object({
    * lesson is read, so a person removed from a channel stops getting its lessons. Absent on a lesson learned before this field: its restricted places are read from the audience's scope.
    */
   sourceScopes: z.array(z.string().max(300)).max(50).optional(),
-  /**
-   * Set by code (`repoVisibilityOf`, repo-eligibility.ts) only when EVERY input the reflector was given (the task's start, its steering, every span it read, the
-   * lessons loaded into the task) was readable by everyone who can read this ONE repository (`place`, `<source>:repo/<id>`). Merges AND it (`mergedRepoVisibility`: a merged lesson keeps it only when both sides carry
-   * it for the same repository). Absent is false: a lesson learned before this field, or one with an input of unknown kind or place, is never repo-only.
-   */
-  repoOnly: z.object({ place: z.string().min(3).max(300) }).strict().optional(),
-  /** Why `repoOnly` is not set: fixed codes, no text, no names (nothing reads them but tests today). Set by code with `repoOnly` absent; merges union them. Absent with `repoOnly` absent: learned before this field. */
-  repoBlockCodes: z.array(z.enum(REPO_BLOCK_CODES)).max(REPO_BLOCK_CODES.length).optional(),
 }).strict();
 export type LessonProvenance = z.infer<typeof LessonProvenanceSchema>;
 
-export const LessonSchema = z.object({
+const LessonObjectSchema = z.object({
   id: z.string().regex(/^[A-Za-z0-9_-]{4,64}$/u), version: z.number().int().min(1), workspaceId: z.string().min(1).max(100), project: z.string().min(1).max(100),
   scope: LessonScopeSchema, type: LessonTypeSchema, stages: z.array(LessonStageSchema).min(1).max(5),
   ...LessonTextSchema.shape,
@@ -244,11 +224,6 @@ export const LessonSchema = z.object({
   contradictsWith: z.string().max(64).optional(),
   /** The lesson this one may duplicate: a judge or the word test took the two for the same advice but they are not the same by structure, so they were NOT merged. A person decides; nothing starts it on trial or applies it while this stands. */
   possibleDuplicateOf: z.string().max(64).optional(),
-  /**
-   * the lessons that name THIS one in `possibleDuplicateOf` only because merging them would have cost a repository-only lesson its mark (`mergeKeepsRepoOnly`). Informational: it changes nothing
-   * about this lesson's own trial or approval; the loader reads it (both directions of the link) so a task is given only one of two twins.
-   */
-  repoTwins: z.array(z.string().max(64)).max(10).optional(),
   /** Set when harmful marks call for a retire and a person has to decide (tier 1 and 2 lessons). */
   retireProposedAt: z.number().optional(),
   /** Set only on the version that harmful marks auto-retired (the number of THAT version): the lesson is exactly this retirement while it is still the head, retired, and this equals its version. Any later change makes a new version, so nothing else is ever mistaken for it. */
@@ -256,7 +231,22 @@ export const LessonSchema = z.object({
   rejectedReason: z.string().max(200).optional(),
   createdAt: z.number(), updatedAt: z.number(),
 }).strict();
-export type Lesson = z.infer<typeof LessonSchema>;
+
+/**
+ * Rows stored before the repository-file marks were removed still carry `repoTwins` and `provenance.repoOnly` / `provenance.repoBlockCodes`. They are read and ignored: dropped here, so a row read and written again is clean.
+ * Nothing sets or reads them any more.
+ */
+function withoutRemovedMarks(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const { repoTwins: _twins, provenance, ...rest } = value as Record<string, unknown>;
+  void _twins;
+  if (typeof provenance !== "object" || provenance === null || Array.isArray(provenance)) return { ...rest, ...(provenance === undefined ? {} : { provenance }) };
+  const { repoOnly: _only, repoBlockCodes: _codes, ...kept } = provenance as Record<string, unknown>;
+  void _only; void _codes;
+  return { ...rest, provenance: kept };
+}
+export const LessonSchema = z.preprocess(withoutRemovedMarks, LessonObjectSchema);
+export type Lesson = z.infer<typeof LessonObjectSchema>;
 
 /** The parts of a lesson that change without a new version: counters and expiry bookkeeping. */
 export const VOLATILE_FIELDS = ["counters", "staleAt", "lastValidatedAt", "lastHelpfulAt", "expiresAt", "retireProposedAt"] as const;
