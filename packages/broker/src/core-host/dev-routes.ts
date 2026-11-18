@@ -133,6 +133,11 @@ export interface DeployedCaller {
    * header, a query or a body. `at` is an ISO time. Absent: no step-up in this session. The age is checked on the route, never trusted from it.
    */
   stepUp?: { at: string; method: string } | undefined;
+  /**
+   * Set only by the broker's sign-in, from the verified client's registration, for the Rovara web app's own sign-in client (DEC 236h; never the CLI's token, a tool's or another client's). Everything else that reads the wiki
+   * is a tool outside Rovara and is held to the company's "Knowledge stays in Rovara" switch (`wiki-routes.ts`).
+   */
+  webApp?: true | undefined;
 }
 
 /** A decision card's caller on the deployed API: who acts and, for the deployment's performer, the person with the step-up time as `Principal.authTime`. */
@@ -583,7 +588,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             }
           }
           if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target) });
+          return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target), webApp: caller.webApp === true });
         }
         if (isWikiCorrectionPath(path, request.method)) {
           // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).

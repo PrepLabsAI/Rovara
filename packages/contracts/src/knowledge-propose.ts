@@ -12,6 +12,13 @@ export type KnowledgeProposer = (typeof KNOWLEDGE_PROPOSERS)[number];
 /** The company switch's one fixed sentence (owner decision 2026-11-17): every MCP knowledge and wiki tool answers exactly this while "Knowledge stays in Rovara" is on. Rovara's own agents are not affected. */
 export const KNOWLEDGE_STAYS_SENTENCE = "Your company keeps team knowledge inside Rovara.";
 
+/**
+ * What a wiki read answers to a caller that is not the Rovara web app (an AI tool outside Rovara: `wiki_list`, `wiki_read`) while the company switch is on: this status, the reason code and the one fixed sentence, nothing of the wiki.
+ * The web app's own Wiki tab never gets it. A reader of an older broker never sees it (it only reads wiki answers).
+ */
+export const WikiToolsOffSchema = z.object({ status: z.literal("off"), reason: z.enum(["company_stays", "regulated"]), message: z.literal(KNOWLEDGE_STAYS_SENTENCE) }).strict();
+export type WikiToolsOff = z.infer<typeof WikiToolsOffSchema>;
+
 /** At most this many proposals from one task (across its steps), and from one person's tools in one UTC day. */
 export const KNOWLEDGE_PROPOSALS_PER_TASK_MAX = 3;
 export const KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX = 10;

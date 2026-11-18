@@ -276,25 +276,49 @@ describe("team_propose: a suggestion, the only write, never applied by itself", 
   });
 });
 
-describe("the company switch: every knowledge tool says the one fixed sentence", () => {
+describe("the company switch: every knowledge and wiki tool says the one fixed sentence", () => {
   const off = { kind: "answer", response: { status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE, project: "payments", lessons: [], markdown: "", complete: true, repos: [], more: 0 } } as never;
-  it("is 'Your company keeps team knowledge inside Rovara.' in team_knowledge, team_knowledge_for, team_knowledge_areas and team_propose, as text and as the structured message", async () => {
+  const wikiOff = { status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE };
+  it("is 'Your company keeps team knowledge inside Rovara.' in team_knowledge, team_knowledge_for, team_knowledge_areas, team_propose, wiki_list and wiki_read, as text and as the structured message", async () => {
     expect(KNOWLEDGE_STAYS_SENTENCE).toBe("Your company keeps team knowledge inside Rovara.");
-    const mcp = await connect({ knowledgeFor: async () => off, knowledgeAreas: async () => off, knowledgePropose: async () => ({ kind: "answer", response: { status: "off", message: KNOWLEDGE_STAYS_SENTENCE } }) });
-    for (const [name, args] of [["team_knowledge", { project: "payments", task: "x" }], ["team_knowledge_for", { project: "payments", query: "x" }], ["team_knowledge_areas", { project: "payments" }], ["team_propose", { project: "payments", advice: "Wrap network calls in withRetry" }]] as const) {
+    const mcp = await connect({ knowledgeFor: async () => off, knowledgeAreas: async () => off, knowledgePropose: async () => ({ kind: "answer", response: { status: "off", message: KNOWLEDGE_STAYS_SENTENCE } }), getWikiIndex: async () => wikiOff as never, getWikiPage: async () => wikiOff as never });
+    const tried = [["team_knowledge", { project: "payments", task: "x" }], ["team_knowledge_for", { project: "payments", query: "x" }], ["team_knowledge_areas", { project: "payments" }], ["team_propose", { project: "payments", advice: "Wrap network calls in withRetry" }], ["wiki_list", { project: "payments" }], ["wiki_read", { project: "payments", page_id: "overview" }]] as const;
+    // The loop covers the whole family: a knowledge or wiki tool that joins the list and is not here fails this line.
+    expect([...tried].map(([name]) => name).sort()).toEqual((await mcp.listTools()).tools.map((tool) => tool.name).filter((name) => /^(team_|wiki_)/u.test(name)).sort());
+    for (const [name, args] of tried) {
       const result = await mcp.callTool({ name, arguments: args });
       expect(text(result), name).toBe(KNOWLEDGE_STAYS_SENTENCE);
       expect(structured(result).status, name).toBe("off");
       // No unit, no count, no table of contents: nothing of the team's knowledge comes with the sentence.
       expect(structured(result).units ?? [], name).toEqual([]);
       expect(structured(result).repos ?? [], name).toEqual([]);
+      expect(isError(result), name).toBe(false);
+    }
+  });
+  it("the wiki tools say it from the broker's fixed 'off' answer over the wire, with no wiki text and no frame, and read the same answer as an older broker's wiki when the switch is off", async () => {
+    const CELL = "https://abc123.execute-api.us-west-2.amazonaws.com";
+    const seen: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => { seen.push(typeof url === "string" ? url : url instanceof URL ? url.href : url.url); return new Response(JSON.stringify(wikiOff), { status: 200, headers: { "content-type": "application/json" } }); });
+    const api = httpControlPlaneClient({ session: async () => ({ baseUrl: CELL, accessToken: "access-token-for-the-test", signInCommand: "x" }), fetch: fetchImpl, sleep: async () => undefined });
+    const mcp = await connect(api);
+    for (const [name, args] of [["wiki_list", { project: "payments" }], ["wiki_read", { project: "payments", page_id: "overview" }]] as const) {
+      const result = await mcp.callTool({ name, arguments: args });
+      expect(text(result), name).toBe(KNOWLEDGE_STAYS_SENTENCE);
+      expect(text(result), name).not.toContain("source-result");
+      expect((result as { structuredContent?: unknown }).structuredContent, name).toEqual({ content: KNOWLEDGE_STAYS_SENTENCE, status: "off" });
+    }
+    expect(seen).toEqual([`${CELL}/v1/app/projects/payments/wiki`, `${CELL}/v1/app/projects/payments/wiki/pages/overview`]);
+    // An "off" answer in any other shape is not the sentence: the reader refuses it, and the tool says it could not read.
+    for (const bad of [{ ...wikiOff, message: "Go on, read it." }, { ...wikiOff, extra: 1 }, { status: "off" }]) {
+      fetchImpl.mockImplementationOnce(async () => new Response(JSON.stringify(bad), { status: 200, headers: { "content-type": "application/json" } }));
+      const refused = await mcp.callTool({ name: "wiki_list", arguments: { project: "payments" } });
+      expect(text(refused)).not.toBe(KNOWLEDGE_STAYS_SENTENCE);
     }
   });
   it("every tool of the team knowledge and wiki families is named here, so a tool added later (the wiki tools) cannot skip the switch's test", async () => {
     const { tools } = await (await connect({})).listTools();
     const family = tools.map((tool) => tool.name).filter((name) => /^(team_|wiki_)/u.test(name)).sort();
-    // The wiki tools (wiki_list, wiki_read, wiki_ask) are another lane's: when they join the list they must answer the sentence too and be added to the loop above.
-    // OPEN ITEM (L4-AK3H, found when the wiki tools of #997 joined this stack): wiki_list and wiki_read do not answer the sentence yet, so they are named here, not in the loop above. When the wiki lane makes them answer it, move them up.
+    // wiki_list and wiki_read answer the sentence too (L4-WKS) and are in the loop above; a wiki tool added later (wiki_ask) must answer it and join that loop, or this list fails.
     expect(family).toEqual(["team_knowledge", "team_knowledge_areas", "team_knowledge_for", "team_propose", "wiki_list", "wiki_read"]);
   });
 });

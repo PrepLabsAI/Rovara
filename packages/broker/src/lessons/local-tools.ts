@@ -15,7 +15,7 @@
 // A few lessons at a time: the answer is always ranked and cut at the project's load budget (a handful of lessons, a few KB). There is no "give me everything" mode: a body that asks for one (`all`) is refused by the route
 // with a fixed sentence, and the whole list is read only on the lessons page, a page at a time, by a team member.
 
-import { KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
+import { KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse, type WikiToolsOff } from "@agentx/contracts";
 import { hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
 import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget, type LearningSettingsReader, type LoadBudget } from "./policy.js";
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
@@ -201,6 +201,26 @@ export async function localToolsGate(deps: Pick<LocalLessonsDeps, "localTools" |
   if (resolved.preset === "regulated") return { kind: "off", reason: "regulated" };
   if (local.projectOn === false) return { kind: "off", reason: "project_setting" };
   return { kind: "on", resolved };
+}
+
+/**
+ * The company switch for the MCP WIKI tools (`wiki_list`, `wiki_read`; owner decision 2026-11-17), through the same gate as the knowledge tools (`localToolsGate`, so the order and the settings are the same). A wiki is not a
+ * lesson, so only the company-level reasons close it: "Knowledge stays in Rovara" (`company_stays`) and the Regulated preset (`regulated`, also when the project's learning is Off, which the gate reports first). The company's own
+ * switch is read BEFORE the install's lessons switch (which the gate checks first and which is about lessons), so a company that turned it on is held to it wherever lessons are off. The project's learning Off and the project's own
+ * local-tools setting are about lessons and leave the wiki as it was. Without `settings` (a company with no lessons runtime) only the company's own switch can close it. Throws `LocalLessonsUnavailable` when a setting
+ * cannot be read (the caller fails closed).
+ */
+export async function wikiToolsGate(deps: Pick<LocalLessonsDeps, "localTools"> & Partial<Pick<LocalLessonsDeps, "settings">>, key: ScopeKey): Promise<WikiToolsOff | undefined> {
+  let local: Awaited<ReturnType<LocalToolsSettingsReader["read"]>>;
+  try { local = await deps.localTools.read(key.workspaceId, key.project); } catch { throw new LocalLessonsUnavailable("settings"); }
+  const closed = (reason: "company_stays" | "regulated"): WikiToolsOff => ({ status: "off", reason, message: KNOWLEDGE_STAYS_SENTENCE });
+  if (local.companyStays) return closed("company_stays");
+  if (deps.settings === undefined) return undefined;
+  const gate = await localToolsGate({ localTools: deps.localTools, settings: deps.settings }, key);
+  if (gate.kind === "on") return undefined;
+  if (gate.reason === "regulated") return closed("regulated");
+  if (gate.reason === "learning_off" && (await resolveLearning(deps.settings, key.workspaceId, key.project)).preset === "regulated") return closed("regulated");
+  return undefined;
 }
 
 /** What the shared read found: the picked lessons (each checked again as for nobody in particular), or why there is nothing to give. */
