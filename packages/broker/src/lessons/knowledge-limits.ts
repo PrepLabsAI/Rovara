@@ -4,7 +4,7 @@
 //   KNOWLEDGE_DISTINCT_DAY   one row per person and day: how many distinct units were served, and whether the admin was already told (set once, by a conditional write, so two calls that cross together tell once)
 // Every row expires on the store's own expiry attribute, which the CALLER names (this file does not write the attribute itself: the files that may are listed by the TTL guard test). The writes are best effort for
 // the answer (a store fault never changes what is returned), but the call limit fails closed: a counter that cannot be read refuses the call.
-import { LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DISTINCT_ALERT, change, companyScoped, when, type DocumentStore } from "@agentx/contracts";
+import { KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX, KNOWLEDGE_PROPOSALS_PER_TASK_MAX, LOCAL_KNOWLEDGE_DAY_CALLS_MAX, LOCAL_KNOWLEDGE_DISTINCT_ALERT, change, companyScoped, when, type DocumentStore } from "@agentx/contracts";
 import { takeRate } from "../core/script-tokens/rate.js";
 
 const DAY_MS = 86_400_000;
@@ -49,5 +49,18 @@ export function knowledgeLimits(deps: KnowledgeLimitDeps): KnowledgeLimits {
       const told = await deps.store.update({ key: counter, ops: [change.set("alerted", true)], condition: when.and(when.gt("distinct", LOCAL_KNOWLEDGE_DISTINCT_ALERT), when.notExists("alerted")) });
       return { distinct, crossed: told.applied };
     },
+  };
+}
+
+/** A task's window: long enough for a task, short enough that the row's own expiry (30 days from the window's start, `takeRate`) always outlives it. */
+const TASK_WINDOW_MS = 14 * DAY_MS;
+/**
+ * The limits of team SUGGESTIONS (L4-AK3), counted before anything is written: a tool's person gets `KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX` a UTC day (one row per company and person), and a task
+ * `KNOWLEDGE_PROPOSALS_PER_TASK_MAX` in a 14-day window (one row per company and task). Fixed-window rows with their own expiry (`takeRate`); a store fault throws, so the suggestion is refused (fail closed).
+ */
+export function proposeLimits(store: DocumentStore, now: () => number): { takePersonDay(companyId: string, personId: string): Promise<boolean>; takeTask(companyId: string, taskId: string): Promise<boolean> } {
+  return {
+    takePersonDay: (companyId, personId) => takeRate(store, { pk: companyScoped(companyId, "KNOWLEDGE_PROPOSE_DAY"), sk: personId }, KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX, DAY_MS, now),
+    takeTask: (companyId, taskId) => takeRate(store, { pk: companyScoped(companyId, "KNOWLEDGE_PROPOSE_TASK"), sk: taskId }, KNOWLEDGE_PROPOSALS_PER_TASK_MAX, TASK_WINDOW_MS, now),
   };
 }

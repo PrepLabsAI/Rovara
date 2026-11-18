@@ -101,7 +101,7 @@ export interface PrVerdictInput {
 export const PR_EXCEPTION_KINDS = [
   "review_only", "check_failed", "check_blocked", "check_not_run", "check_already_failing", "check_made_by_rovara", "testing_reason",
   "requirements_pending", "other_not_tested", "requirement_failed", "requirement_partly_tested", "requirement_not_tested", "requirement_not_proven", "code_without_tests",
-  "service_not_available", "service_made_by_rovara", "service_hand_written", "service_made_up_answers", "service_fell_back", "service_emulated", "service_old_fake",
+  "service_not_available", "service_made_by_rovara", "service_hand_written", "service_made_up_answers", "service_fell_back", "service_emulated", "service_old_fake", "service_spec_check",
   "tests_weaker", "weakening_not_compared", "flagged_files",
   "finding_accepted", "second_review_blocking", "second_review_not_run", "reviews_partial", "review_same_model",
   "flaky_rerun", "browser_problem", "eval_worse", "eval_prompt_without_run", "files_incomplete", "files_not_read", "merge_order",
@@ -233,10 +233,10 @@ function serviceWords(dependency: EvidenceDependency, asOf: string): string {
   const name = raw(dependency.name, 40) || "a service";
   const made = dependency.madeUpAnswers ?? 0;
   const madeText = Number.isInteger(made) && made >= 0 ? `${number(made)} made-up ${made === 1 ? "answer" : "answers"}` : "made-up answers";
-  const age = dependency.label === "recorded_fake" ? ageDays(dependency.recordedAt, asOf) : undefined;
+  const age = dependency.label === "recorded_fake" ? ageDays(dependency.approvedAt ?? dependency.recordedAt, asOf) : undefined;
   const base: Record<EvidenceDependency["label"], string> = {
     real: "real", real_project_image: "real, the project's image", company_approved: "real, the company's own image", rovara_local_aws: "emulated, not real AWS", test_account: "a test account", vendor_test: "the vendor's test mode",
-    recorded_fake: `recorded fake${age === undefined ? ", date unknown" : age === 1 ? ", 1 day old" : `, ${number(age)} days old`}`, hand_written_fake: "fake written by hand", rovara_made_fake: "fake made by Rovara", faked_by_tests: "faked by the tests themselves", not_available: "not available",
+    recorded_fake: `recorded fake${age === undefined ? (dependency.approvedAt === undefined ? ", date unknown" : ", approval date unknown") : `, ${dependency.approvedAt === undefined ? "recorded" : "approved"} ${number(age)} ${age === 1 ? "day" : "days"} ago`}`, hand_written_fake: "fake written by hand", rovara_made_fake: "fake made by Rovara", faked_by_tests: "faked by the tests themselves", not_available: "not available",
   };
   const extra = [...(some(dependency.madeUpAnswers) ? [madeText] : []), ...(dependency.fellBack === undefined ? [] : [`fell back: ${EVIDENCE_FALLBACK_REASON_WORDS[dependency.fellBack.reason]}`])];
   return `${name} (${[Object.hasOwn(base, dependency.label) ? base[dependency.label] : "unknown kind, treated as a fake", ...extra].join(", ")})`;
@@ -249,7 +249,7 @@ function serviceClass(dependency: EvidenceDependency, asOf: string): ServiceClas
     case "hand_written_fake": return "hand_written";
     case "rovara_local_aws": return "emulated";
     case "recorded_fake": {
-      const age = ageDays(dependency.recordedAt, asOf);
+      const age = ageDays(dependency.approvedAt ?? dependency.recordedAt, asOf);
       // An unknown age is not fresh: the fake cannot be called recent.
       return age === undefined || age > OLD_FAKE_DAYS ? "old_fake" : "quiet";
     }
@@ -341,7 +341,10 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   const emulated = byClass("emulated");
   if (emulated.length > 0) add("service_emulated", "AWS was emulated, not real.", "The emulator does not check permissions, so nothing here shows the change is allowed to do it on real AWS.", emulated.map(named));
   const oldFakes = byClass("old_fake");
-  if (oldFakes.length > 0) add("service_old_fake", oldFakes.length === 1 ? "A recorded fake is old." : `${oldFakes.length} recorded fakes are old.`, `Recorded more than ${OLD_FAKE_DAYS} days ago (or the date is unknown). Real behaviour may have changed.`, oldFakes.map((dependency) => { const age = ageDays(dependency.recordedAt, input.asOf); return `${named(dependency)}: ${age === undefined ? "recorded on an unknown date" : `recorded ${number(age)} days before this pull request`}`; }));
+  if (oldFakes.length > 0) add("service_old_fake", oldFakes.length === 1 ? "A recorded fake is old." : `${oldFakes.length} recorded fakes are old.`, `More than ${OLD_FAKE_DAYS} days old (or the date is unknown). Real behaviour may have changed.`, oldFakes.map((dependency) => { const age = ageDays(dependency.approvedAt ?? dependency.recordedAt, input.asOf); const verb = dependency.approvedAt === undefined ? "recorded" : "approved"; return `${named(dependency)}: ${age === undefined ? `${verb} on an unknown date` : `${verb} ${number(age)} days before this pull request`}`; }));
+  const specMismatches = dependencies.filter((dependency) => dependency.mockSpecResult === "mismatch");
+  const specMissing = dependencies.filter((dependency) => dependency.mockSpecResult === "no_spec");
+  if (specMismatches.length + specMissing.length > 0) add("service_spec_check", "A mock needs a spec check.", "A mock mismatch raises merge risk one level. No published spec is stated when a catalog entry has no matching operation.", [...specMismatches.map((dependency) => `${named(dependency)}: does not match ${dependency.mockSpecVendor === "stripe" ? "Stripe" : dependency.mockSpecVendor === "github" ? "GitHub" : "the pinned vendor"}'s published API; check this mock.`), ...specMissing.map((dependency) => `${named(dependency)}: no published spec to check against.`)]);
 
   // Weakened tests and flags
   const weakening = input.weakening;
@@ -385,7 +388,8 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
 
   // ---- risk (rules V5, V6)
   const judged = input.risk.judged && changed !== undefined && changed.source === "host";
-  const riskLevel: "low" | "medium" | "high" = judged ? input.risk.level : "high";
+  const hasSpecMismatch = dependencies.some((dependency) => dependency.mockSpecResult === "mismatch");
+  const riskLevel: "low" | "medium" | "high" = !judged ? "high" : hasSpecMismatch ? input.risk.level === "low" ? "medium" : "high" : input.risk.level;
   const riskJudged = judged;
   const riskPhrase = riskJudged ? `${RISK_WORDS[riskLevel]} risk` : "Risk not judged yet (treated as high)";
 
@@ -443,7 +447,7 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   })();
 
   const riskLines = ((): string[] => {
-    const reasons = input.risk.reasons.map((reason) => safeLine(reason, 200));
+    const reasons = [...input.risk.reasons.map((reason) => safeLine(reason, 200)), ...(hasSpecMismatch ? ["A mock does not match the pinned vendor API spec; check it before merging."] : [])];
     const first = riskJudged ? `${RISK_WORDS[riskLevel]}.${reasons[0] === undefined ? "" : ` ${reasons[0]}`}`
       : changed === undefined ? "Not judged yet, so it counts as high. Rovara is still reading the changed files."
         : "Not judged from the code host's list of changed files, so it counts as high.";
@@ -478,7 +482,11 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
     }
     return [...tally].map(([word, n]) => (n === 1 ? `1 ${word}` : `${n} ${word}s`));
   })();
-  const setupSummary = `Test setup: ${[...(input.testedIn !== undefined && EVIDENCE_TIERS.includes(input.testedIn) ? [input.testedIn] : []), ...setupParts].join(", ") || "where the checks ran"}`;
+  const setupDetails = dependencies.filter((dependency) => dependency.label === "recorded_fake").map((dependency) => {
+    const age = ageDays(dependency.approvedAt ?? dependency.recordedAt, input.asOf);
+    return age === undefined ? undefined : `${raw(dependency.name, 40) || "a service"} recorded fake, ${dependency.approvedAt === undefined ? "recorded" : "approved"} ${number(age)} ${age === 1 ? "day" : "days"} ago`;
+  }).filter((detail): detail is string => detail !== undefined);
+  const setupSummary = `Test setup: ${[...(input.testedIn !== undefined && EVIDENCE_TIERS.includes(input.testedIn) ? [input.testedIn] : []), ...setupParts, ...setupDetails].join(", ") || "where the checks ran"}`;
 
   const reviewsSummary = `Reviews: ${input.reviews.code === "passed" && input.reviews.security === "passed" ? "2 passed" : "2 passed after accepted findings"}, ${plural(accepted.length, "finding")} accepted${second === undefined ? "" : second.state === "agreed" ? ", second review found no blocking finding" : second.state === "blocking" ? `, second review has ${plural(second.count, "blocking finding")}` : ", second review did not run"}${input.reviews.partialDiff ? ", saw only part of the change" : ""}${input.reviews.sameModel ? ", same model as the build" : ""}`;
 

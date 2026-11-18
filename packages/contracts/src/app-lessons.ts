@@ -97,6 +97,8 @@ export const LessonViewSchema = z.object({
   /** Set on a possible-duplicate card that cannot be merged into the other lesson: this one came only from the repository's own reviews, the other did not, and a merge would take that away. Approve (keep both) or reject. */
   mergeBlocked: z.literal(true).optional(),
   rejectedReason: z.string().max(200).optional(),
+  /** Set when the lesson began as a team SUGGESTION (L4-AK3) from an AI tool outside Rovara (`tool`) or one of Rovara's own agents (`agent`): the card says "proposed by an AI tool / a Rovara agent" and shows its text as untrusted. Absent: it did not. */
+  proposedBy: z.enum(["tool", "agent"]).optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
   /** "Used in N tasks": the distinct tasks the lesson was given to in the last 180 days, at most 500 (`usedInTasksMore`: there were more). Absent: not counted (the Lessons tab, the proposed list), or it could not be counted. */
@@ -130,6 +132,8 @@ export const LessonsViewSchema = z.object({
   /** Whether this viewer may approve, reject, retire and roll back. A viewer who may not still reads the active lessons. */
   canDecide: z.boolean(),
   waiting: z.array(LessonViewSchema).max(100), active: z.array(LessonViewSchema).max(200), removed: z.array(LessonViewSchema).max(50),
+  /** For people who decide (L4-AK3): proven procedure lessons that could become a skill ("Make this a skill?"). Absent: none, or not looked for here. */
+  skillOffers: z.array(z.object({ lessonId: z.string().min(1).max(64), title: z.string().max(80), tasks: z.number().int().min(0).max(500), days: z.number().int().min(0) }).strict()).max(20).optional(),
   /** Candidates collected and not yet in front of people. Nothing is dropped. */
   queued: z.number().int().min(0),
   /** Lessons left out because this viewer cannot see their source (a count, never a name). */
@@ -203,7 +207,8 @@ export const LoadedLessonRowSchema = z.object({
   trial: z.enum(["trial", "stable"]).optional(),
 }).strict();
 /** `canThumbsDown`: the caller has a role in the project and may write, so the task page offers the one-tap thumbs-down only to someone it will work for. Absent (an older broker): offered, and the broker decides. */
-export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional() }).strict();
+export const LoadedWikiUseSchema = z.object({ given: z.array(z.string().min(1).max(120)).max(80), read: z.array(z.string().min(1).max(120)).max(80) }).strict();
+export const LoadedLessonsSchema = z.object({ lessons: z.array(LoadedLessonRowSchema).max(500), canThumbsDown: z.boolean().optional(), wikiUse: LoadedWikiUseSchema.optional() }).strict();
 export const LoadedLessonsReaderSchema = forwardReader(LoadedLessonsSchema);
 
 // ---- request bodies

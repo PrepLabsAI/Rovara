@@ -32,6 +32,7 @@ export interface IntakeItemRecord {
   system: string;
   id: string;
   url: string;
+  parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined };
   title: string;
   /** The ticket's body while it waits (redacted, inert, cut): so the member who says "Start" starts it with the text that was handed over. Gone once it starts. */
   body?: string;
@@ -87,7 +88,7 @@ export async function readIntakeItem(table: IntakeTable, orgId: OrgId, project: 
   return recordOf(await table.store.get(intakeItemKey(orgId, project, itemId)), orgId, project);
 }
 
-export type NewIntakeItem = Pick<IntakeItemRecord, "orgId" | "project" | "itemId" | "channel" | "system" | "id" | "url" | "title" | "requester"> & { body?: string | undefined; writer?: string | undefined } & { state: "waiting" | "starting"; reason?: IntakeWaitReason | undefined; startedBy?: string | undefined };
+export type NewIntakeItem = Pick<IntakeItemRecord, "orgId" | "project" | "itemId" | "channel" | "system" | "id" | "url" | "title" | "requester"> & { body?: string | undefined; writer?: string | undefined; parent?: IntakeItemRecord["parent"] } & { state: "waiting" | "starting"; reason?: IntakeWaitReason | undefined; startedBy?: string | undefined };
 
 /**
  * Writes a ticket's item if there is none. "created" when it wrote it; otherwise the item that is there (read again), so a caller learns whether the ticket is new and what became
@@ -98,6 +99,7 @@ export async function claimIntakeItem(table: IntakeTable, input: NewIntakeItem):
   const key = intakeItemKey(input.orgId, input.project, input.itemId);
   const record: IntakeItemRecord = {
     orgId: input.orgId, project: input.project, itemId: input.itemId, channel: input.channel, system: input.system, id: input.id, url: input.url, title: input.title, requester: input.requester,
+    ...(input.parent === undefined ? {} : { parent: input.parent }),
     ...(input.writer === undefined ? {} : { writer: input.writer }),
     state: input.state, since: at, updatedAt: at, generation: 1,
     ...(input.body !== undefined && input.body !== "" ? { body: input.body } : {}),

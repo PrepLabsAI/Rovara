@@ -88,4 +88,23 @@ describe("the core root's hosted intake", () => {
     const plain = (await unwired.app.runtimeFor(A)).flow.deps.milestones as unknown as { register(h: typeof handler): () => void };
     expect(() => plain.register(handler)).not.toThrow();
   });
+
+  it("L4-LP2: hooks the task log (answers, questions and decisions told to the ticket thread) and registers its handler beside the write-back, only where Linear and lessons are wired", async () => {
+    const taskLogHandler = { name: "task_log", on: async () => undefined };
+    const wired = root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }).root;
+    const runtime = await wired.app.runtimeFor(A);
+    expect(runtime.flow.deps.taskLog).toBeDefined();
+    const milestones = runtime.flow.deps.milestones as unknown as { register(h: typeof taskLogHandler): () => void };
+    expect(() => milestones.register(taskLogHandler)).toThrow("already registered");
+    // Each company gets its own hook: B's flow is not told of A's tasks.
+    const other = await wired.app.runtimeFor(B);
+    expect(other.flow.deps.taskLog).toBeDefined();
+    expect(other.flow.deps.taskLog).not.toBe(runtime.flow.deps.taskLog);
+    // No Linear write-back: the flow is as before (no hook, no log handler).
+    const unwired = (await root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all", ROVARA_CORE_LESSONS: "on" }, { linear: false }).root.app.runtimeFor(A)).flow.deps;
+    expect(unwired.taskLog).toBeUndefined();
+    expect(() => (unwired.milestones as unknown as { register(h: typeof taskLogHandler): () => void }).register(taskLogHandler)).not.toThrow();
+    // No lessons: no company milestones, so nothing here is built either.
+    expect((await root({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: "all" }).root.app.runtimeFor(A)).flow.deps.taskLog).toBeUndefined();
+  });
 });

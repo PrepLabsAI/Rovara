@@ -16,6 +16,7 @@ import { nextVersion, type ScopeKey } from "./store.js";
 import { classifyTier, type TierContext } from "./tier.js";
 import { TRIAL_APPROVER, trialBlockers, type TrialContext } from "./trial.js";
 import { sameSource, type Lesson } from "./types.js";
+import { proposalSightings, proposedByOf } from "./proposal-mark.js";
 
 export interface ProcessDeps extends CurateDeps {
   verifier: CitationVerifier; facts: CodeFacts; settings: LearningSettingsReader;
@@ -49,6 +50,8 @@ export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: r
   if (reasons.includes("capability_request")) return true;
   if (new Set(lesson.provenance.supportTasks).size >= 2) return true;
   if (lesson.provenance.supportTasks.length >= 1 && lesson.provenance.memberSignal) return true;
+  // A team suggestion (a tool outside Rovara, or an agent) is a weak source: it waits as a candidate until a second, independent sighting (two tasks, two people, or one of each). It never gets by on a single one.
+  if (proposedByOf(lesson) !== undefined && proposalSightings(lesson) >= 2) return true;
   return tier === 0 && isCorroborated(lesson.provenance);
 }
 
@@ -128,7 +131,10 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
     });
     const trialWhy = trialBlockers({ ...verified, ...(decision.tier === 0 && decision.rendered !== undefined ? { title: decision.rendered.title, description: decision.rendered.description, body: decision.rendered.body } : {}) }, decision.tier, trialContext(resolved, brakeOn, held));
     const trial = trialWhy.length === 0;
-    const earned = trial || (earnedAttention(verified, decision.tier, decision.reasons) && (!held || current.status === "pending"));
+    // A team suggestion (a tool or an agent) with fewer than two independent sightings stays a candidate WHATEVER else routes it to a person (a contradiction, a possible duplicate or a rejected look-alike keep their link and
+    // go in front of people when the second sighting comes): one tool call never puts a card in front of reviewers or raises an alert.
+    const proposalHeld = proposedByOf(verified) !== undefined && proposalSightings(verified) < 2;
+    const earned = !proposalHeld && (trial || (earnedAttention(verified, decision.tier, decision.reasons) && (!held || current.status === "pending")));
     // The project brake: while the volume alert is fresh, a tier-0 lesson that WOULD have applied by itself is sent to a person instead, and stays with a person (no source is paused).
     const autoOn = decision.tier === 0 && approversRequired(0, resolved.approval) === 0 && modeAllows(resolved.mode, "auto_apply");
     const braked = autoOn && brakeOn;

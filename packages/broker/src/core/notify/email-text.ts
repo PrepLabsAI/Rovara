@@ -2,7 +2,7 @@
 // emails. Nothing else: no task content beyond the title, no secret, no address but the recipient's own (the adapter puts it in the envelope).
 import { EMAIL_BODY_MAX_BYTES, EMAIL_SUBJECT_MAX } from "@agentx/contracts";
 
-export interface EmailLine { title: string; status: string; link?: string | undefined }
+export interface EmailLine { title: string; status: string; link?: string | undefined; /** `upkeep_paused` for a nightly upkeep notice (a project, not a task). */ kind?: string | undefined }
 
 /** Links the surface that serves the pages supplies; each must be a plain https link or it is left out. */
 export interface AttentionEmailLinks {
@@ -29,9 +29,11 @@ export type AttentionEmailKind = "attention" | "done" | "digest" | "notice";
 
 export function attentionEmail(lines: readonly EmailLine[], more: number, kind: AttentionEmailKind, links: AttentionEmailLinks = {}): { subject: string; text: string; unsubscribeUrl?: string } {
   const count = lines.length + more;
-  const tasks = `${String(count)} ${count === 1 ? "task" : "tasks"}`;
-  const subject = kind === "notice" ? "Rovara: a notice for you" : kind === "digest" ? `Rovara digest: ${tasks}` : kind === "done" ? `Rovara: ${tasks} finished` : `Rovara: ${tasks} ${count === 1 ? "needs" : "need"} your attention`;
-  const heading = kind === "notice" ? "A notice from Rovara:" : kind === "digest" ? "Your Rovara digest:" : kind === "done" ? (count === 1 ? "A task finished in Rovara:" : "These tasks finished in Rovara:") : count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:";
+  const upkeep = lines.filter((line) => line.kind === "upkeep_paused").length;
+  const onlyUpkeep = upkeep > 0 && upkeep === lines.length && more === 0;
+  const tasks = `${String(count)} ${upkeep > 0 ? (count === 1 ? "item" : "items") : count === 1 ? "task" : "tasks"}`;
+  const subject = kind === "notice" ? "Rovara: a notice for you" : kind === "digest" ? `Rovara digest: ${tasks}` : kind === "done" ? `Rovara: ${tasks} finished` : onlyUpkeep ? "Rovara: nightly upkeep needs your attention" : `Rovara: ${tasks} ${count === 1 ? "needs" : "need"} your attention`;
+  const heading = kind === "notice" ? "A notice from Rovara:" : kind === "digest" ? "Your Rovara digest:" : kind === "done" ? (count === 1 ? "A task finished in Rovara:" : "These tasks finished in Rovara:") : onlyUpkeep ? "Nightly upkeep needs your attention in Rovara:" : upkeep > 0 ? "These items need your attention in Rovara:" : count === 1 ? "A task needs your attention in Rovara:" : "These tasks need your attention in Rovara:";
   const home = plainHttpsLink(links.home), settings = plainHttpsLink(links.settings), unsubscribe = plainHttpsLink(links.unsubscribe);
   const tail = [
     "",

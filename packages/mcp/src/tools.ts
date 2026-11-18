@@ -17,6 +17,7 @@ import { isExpiredNotice } from "./admin-expiry.js";
 import { adminApiFits, type Compatibility } from "./compatibility.js";
 import { ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
 import type { RequestIdMemory } from "./request-ids.js";
+import { WIKI_TOOLS } from "./wiki-tools.js";
 import { waitForTask } from "./wait.js";
 
 export interface ToolContext {
@@ -1756,4 +1757,5 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   ...KNOWLEDGE_TOOLS,
+  ...WIKI_TOOLS,
 ];

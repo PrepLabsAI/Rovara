@@ -820,6 +820,14 @@ describe("what did not change", () => {
 // those 6 rows still gives 0a31f2f4...).
 // Batch 13 (rule D): and for #855's one new row (POST /v1/dev/tasks/{taskId}/answers tasks:act; added, none changed; removing exactly that row still gives ef0ea58f...).
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
-// L4-AK1H (rule D): and for the 2 hosted team knowledge rows (POST /v1/dev/projects/{project}/lessons full, POST /v1/dev/projects/{project}/knowledge/areas full; all added, none changed; removing exactly
-// those 2 rows still gives 8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80).
-const EXISTING_ROUTES_DIGEST = "4fa876d052df994fa0c1fa5821d155277633f6f3aab72b10664e0ccdd8774698";
+// Batch 14 (rule D): and for 4 new rows: GET/POST /v1/dev/projects/{project}/machine-size (tasks:read / full; #882/#901) and GET /v1/dev/tasks/{taskId}/people/candidates,
+// POST /v1/dev/tasks/{taskId}/people/add (tasks:act; #888). All added, none changed: removing exactly those 4 rows still gives 8e72149c....
+// L4-MF4 (rule D): re-pinned for the one new row GET /v1/dev/me/sign-in-factors (full; added, none changed; removing exactly that row still gives 8e72149c...).
+// Rule D (proof list): and for one new row (GET /v1/dev/tasks/{taskId}/evidence tasks:read, Cloud's Proof tab; added, none changed; removing exactly that row still gives 8e72149c...).
+// Batch 14 combined (rule D): those two rows plus #960's GET /v1/dev/projects/{project}/lessons/measure (full). All 3 added, none changed: removing exactly those 3 rows
+// still gives 425c010b... (the batch-14 table above).
+// L4-AK1H (rule D): the 2 hosted team knowledge rows (POST /v1/dev/projects/{project}/lessons full, POST /v1/dev/projects/{project}/knowledge/areas full); L4-AK3 (rule D): the 5 Rovara skills rows (GET .../skills,
+// POST .../lessons/{lessonId}/skill, PUT .../skills/{skill}, POST .../skills/{skill}/approve and .../retire; all full); L4-AK3H (rule D): ONE new row, POST /v1/dev/projects/{project}/knowledge/propose (full).
+// All added, none changed: removing exactly those 8 rows still gives batch 14's e585a6143bf06e59b70b86b207dec41c343aee0253436308d29fe83771fa8b9c (above); removing only AK3H's 1 row gives
+// fa135a7b0fb1676e4268247e77e832b7d2fe4c92bfe7b328aea60eb250781f2c (the table of #995 + the skills rows).
+const EXISTING_ROUTES_DIGEST = "988275fc921cc6a27cfe2a0f8ce40c62c59118ffe7e6fc895854417f9f23da04";

@@ -7,7 +7,7 @@
 //  - a COMMIT pushed to the default branch (subject `Revert "..."`, a body line `This reverts commit <sha>`), when the host can show the commit (its author, its committer, whether it is a merge and verified)
 //    and its author and the account that pushed it both can write. Port gap: the CodeHost port has no commit read, and the push event names no pusher, so the caller supplies `CommitReader` and `pusher`.
 // Anything unproven records nothing. A revert of a revert names the first revert's commit, so it matches nothing and the task stays reverted (there is no un-revert).
-import { when, type ChangeRequestRef, type CodeHost, type DocumentStore, type HostAccount, type HostScope, type OrgId, type RepositoryRef, COMMIT_ID_PATTERN, COMMIT_ID_SOURCE } from "@agentx/contracts";
+import { hostRateLimitRetryAt, when, type ChangeRequestRef, type CodeHost, type DocumentStore, type HostAccount, type HostScope, type OrgId, type RepositoryRef, COMMIT_ID_PATTERN, COMMIT_ID_SOURCE } from "@agentx/contracts";
 import { providerOf } from "../../../plugins/routing.js";
 import type { RovaraPullRequest, RovaraPullRequestIndex } from "./rovara-pull-request-index.js";
 
@@ -94,7 +94,9 @@ async function canWrite(deps: RevertDetectorDependencies, repository: Repository
   try {
     const standing = await deps.codeHost.standing(repository, person, scope);
     return (standing.permission === "write" || standing.permission === "admin") && standing.accountType === "person";
-  } catch {
+  } catch (error) {
+    // A host that said slow down is not "unproven": the error goes on, so the caller looks at this revert again later (review L1 of lane L4-LM1b). Any other fault stays unproven.
+    if (hostRateLimitRetryAt(error) !== undefined) throw error;
     return false;
   }
 }

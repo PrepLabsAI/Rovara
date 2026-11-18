@@ -104,6 +104,13 @@ describe("the card never guesses a size", () => {
     expect(a.status).toBe("not_measured");
     expect(a.reasons).toContain("no available size meets the measured memory requirement");
   });
+  it("labels the big rows in fixed words", () => {
+    expect(machineRowLabel("arm64-16-64")).toBe("ARM, 16 vCPU, 64 GB");
+    expect(machineRowLabel("arm64-32-128")).toBe("ARM, 32 vCPU, 128 GB");
+    expect(machineRowLabel("x86_64-16-64")).toBe("x86, 16 vCPU, 64 GB");
+    expect(machineRowLabel("x86_64-32-128")).toBe("x86, 32 vCPU, 128 GB");
+    expect(machineRowLabel("arm64-64-256")).toBeUndefined();
+  });
   it("labels rows in fixed words and never from input", () => {
     expect(machineRowLabel("x86_64-8-32")).toBe("x86, 8 vCPU, 32 GB");
     expect(machineRowLabel("evil")).toBeUndefined();

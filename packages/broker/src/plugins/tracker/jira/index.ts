@@ -11,13 +11,15 @@
 // no such issue) is a `TrackerWriteRefusedError`, so a ticket that cannot be written never fails the task. Jira sends no webhook here: the adapter has no `events`.
 import { createHash } from "node:crypto";
 import {
-  TrackerItemSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
-  type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerItem, type TrackerItemRef, type UntrustedText,
+  TrackerItemSchema, TrackerParentSchema, TrackerSearchError, TrackerWriteRefusedError, agentXError, HostScopeSchema,
+  type HostScope, type NeutralStatus, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerItem, type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 
 export const JIRA_TRACKER_KIND = "jira";
 /** The comment property that marks Rovara's update (its value is a hash of the update's key, nothing else). */
 export const JIRA_MARKER_PROPERTY = "rovara.ticket-update";
+/** A Jira comment's id is a number. */
+const JIRA_COMMENT_ID = /^[0-9]{1,18}$/u;
 export const JIRA_KEY = /^[A-Z][A-Z0-9_]{0,30}-[1-9][0-9]{0,9}$/u;
 const ATLASSIAN_HOST = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.atlassian\.net$/u;
 const JIRA_LABEL = /^[^"\\\p{Cc}]{1,100}$/u;
@@ -55,6 +57,16 @@ const arr = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const str = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
 const lower = (value: unknown): string => (typeof value === "string" ? value.toLowerCase() : "");
 const cut = (text: string, max: number): string => [...text].slice(0, max).join("");
+// Jira's project is never a feature suggestion; only a verified epic parent is.
+function epicParent(fields: Record<string, unknown>, site: string) {
+  const parent = rec(fields["parent"]), facts = rec(parent["fields"]), type = rec(facts["issuetype"]);
+  if (type["hierarchyLevel"] !== 1 && str(type["name"])?.toLowerCase() !== "epic") return {};
+  const key = str(parent["key"]);
+  if (key === undefined || !JIRA_KEY.test(key)) return {};
+  const parsed = TrackerParentSchema.safeParse({ kind: "epic", id: `${new URL(site).hostname}/${key}`, title: cut(str(facts["summary"]) ?? "", 200), url: `${site}/browse/${key}` });
+  return parsed.success ? { parent: parsed.data } : {};
+}
+
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "Jira could not be reached just now.");
 const rateLimited = () => agentXError("TOO_MANY_REQUESTS", "Jira asked Rovara to slow down.");
 const refused = (status: number): boolean => status === 401 || status === 403;
@@ -201,7 +213,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
     async readItem(ref: TrackerItemRef, scope: HostScope): Promise<TrackerItem> {
       checkedScope(scope);
       const key = keyOf(ref);
-      const answer = await call(`/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,status,assignee,labels,updated`);
+      const answer = await call(`/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,status,assignee,labels,updated,project,parent`);
       if (answer.status === 404 || refused(answer.status)) throw agentXError("RUNTIME_UNAVAILABLE", "the tracker has no such item");
       if (answer.status !== 200) throw unavailable();
       const issue = rec(answer.body);
@@ -215,10 +227,11 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
         ...(str(rec(fields["assignee"])["displayName"]) === undefined ? {} : { assignee: cut(str(rec(fields["assignee"])["displayName"])!, 200) }),
         labels: arr(fields["labels"]).filter((label): label is string => typeof label === "string" && label !== "").slice(0, 100).map((label) => cut(label, 200)),
         ...(str(fields["updated"]) === undefined || Number.isNaN(Date.parse(str(fields["updated"])!)) ? {} : { updatedAt: new Date(str(fields["updated"])!).toISOString() }),
+        ...epicParent(fields, site),
       });
     },
 
-    async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, commentOptions?: TrackerCommentOptions): Promise<void> {
+    async comment(ref: TrackerItemRef, body: UntrustedText, scope: HostScope, commentOptions?: TrackerCommentOptions): Promise<TrackerCommentResult | void> {
       checkedScope(scope);
       const key = keyOf(ref);
       if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
@@ -232,9 +245,10 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       if (recent.status !== 200) throw unavailable();
       // Only a comment the key's OWN account wrote counts, so someone else's comment carrying the marker cannot hold ours back.
       const me = await call("/rest/api/3/myself").then((answer) => (answer.status === 200 ? str(rec(answer.body)["accountId"]) : undefined));
-      const already = me !== undefined && arr(rec(recent.body)["comments"]).some((comment) => rec(rec(comment)["author"])["accountId"] === me
-        && arr(rec(comment)["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY && rec(rec(property)["value"])["id"] === marker));
-      if (already) return;
+      const earlier = me === undefined ? undefined : arr(rec(recent.body)["comments"]).map(rec).find((comment) => rec(comment["author"])["accountId"] === me
+        && arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY && rec(rec(property)["value"])["id"] === marker));
+      // The same update again is the same comment: its id is answered, so the caller can edit it.
+      if (earlier !== undefined) return JIRA_COMMENT_ID.test(str(earlier["id"]) ?? "") ? { commentId: str(earlier["id"])! } : undefined;
       const paragraphs = body.split("\n").filter((line) => line !== "").map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
       // For a task only its owner can see, the comment is internal, so a Jira Service Management customer never sees it (a plain Jira project ignores the property).
       const properties = [{ key: JIRA_MARKER_PROPERTY, value: { id: marker } }, ...(commentOptions?.requirePrivate === true ? [{ key: "sd.public.comment", value: { internal: true } }] : [])];
@@ -242,6 +256,30 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
       if (refused(answer.status)) throw new TrackerWriteRefusedError("needs_write_access");
       if (answer.status === 404) throw new TrackerWriteRefusedError("not_found");
       if (answer.status !== 201 && answer.status !== 200) throw unavailable();
+      // Jira has no threads: a reply (`parentId`) is an ordinary comment on the issue.
+      const created = str(rec(answer.body)["id"]);
+      return created !== undefined && JIRA_COMMENT_ID.test(created) ? { commentId: created } : undefined;
+    },
+
+    async updateComment(ref: TrackerItemRef, commentId: string, body: UntrustedText, scope: HostScope): Promise<void> {
+      checkedScope(scope);
+      const key = keyOf(ref);
+      if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
+      if (!JIRA_COMMENT_ID.test(commentId)) throw agentXError("CONFIG_INVALID", "the comment is not a Jira comment id");
+      const path = `/rest/api/3/issue/${encodeURIComponent(key)}/comment/${commentId}`;
+      // Only a comment on THIS issue that the key's own account wrote as a Rovara update is rewritten.
+      const found = await call(`${path}?expand=properties`);
+      if (refused(found.status)) throw new TrackerWriteRefusedError("needs_write_access");
+      if (found.status === 404) throw new TrackerWriteRefusedError("not_found");
+      if (found.status !== 200) throw unavailable();
+      const me = await call("/rest/api/3/myself").then((answer) => (answer.status === 200 ? str(rec(answer.body)["accountId"]) : undefined));
+      const comment = rec(found.body);
+      if (str(comment["id"]) !== commentId || me === undefined || rec(comment["author"])["accountId"] !== me || !arr(comment["properties"]).some((property) => rec(property)["key"] === JIRA_MARKER_PROPERTY)) throw new TrackerWriteRefusedError("not_found");
+      const paragraphs = body.split("\n").filter((line) => line !== "").map((line) => ({ type: "paragraph", content: [{ type: "text", text: line }] }));
+      const written = await call(path, { method: "PUT", body: { body: { type: "doc", version: 1, content: paragraphs } } });
+      if (refused(written.status)) throw new TrackerWriteRefusedError("needs_write_access");
+      if (written.status === 404) throw new TrackerWriteRefusedError("not_found");
+      if (written.status !== 200 && written.status !== 204) throw unavailable();
     },
 
     async setStatusByName(ref: TrackerItemRef, name: string, scope: HostScope): Promise<"moved" | "no_such_status"> {
@@ -290,7 +328,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
         }
         if (clauses.length === 0) return [];
         const jql = `(${clauses.join(" OR ")}) AND statusCategory != Done ORDER BY updated DESC`;
-        const params = new URLSearchParams({ jql, maxResults: String(Math.min(query.limit, 50)), fields: "summary,description,labels,assignee,reporter", expand: "changelog" });
+        const params = new URLSearchParams({ jql, maxResults: String(Math.min(query.limit, 50)), fields: "summary,description,labels,assignee,reporter,project,parent", expand: "changelog" });
         const answer = await call(`/rest/api/3/search/jql?${params.toString()}`, { signal: query.signal });
         if (refused(answer.status)) throw new TrackerSearchError("CONNECTION_REFUSED");
         if (answer.status !== 200) throw new TrackerSearchError("SEARCH_FAILED");
@@ -312,6 +350,7 @@ export function jiraTracker(options: JiraApiOptions): Tracker {
             // The change that made the label-add, as Jira's own change log says: claimed once per company by the engine, so a project watching the same label does not start it a second time as the person.
             ...(label === undefined || found.changeId === undefined ? {} : { change: { id: found.changeId, act: { kind: "label" as const, value: label } } }),
             ...(numeric === undefined ? {} : { alternateIds: [numeric] }),
+        ...epicParent(fields, site),
           });
         }
         return items;

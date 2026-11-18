@@ -12,6 +12,9 @@
 //     switch-off: a switch-on change set shows that one IAM policy Add, the dispatcher's environment Modify and the mapping's Enabled flag. Its grant may take a few seconds to apply
 //     after the mapping is enabled; a first core batch that meets AccessDenied on the deleter comes back and is retried.)
 //   - an alarm on the dead-letter queue;
+//   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
+//     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
+//   - the `CoreAnswersModel` parameter (L4-AM, default empty = the agent model; broker only, packed `aa`, ROVARA_CORE_ANSWERS_MODEL, hosted answers and classifier only)
 //   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
 //     (`https://<host>`) and ROVARA_CORE_AGENT_MODEL.
 //
@@ -23,12 +26,13 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
+  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
-  coreDispatchDeadLetterName, coreDispatchQueueName, type CoreJobSchedule,
+  coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
+import { AttentionEmail } from "./attention-email.js";
 
 /** The stack parameter that holds the switch. */
 export const CORE_ENGINE_PARAMETER = "CoreEngine";
@@ -66,18 +70,22 @@ export class CoreEngine extends Construct {
   private readonly companyDayCap: CfnParameter;
   private readonly policyHook: CfnParameter;
   private readonly lessons: CfnParameter;
+  private readonly systemRuns: CfnParameter;
   private readonly modelGatewayHost: CfnParameter;
   private readonly agentModel: CfnParameter;
   /** DEC 254z-amend3: the install's test services switch ("1" on, the default; "0" off), packed for the broker and the dispatcher (`td`) and given to the session steps whole. */
   readonly testServices: CfnParameter;
   /** DEC 254zm: `none` (the default) or `mirrored`, packed for the broker and the dispatcher (`ti`) and given whole to the session steps. */
   readonly testServiceImages: CfnParameter;
+  private readonly answersModel: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
   readonly invokeRole: iam.Role;
   readonly schedules: scheduler.CfnSchedule[] = [];
   readonly isOn: CfnCondition;
+  readonly attentionEmail: AttentionEmail;
+  readonly systemRunsOn: CfnCondition;
   private readonly brokerFunctionArn: string;
 
   constructor(scope: Construct, id: string, props: CoreEngineProps) {
@@ -105,6 +113,11 @@ export class CoreEngine extends Construct {
       addBrokerSetting(broker, props.naming, key, value);
       addPackedSetting(dispatcher, key, value);
     }
+    // L4-P1 (owner DEC 254zzl): the per-company flag of system-started runs, default off (written out: tests/contract/config-keys.test.ts reads the declaration). It also holds the hourly `upkeep-night` schedule off (below).
+    // L4-P2: also packed for the dispatcher (an environment value only, no IAM): its setup gate before a build can RETRY a re-check, and that retry must stop when the flag (or the company's consent) goes off.
+    this.systemRuns = new CfnParameter(stack, "CoreSystemRuns", { type: "String", default: SYSTEM_RUNS_DEFAULT, maxLength: 64, allowedPattern: SYSTEM_RUNS_PARAMETER_PATTERN, description: "Core system-started runs (Rovara's own setup re-check and nightly check): off (the default), on, or on:<company id>[:<company id>]. Also enables the hourly upkeep-night schedule" });
+    addBrokerSetting(broker, props.naming, "coreSystemRuns", this.systemRuns.valueAsString);
+    addPackedSetting(dispatcher, "coreSystemRuns", this.systemRuns.valueAsString);
     addBrokerSetting(broker, props.naming, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     addPackedSetting(dispatcher, "coreAllowedCompanies", this.allowedCompanies.valueAsString);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
@@ -128,6 +141,11 @@ export class CoreEngine extends Construct {
     this.testServiceImages = new CfnParameter(stack, "TestServiceImages", { type: "String", default: TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICE_IMAGES_PARAMETER_VALUES], description: "Test service images: none (the default) or mirrored once the starter copies are checked" });
     addBrokerSetting(broker, props.naming, "testServiceImages", this.testServiceImages.valueAsString);
     addPackedSetting(dispatcher, "testServiceImages", this.testServiceImages.valueAsString);
+    // L4-AM (DEC 254zzn(2)): the hosted answers model, for the BROKER only (the answers and the start-box classifier run there; the dispatcher runs coding steps, which keep the agent model). A
+    // stack parameter, so an upgrade keeps it (OPERATOR_PARAMETERS); packed (`aa`), because the broker's 4 KB has no room for another variable. Empty (the default): answers and the
+    // classifier use the agent model, exactly as before. A Claude engine name only (the answers purpose runs on the company's own Anthropic account). No IAM, no secret.
+    this.answersModel = new CfnParameter(stack, "CoreAnswersModel", { type: "String", default: "", maxLength: CORE_ANSWERS_MODEL_MAX_LENGTH, allowedPattern: CORE_ANSWERS_MODEL_PATTERN, description: "Core engine hosted answers model, a Claude model id such as claude-haiku-4-5 used for the Just answer and the start-box classifier only; empty (the default) uses the agent model" });
+    addBrokerSetting(broker, props.naming, "coreAnswersModel", this.answersModel.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).
@@ -172,7 +190,12 @@ export class CoreEngine extends Construct {
     });
     this.invokeRole.addToPolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
     const state = Token.asString(Fn.conditionIf(this.isOn.logicalId, "ENABLED", "DISABLED"));
-    for (const entry of CORE_JOB_SCHEDULES) this.schedules.push(this.schedule(entry, state));
+    // The upkeep night (L4-P1) is enabled only while the engine is not off AND system runs are not off: the resource is there, its state follows the flag (default DISABLED, so merging this changes nothing).
+    this.systemRunsOn = new CfnCondition(this, "CoreSystemRunsIsOn", { expression: Fn.conditionAnd(Fn.conditionNot(Fn.conditionEquals(this.parameter.valueAsString, "off")), Fn.conditionNot(Fn.conditionEquals(this.systemRuns.valueAsString, "off"))) });
+    const upkeepState = Token.asString(Fn.conditionIf(this.systemRunsOn.logicalId, "ENABLED", "DISABLED"));
+    for (const entry of CORE_JOB_SCHEDULES) this.schedules.push(this.schedule(entry, entry.job === UPKEEP_NIGHT_JOB ? upkeepState : state));
+    // Web task channel C8 (option b): the attention email's own sender function, OFF by default and absent from the template while off (attention-email.ts).
+    this.attentionEmail = new AttentionEmail(this, "AttentionEmail", { naming: props.naming, env, broker });
   }
 
   private schedule(entry: CoreJobSchedule, state: string): scheduler.CfnSchedule {

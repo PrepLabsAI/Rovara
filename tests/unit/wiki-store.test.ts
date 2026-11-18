@@ -1,7 +1,7 @@
 // The project wiki store (lead 4, W2): rows only, one partition per company AND project. Two-project and two-company isolation on every read and write; the agents' read; quotes redacted
 // and cut; removed repositories; the person erase step; answer expiry; the company purge removes every wiki row (no purge change).
 import { describe, expect, it } from "vitest";
-import { WIKI_QUOTE_MAX, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
+import { WIKI_FLAG_SCAN_MAX, WIKI_QUOTE_MAX, answerThreadKey, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
 import { WIKI_FORMER_MEMBER, createWikiStore, storedQuote } from "../../packages/broker/src/core/wiki/store.js";
@@ -51,7 +51,39 @@ async function everything(store: MemoryDocumentStore): Promise<StoredDocument[]>
   return out;
 }
 
+describe("wiki store: Delete wiki with answer threads (batch 14, from #932)", () => {
+  it("removes the project's J1 thread rows with the rest of the wiki, and leaves another project's and company's threads alone", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A-alpha"));
+    const own = answerThreadKey(A, "alpha", "thread-1", { personId: "person-1" });
+    const shared = answerThreadKey(A, "alpha", "thread-2", "shared");
+    const otherProject = answerThreadKey(A, "beta", "thread-1", "shared");
+    const otherCompany = answerThreadKey(B, "alpha", "thread-1", "shared");
+    for (const key of [own, shared, otherProject, otherCompany]) await w.store.put({ item: { ...key, entityType: "WIKI_THREAD", turns: [] } });
+    await expect(w.a.deleteWiki("alpha")).resolves.toBeGreaterThan(0);
+    const left = (await everything(w.store)).map((item) => `${item.pk}|${item.sk}`);
+    expect(left.filter((row) => row.startsWith(`${wikiPartition(A, "alpha")}|`))).toEqual([]);
+    expect(left).toContain(`${otherProject.pk}|${otherProject.sk}`);
+    expect(left).toContain(`${otherCompany.pk}|${otherCompany.sk}`);
+  });
+});
+
 describe("wiki store: two companies and two projects never meet", () => {
+  it("acknowledges changed notes only in their company and project, recording actor and time", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A-alpha"));
+    await w.a.writePage("beta", page("A-beta"));
+    await w.b.writePage("alpha", page("B-alpha"));
+    const own = await w.a.addNote("alpha", { pageId: "overview", text: "check source", authorId: "person-1" });
+    const beta = await w.a.addNote("beta", { pageId: "overview", text: "beta", authorId: "person-2" });
+    const other = await w.b.addNote("alpha", { pageId: "overview", text: "other company", authorId: "person-3" });
+    w.clock.now += 5000;
+    expect(await w.a.acknowledgeNote("alpha", "overview", own.noteId, "person-1")).toMatchObject({ changedAcknowledgement: { by: "person-1", at: new Date(w.clock.now).toISOString() } });
+    expect(await w.a.acknowledgeNote("alpha", "overview", beta.noteId, "person-1")).toBeUndefined();
+    expect(await w.a.acknowledgeNote("alpha", "overview", other.noteId, "person-1")).toBeUndefined();
+    expect((await w.a.readPage("beta", "overview", "person"))?.notes[0]?.changedAcknowledgement).toBeUndefined();
+    expect((await w.b.readPage("alpha", "overview", "person"))?.notes[0]?.changedAcknowledgement).toBeUndefined();
+  });
   it("every read of company A, project alpha sees only its own rows (index, page, notes, flags, builds, answers)", async () => {
     const w = world();
     // The same project name, page id and repo in both companies; and a second project in company A.
@@ -292,6 +324,50 @@ describe("wiki store: what agents get", () => {
     expect((await w.a.readIndex("alpha"))[0]?.flagged).toBe(false);
   });
 
+  it("openClaimFlagPages lists the pages with an open claim-level flag (newest time), not page-level or resolved flags, per company and project", async () => {
+    const w = world();
+    for (const [store, project] of [[w.a, "alpha"], [w.a, "beta"], [w.b, "alpha"]] as const) {
+      await store.writePage(project, page(project));
+      await store.writePage(project, page(project, { pageId: "repo-web", kind: "repo" }));
+    }
+    const person = { kind: "person", personId: "person-1" } as const;
+    expect(await w.a.openClaimFlagPages("alpha")).toEqual({ pages: [], complete: true });
+    await w.a.addFlag("alpha", { pageId: "overview", by: person });
+    expect(await w.a.openClaimFlagPages("alpha")).toEqual({ pages: [], complete: true });
+    w.clock.now = T0 + 5_000;
+    await w.a.addFlag("alpha", { pageId: "overview", claimId: "c0001", by: person });
+    w.clock.now = T0 + 9_000;
+    await w.a.addFlag("alpha", { pageId: "overview", claimId: "c0002", by: { kind: "task", taskId: "00000000-0000-4000-8000-000000000001" } });
+    await w.a.addFlag("alpha", { pageId: "repo-web", claimId: "c0001", by: person });
+    expect(await w.a.openClaimFlagPages("alpha")).toEqual({
+      pages: [{ pageId: "overview", latestAt: new Date(T0 + 9_000).toISOString() }, { pageId: "repo-web", latestAt: new Date(T0 + 9_000).toISOString() }], complete: true,
+    });
+    // Another project of the company and the same project of another company see none of it, and their own flags stay their own.
+    expect(await w.a.openClaimFlagPages("beta")).toEqual({ pages: [], complete: true });
+    expect(await w.b.openClaimFlagPages("alpha")).toEqual({ pages: [], complete: true });
+    await w.b.addFlag("alpha", { pageId: "repo-web", claimId: "c0002", by: person });
+    expect((await w.b.openClaimFlagPages("alpha")).pages.map((entry) => entry.pageId)).toEqual(["repo-web"]);
+    expect((await w.a.openClaimFlagPages("alpha")).pages.map((entry) => entry.pageId)).toEqual(["overview", "repo-web"]);
+    // Resolved flags are not open.
+    await w.a.resolveFlags("alpha", "overview");
+    expect((await w.a.openClaimFlagPages("alpha")).pages.map((entry) => entry.pageId)).toEqual(["repo-web"]);
+  });
+
+  it("openClaimFlagPages says it did not read everything (complete false) past the scan limit, and refuses a row that is not this project's", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A"));
+    const flag = (n: number, state: "open" | "resolved") => ({
+      pk: wikiPartition(A, "alpha"), sk: `FLAG#overview#flag-${String(n).padStart(5, "0")}`, entityType: "WIKI_FLAG", companyId: A, project: "alpha",
+      flag: { flagId: `flag-${String(n).padStart(5, "0")}`, pageId: "overview", claimId: "c0001", by: { kind: "person", personId: "person-1" }, createdAt: new Date(T0).toISOString(), state },
+    }) as unknown as StoredDocument;
+    for (let n = 0; n < WIKI_FLAG_SCAN_MAX; n += 1) await w.store.put({ item: flag(n, "resolved") });
+    expect(await w.a.openClaimFlagPages("alpha")).toEqual({ pages: [], complete: true });
+    await w.store.put({ item: flag(WIKI_FLAG_SCAN_MAX, "open") });
+    expect((await w.a.openClaimFlagPages("alpha")).complete).toBe(false);
+    await w.store.put({ item: { ...flag(0, "open"), sk: "FLAG#overview#aaaa-other", project: "beta" } });
+    await expect(w.a.openClaimFlagPages("alpha")).rejects.toThrow("A wiki row could not be read.");
+  });
+
   it("refuses an audience that is neither a person nor an agent", async () => {
     const w = world();
     await w.a.writePage("alpha", page("x"));
@@ -353,6 +429,34 @@ describe("wiki store: deleting", () => {
     expect(await w.a.readIndex("beta")).toHaveLength(1);
   });
 
+  it("deleting the wiki also removes J1's answer thread rows (THREAD#<hash>) of that company and project, and no other project's or company's", async () => {
+    const w = world();
+    // J1's key shapes, written the way J1 writes them (a raw row in the project's own partition): ANSWER# records and THREAD# thread memory, in every company and project.
+    const thread = (project: string, company: OrgId, hash: string) => ({ pk: wikiPartition(company, project), sk: `THREAD#${hash.repeat(32).slice(0, 32)}`, entityType: "ANSWER_THREAD", companyId: company, project, answerIds: ["a0000000000000000000000000000001"] }) as unknown as StoredDocument;
+    for (const [store, project, company, tag] of [[w.a, "alpha", A, "A-alpha"], [w.a, "beta", A, "A-beta"], [w.b, "alpha", B, "B-alpha"]] as const) {
+      await store.writePage(project, page(tag));
+      await store.writeAnswer(project, { answerId: "answer-0001", askedBy: "person-1", channel: "web", question: "q", answer: "a", outcome: "answered", sources: [], pagesRead: [] });
+      await w.store.put({ item: thread(project, company, "1") });
+      await w.store.put({ item: thread(project, company, "f") });
+    }
+    const others = JSON.stringify((await everything(w.store)).filter((item) => item.pk !== wikiPartition(A, "alpha")));
+    // Every row goes: 1 page index + 1 body + 1 answer + 2 threads.
+    expect(await w.a.deleteWiki("alpha")).toBe(5);
+    expect((await everything(w.store)).filter((item) => item.pk === wikiPartition(A, "alpha"))).toEqual([]);
+    expect(JSON.stringify((await everything(w.store)).filter((item) => item.pk !== wikiPartition(A, "alpha")))).toBe(others);
+    expect((await everything(w.store)).filter((item) => item.sk.startsWith("THREAD#"))).toHaveLength(4);
+  });
+
+  it("a sort key that is not one of the wiki's families (a thread hash of the wrong shape, an unknown prefix) is still refused", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A"));
+    for (const sk of ["THREAD#short", `THREAD#${"A".repeat(32)}`, `THREAD#${"a".repeat(33)}`, "OTHER#abc12345"]) {
+      await w.store.put({ item: { pk: wikiPartition(A, "alpha"), sk } });
+      await expect(w.a.deleteWiki("alpha")).rejects.toThrow("not a wiki row's sort key");
+      await w.store.delete({ key: { pk: wikiPartition(A, "alpha"), sk } });
+    }
+  });
+
   it("the company purge removes every wiki row of the company and leaves the other company's (no purge change)", async () => {
     const w = world();
     await w.a.writePage("alpha", page("A"));
@@ -379,6 +483,11 @@ describe("wiki store: person erase and answer expiry", () => {
       await w.a.writePage(project, page(project));
       await w.a.addNote(project, { pageId: "overview", text: `erase me ${project}`, authorId: "person-1" });
       await w.a.addNote(project, { pageId: "overview", text: `keep me ${project}`, authorId: "person-2" });
+      const acknowledged = await w.a.addNote(project, { pageId: "overview", text: `ack by erased ${project}`, authorId: "person-2" });
+      await w.a.acknowledgeNote(project, "overview", acknowledged.noteId, "person-1");
+      const approved = await w.a.addNote(project, { pageId: "overview", text: `approved by erased ${project}`, authorId: "person-2" });
+      await w.a.approveNote(project, "overview", approved.noteId, "person-1");
+      await w.a.acknowledgeNote(project, "overview", approved.noteId, "person-2");
       await w.a.addFlag(project, { pageId: "overview", claimId: "c0001", by: { kind: "person", personId: "person-1" }, reason: `my reason ${project}` });
       await w.a.addFlag(project, { pageId: "overview", claimId: "c0002", by: { kind: "person", personId: "person-2" }, reason: `their reason ${project}` });
       await w.a.writeAnswer(project, { answerId: "answer-0001", askedBy: "person-1", channel: "slack", question: `my question ${project}`, answer: "a", outcome: "answered", sources: [], pagesRead: [] });
@@ -391,6 +500,10 @@ describe("wiki store: person erase and answer expiry", () => {
     const raw = JSON.stringify(await everything(w.store));
     expect(raw).not.toMatch(/erase me|my reason|my question/u);
     expect(raw).toMatch(/keep me alpha/u);
+    expect(raw).toMatch(/ack by erased alpha/u);
+    expect(raw).toContain('"text":"approved by erased alpha"');
+    expect(raw).toContain('"changedAcknowledgement":{"by":"person-2"');
+    expect(raw).not.toContain('"changedAcknowledgement":{"by":"person-1"');
     expect(raw).toMatch(/their reason beta/u);
     expect(raw).toMatch(/their question alpha/u);
     expect(raw).toContain("b note");

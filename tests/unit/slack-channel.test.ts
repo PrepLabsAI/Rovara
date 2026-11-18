@@ -84,6 +84,13 @@ describe("the web client", () => {
 describe("what Rovara says", () => {
   const base = { version: 1 as const, id: "evt_aaaaaaaaaaaaaaaaaaaa", channel: "slack", createdAt: "2026-11-10T10:00:00.000Z", conversation: { channel: "slack", tenant: TEAM, space: CHANNEL, thread: "1700000000.000001" } };
 
+  // L4-PRP: the pull request card says the verdict heading under the title and link (the same words as the description).
+  it("renders a pull request's verdict under its title and link, and nothing without one", () => {
+    const data = { url: "https://git.example.test/acme/web/pull/7", title: "Add a retry", action: "opened" as const };
+    const withVerdict = renderEvent({ ...base, type: "pr", data: { ...data, verdict: "Verified · Low risk · nothing extra to check" } }, 3_000)!;
+    expect(withVerdict.text).toBe("Pull request: Add a retry\nhttps://git.example.test/acme/web/pull/7\nVerified · Low risk · nothing extra to check");
+    expect(renderEvent({ ...base, type: "pr", data }, 3_000)!.text).toBe("Pull request: Add a retry\nhttps://git.example.test/acme/web/pull/7");
+  });
   it("escapes what could become a mention, a link or a channel reference", () => {
     expect(escapeText("<!channel> <@U123> <https://x.example|click> & more")).toBe("&lt;!channel&gt; &lt;@U123&gt; &lt;https://x.example|click&gt; &amp; more");
     const rendered = renderEvent({ ...base, type: "progress", data: { text: "Task <!here> needs you" } }, 3_000)!;

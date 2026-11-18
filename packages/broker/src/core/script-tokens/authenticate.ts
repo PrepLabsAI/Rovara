@@ -1,7 +1,5 @@
-// Script tokens: who a request with `Authorization: Bearer rvst_...` is, and whether it may do what it asks. Runs before any route is matched, so a token reaches
-// nothing but the closed list below: read the creator's own tasks on the token's projects, and start a task on one of them. Everything else, including every settings, token, decision, approval,
-// merge and session route, is refused here with one fixed text, before any read. A token acts as its creator, with the creator's live role, and only while that role is the one it was made with
-// and the creator is still the install's person: a token refused for a change in its creator's place is revoked at once, so it never comes back.
+// Script tokens reach only the closed task, lessons and wiki read list below, with explicit permissions on named projects; everything else is refused before any read.
+// A token acts as its creator with their live role; a change in that role or identity revokes it permanently.
 //
 // A script token is NEVER an approval proof (owner decision L7A-1): no route on the list decides anything, and what this returns carries no page session, so it can neither ask a local page to
 // open nor sign a proof. The core's approval gate is not reachable with one (a test walks the owner's routes with a token and expects the fixed refusal).
@@ -9,8 +7,8 @@
 // Cloud checks more about the creator's sign-in (an admin's end of sign-ins, an unlinked method, a SAML cut-off, the edition's session cap). Those belong to Cloud's identity and edition and are not
 // here: the identity port answers "is this person still here with this role", and an install with more to check says so by answering no.
 import {
-  SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, agentXError, companyScoped,
-  type IdentityProvider, type OrgId, type OrgRole,
+  SCRIPT_TOKEN_NOT_ALLOWED_MESSAGE, WikiProjectSchema, WikiPageIdSchema, agentXError, companyScoped,
+  type IdentityProvider, type OrgId, type OrgRole, type ScriptTokenPermission,
 } from "@agentx/contracts";
 import type { BrokerRequest } from "../../handler.js";
 import { developerIdOf } from "../sessions/create.js";
@@ -35,12 +33,15 @@ const LESSONS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/l
 /** The table of contents of a project's team knowledge (names and counts, no text): the same permission as the lessons read, so one "Team knowledge" permission covers both. */
 const KNOWLEDGE_AREAS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/areas$/u;
 
+/** A team SUGGESTION from a tool (L4-AK3): the one write a "Team knowledge" token may make. It only adds a weak-source lesson that waits for a second sighting and then for a person; it never changes anything live. */
+const KNOWLEDGE_PROPOSE_WRITE = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/propose$/u;
+
 /** What one allowed request is: the permission it needs and how its project is found. */
 export type AllowedRoute =
   | { permission: "start"; project: "body" }
   | { permission: "read"; project: "query" }
   | { permission: "read"; project: "task"; taskId: string }
-  | { permission: "lessons"; project: "path"; name: string };
+  | { permission: "lessons" | "wiki"; project: "path"; name: string };
 
 /** The whole list of what a script token may call. Anything not here is refused. Exported for the test that pins it. */
 export function scriptTokenRoute(method: string, pathname: string): AllowedRoute | undefined {
@@ -49,14 +50,16 @@ export function scriptTokenRoute(method: string, pathname: string): AllowedRoute
     if (method === "GET") return { permission: "read", project: "query" };
     return undefined;
   }
-  const lessons = method === "POST" ? (LESSONS_READ.exec(pathname) ?? KNOWLEDGE_AREAS_READ.exec(pathname)) : null;
+  const wiki = method === "GET" ? WIKI_READ.exec(pathname) : null;
+  if (wiki !== null && WikiProjectSchema.safeParse(wiki[1]).success && (wiki[2] === undefined || WikiPageIdSchema.safeParse(wiki[2]).success)) return { permission: "wiki", project: "path", name: wiki[1]! };
+  const lessons = method === "POST" ? (LESSONS_READ.exec(pathname) ?? KNOWLEDGE_AREAS_READ.exec(pathname) ?? KNOWLEDGE_PROPOSE_WRITE.exec(pathname)) : null;
   if (lessons !== null) return { permission: "lessons", project: "path", name: lessons[1]! };
   const read = method === "GET" ? TASK_READ.exec(pathname) : null;
   return read === null ? undefined : { permission: "read", project: "task", taskId: read[1]! };
 }
 
 /** What a script token's caller carries: the token, scoped. */
-export interface ScriptTokenScope { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] }
+export interface ScriptTokenScope { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] }
 
 export interface ScriptTokenAuthDependencies extends ScriptTokenDependencies {
   /** The install's company: a token of another company is refused as an unknown one. */
@@ -163,3 +166,6 @@ export async function authenticateScriptToken(deps: ScriptTokenAuthDependencies,
   const scope: ScriptTokenScope = { tokenId: record.tokenId, name: record.name, permissions: record.permissions, projects: record.projects };
   return { caller: { principal: held.principal, scriptToken: scope }, request: served, ...(route.project === "query" && named !== undefined ? { listProject: named } : {}) };
 }
+
+// Below the existing rate-key forwarding sites to preserve the inventory ratchet's reviewed locations.
+const WIKI_READ = /^\/v1\/app\/projects\/([^/]+)\/wiki(?:\/pages\/([^/]+))?$/u;

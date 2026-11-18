@@ -1,9 +1,10 @@
 // The project wiki's read routes (lead 4, W2): any project role reads; anyone else, a missing project, another company's and a malformed name get the same 404; two companies and two
 // projects never meet; people never see a stored quote, a flag's author or reason; refusals are fixed words with no echo.
 import { describe, expect, it } from "vitest";
-import { WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, type OrgId, type WikiPageWrite } from "@agentx/contracts";
+import { WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TRUST_LINE, WIKI_UNAVAILABLE, wikiAgentSwitchKey, type OrgId, type WikiPageWrite } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
+import { setWikiAgentSwitch } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { WIKI_FORMER_MEMBER_NAME, hostedEraseWiki, isWikiPath, routeHostedWiki, type HostedWikiWiring } from "../../packages/broker/src/core-host/wiki-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 
@@ -40,7 +41,8 @@ function world(standings: Record<string, SetupRunStanding["access"]> = {}, proje
     displayName: async (personId) => (personId === "ada" ? "Ada" : undefined),
   };
   const get = async (companyId: OrgId, personId: string, path: string, overrides: Partial<HostedWikiWiring> = {}) => {
-    const answer = await routeHostedWiki({ request: { method: "GET", path, headers: {} }, path, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0 });
+    const routePath = new URL(path, "https://agentx.invalid").pathname;
+    const answer = await routeHostedWiki({ request: { method: "GET", path, headers: {} }, path: routePath, personId, companyId, store, wiring: { ...wiring, ...overrides }, now: () => T0 });
     return { status: answer.statusCode, body: JSON.parse(answer.body ?? "{}") as Record<string, unknown>, raw: answer.body ?? "" };
   };
   return { store, get, calls, a: createWikiStore({ store, companyId: A, now: () => T0 }), b: createWikiStore({ store, companyId: B, now: () => T0 }) };
@@ -49,14 +51,15 @@ function world(standings: Record<string, SetupRunStanding["access"]> = {}, proje
 async function seeded() {
   const w = world({ [`${A}/alpha/ada`]: "view", [`${A}/alpha/owner`]: "manage", [`${A}/beta/bob`]: "view", [`${B}/alpha/ada`]: "view" });
   await w.a.writePage("alpha", page("A-alpha"));
-  await w.a.writePage("beta", page("A-beta"));
-  await w.b.writePage("alpha", page("B-alpha"));
+  await w.a.writePage("beta", { ...page("A-beta"), pageId: "beta-overview" });
+  await w.b.writePage("alpha", { ...page("B-alpha"), pageId: "b-overview" });
   return w;
 }
 
 describe("wiki read routes: paths", () => {
-  it("serves only GET on the three paths", () => {
+  it("serves only GET on the four route shapes", () => {
     expect(isWikiPath("/v1/app/projects/alpha/wiki", "GET")).toBe(true);
+    expect(isWikiPath("/v1/app/projects/alpha/wiki/search", "GET")).toBe(true);
     expect(isWikiPath("/v1/app/projects/alpha/wiki/pages/overview", "GET")).toBe(true);
     expect(isWikiPath("/v1/app/projects/alpha/wiki/pages/overview/sources", "GET")).toBe(true);
     for (const [method, path] of [["POST", "/v1/app/projects/alpha/wiki"], ["PUT", "/v1/app/projects/alpha/wiki/pages/overview"], ["GET", "/v1/app/projects/alpha/wiki/pages"], ["GET", "/v1/app/projects/alpha/wiki/notes"], ["GET", "/v1/app/projects//wiki"], ["GET", "/v1/app/projects/alpha/wiki/pages/overview/sources/x"]] as const) {
@@ -159,6 +162,63 @@ describe("wiki read routes: isolation", () => {
     expect(bAlpha).not.toMatch(/A-alpha|A-beta/u);
   });
 
+  it("search reads title, summary and page text only within the authorized company and project", async () => {
+    const w = await seeded();
+    for (const [company, person, project, q, expected, forbidden] of [
+      [A, "ada", "alpha", "Text A-alpha", "A-alpha", /A-beta|B-alpha/u],
+      [A, "bob", "beta", "Text A-beta", "A-beta", /A-alpha|B-alpha/u],
+      [B, "ada", "alpha", "Text B-alpha", "B-alpha", /A-alpha|A-beta/u],
+    ] as const) {
+      const found = await w.get(company, person, `/v1/app/projects/${project}/wiki/search?q=${encodeURIComponent(q)}`);
+      expect(found.status).toBe(200);
+      expect(found.raw).toContain(expected);
+      expect(found.raw).not.toMatch(forbidden);
+    }
+    const denied = await w.get(A, "bob", "/v1/app/projects/alpha/wiki/search?q=Text");
+    expect(denied).toMatchObject({ status: 404, body: { error: { message: WIKI_PROJECT_NOT_FOUND } } });
+    for (const [company, person, project, q, ids] of [
+      [A, "ada", "alpha", "Text A-beta", []],
+      [A, "bob", "beta", "Text A-alpha", []],
+      [A, "ada", "alpha", "Text", ["overview"]],
+      [A, "bob", "beta", "Text", ["beta-overview"]],
+      [B, "ada", "alpha", "A-alpha", []],
+    ] as const) {
+      const answer = await w.get(company, person, `/v1/app/projects/${project}/wiki/search?q=${encodeURIComponent(q)}`);
+      expect((answer.body["results"] as Array<{ pageId: string }>).map((entry) => entry.pageId)).toEqual(ids);
+    }
+  });
+
+  it("search reads page and body rows only, without querying notes or flags", async () => {
+    const w = await seeded();
+    const queried: string[] = [];
+    const query = w.store.query.bind(w.store);
+    w.store.query = async (request) => { queried.push(request.sk?.op === "beginsWith" ? request.sk.prefix : ""); return await query(request); };
+    const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/search?q=Text");
+    expect(answer.status).toBe(200);
+    expect(queried).not.toContain("WIKI#NOTE#");
+    expect(queried).not.toContain("WIKI#FLAG#");
+  });
+
+  it("redacts key-shaped text in search snippets and frames snippets as untrusted", async () => {
+    const w = world({ [`${A}/alpha/ada`]: "view" });
+    const keyText = "sk-proj-" + "A".repeat(48);
+    await w.a.writePage("alpha", { ...page("A-alpha"), blocks: [{ kind: "paragraph", blockId: "p0001", text: `Credential ${keyText} remains private`, claimIds: ["c0001", "c0002"] }] });
+    const answer = await w.get(A, "ada", "/v1/app/projects/alpha/wiki/search?q=Credential");
+    expect(answer.body).toMatchObject({ trustLine: WIKI_TRUST_LINE });
+    expect(answer.raw).not.toContain(keyText);
+    expect(answer.raw).toContain("[REDACTED]");
+  });
+
+  it("returns the existing agent switch for this company and project, and defaults off", async () => {
+    const w = await seeded();
+    expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(false);
+    await setWikiAgentSwitch({ store: w.store, companyId: A, now: () => T0 }, "alpha", true);
+    expect((await w.get(A, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(true);
+    await w.store.put({ item: { ...wikiAgentSwitchKey(A, "beta"), entityType: "WIKI_AGENT_SWITCH", companyId: A, project: "alpha", on: true, changedAt: new Date(T0).toISOString() } });
+    expect((await w.get(A, "bob", "/v1/app/projects/beta/wiki")).body["agentsEnabled"]).toBe(false);
+    expect((await w.get(B, "ada", "/v1/app/projects/alpha/wiki")).body["agentsEnabled"]).toBe(false);
+  });
+
   it("asks for the standing in the member company and the project of the path, never another", async () => {
     const w = await seeded();
     await w.get(B, "ada", "/v1/app/projects/alpha/wiki");
@@ -182,7 +242,7 @@ describe("wiki read routes: isolation", () => {
   it("a project with no wiki yet reads as empty", async () => {
     const w = world({ [`${A}/beta/bob`]: "view" }, { [A]: { beta: ["web"] } });
     await w.b.writePage("alpha", page("B-alpha"));
-    expect((await w.get(A, "bob", "/v1/app/projects/beta/wiki")).body).toEqual({ project: "beta", state: "empty", pages: [] });
+    expect((await w.get(A, "bob", "/v1/app/projects/beta/wiki")).body).toEqual({ project: "beta", state: "empty", agentsEnabled: false, pages: [] });
   });
 });
 
@@ -236,11 +296,11 @@ describe("the hosted wiki erase step", () => {
       await w.store.put({ item: { pk: `ORG#${company}#PROJECT_CATALOG`, sk: `PROJECT#${project}` } });
     }
     await w.a.addNote("alpha", { pageId: "overview", text: "A alpha words", authorId: "ada" });
-    await w.a.addNote("beta", { pageId: "overview", text: "A beta words", authorId: "ada" });
-    await w.b.addNote("alpha", { pageId: "overview", text: "B alpha words", authorId: "ada" });
+    await w.a.addNote("beta", { pageId: "beta-overview", text: "A beta words", authorId: "ada" });
+    await w.b.addNote("alpha", { pageId: "b-overview", text: "B alpha words", authorId: "ada" });
     expect(await hostedEraseWiki({ store: w.store, now: () => T0 })(A, "ada")).toEqual({ notes: 2, reasons: 0, answers: 0 });
     expect((await w.a.readPage("alpha", "overview", "person"))?.notes).toEqual([]);
-    expect((await w.a.readPage("beta", "overview", "person"))?.notes).toEqual([]);
-    expect((await w.b.readPage("alpha", "overview", "person"))?.notes.map((note) => note.text)).toEqual(["B alpha words"]);
+    expect((await w.a.readPage("beta", "beta-overview", "person"))?.notes).toEqual([]);
+    expect((await w.b.readPage("alpha", "b-overview", "person"))?.notes.map((note) => note.text)).toEqual(["B alpha words"]);
   });
 });

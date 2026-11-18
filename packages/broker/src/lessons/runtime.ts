@@ -19,6 +19,7 @@ import { DocumentLessonStore } from "./document-store.js";
 import { documentLearningSettings, DocumentLocalToolsSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
 import type { LocalToolsSettingsStore } from "./local-tools.js";
 import { documentLessonVectors } from "./document-vectors.js";
+import { documentMeasureSink } from "./measure.js";
 import { modelCorrectionJudge } from "./judge-model.js";
 import type { LoadDeps } from "./load.js";
 import { gatedByLessonsSwitch } from "./model-gate.js";
@@ -142,7 +143,8 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const model = input.model;
   const spend = input.spend ?? DENYING_SPEND;
   const judgeModel = model === undefined ? REFUSING_MODEL : gatedByLessonsSwitch(model);
-  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access };
+  // Phase 0 (measure only, `measure.ts`): each live load writes its fit numbers, for this company only. It changes nothing about what loads.
+  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access, measure: documentMeasureSink(input.store, input.companyId, input.now) };
   const outcomeJudge = model === undefined || input.spend === undefined ? REFUSING_JUDGE : modelCorrectionJudge({ model, spend, pause, edition });
   const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors };
   const process: ProcessDeps = {
@@ -160,7 +162,7 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   };
   const presetStore = new DocumentPresetStore(input.store);
   const soleOwner = new DocumentSoleOwnerSwitch(input.store);
-  const view = { store, directory, settings, access, names, now: input.now, ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
+  const view = { documents: input.store, store, directory, settings, access, names, now: input.now, ...(input.log === undefined ? {} : { log: input.log }), pause, ...(input.pauseStillApplies === undefined ? {} : { pauseStillApplies: input.pauseStillApplies }) } satisfies LessonViewDeps;
   const routes: LessonRouteDeps = {
     ...base, ...view, store, directory, settings, access, vectors, embedder, judgeModel, spend, edition, pause, verifier, facts, projectRepos: process.projectRepos,
     judge: outcomeJudge,

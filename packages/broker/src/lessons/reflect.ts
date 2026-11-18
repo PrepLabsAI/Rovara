@@ -62,7 +62,7 @@ const MAX_OUTPUT_TOKENS = 1800;
  * The kinds of cited span that are a member's own correction of Rovara's work: a send-back, a human edit (including a member's review comment on the pull request), "remember this",
  * and a member's reason for closing. A plan, an agent's review, CI text and the task's own wording are not corrections.
  */
-const CORRECTION_KINDS: ReadonlySet<string> = new Set(["send_back", "human_edit", "remembered", "close_reason", "review_finding"]);
+const CORRECTION_KINDS: ReadonlySet<string> = new Set(["send_back", "human_edit", "remembered", "close_reason", "review_finding", "plan_comment", "design_comment"]);
 /** Source keys that are not a member speaking to Rovara: Slack, trackers, MCP sources and code comments. A lesson that cites one never goes live on trial. */
 const EXTERNAL_SOURCE = /^\s*(slack|linear|jira|mcp|code|comment)\b/iu;
 
@@ -94,7 +94,7 @@ function restrictedBeyondRepos(audience: Audience | undefined): boolean {
 /** The source key of CI failures, as the subject source writes it. */
 const CI_SOURCE_KEY = "ci";
 /** Kinds a person writes. Plans are agent text, and outcomes, CI output and loaded lessons are not people. */
-const PERSON_KINDS: ReadonlySet<string> = new Set(["send_back", "remembered", "human_edit", "close_reason", "review_finding", "intent", "pr_comment"]);
+const PERSON_KINDS: ReadonlySet<string> = new Set(["send_back", "remembered", "human_edit", "close_reason", "review_finding", "intent", "pr_comment", "plan_comment", "design_comment"]);
 
 function parseJson(text: string): unknown {
   const trimmed = text.trim().replace(/^```(?:json)?\s*/iu, "").replace(/\s*```$/u, "");
@@ -317,7 +317,7 @@ async function toDraft(
       minTrust: trust, audience, reflectorRun: runId, model: model.slice(0, 100),
       ...(sourceScopes.length === 0 ? {} : { sourceScopes }),
       ...(readFrom.length === 0 ? {} : { readFrom }), ...(coAuthored.length === 0 ? {} : { coAuthored }),
-      memberSignal: evidence.some((s) => s.trust === "member" && (s.kind === "remembered" || s.kind === "human_edit" || (s.kind === "pr_comment" && s.ledToChange === true))),
+      memberSignal: evidence.some((s) => s.trust === "member" && (s.kind === "remembered" || s.kind === "human_edit" || s.kind === "plan_comment" || s.kind === "design_comment" || (s.kind === "pr_comment" && s.ledToChange === true))),
       memberCorrection: memberCorrectionOf(cited, trust),
       // The lesson's key words must appear in the cited correction or the cited code, and nowhere else: worked out here, where the correction text is in hand (it is never stored).
       claimsSupported: lessonClaimsSupported({ title, description, body, ...(candidate.scope.paths === undefined ? {} : { scopePaths: candidate.scope.paths }) }, {

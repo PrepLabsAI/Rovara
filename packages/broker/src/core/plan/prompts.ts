@@ -33,7 +33,7 @@ export interface StructuredPlanInput {
 export function structuredPlanRules(input: StructuredPlanInput): string {
   const instructions = planDocumentInstructions({
     kind: input.kind, path: input.path, anchors: true, planQuality: true,
-    ...(input.rovaraV2 ? { noChangeOption: true, requiredParts: true } : {}),
+    ...(input.rovaraV2 ? { noChangeOption: true, requiredParts: true, setupChanges: true } : {}),
     ...(input.retired === undefined || input.retired.length === 0 ? {} : { retired: input.retired }),
   });
   const checks = input.kind === "plan" && input.checks !== undefined ? `\n\n${planChecksInstructions(input.checks.repositoryPaths, input.checks.required)}` : "";

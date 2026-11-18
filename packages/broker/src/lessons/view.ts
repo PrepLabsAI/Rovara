@@ -1,7 +1,7 @@
 // What the Lessons tab, the Sources tab and the task page's lessons list read (design 1.2). Everything a viewer is told goes through `readVisible` (the frozen
 // snapshot AND the access records now), so a lesson from a source the viewer cannot see is counted for a person who decides and otherwise not mentioned. People are named the way the
 // rest of Rovara names them (`attributionNameOf`; an erased or unreadable person is "a former member"). Nothing here writes: the writes are in routes.ts, through the lesson library.
-import { agentXError, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
+import { agentXError, type DocumentStore, type LessonPerson, type LessonsPauseCode, type LessonView, type LessonsViewAnswer, type OrgId } from "@agentx/contracts";
 import { attributionNameOf, type AttributionReader } from "./people.js";
 import type { AccessCheckPort } from "./access-port.js";
 import { approversRequired, resolveLearning, stricterMode, LearningModeSchema, type LearningSettingsReader } from "./policy.js";
@@ -12,10 +12,14 @@ import { readVisible, readVisibleRanked, type LessonLog } from "./read-visible.j
 import type { ApproverDirectory } from "./ports.js";
 import type { LessonsPauseStore } from "./pause.js";
 import type { LessonStore, ScopeKey } from "./store.js";
+import { proposedByOf } from "./proposal-mark.js";
+import { skillOffers } from "./skills.js";
 import { ERASED_MARK, idIn, normId, normSource, sameId, type IdentitySet, type Lesson } from "./types.js";
 import { lessonValue } from "./value.js";
 
 export interface LessonViewDeps {
+  /** The install's document store, for the "Make this a skill?" offers (`skillOffers`). Absent: no offers. */
+  documents?: DocumentStore | undefined;
   store: LessonStore; directory: ApproverDirectory; settings: LearningSettingsReader; access: AccessCheckPort;
   /** Names of the people a lesson mentions. */
   names: AttributionReader;
@@ -134,7 +138,7 @@ function toView(lesson: Lesson, ctx: Context): LessonView {
     approvals: ctx.canDecide ? lesson.approvals.map((a) => ({ by: ctx.person(a.by), at: a.at, mode: a.mode })) : [],
     ...(lesson.trial === undefined ? {} : { trial: lesson.trial.state }),
     ...(lesson.reviewRequired === true ? { reviewRequired: true as const } : {}), ...(lesson.contradictsWith === undefined ? {} : { contradicts: lesson.contradictsWith }), ...(lesson.possibleDuplicateOf === undefined ? {} : { possibleDuplicate: lesson.possibleDuplicateOf }), ...(lesson.possibleDuplicateOf !== undefined && lesson.tierReasons.includes("repo_twin") ? { mergeBlocked: true as const } : {}),
-    ...(lesson.retireProposedAt === undefined ? {} : { retireProposed: true as const }), ...(lesson.supersedes === undefined ? {} : { supersedes: lesson.supersedes }),
+    ...(proposedByOf(lesson) === undefined ? {} : { proposedBy: proposedByOf(lesson)! }), ...(lesson.retireProposedAt === undefined ? {} : { retireProposed: true as const }), ...(lesson.supersedes === undefined ? {} : { supersedes: lesson.supersedes }),
     ...(lesson.status === "rejected" && lesson.rejectedReason !== undefined ? { rejectedReason: lesson.rejectedReason } : {}),
     canApprove, canReject: ctx.canDecide && pending, canRetire: ctx.canDecide && (lesson.status === "active" || lesson.status === "stale" || pending),
   };
@@ -209,6 +213,8 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
   const person = await namePeople(deps, caller.orgId, caller.developerId, [...waiting, ...active, ...removed].flatMap(personIdsOf));
   const ctx: Context = { canDecide: state.canDecide, eligibleCount: state.eligibleCount, eligible: state.eligible, me: caller.developerId, required: (lesson) => approversRequired(lesson.tier, resolved.approval), groups: resolved.requiredGroups, person };
 
+  // "Make this a skill?" (L4-AK3): only for the people who decide, never on Home, and never an error: a card that cannot be worked out is not shown.
+  const offers = state.canDecide && !home && deps.documents !== undefined ? await skillOffers({ documents: deps.documents, lessons: deps.store, now: deps.now, access: deps.access, log: deps.log }, key).catch(() => []) : [];
   const setVersion = await deps.store.setVersion(key);
   const snapshots = state.canDecide && !home ? (await deps.store.snapshots(key)).filter((s) => s.setVersion !== setVersion).slice(-SNAPSHOTS_MAX).map((s) => ({ setVersion: s.setVersion, at: s.at, lessons: s.members.length })) : [];
   const truncated: Array<"waiting" | "active" | "removed"> = [];
@@ -222,6 +228,7 @@ export async function buildLessonsView(deps: LessonViewDeps, caller: LessonCalle
     ...(resolved.expiryDays === undefined ? {} : { expiryDays: resolved.expiryDays }),
     canDecide: state.canDecide,
     waiting: waiting.map((l) => toView(l, ctx)), active: active.map((l) => toView(l, ctx)), removed: removed.map((l) => toView(l, ctx)),
+    ...(offers.length === 0 ? {} : { skillOffers: offers }),
     queued,
     // Lessons the person could not see among those the lists checked (the lists check only as many as they show, so this is a count of what was looked at, not of the whole project).
     hidden: state.canDecide ? Math.max(0, checked - kept - legacyChecked.size) : 0,

@@ -62,19 +62,57 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
     // DEC 254z-amend3: the project's test environment state, read only.
     ["GET", "/v1/app/projects/payments/test-environment", "full"],
+    // L4-MF1: the project's saved environment image panel, read only.
+    ["GET", "/v1/app/projects/payments/environment-image", "full"],
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
     // Guided onboarding L2-3: the hosted setup run.
     ["GET", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent/stop", "full"],
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
-    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"], ["POST", "/v1/app/notify/unsubscribe", "full"],
     // Wiki W0: a project's free file map.
     ["GET", "/v1/app/projects/payments/wiki-map", "full"], ["POST", "/v1/app/projects/payments/wiki-map", "full"],
     // Lead 4 W2: the project wiki's reads.
-    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
+    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/search", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
+    // L4-B3b: approving the project's test environment (the state read keeps its own row above).
+    ["POST", "/v1/app/projects/payments/test-environment/approve", "full"],
+    // Lead 4 L4-MF3: the company-wide agent directory (a live company owner or administrator reads it).
+    ["GET", "/v1/app/agents", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
+    // Lead 4 C1: the wiki's corrections (additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/wiki/pages/overview/corrections", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/delete", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/suggest-lesson", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/acknowledge", "full"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags", "full"],
+    ["POST", "/v1/app/projects/payments/wiki/pages/overview/flags/resolve", "full"], ["GET", "/v1/app/projects/payments/wiki/disputed", "full"],
+    // Lead 4 A1/A2: the cost and time report (full access only; a live company owner or admin, or the task's starter or a maintainer for a task's feature).
+    ["GET", "/v1/app/org/report/tasks", "full"], ["GET", "/v1/app/org/report/features", "full"], ["POST", "/v1/app/org/report/features", "full"],
+    ["POST", "/v1/app/org/report/features/ft_00000000000000000001/rename", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/merge", "full"], ["POST", "/v1/app/org/report/features/ft_00000000000000000001/state", "full"],
+    ["POST", "/v1/app/tasks/t1/feature", "full"],
+    // L4-P1: "Re-check setup".
+    ["GET", "/v1/app/projects/payments/setup-check", "full"], ["POST", "/v1/app/projects/payments/setup-check", "full"],
+    // Lead 4 W4: the wiki build controls.
+    ["GET", "/v1/app/projects/payments/wiki-build", "full"], ["POST", "/v1/app/projects/payments/wiki-build", "full"], ["POST", "/v1/app/projects/payments/wiki-build/continue", "full"], ["POST", "/v1/app/projects/payments/wiki-build/stop", "full"],
+    ["POST", "/v1/app/projects/payments/wiki-build/refresh", "full"], ["POST", "/v1/app/projects/payments/wiki-build/agents", "full"], ["POST", "/v1/app/projects/payments/wiki-build/delete", "full"],
+    // L4-SC: the Update setup offers, making a candidate from one, and "Not now".
+    ["GET", "/v1/app/projects/payments/setup-agent/updates", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/prepare", "full"], ["POST", "/v1/app/projects/payments/setup-agent/updates/dismiss", "full"],
+    // Lead 4 J3: the start box's path suggestion.
+    ["POST", "/v1/app/projects/payments/code/suggest", "full"],
+    // Lead 4 J1: the smart Just answer.
+    ["POST", "/v1/app/projects/payments/answers", "full"],
+    // Lead 4 J5: answers feed the wiki (additive: no existing row changed).
+    ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right", "full"], ["GET", "/v1/app/projects/payments/wiki/gaps", "full"],
+    // L4-SF: allow or refuse a website a setup run asked for.
+    ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
+    // Lead 4 N1: the nightly upkeep switch.
+    ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
+    // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
+    ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
+    // Lead 4 PCF: the plan card's "Change" lists the open features (the same people as the filing).
+    ["GET", "/v1/app/tasks/t1/feature-choices", "full"],
+    // L4-P3: the company's one control over Rovara's automatic runs.
+    ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -84,16 +122,37 @@ describe("the /v1/app route table", () => {
     expect(APP_ROUTES).toHaveLength(SERVED.length);
     // The laptop's own routes, the asks (not built on AWS), a playbook edit (Cloud's editor), other methods, extra or empty segments and other prefixes.
     for (const [method, path] of [
-      ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
+      ["POST", "/v1/app/sessions/s1/log"], ["PUT", "/v1/app/sessions/s1/log"], ["DELETE", "/v1/app/sessions/s1/log"], ["GET", "/v1/app/sessions/s1/logs"], ["GET", "/v1/app/sessions/s1/log/x"], ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
       ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
-      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
+      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["GET", "/v1/app/projects/payments/test-environment/approve"], ["PUT", "/v1/app/projects/payments/test-environment/approve"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
-      // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
-      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
+      // The laptop page's own setup acts (a typed command, eval confirm, the setup check's other methods) are not served on AWS, nor other methods on the setup run.
+      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/host-decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["PUT", "/v1/app/projects/payments/setup-check"], ["DELETE", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
       ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
+      // The saved environment image has no Reset or setting write here (those stay Cloud's / the laptop's): only the read.
+      ["POST", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image"], ["PUT", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-image/setting"], ["GET", "/v1/app/projects/payments/environment-images"],
       // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
       ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
+      // Corrections: only the methods and paths that exist (a note is deleted by POST .../delete; there is no DELETE, PUT or PATCH row, and no read of the notes list).
+      ["DELETE", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview/notes"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes"],
+      ["GET", "/v1/app/projects/payments/wiki/pages/overview/flags"], ["POST", "/v1/app/projects/payments/wiki/pages/overview/corrections"], ["POST", "/v1/app/projects/payments/wiki/disputed"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/notes/note0001/approve"],
+      // The report: no write on the rows, no delete, no people route (a later slice), no other method on a feature.
+      ["POST", "/v1/app/org/report/tasks"], ["PUT", "/v1/app/org/report/features"], ["DELETE", "/v1/app/org/report/features/ft_1"], ["GET", "/v1/app/org/report/features/ft_1/rename"], ["POST", "/v1/app/org/report/features/ft_1/delete"],
+      ["GET", "/v1/app/org/report/people"], ["GET", "/v1/app/tasks/t1/feature"], ["POST", "/v1/app/tasks/t1/feature/extra"], ["POST", "/v1/app/tasks/feature"],
+      // The wiki build controls: no other methods, no other tails.
+      ["PUT", "/v1/app/projects/payments/wiki-build"], ["DELETE", "/v1/app/projects/payments/wiki-build"], ["GET", "/v1/app/projects/payments/wiki-build/stop"], ["GET", "/v1/app/projects/payments/wiki-build/delete"], ["POST", "/v1/app/projects/payments/wiki-build/extra"], ["GET", "/v1/app/projects/payments/wiki-builds"],
+      // The start box's suggestion is a POST on its own path; starting work itself (`/code`) is Cloud's route, and nothing else sits under it.
+      ["GET", "/v1/app/projects/payments/code/suggest"], ["PUT", "/v1/app/projects/payments/code/suggest"], ["POST", "/v1/app/projects/payments/code"], ["POST", "/v1/app/projects/payments/code/suggest/x"], ["POST", "/v1/app/projects/payments/code/start"],
+      // The answer route is one POST: no read of answers, no other writes, no deeper paths.
+      ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
+      // J5: "Not right" is one POST, and the gap list one GET.
+      ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
+      // The upkeep switch: GET and PUT only, no other tail.
+      ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
+      ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
+      // The company's automatic-runs control: GET and PUT only, no other tail.
+      ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
@@ -345,6 +404,29 @@ describe("the core's /v1/app routes over the core, two companies", () => {
     expect(other).toMatchObject({ status: 200, body: { tokens: [] } });
     expect((await call("POST", `/v1/app/script-tokens/${encodeURIComponent(tokenId)}/revoke`, await cli(BO, 30))).status).toBe(404);
     expect((await call("GET", "/v1/app/script-tokens", await cli(ADA))).body).toMatchObject({ tokens: [{ tokenId, status: "active" }] });
+  });
+
+  it("uses live membership for canCreate and creation, while a demoted member can still list and revoke their own tokens", async () => {
+    const authorization = await cli(ADA, 30);
+    const create = () => call("POST", "/v1/app/script-tokens", authorization, { body: { ...makeToken, requestId: randomUUID() } });
+    const own = await create();
+    expect(own.status).toBe(201);
+    const tokenId = (own.body as { token: { tokenId: string } }).token.tokenId;
+    expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: true });
+    // A second person's token in this company stays hidden from the demoted member.
+    membership(BO, FAKE_COMPANY, "owner");
+    const others = await call("POST", "/v1/app/script-tokens", await cli(BO, 30), { body: { ...makeToken, requestId: randomUUID() } });
+    expect(others.status).toBe(201);
+    const otherId = (others.body as { token: { tokenId: string } }).token.tokenId;
+    membership(ADA, FAKE_COMPANY, "member");
+    expect(await create()).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." } } });
+    expect((await call("GET", "/v1/app/script-tokens", authorization)).body).toMatchObject({ canCreate: false, tokens: [{ tokenId }] });
+    expect((await call("POST", `/v1/app/script-tokens/${otherId}/revoke`, authorization)).status).toBe(404);
+    expect(await call("POST", `/v1/app/script-tokens/${tokenId}/revoke`, authorization)).toMatchObject({ status: 200, body: { token: { tokenId, status: "revoked" } } });
+    membership(ADA, FAKE_COMPANY, "owner");
+    expect((await create()).status).toBe(201);
+    membership(ADA, FAKE_COMPANY, "owner", new Date(T0 - 1_000).toISOString());
+    expect(await create()).toMatchObject({ status: 401, body: { error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } } });
   });
 
   it("erases a removed person only for an admin of that person's company with a fresh step-up; another company's admin is told 'not found'", async () => {

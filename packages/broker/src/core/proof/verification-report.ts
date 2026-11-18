@@ -76,6 +76,8 @@ export interface ChangedFileEntry {
   snapshotChanged?: true | undefined;
   /** TE-B3: the file is a fixture, mock or recorded-answer file (under either name). */
   fixtureChanged?: true | undefined;
+  /** L4-SC (DEC 254z c): the file is a mock source (an OpenAPI or Swagger description a Rovara-made fake is built from) that the approved plan did not name. Set by the broker from the plan and the project's fakes, never from the diff or the worker. */
+  mockUnplanned?: true | undefined;
   /** The diff changes a route declaration or response model, or a schema, serializer, OpenAPI or protobuf file: the public API or the shape of a response may be different for existing callers. */
   apiShapeChanged?: true | undefined;
 }

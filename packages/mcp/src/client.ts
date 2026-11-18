@@ -4,6 +4,7 @@ import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { randomUUID } from "node:crypto";
 import {
   AgentXConfigurationConfirmSchema,
+  WikiIndexResponseSchema, WikiPageResponseSchema, type WikiIndexResponse, type WikiPageResponse,
   AgentXError,
   DeveloperCloseResponseSchema,
   DeveloperProjectsResponseSchema,
@@ -44,6 +45,9 @@ import {
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
   forwardReader,
+  KnowledgeProposeReaderSchema,
+  type KnowledgeProposeBody,
+  type KnowledgeProposeRead,
   LOCAL_KNOWLEDGE_DAY_LIMIT_MESSAGE,
   LocalKnowledgeAreasReaderSchema,
   LocalLessonsResponseReaderSchema,
@@ -147,9 +151,13 @@ export interface ControlPlaneClient {
   knowledgeFor(project: string, body: Omit<LocalLessonsBody, "all" | "skipRepoFile">): Promise<KnowledgeAsk<LocalLessonsRead>>;
   /** The table of contents of one project's team knowledge (`POST /v1/dev/projects/<project>/knowledge/areas`): a tree project > repository > top folder, counts only. */
   knowledgeAreas(project: string, body: { repo?: string }): Promise<KnowledgeAsk<LocalKnowledgeAreasRead>>;
+  /** A team SUGGESTION for one project (`POST /v1/dev/projects/<project>/knowledge/propose`): a weak-source lesson that waits for a second sighting and then for a person. The one write of the team knowledge tools. */
+  knowledgePropose(project: string, body: KnowledgeProposeBody): Promise<KnowledgeAsk<KnowledgeProposeRead>>;
   /** The environment's agentx-configuration, read without a token. */
   configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
+  getWikiIndex(project: string): Promise<WikiIndexResponse>;
+  getWikiPage(project: string, pageId: string): Promise<WikiPageResponse>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskClientView>;
   /** PLANFULLDOC: one stored version of the task's plan, whole (the latest when `version` is left out). */
@@ -421,6 +429,7 @@ export function httpControlPlaneClient(options: {
   return {
     knowledgeFor: (project, body) => knowledgeCall(LocalLessonsResponseReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/lessons`, body),
     knowledgeAreas: (project, body) => knowledgeCall(LocalKnowledgeAreasReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/knowledge/areas`, body),
+    knowledgePropose: (project, body) => knowledgeCall(KnowledgeProposeReaderSchema, `/v1/dev/projects/${encodeURIComponent(project)}/knowledge/propose`, body),
     configuration: async () => {
       const current = await session();
       const value = await send(current, ConfigurationSchema, "GET", "/v1/auth/.well-known/agentx-configuration", undefined, false);
@@ -431,6 +440,16 @@ export function httpControlPlaneClient(options: {
       };
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
+    getWikiIndex: async (project) => {
+      const answer = await call(WikiIndexResponseSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki`);
+      if (answer.project !== project) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE);
+      return answer;
+    },
+    getWikiPage: async (project, pageId) => {
+      const answer = await call(WikiPageResponseSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/wiki/pages/${encodeURIComponent(pageId)}`);
+      if (answer.project !== project || answer.page.pageId !== pageId) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", UNREADABLE);
+      return answer;
+    },
     startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request, true, { busyStep: START_BUSY_STEP })),
     getTask: async (taskId, events, options) => task(await call(DeveloperTaskResponseSchema, "GET", path(taskId, `?events=${events}`), undefined, true, options)),
     getTaskPlan: async (taskId, query) => {

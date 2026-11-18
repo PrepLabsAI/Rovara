@@ -58,6 +58,8 @@ export const TaskPeopleViewSchema = z.object({
     role: TaskPeopleRoleSchema,
     you: z.boolean(),
     effectiveRole: z.enum(["owner", "commenter", "viewer"]).nullable(),
+    /** Web task channel (Q7 follow-up): how the person signs in (slack, github, ...), so a client can label them. Absent from older servers; never an issuer, a subject or an address. */
+    method: z.enum(BUILT_IN_SIGN_IN_METHODS).optional(),
   }).strict()).max(100),
   canManage: z.boolean(),
   canTakeOwnership: z.boolean(),
@@ -112,3 +114,37 @@ export const TaskPeopleProposalSchema = z.object({
   if (value.kind === "takeOwnership" && (value.personId !== undefined || value.role !== undefined)) context.addIssue({ code: "custom", message: "take-ownership proposals cannot name a person or role" });
 });
 export type TaskPeopleProposal = z.infer<typeof TaskPeopleProposalSchema>;
+
+/** Web task channel C4 (plan 4.2 "Add a person from the web"; decision D3): at most this many people are offered, and each is re-checked live. */
+export const TASK_PEOPLE_CANDIDATES_MAX = 200;
+const TaskPersonDeveloperIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+/** One person a task owner may add from the web: a live member of the task's company with a developer or administrator grant on its project. Name and opaque id only. */
+export const TaskPeopleCandidateSchema = z.object({
+  developerId: TaskPersonDeveloperIdSchema,
+  name: z.string().min(1).max(80),
+}).strict();
+export type TaskPeopleCandidate = z.infer<typeof TaskPeopleCandidateSchema>;
+
+/** `GET /v1/dev/tasks/{taskId}/people/candidates`: owner only. `complete` is false when the project has more people than were checked. */
+export const TaskPeopleCandidatesSchema = z.object({
+  candidates: z.array(TaskPeopleCandidateSchema).max(TASK_PEOPLE_CANDIDATES_MAX),
+  complete: z.boolean(),
+}).strict();
+export type TaskPeopleCandidates = z.infer<typeof TaskPeopleCandidatesSchema>;
+
+/** Strict REST transport envelope for the candidates read. */
+export const TaskPeopleCandidatesResponseSchema = z.object({
+  candidates: TaskPeopleCandidatesSchema,
+  requestId: z.string(),
+}).strict();
+export type TaskPeopleCandidatesResponse = z.infer<typeof TaskPeopleCandidatesResponseSchema>;
+
+/** `POST /v1/dev/tasks/{taskId}/people/add`: registers a web candidate on the task, then proposes the role (the existing confirm step commits it). Remove = role `denied` through people/role. */
+export const TaskPeopleAddRequestSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedPeopleRevision: z.number().int().positive(),
+  developerId: TaskPersonDeveloperIdSchema,
+  role: z.enum(["owner", "commenter", "viewer"]),
+}).strict();
+export type TaskPeopleAddRequest = z.infer<typeof TaskPeopleAddRequestSchema>;

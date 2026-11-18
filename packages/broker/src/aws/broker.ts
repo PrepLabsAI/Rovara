@@ -1,10 +1,11 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
-import { createBrokerCoreServices } from "./core-job-services.js";
-import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js";
+import { createHostedBrokerCoreServices } from "./core-job-services.js";
+import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
+import { askSlackAnswerForIdentity } from "./slack-answers.js";
 import { SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema, type SlackWorkspaceOperatorEvent } from "./slack-workspace-binding.js";
 import { handleSlackWorkspaceRemoved, type SlackInstallWiring } from "./slack-company-install.js";
@@ -32,6 +33,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -333,6 +335,7 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { installEngineModel } from "../core-host/company-engine-model.js";
+import { createHostedLessonsPeople } from "./hosted-lessons-people.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -379,7 +382,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -1402,6 +1405,10 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         if (request.method === "POST" && serviceUrl.pathname === "/v1/workflows/quick-start") {
           return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
         }
+        // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
+        if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
+          return json(await askSlackAnswerForIdentity({ company: dependencies, core: dependencies.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
+        }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
           return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
         }
@@ -2372,7 +2379,7 @@ async function registerProject(
       if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
       if (snapshot.newest !== undefined) corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest, corePlan.writes);
     }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
 
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
@@ -2478,7 +2485,7 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
       corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest!);
       corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
     }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", "core project copy refused"); }
+    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest?.companyId, projectName)); }
     if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
@@ -15013,7 +15020,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   // FR-015's membership check, answered FORBIDDEN (requireAdministrator's missing-membership answer
   // is NOT_FOUND, which would read as "no such task").
   const membership = await getMembership(dependencies, identity.ownerKey, task.project);
-  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const claimed = [identity.claims.name, identity.claims.email].find((claim): claim is string => typeof claim === "string" && claim.trim() !== "");
   return adminShareMode(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
@@ -15069,7 +15076,7 @@ async function adminTaskE2EReplay(dependencies: AwsBrokerDependencies, identity:
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
   if (task === undefined) throw agentXError("TASK_NOT_FOUND", `no task ${taskId}`);
   const membership = await getMembership(dependencies, identity.ownerKey, task.project);
-  if (membership?.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
+  if (membership?.role !== "administrator" || !await administratorOfTaskCompany(dependencies, identity, task)) throw agentXError("FORBIDDEN", "administrator project membership is required");
   const store = { documentClient: dependencies.documentClient, tableName: dependencies.tableName };
   if (method === "GET") {
     const asked = query.get("roundId") ?? task.workflow?.e2e?.qualifiedRound?.roundId;
@@ -15449,6 +15456,7 @@ const ec2Sessions = new SessionManager({
       return (await stepFunctions.send(new StartExecutionCommand(input))).executionArn!;
     },
   },
+  ...optionalPicker(machineSizePicker({ documentClient, tableName: process.env.STATE_TABLE_NAME ?? "" })),
 });
 const github = createGitHubAppCredentials(secretsManager);
 /** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
@@ -15593,10 +15601,13 @@ function buildBrokerHandler(callbackSigningKey: string) {
         log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
       }),
     }),
-    services: (companyId, flow, registry, wiring) => createBrokerCoreServices({
-      companyId, flow, registry, ciMode: wiring.ciMode!,
+    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }),
       // L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now; the core root answers it once built (before that: no one).
-      notification: { adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
+      notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true } }),
+    // L4-LPPL: who approves, who is on a project's roster and who a lesson may name, from the install's own live member and grant records (aws/hosted-lessons-people.ts). Without the sign-in table
+    // (no company layer) nothing is given, so lessons stay unbuilt and are reported (core_engine.lessons_not_wired), never built over no people.
+    ...(process.env.DEVELOPER_SIGNIN_TABLE_NAME === undefined || process.env.DEVELOPER_SIGNIN_TABLE_NAME === "" ? {} : {
+      lessonsPeople: createHostedLessonsPeople({ documentClient, stateTableName: requiredEnvironment("STATE_TABLE_NAME"), signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME, now: Date.now }),
     }),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
@@ -15745,6 +15756,20 @@ export const handler: BrokerHandler = async (event, context) => {
 
 /** One broker log line writer; company-scoped events wrap it with companyLog so the helper owns companyId. */
 function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.stringify({ component: "broker", ...entry })); }
+
+/**
+ * Q2: a project grant names a project by NAME only (its rows carry no company). On an install with company sign-in (a membership reader), the grant counts for a task only when the
+ * administrator's live membership is the task's own company, read from the stored task (an old task without a company is the install's fixed company, as everywhere: `recordInCompany`).
+ * No membership, or one that can't be read, counts as another company's: the caller then gets the missing grant's answer. Without company sign-in there is one company and nothing changes.
+ */
+async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, task: DeveloperTaskRecord): Promise<boolean> {
+  // The deployment wires the reader on the developer sign-in (COMPANY_SIGNIN=enabled), as the other admin routes read it; the top-level reader is the same reader where a host sets it.
+  const companies = dependencies.developer?.companies ?? dependencies.companies;
+  if (companies === undefined) return true;
+  let companyId: string | undefined;
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
+  return companyId !== undefined && recordInCompany(task, companyId);
+}
 
 /** Guided onboarding L2-1: the client create's dependencies, so tests can call it with per-company naming before any route does (PR 19 wires the route). */
 export function clientProjectDependenciesForTests(input: AwsBrokerInput): ReturnType<typeof clientProjectRouteDependencies> {

@@ -6,3 +6,4 @@ export * from "./threads.js";
 export * from "./company.js";
 export * from "./commands.js";
 export * from "./thread-notices.js";
+export * from "./log-mirror.js";
