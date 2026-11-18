@@ -308,6 +308,8 @@ export function projectRoleOf(grant: "developer" | "administrator" | undefined):
   return grant === "administrator" ? "maintainer" : grant === "developer" ? "contributor" : undefined;
 }
 
+/** Audit gap 11b: the trackers a hosted company's tickets are written back to (Linear only, over the company's own OAuth connection; hosted-intake.ts). */
+export const HOSTED_TICKET_TRACKERS: readonly string[] = ["linear"];
 export const NOT_A_MEMBER_HERE = "You are not a member of this company.";
 export const NO_PROJECT_GRANT = "You do not have access to this project.";
 
@@ -803,6 +805,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Lead 4 N1 + L4-P1: the nightly upkeep switch. The same live standing as the wiki controls. `available` follows the company's SystemRuns flag (default off): the system starter and the hourly `upkeep-night` job exist exactly there, so with the flag off the page hides the switch and a change is refused. (The per-project schedule is not used: one hourly job starts every due project.)
           upkeep: { standing: setupRunStanding, available: upkeepAvailableFor(systemRunsFlag.value) },
+          // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
+          ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

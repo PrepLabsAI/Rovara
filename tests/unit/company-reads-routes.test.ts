@@ -115,6 +115,82 @@ describe("who may read: a company administrator, resolved from membership", () =
   it.todo("refuses a token without the company events scope (waits for the scope table: lane ID's named scopes)");
 });
 
+// Audit gap 4 (2026-11-18): an owner or admin of a real company has no Rovara administrator flag (that is the built-in company's OIDC admin only). They read their own company by their LIVE
+// role, the rule the other company admin routes use; a member, a removed person and another company's person are refused.
+describe("who may read: a live owner or admin of the caller's own company", () => {
+  const OWNER = { developerId: "e".repeat(64), administrator: false };
+  const ADMIN = { developerId: "f".repeat(64), administrator: false };
+  const MEMBER = { developerId: "9".repeat(64), administrator: false };
+  const OWNER_B = { developerId: "8".repeat(64), administrator: false };
+  const roles: Record<string, { companyId: string; role: "owner" | "admin" | "member" }> = {
+    [OWNER.developerId]: { companyId: COMPANY_A, role: "owner" }, [ADMIN.developerId]: { companyId: COMPANY_A, role: "admin" },
+    [MEMBER.developerId]: { companyId: COMPANY_A, role: "member" }, [OWNER_B.developerId]: { companyId: COMPANY_B, role: "owner" },
+  };
+  async function live(overrides: Partial<CompanyReadsConfiguration> = {}) {
+    const base = await world();
+    const config: CompanyReadsConfiguration = {
+      ...base.config,
+      companyOf: async (developerId) => roles[developerId]?.companyId,
+      membershipOf: async (developerId) => roles[developerId],
+      ...overrides,
+    };
+    return { ...base, config };
+  }
+  const ids = (page: unknown) => (page as { records: Array<{ eventId: string }> }).records.map((record) => record.eventId).sort();
+
+  it("an owner and an admin read their own company's records and events, and nothing of the other company", async () => {
+    const { config, a } = await live();
+    for (const caller of [OWNER, ADMIN]) {
+      expect(ids(await read(config, caller, url(AUDIT)))).toEqual(["evt_a0", "evt_a1", "evt_a2"]);
+      expect((await read(config, caller, url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })) as { events: Array<{ id: string }> }).events.map((event) => event.id)).toEqual([a]);
+    }
+    expect(ids(await read(config, OWNER_B, url(AUDIT)))).toEqual(["evt_b0", "evt_b1", "evt_b2"]);
+  });
+
+  it("refuses a member, a person with no membership, and a role the reader does not know, with the fixed words and no read", async () => {
+    const { config, store } = await live({ membershipOf: async (developerId) => (developerId === "7".repeat(64) ? { companyId: COMPANY_A, role: "stranger" as never } : roles[developerId]) });
+    const probe = countingReadOnly(store);
+    for (const caller of [MEMBER, NOBODY, { developerId: "7".repeat(64), administrator: false }]) {
+      for (const target of [url(AUDIT), url(EVENTS, { from: "2026-11-01T00:00:00.000Z" })]) {
+        expect(await failure(read({ ...config, store: probe.store }, caller, target))).toMatchObject({ code: "FORBIDDEN", message: "FORBIDDEN: only a company administrator can read this" });
+      }
+    }
+    expect(probe.queries()).toBe(0);
+  });
+
+  it("refuses an owner whose live membership names another company than the resolver, or than their sign-in resolved", async () => {
+    const { config, store } = await live();
+    const probe = countingReadOnly(store);
+    // The resolver says company A, the live membership says company B: no read of either.
+    const split = { ...config, store: probe.store, membershipOf: async () => ({ companyId: COMPANY_B, role: "owner" as const }) };
+    expect(await failure(read(split, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    // The sign-in resolved company B, the membership now says company A (moved or removed since): refused.
+    expect(await failure(read({ ...config, store: probe.store }, { ...OWNER, companyId: COMPANY_B }, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    expect(probe.queries()).toBe(0);
+    // The same company on both: read.
+    expect(ids(await read(config, { ...OWNER, companyId: COMPANY_A }, url(AUDIT)))).toEqual(["evt_a0", "evt_a1", "evt_a2"]);
+  });
+
+  it("refuses everyone but a Rovara administrator where the install gives no live role reader, or no company resolver", async () => {
+    const { config } = await live();
+    const { membershipOf: _dropped, ...noRoles } = config;
+    void _dropped;
+    expect(await failure(read(noRoles, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    const { companyOf: _alsoDropped, ...noResolver } = config;
+    void _alsoDropped;
+    expect(await failure(read(noResolver, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+    // Even a role reader that names the install's one (implicit) company opens nothing without a resolver: that install's reads stay the Rovara administrator's.
+    expect(await failure(read({ ...noResolver, membershipOf: async () => ({ companyId: IMPLICIT_COMPANY_ID, role: "owner" as const }) }, OWNER, url(AUDIT)))).toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("answers the sign-in-again refusal when the live role cannot be read, never the cause", async () => {
+    const { config } = await live({ membershipOf: async () => { throw new Error("membership store down: secret"); } });
+    const refusal = await failure(read(config, OWNER, url(AUDIT)));
+    expect(refusal).toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(refusal.message).not.toContain("secret");
+  });
+});
+
 describe("the query string", () => {
   it("passes the audit filters through", async () => {
     const { config } = await world();

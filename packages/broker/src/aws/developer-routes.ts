@@ -1473,10 +1473,25 @@ async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request:
   const status = await readProjectSetupStatus({
     documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories },
     viewer: { companyRole: role ?? null, projectAdmin },
-    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId) },
+    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId), ...linearTeamReader(deps, companyId, project) },
   });
   scope.check();
   return status;
+}
+
+/**
+ * Audit gap 11c: the checklist's Linear row reads the project's picked Linear team (linear-connect-routes.ts's `teamPick`, the company's own pick row) where the install wires Linear and has a company
+ * layer; elsewhere the row stays optional, as before. A pick is shown by its id and name only (the contract's bounds); a read that fails is the checklist's fixed unreadable answer.
+ */
+function linearTeamReader(deps: DeveloperRouteDependencies, companyId: string | undefined, project: string): { linearTeam?: () => Promise<{ id: string; name?: string } | undefined> } {
+  const connections = deps.developer.linearConnect?.connections;
+  if (connections === undefined || companyId === undefined) return {};
+  return { linearTeam: async () => {
+    const pick = await connections.teamPick(companyId, project);
+    if (pick === undefined) return undefined;
+    const name = pick.teamName.trim().slice(0, 200);
+    return { id: pick.teamId, ...(name === "" ? {} : { name }) };
+  } };
 }
 
 const CLIENT_LIFECYCLE = /^\/v1\/dev\/client\/projects\/([^/]+)\/(archive-preview|archive|restore-preview|restore)$/;
@@ -1522,6 +1537,27 @@ async function companyMayCreateProjects(deps: DeveloperRouteDependencies, creato
   return person !== undefined && person.revoked !== true;
 }
 const CLIENT_MEMBERS = /^\/v1\/dev\/client\/projects\/([^/]+)\/members(?:\/([^/]+))?$/;
+/** Who may see and change a project's members; fixed words (no project name echoed), so the refusal never reads like a missing project. */
+export const CLIENT_MEMBERS_NOT_ALLOWED = "Only a company owner or admin, or the project's admin, can see and change its members.";
+
+/**
+ * Audit gap 12c (DEC 254n item 3, `lifecycleAccess` in project-lifecycle-routes.ts: "owners, admins and the project's administrators manage"): whether the caller is a LIVE owner or admin of the
+ * company this project belongs to. The role and company are membership's, read now (never a claim or the request); the sign-in's company, when the install resolved one, must be the same; the
+ * project's company is its latest revision's (a legacy row with none is the implicit company's, never the caller's). No company layer, no role reader, or no project: false.
+ */
+async function companyManagesProject(deps: DeveloperRouteDependencies, caller: { developerId: string; companyId?: string | undefined }, project: string): Promise<boolean> {
+  const reader = deps.companies ?? deps.developer.companies;
+  if (reader?.membershipOf === undefined) return false;
+  const membership = await reader.membershipOf(caller.developerId);
+  if (membership === undefined || (membership.role !== "owner" && membership.role !== "admin")) return false;
+  if (caller.companyId !== undefined && caller.companyId !== membership.companyId) return false;
+  const latest = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+  })) as { Items?: unknown[] };
+  const row = latest.Items?.[0];
+  return row !== undefined && recordInCompany(row, membership.companyId);
+}
 
 /**
  * Spec 065: a sign-in client acting as the signed-in person, within its scopes and the person's own rights. 065a: a
@@ -1545,7 +1581,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
       if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
       return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
     });
-    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator }, url, deps.now());
+    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator, companyId: reader.companyId }, url, deps.now());
   }
   // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
   const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
@@ -1621,9 +1657,10 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const project = decodeURIComponent(members[1]!);
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const actions = memberActions(deps);
-  // FR-004: as the person: they administer the project, or they are a Rovara administrator.
+  // FR-004: as the person: they administer the project, they are a Rovara administrator, or (DEC 254n item 3, the rule of `lifecycleAccess`) they are a LIVE owner or admin of the company
+  // the project belongs to, grant or not.
   const own = await projectGrant(actions, project, caller.developerId);
-  if (!caller.administrator && own?.role !== "administrator") throw agentXError("FORBIDDEN", `you don't administer ${project}; ask one of its administrators`);
+  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
   const registered = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,

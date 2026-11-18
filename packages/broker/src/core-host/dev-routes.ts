@@ -25,6 +25,7 @@
 //     install switch is on: then it answers a plain 404 "Saved environments are off for this install", never made-up data. Reset and the setting are not on the core here;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
 //     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
+//   - a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, audit gap 11b): the laptop's GET and PUT, any project role reads, a live company owner or admin or the project's administrator changes (ticket-updates-routes.ts);
 //   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
 //     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
 //   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
@@ -83,6 +84,7 @@ import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWir
 import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
+import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -214,6 +216,8 @@ export interface CoreDevWiring {
   answers?: HostedAnswersWiring;
   /** Lead 4 N1: the nightly upkeep switch (`/v1/app/projects/<p>/upkeep`, upkeep-routes.ts). Absent: that path says "not on the core yet". */
   upkeep?: HostedUpkeepWiring;
+  /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
+  ticketUpdates?: HostedTicketUpdatesWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -262,7 +266,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isTicketUpdatesPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -601,6 +605,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
             // L4-P3: allowing the company's automatic runs (the setup step) needs a fresh step-up, checked here against the company's window like making a script token.
             freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
+          });
+        }
+        if (isTicketUpdatesPath(path, request.method)) {
+          // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedTicketUpdates({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.ticketUpdates,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
           });
         }
         if (isSystemRunsPath(path, request.method)) {

@@ -113,6 +113,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/tasks/t1/feature-choices", "full"],
     // L4-P3: the company's one control over Rovara's automatic runs.
     ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
+    // Audit gap 11b: a project's ticket-sharing settings (the laptop's intake/updates route; additive: no existing row changed).
+    ["GET", "/v1/app/projects/payments/intake/updates", "full"], ["PUT", "/v1/app/projects/payments/intake/updates", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -153,6 +155,9 @@ describe("the /v1/app route table", () => {
       ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
       // The company's automatic-runs control: GET and PUT only, no other tail.
       ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
+      // Ticket-sharing settings: GET and PUT only (the laptop's POST alias is not served here), and none of the laptop's other intake routes (the waiting tickets are /v1/dev/projects/{p}/intake).
+      ["POST", "/v1/app/projects/payments/intake/updates"], ["DELETE", "/v1/app/projects/payments/intake/updates"], ["GET", "/v1/app/projects/payments/intake/updates/x"], ["GET", "/v1/app/projects/payments/intake"],
+      ["PUT", "/v1/app/projects/payments/intake/sources"], ["GET", "/v1/app/projects/payments/intake/notices"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
