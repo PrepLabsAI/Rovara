@@ -2056,6 +2056,7 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
   return routeCompanyMembers({
     documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, members,
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
+    ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
   }, { caller: person, stepUp, companyId }, request, url);
 }
 
