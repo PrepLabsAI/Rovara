@@ -43,6 +43,17 @@ function jobDeps(w: World, over: Partial<LessonsJobDeps> = {}) {
 }
 
 describe("the nightly re-reflection", () => {
+  it("After merge stopped (L4-LP3Wc): no revert is looked for or queued; another project and resumed are as before", async () => {
+    const w = await setup();
+    w.revert("task-a", hoursAgo(3));
+    w.revert("task-z", hoursAgo(3), "api");
+    const lessonStore = new InMemoryLessonStore();
+    await lessonStore.setFlags({ workspaceId: ORG_A as never, project: "web" }, { stoppedKinds: { outcome: { at: 1 } } });
+    const { deps, sent } = jobDeps(w, { maintain: { store: lessonStore } as never });
+    expect(await lessonsRevertJob(deps, ORG_A, ["web", "api"], 10_000)).toMatchObject({ revertsEnqueued: 1 });
+    expect((sent as Array<{ taskId: string }>).map((m) => m.taskId)).toEqual(["task-z"]);
+  });
+
   it("sends {outcome: reverted} per reverted task of the window to the same queue as a task's end: ids only, and the company is the job's, never a row's claim", async () => {
     const w = await setup();
     w.revert("task-a", hoursAgo(3));

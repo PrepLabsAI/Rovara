@@ -200,6 +200,19 @@ describe("resume brings nothing back (the stopped time stays on record)", () => 
     expect(await learnFromEndedTask(other.deps, merged)).toBe("not_reflected");
     expect(other.model.calls).toHaveLength(0);
   });
+  it("a revert found after the resume for a task that lived through the stopped After merge time makes no model call", async () => {
+    const w = await world();
+    w.clock.advance(1000);
+    const created = w.clock.now();
+    w.clock.advance(1000);
+    await w.pause("after_merge", true);
+    w.clock.advance(1000);
+    await w.pause("after_merge", false);
+    w.clock.advance(1000);
+    w.state.base = { ...baseOf([span("intent", "x", { authorId: "creator" })]), lifetime: { from: created, to: created + 500 } };
+    expect(await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "reverted" })).toMatchObject({ status: "off" });
+    expect(w.model.calls).toHaveLength(0);
+  });
   it("the lifted stops are bounded, newest kept", async () => {
     const w = await world();
     for (let i = 0; i < 210; i += 1) { w.clock.advance(1); await w.pause("ci", true); w.clock.advance(1); await w.pause("ci", false); }
@@ -234,7 +247,10 @@ describe("outcome counting: a paused source is not judged or counted", () => {
     await w.pause("after_merge", true);
     await learnFromEndedTask(w.deps, merged);
     expect(await w.queued()).toEqual([]);
-    expect(await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "reverted" })).toMatchObject({ status: expect.any(String) });
+    const callsBefore = w.model.calls.length;
+    expect(await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "reverted" })).toMatchObject({ status: "off", retry: false });
+    // A revert queued before the pause and delivered after it makes no model call.
+    expect(w.model.calls.length).toBe(callsBefore);
     expect(w.rows.asked).not.toContain("reverted_by");
     await w.pause("after_merge", false);
     w.clock.advance(1000);
@@ -280,7 +296,7 @@ describe("the human-edit extractor", () => {
 
 describe("the repository-only reflection of a merged pull request", () => {
   const comment = (text: string) => memberSpan(text, { kind: "pr_comment", eventId: "acme/api#pr7:review_comment11", authorId: "rae", scopes: [PLACE], audience: { kind: "project" }, paths: ["src/a.ts"] });
-  const change = (): PlacedChangeRequest => ({ place: PLACE, repository: "api", repositoryUrl: "https://github.com/acme/api", link: LINK, linkPrefix: "https://github.com/acme/api/pull/", revision: "9".repeat(40), mergeRevision: MERGED, merged: true, audience: { kind: "project" }, comments: [comment("Use withRetry for HTTP retries in api, not a hand-rolled loop.")], edits: [] }) as PlacedChangeRequest;
+  const change = (): PlacedChangeRequest => ({ place: PLACE, repository: "api", repositoryUrl: "https://github.com/acme/api", link: LINK, linkPrefix: "https://github.com/acme/api/pull/", revision: "9".repeat(40), mergeRevision: MERGED, merged: true, audience: { kind: "project" }, comments: [comment("Use withRetry for HTTP retries in api, not a hand-rolled loop.")], edits: [] });
   async function run(pausedRow?: (typeof LEARNING_SOURCE_KEYS)[number]) {
     const store = new InMemoryLessonStore();
     const audit = new Audit();

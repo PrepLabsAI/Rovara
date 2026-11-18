@@ -18,7 +18,7 @@ export function pausedKindsOfFlags(flags: ProjectFlags): ReadonlySet<SpanKind> {
 export interface TaskLifetime { from: number; to?: number }
 
 /**
- * The kinds whose stopped time overlaps the task's life: its evidence of those kinds is not read, even after the resume. A comment can arrive after the task is closed, so a pull request comment is judged by the task's start alone.
+ * The kinds whose stopped time overlaps the task's life: its evidence of those kinds is not read, even after the resume. A comment (or a revert) can arrive after the task is closed, so a pull request comment and an outcome are judged by the task's start alone.
  * A task with no known life is judged as alive the whole time (fail closed).
  */
 export function kindsStoppedDuringTask(flags: ProjectFlags, life: TaskLifetime | undefined): ReadonlySet<SpanKind> {
@@ -26,7 +26,7 @@ export function kindsStoppedDuringTask(flags: ProjectFlags, life: TaskLifetime |
   for (const window of flags.stopWindows ?? []) {
     if (!KNOWN.has(window.kind)) continue;
     const starts = life?.from ?? Number.NEGATIVE_INFINITY;
-    const ends = window.kind === "pr_comment" ? Number.POSITIVE_INFINITY : life?.to ?? Number.POSITIVE_INFINITY;
+    const ends = window.kind === "pr_comment" || window.kind === "outcome" ? Number.POSITIVE_INFINITY : life?.to ?? Number.POSITIVE_INFINITY;
     if (starts < window.to && ends > window.from) out.add(window.kind as SpanKind);
   }
   return out;

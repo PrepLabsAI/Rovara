@@ -297,6 +297,8 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
     if (given === undefined || given.facts.workspaceId !== input.workspaceId) return final("no_facts");
     const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: given.facts.project }, given.lifetime ?? "unknown");
+    // "After merge" stopped (now, or at any time while the task lived): a revert is not read and no model is called for it, whether it was queued before the pause, retried, or found again after the resume.
+    if (input.outcome === "reverted" && paused.has("outcome")) return final("off");
     const base = withoutPausedEvidence(given, paused);
     // An eval or replay run is not learned from: no rows are read, no outcome is counted, no model is called.
     if (isEvalRunMark(base.facts.rest.evalRun)) return final("eval_run");

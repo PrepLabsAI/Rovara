@@ -93,7 +93,7 @@ export async function setLearningSourcePause(deps: { store: LessonStore; audit: 
   const to = deps.now();
   const rest = { ...(latest.stoppedKinds ?? {}) };
   // The stopped time stays on record as a window, so evidence of a task that was alive during it is not read after the resume.
-  const lifted = kinds.flatMap((kind) => (rest[kind] === undefined ? [] : [{ kind, from: rest[kind]!.at, to }]));
+  const lifted = kinds.flatMap((kind) => { const entry = rest[kind]; return entry === undefined ? [] : [{ kind, from: entry.at, to }]; });
   for (const kind of kinds) delete rest[kind];
   await deps.store.setFlags(key, { ...latest, stoppedKinds: rest, stopWindows: [...(latest.stopWindows ?? []), ...lifted].slice(-MAX_STOP_WINDOWS) });
   return { ok: true, paused: false, changed: true };

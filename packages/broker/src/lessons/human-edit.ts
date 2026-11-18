@@ -20,6 +20,7 @@ import { isEvalRunMark } from "./eval-run.js";
 import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { EvidenceSpan, ReflectSubject } from "./reflect-input.js";
+import type { LessonStore } from "./store.js";
 import { withoutPausedEvidence, type LearnResult, type TaskSubjectSource } from "./task-end.js";
 import { buildTaskReflectSubject } from "./task-subject.js";
 
@@ -162,6 +163,8 @@ export interface HumanEditWorkDeps {
   /** The Team record's `humanEdit.run(job, { leased: true })`: proves the authors, reads the compare live and hands it to the extractor once. */
   run(job: HumanEditJob): Promise<"handed_on" | "skipped">;
   settings: LearningSettingsReader;
+  /** The lessons store, to read what a person stopped. */
+  store: Pick<LessonStore, "flags">;
 }
 
 /**
@@ -175,6 +178,8 @@ export async function learnFromHumanEdit(deps: HumanEditWorkDeps, job: HumanEdit
   try {
     const learning = await resolveLearning(deps.settings, job.repo.workspaceId, job.project);
     if (!modeAllows(learning.mode, "reflect")) return { status: "off", retry: false };
+    // Lead 4 L4-LP3Wc: edits stopped: the code host's compare is not read at all (fail closed).
+    if ((await pausedKindsFor(deps.store, { workspaceId: job.repo.workspaceId, project: job.project })).has("human_edit")) return { status: "off", retry: false };
     const handed = await deps.run(job);
     return { status: handed === "handed_on" ? "reflected" : "no_facts", retry: false };
   } catch (error) {
