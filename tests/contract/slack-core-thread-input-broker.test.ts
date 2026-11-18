@@ -4,7 +4,7 @@
 // Mutants are listed in briefs/lead4/L4-U5d-MUTANTS-20261118.md with the test that kills each.
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { SLACK_CHANNEL as SLACK, sharedTaskKey } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SLACK_CHANNEL as SLACK, sharedTaskKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
@@ -27,7 +27,7 @@ const CORE = { engine: "core", areas: { flow: "core", build: "core", merge: "cor
 beforeAll(async () => { await loadSlackBroker(); });
 
 /** A company-mode broker (one Slack workspace of company A, one linked person) over a fake core entry that records each reply it is given. */
-async function world(options: { entry?: "none" | "no-thread-input"; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string } = {}) {
+async function world(options: { entry?: "none" | "no-thread-input"; stamp?: boolean; guard?: Record<string, unknown> | null; company?: string; installTeam?: true } = {}) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   const store = new MemoryDocumentStore();
   const company = options.company ?? A;
@@ -51,7 +51,9 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => (id === PERSON ? company : undefined) },
-    developer: { ...h.brokerInput.developer!, slackTeamId: "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
+    // DEC 254zzz95: `installTeam`: SLACK_TEAM is the install's own team (its legacy view), as on staging.
+    ...(options.installTeam === true ? { slackWorkspaceLegacyTeamId: SLACK_TEAM } : {}),
+    developer: { ...h.brokerInput.developer!, slackTeamId: options.installTeam === true ? SLACK_TEAM : "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
   if (options.stamp !== false) h.db.set({ ...engineStampKey(TASK), coreEngine: CORE });
   if (options.guard !== null) {
     h.db.set({
@@ -62,8 +64,33 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   const note = (extra: Record<string, unknown> = {}) => handler({
     source: "agentx.slack-ingress", action: "thread-note", taskId: TASK, userId: USER, thread, eventId: "EvNote0001", messageTs: "1700000001.000100", text: "Also cover the 404 case.", ...extra,
   });
-  return { ...h, handler, entry, calls, answerWith, note, store };
+  return { ...h, handler, entry, calls, answerWith, note, store, workspaces };
 }
+
+describe("DEC 254zzz95: the install team of a NAMED company runs its thread follow-ups as that company", () => {
+  it("a reply in the install team's thread reaches the core's input as the linked person, as in company mode", async () => {
+    const w = await world({ installTeam: true });
+    const result = await w.note({ mention: true });
+    expect(result.statusCode, result.body).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ outcome: "captured", notice: "note_saved", core: true });
+    expect(w.calls).toHaveLength(1);
+    expect(w.calls[0]!.caller).toMatchObject({ developerId: PERSON });
+  });
+
+  it("an install team whose company cannot be read answers a retryable error and reaches nothing (never the legacy view's guess)", async () => {
+    const w = await world({ installTeam: true });
+    w.workspaces.requireCompany = async () => { throw new Error("refused"); };
+    const result = await w.note({ mention: true });
+    expect(result.statusCode).toBe(503);
+    expect(w.calls).toEqual([]);
+  });
+
+  it("the built-in company's install team keeps the legacy view: the core's input is never reached as a linked person", async () => {
+    const w = await world({ installTeam: true, company: IMPLICIT_COMPANY_ID });
+    await w.note({ mention: true });
+    expect(w.calls.filter((call) => (call.caller as { developerId?: string }).developerId === PERSON)).toEqual([]);
+  });
+});
 
 describe("a reply in the thread of a task the core owns", () => {
   it("reaches the core's input as the linked person, with the thread, the sender, the message's own id and the flags; the answer carries the core's notice", async () => {

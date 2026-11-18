@@ -1201,9 +1201,18 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
+    // DEC 254zzz95 (owner, R2-F1): the install team's Slack actions (Stop, task people, presses, intake, core presses, thread and feedback notes, the start) run as its
+    // NAMED company when its operator binding names one: the same switch as the start (namedInstallTeamView). Every other case keeps `dependencies` exactly.
+    let slackView = dependencies;
+    const slackTeam = slackIngressThreadTeam(event);
+    if (slackTeam !== undefined) {
+      try { slackView = await namedInstallTeamView(dependencies, slackTeam); }
+      catch { return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "This Slack workspace is not available." } }, "slack-ingress", 503); }
+    }
+    const slackTasks = slackView === dependencies ? tasks : developerTaskActions(slackView);
     if (isSlackStopTaskEvent(event)) {
       try {
-        return json(await stopSlackThreadTask(dependencies, event), "slack-ingress");
+        return json(await stopSlackThreadTask(slackView, event), "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) {
           return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
@@ -1212,21 +1221,21 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       }
     }
     if (isSlackTaskAuthorizationEvent(event)) {
-      try { return json(await authorizeSlackTaskAction(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await authorizeSlackTaskAction(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackTaskPeopleConfirmEvent(event)) {
-      try { return json(await confirmSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await confirmSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackTaskPeopleReadEvent(event) || isSlackTaskPeopleChangeEvent(event) || isSlackTaskPeopleTakeOwnershipEvent(event)) {
-      try { return json(await handleSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      try { return json(await handleSlackTaskPeople(slackView, slackTasks, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
@@ -1234,7 +1243,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     }
     if (isSlackWorkflowStartEvent(event)) {
       try {
-        const task = await startSlackWorkflow(dependencies, tasks, event);
+        const task = await startSlackWorkflow(slackView, slackTasks, event);
         return json({ taskId: task.task.taskId }, "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
@@ -1244,31 +1253,31 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     // Task 19: every Slack press the interactivity hands over asynchronously; a refusal is told to the presser privately.
     const approval = { outOfDate: SLACK_APPROVAL_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
     const button = { outOfDate: SLACK_BUTTON_OUT_OF_DATE, awsRequestId: context?.awsRequestId };
-    if (isSlackWorkflowDecisionEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "decision", () => decideSlackWorkflow(dependencies, tasks, event), approval);
-    if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "verification_retry", () => retrySlackWorkflowChecks(dependencies, tasks, event), button);
-    if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "review_retry", () => retrySlackWorkflowReviews(dependencies, tasks, event), button);
-    if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "publish_retry", () => retrySlackWorkflowPublication(dependencies, tasks, event), button);
-    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(dependencies, tasks, event), button);
-    if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "send_back", () => sendSlackWorkflowBack(dependencies, tasks, event), button);
-    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "resolve_findings", () => resolveSlackWorkflowFindings(dependencies, tasks, event), button);
-    if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "close", () => closeSlackWorkflowTask(dependencies, tasks, event), button);
+    if (isSlackWorkflowDecisionEvent(event)) return answerSlackWorkflowEvent(slackView, event, "decision", () => decideSlackWorkflow(slackView, slackTasks, event), approval);
+    if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "verification_retry", () => retrySlackWorkflowChecks(slackView, slackTasks, event), button);
+    if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "review_retry", () => retrySlackWorkflowReviews(slackView, slackTasks, event), button);
+    if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(slackView, event, "publish_retry", () => retrySlackWorkflowPublication(slackView, slackTasks, event), button);
+    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(slackView, slackTasks, event), button);
+    if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(slackView, event, "send_back", () => sendSlackWorkflowBack(slackView, slackTasks, event), button);
+    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(slackView, event, "resolve_findings", () => resolveSlackWorkflowFindings(slackView, slackTasks, event), button);
+    if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(slackView, event, "close", () => closeSlackWorkflowTask(slackView, slackTasks, event), button);
     if (isSlackWorkflowFeedbackFindingsDecisionEvent(event)) {
-      return answerSlackWorkflowEvent(dependencies, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(dependencies, tasks, event), approval);
+      return answerSlackWorkflowEvent(slackView, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(slackView, slackTasks, event), approval);
     }
     if (isSlackWorkflowFeedbackReviewRetryEvent(event)) {
-      return answerSlackWorkflowEvent(dependencies, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(dependencies, tasks, event), button);
+      return answerSlackWorkflowEvent(slackView, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(slackView, slackTasks, event), button);
     }
     // Decision 134: the broker's own record of a routed request, from the ingress (never the Slack service).
     if (isSlackIntakeRecordEvent(event)) {
-      try { return json(await recordSlackIntake(dependencies, event), "slack-ingress"); }
+      try { return json(await recordSlackIntake(slackView, event), "slack-ingress"); }
       catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
-    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(dependencies.developer?.coreTasks, event, (thread, userId) => companySlackCaller(dependencies, thread, userId)); if (isSlackThreadNoteEvent(event)) {
+    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(slackView.developer?.coreTasks, event, (thread, userId) => companySlackCaller(slackView, thread, userId)); if (isSlackThreadNoteEvent(event)) {
       try {
-        const result = await recordSlackThreadNote(dependencies, tasks, event);
+        const result = await recordSlackThreadNote(slackView, slackTasks, event);
         // Never the note's text: only who and where.
         console.log(JSON.stringify({ component: "broker", event: "slack.thread_note", taskId: event.taskId, eventId: event.eventId, outcome: result.outcome }));
         // Exactly the outcome: the ingress reads nothing else.
@@ -1281,7 +1290,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     }
     if (isSlackWorkflowFeedbackNoteEvent(event)) {
       try {
-        return json(await captureSlackWorkflowFeedbackNote(dependencies, tasks, event), "slack-ingress");
+        return json(await captureSlackWorkflowFeedbackNote(slackView, slackTasks, event), "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         // The ingress reads a 4xx as a refusal; an unexpected failure must make Slack retry instead.
@@ -6356,7 +6365,7 @@ async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperT
   if (view.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
   // DEC 254zzz80 (R2-F1): the install team of a NAMED company starts as that company (its linked person, its own binding, the core); the built-in company as before.
-  const dependencies = await namedInstallTeamStart(view, thread.teamId);
+  const dependencies = await namedInstallTeamView(view, thread.teamId);
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
   const caller = await companySlackCaller(dependencies, thread, userId);
@@ -6386,12 +6395,21 @@ async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperT
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
 }
 
+/** The Slack team of a Slack Lambda direct invoke (`source: agentx.slack-ingress`, never an HTTP request) that names a thread; undefined for anything else. */
+function slackIngressThreadTeam(event: unknown): string | undefined {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) return undefined;
+  const value = event as { source?: unknown; requestContext?: unknown; thread?: unknown };
+  if (value.source !== "agentx.slack-ingress" || value.requestContext !== undefined || value.thread === null || typeof value.thread !== "object") return undefined;
+  const team = (value.thread as { teamId?: unknown }).teamId;
+  return typeof team === "string" ? team : undefined;
+}
+
 /**
- * DEC 254zzz80 (R2-F1): the dependencies a Slack start runs with. In the install team's legacy view, when the team's operator binding names a NAMED company, the start is that
+ * DEC 254zzz80 (R2-F1), DEC 254zzz95: the dependencies a Slack start, and every install-team Slack action, runs with. In the install team's legacy view, when the team's operator binding names a NAMED company, the start is that
  * company's: the company path's own `workspaces` and membership reader (installTeamCompanyMode), so the caller is the linked Rovara person, the binding is the company's own row
  * and the task starts on the core for that company. Every other case (the company handler, another team, the built-in company, company mode off) is returned unchanged.
  */
-async function namedInstallTeamStart(dependencies: AwsBrokerDependencies, teamId: string): Promise<AwsBrokerDependencies> {
+async function namedInstallTeamView(dependencies: AwsBrokerDependencies, teamId: string): Promise<AwsBrokerDependencies> {
   const mode = dependencies.installTeamCompanyMode;
   if (dependencies.workspaces !== undefined || mode === undefined || dependencies.slackInstallTeamOnly === undefined || teamId !== dependencies.slackInstallTeamOnly) return dependencies;
   if (await slackBindingCompany(dependencies, teamId) === undefined) return dependencies;
