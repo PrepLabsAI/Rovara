@@ -17,7 +17,7 @@ import {
 import { curateDraft } from "./curate.js";
 import { cleanForLearning, hasEncodedBlob, hasLiteralExecutable, requestsCapabilityChange } from "./guards.js";
 import { learnedLessonsSwitchOn, modeAllows, requireAudit, resolveLearning } from "./policy.js";
-import { PROPOSED_SOURCE } from "./proposal-mark.js";
+import { PROPOSED_SOURCE, requesterSourceOf } from "./proposal-mark.js";
 import { settleLesson, settleOptionsOf, type ProcessDeps } from "./process.js";
 import type { LessonDraft } from "./reflect.js";
 import type { ScopeKey } from "./store.js";
@@ -38,6 +38,8 @@ export interface ProposeInput {
   proposal: unknown;
   /** The project repository a tool named (already proved to be the project's by the caller): the suggestion is scoped to it. */
   repo?: { name: string } | undefined;
+  /** For an agent's suggestion: the person who requested its task (the broker's own record, never the event's). Their own tool's identical suggestion is then not a second person's sighting. */
+  requesterId?: string | undefined;
 }
 export interface ProposeDeps { process: ProcessDeps; limits: ProposeLimits }
 
@@ -64,7 +66,7 @@ function draftOf(input: ProposeInput, proposal: KnowledgeProposal, text: { title
   const { proposer } = input;
   const paths = proposal.paths ?? [];
   const scope: LessonScope = { ...(input.repo === undefined ? {} : { repos: [input.repo.name] }), ...(paths.length === 0 ? {} : { paths: [...new Set(paths)] }) };
-  const sources = proposer.kind === "tool" ? [PROPOSED_SOURCE.tool, `member:${proposer.personId}`] : [PROPOSED_SOURCE.agent];
+  const sources = proposer.kind === "tool" ? [PROPOSED_SOURCE.tool, `member:${proposer.personId}`] : [PROPOSED_SOURCE.agent, ...(input.requesterId === undefined ? [] : [requesterSourceOf(input.requesterId)])];
   return {
     type: proposal.type ?? "convention", ...text, scope, stages: [...STAGES], citations: [],
     provenance: {
