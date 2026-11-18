@@ -41,7 +41,7 @@ const post = (path: string, body: unknown = {}) => ({ method: "POST", path, head
 const RUN = `/v1/app/projects/${PROJECT}/setup-agent`;
 interface Person { companyId: OrgId; role: OrgRole; grants: Record<string, "developer" | "administrator"> }
 
-async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean } = {}) {
+async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown> } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, PROJECT); await register(world, OTHER, PROJECT);
   const app = appOver(world);
@@ -69,7 +69,7 @@ async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean } = 
   const wiringFor = (companyId: OrgId): HostedSetupRunWiring => ({
     standing, modelAccessConfigured: () => true,
     approval: createHostedSetupApproval({ flow: { store: world.store, companyId, now: () => new Date(world.clock.now) }, store: world.store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now: () => new Date(world.clock.now) }),
-    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
+    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
   });
   const wirings = new Map<string, HostedSetupRunWiring>([[FAKE_COMPANY, wiringFor(FAKE_COMPANY)], [OTHER, wiringFor(OTHER)]]);
   const routes = createCoreDevRoutes({
@@ -271,5 +271,43 @@ describe("POST eval-health: the opt-in", () => {
     expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 1 }), admin)).body).toMatchObject({ error: { code: "CHANGE_STALE" } });
     expect((await call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: 600_000 }), person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" }))).body).toEqual({ error: { code: "FORBIDDEN", message: SETUP_RUN_NOT_ALLOWED } });
     expect((await call(post(`${RUN}/eval-health`, { requestId: "x", seenCostMicros: 600_000 }), admin)).status).toBe(400);
+  });
+});
+
+
+describe("POST eval-health starts the run (L4-EVH)", () => {
+  async function approvedWorld(options: Parameters<typeof hosted>[0]) {
+    const h = await hosted(options);
+    await h.reported(FAKE_COMPANY);
+    const admin = h.person("p-admin", FAKE_COMPANY, "admin");
+    expect((await h.call(post(`${RUN}/eval-approve`, await approveBody(h.call, admin)), admin)).status).toBe(200);
+    const card = (await h.call(get(`${RUN}/eval`), admin)).body as { health?: { seenCostMicros: number } };
+    return { ...h, admin, seen: card.health?.seenCostMicros ?? 600_000 };
+  }
+  it("after a recorded yes the broker is asked to start the run, once per yes: a repeat of the same yes starts nothing", async () => {
+    const started: string[] = [];
+    const t = await approvedWorld({ healthRun: async (name) => { started.push(name); } });
+    const requestId = randomUUID();
+    expect((await t.call(post(`${RUN}/eval-health`, { requestId, seenCostMicros: t.seen }), t.admin)).status).toBe(200);
+    expect(started).toEqual([PROJECT]);
+    expect((await t.call(post(`${RUN}/eval-health`, { requestId, seenCostMicros: t.seen }), t.admin)).body).toMatchObject({ requested: true, duplicate: true });
+    expect(started).toEqual([PROJECT]);
+  });
+  it("the person's answer does not wait on, or fail with, the worker: a run that cannot start still answers the recorded yes", async () => {
+    const t = await approvedWorld({ healthRun: async () => { throw new Error("worker down"); } });
+    const yes = await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen }), t.admin);
+    expect(yes.status).toBe(200);
+    expect(yes.body).toMatchObject({ requested: true, duplicate: false });
+  });
+  it("no start for a refused yes (a stale cost, a person who may not approve, a route that is not served)", async () => {
+    const started: string[] = [];
+    const t = await approvedWorld({ healthRun: async (name) => { started.push(name); } });
+    expect((await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen - 1 }), t.admin)).status).toBeGreaterThanOrEqual(400);
+    const dev = t.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
+    expect((await t.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: t.seen }), dev)).status).toBe(403);
+    expect(started).toEqual([]);
+    const off = await approvedWorld({ healthRuns: false, healthRun: async (name) => { started.push(name); } });
+    expect((await off.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: off.seen }), off.admin)).status).toBe(404);
+    expect(started).toEqual([]);
   });
 });

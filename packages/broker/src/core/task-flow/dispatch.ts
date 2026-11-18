@@ -318,11 +318,13 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   const secret = Buffer.from(deps.callbackSigningKey);
   // The step's own model when the install's rule chose one (its thinking level goes with it), else the install's one model.
   const modelRoute = stepModel !== undefined ? stepModel.choice.route : spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
+  // L4-EVH: an opt-in eval health run's own preparation (no task) may ask for model access: the broker describes its token from the run's claim (core/model-gateway/health.ts). Only where the install has a model route; the payload gets no route.
+  const healthAccess = spec.kind === "prepare" && spec.payload["evalHealth"] !== undefined && await deps.modelAccess?.route() !== undefined;
   // A worker that cannot run the eval is sent no `evalRequest` (below), so its capability does not name the eval plan's action either.
   const evalDropped = spec.kind === "task" && spec.payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE);
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
-    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
+    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined && !healthAccess ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
@@ -337,6 +339,8 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     delete payload["evalPromptLocations"];
     log(deps, { event: "eval_prompt_locations_dropped_unsupported_worker" });
   }
+  // L4-EVH: the same for the opt-in health run's preparation, which has no eval request but the run itself.
+  if (spec.kind === "prepare" && payload["evalHealth"] !== undefined && features.includes(EVAL_GATEWAY_FEATURE) && EvalGatewayOriginSchema.safeParse(deps.evalGatewayUrl).success) payload["evalGatewayUrl"] = deps.evalGatewayUrl;
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     // A fix round (a build with `workflowFix`) hands the correction's words over so the lessons are picked again by them; the text only ranks and is never stored.

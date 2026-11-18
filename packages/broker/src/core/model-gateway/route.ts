@@ -6,6 +6,7 @@ import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { mintTaskToken, MODEL_ACCESS_INVALID, type TaskTokenDeps } from "./token.js";
 import { readTaskTokenRecords } from "./records.js";
 import { withinTaskTokenDeadline } from "./deadline.js";
+import { evalHealthTokenDescriber } from "./health.js";
 
 export const MODEL_ACCESS_PATH = "/v1/internal/model-access";
 export type ModelGateway = Omit<TaskTokenDeps, "now"> & { gatewayUrl: string };
