@@ -28,7 +28,7 @@ describe("Slack from any workspace (DEC 254e)", () => {
     expect(w.db.get(`DEVELOPER#${id}`, "META")).toMatchObject({ provider: "slack", subject: `${OTHER}:U0NEW0001`, slackTeamId: OTHER, companyless: true });
     expect(w.db.get(`DEVELOPER#${id}`, "META")).not.toHaveProperty("slackUserId");
     expect(w.db.find((row) => row.entityType === "SESSION" && row.developerId === id)).toEqual([expect.not.objectContaining({ companyId: expect.anything() as unknown, slackUserId: expect.anything() as unknown })]);
-    expect((await w.access(signed.access)).body).toEqual({ developerId: id, displayName: "New Person", nameChosen: false, administrator: false, projects: [], notices: [] });
+    expect((await w.access(signed.access)).body).toEqual({ developerId: id, displayName: "New Person", nameChosen: false, administrator: false, projects: [], notices: [], slackTeamId: OTHER });
     // Nobody looked them up in the install's Slack directory.
     expect(w.fetch.calls.filter((call) => call.includes("lookupByEmail"))).toEqual([]);
     // They make their own company with an operator's code, then sign in again through Slack and get it.

@@ -117,6 +117,7 @@ import { CompanyIssuerRecord, companyIssuerKey } from "../developer/company-issu
 import { CompanyRecord, companyKey } from "../developer/company-membership.js";
 import { INSTALL_COMPANY_PROJECTS_MAX, InstallCompanyRefused, installCompanyCatalog, installCompanyGrants, installCompanyLatestDefinition, installCompanyOf, installUsesCompanyLayout, mergeSurvivor } from "./install-company.js";
 import { installCompanyBindings } from "./slack-install-company.js";
+import { slackWorkspaceHint } from "../developer/providers.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -1095,7 +1096,9 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   }
   scope?.check();
   if (access === undefined) throw refused();
-  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company };
+  // L4-SIGNIN: a Slack session of the person's own token also names its workspace (a convenience for the browser; best effort: unreadable is left out).
+  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId) : undefined;
+  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
   const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
@@ -1103,6 +1106,15 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   const checked = AccessCheckResponseSchema.safeParse(ruled);
   if (!checked.success) throw refused();
   return checked.data;
+}
+
+/** L4-SIGNIN: the Slack workspace id on the person's own stored profile, only when it is a workspace id. Any failure is no workspace: it is a convenience, never a gate. */
+async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: string): Promise<string | undefined> {
+  try {
+    return slackWorkspaceHint((await getSignIn<Pick<DeveloperRecord, "slackTeamId">>(deps, `DEVELOPER#${developerId}`))?.slackTeamId);
+  } catch {
+    return undefined;
+  }
 }
 
 /** DEC 253z: the person's company from Code's own company layer: live membership (with its role) and the company's stored profile. Any doubt refuses. */

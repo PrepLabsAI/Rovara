@@ -133,6 +133,12 @@ export const AccessCheckResponseSchema = z.object({
    * sign-in that spent the invite but then failed (an expired code, a refused step-up) leaves the person a member, and later sign-ins never carry it.
    */
   joinedByInvite: z.boolean().optional(),
+  /**
+   * L4-SIGNIN: the Slack workspace id the person's own Slack sign-in came from, read from their stored profile and sent only on a check with the person's own
+   * token of a Slack session. The web app remembers it in the browser and passes it back as Slack's `team` hint so the next sign-in opens on that workspace. A
+   * workspace id is not a secret and not personal data, and nothing trusts it on the way back: Code reads the workspace from Slack's verified ID token.
+   */
+  slackTeamId: z.string().regex(/^T[A-Z0-9]{6,15}$/u).optional(),
 }).strict().refine((answer) => (answer.companyId === undefined) === (answer.companyRole === undefined) && (answer.companyName === undefined || answer.companyId !== undefined)
   && (answer.joinedByInvite === undefined || answer.companyId !== undefined), "a company comes with its role, and a name or an invite join only with a company");
 export type AccessCheckResponse = z.infer<typeof AccessCheckResponseSchema>;

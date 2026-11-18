@@ -76,7 +76,7 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { mergeSurvivor } from "../aws/install-company.js";
-import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
+import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createFactorAdmin } from "./factor-admin.js";
 import { createSignInLinks } from "./sign-in-links.js";
@@ -378,6 +378,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   async function authorize(query: URLSearchParams): Promise<HttpResult> {
     let methods = enabledMethods(deps);
+    // L4-SIGNIN: the Slack workspace the browser remembers. A convenience only: it is read as a plain workspace id or dropped, goes to Slack alone as `team`,
+    // and never reaches the callback, which reads the workspace from Slack's verified ID token.
+    const workspaceHint = slackWorkspaceHint(query.get("slack_team"));
     const requestId = query.get("request");
     if (requestId !== null) {
       const method = query.get("method");
@@ -394,7 +397,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const request = await store.chooseMethod(requestId, method);
       if (request === undefined) return expired();
       try {
-        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.stepUp === true, request.companyId);
+        return await toProvider(request.id, request.nonce, method, request.clientRedirectUri, request.clientState, request.stepUp === true, request.companyId, workspaceHint);
       } catch (error) {
         return serverError(error, "/v1/auth/authorize", request.clientRedirectUri, request.clientState);
       }
@@ -443,6 +446,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (methods.length === 0) {
       return toClient(redirectUri, { error: "access_denied", state: clientState, error_description: "developer sign-in is not enabled in this AgentX environment; ask an admin to run agentx signin enable slack" });
     }
+    // L4-SIGNIN: a sign-in page that already knows the method (its own "Sign in with Slack" / "Sign in with GitHub" button) names it, and skips the method page.
+    // Only a method this sign-in offers counts; anything else is the one unavailable answer, never a redirect.
+    const wanted = query.get("method");
+    if (wanted !== null) {
+      const chosen = methods.find((method) => method === wanted);
+      if (chosen === undefined) return methodUnavailable();
+      methods = [chosen];
+    }
     // Lane ID part 2 (OpenID Connect Core 3.1.2.1): the client asks for a step-up. Other acr values are not ours and are ignored, as before.
     const stepUp = (query.get("acr_values") ?? "").split(" ").includes(DEVELOPER_STEP_UP_ACR);
     // No factor on this install: refused at once, with no round trip to the provider (a code is never issued for a step-up Code cannot check).
@@ -463,13 +474,13 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       if (methods.length === 1) {
         const method = methods[0]!;
         if (await store.chooseMethod(request.id, method) === undefined) return expired();
-        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, stepUp, request.companyId);
+        return await toProvider(request.id, request.nonce, method, redirectUri, clientState, stepUp, request.companyId, workspaceHint);
       }
     } catch (error) {
       return serverError(error, "/v1/auth/authorize", redirectUri, clientState);
     }
     return page(200, "Sign in to AgentX", [`Environment: ${config.env}`], methods.map((method) => ({
-      href: `${endpoint("/authorize")}?request=${encodeURIComponent(request.id)}&method=${method}`,
+      href: `${endpoint("/authorize")}?request=${encodeURIComponent(request.id)}&method=${method}${method === "slack" && workspaceHint !== undefined ? `&slack_team=${workspaceHint}` : ""}`,
       label: `Sign in with ${methodLabel(method)}`,
     })));
   }
@@ -512,10 +523,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return toClient(clientRedirect, { error: "server_error", error_description: "sign-in failed on the AgentX server; run agentx login again", state: clientState });
   }
 
-  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, stepUp = false, companyId?: string): Promise<HttpResult> {
+  async function toProvider(requestId: string, nonce: string, method: DeveloperSignInMethod, clientRedirect: string, clientState: string, stepUp = false, companyId?: string, workspaceHint?: string): Promise<HttpResult> {
     try {
       return redirect(await (await providerFor(method, companyId)).authorizeUrl({
         state: requestId, nonce, redirectUri: endpoint(`/callback/${method}`), ...(stepUp ? { reauthenticate: { maxAgeSeconds: DEVELOPER_STEP_UP_WINDOW_SECONDS } } : {}),
+        ...(method === "slack" && workspaceHint !== undefined ? { workspaceHint } : {}),
       }));
     } catch (error) {
       if (deps.company !== undefined && companyId !== undefined) {
@@ -925,7 +937,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       tokenEndpoint: endpoint("/token"),
       revocationEndpoint: endpoint("/revoke"),
       clientId: AGENTX_CLI_CLIENT_ID,
-      methods: { slack: methods.includes("slack"), oidc: methods.includes("oidc") && config.oidc !== undefined ? { displayName: config.oidc.displayName } : null },
+      methods: {
+        slack: methods.includes("slack"), oidc: methods.includes("oidc") && config.oidc !== undefined ? { displayName: config.oidc.displayName } : null,
+        // L4-SIGNIN: a sign-in page shows "Sign in with GitHub" only when this lists it (DEC 254h: only with Code's company layer).
+        ...(methods.includes("github") ? { github: { displayName: "GitHub" } } : {}),
+      },
       // FR-041, E16: the methods this environment allows; the MCP server adds the client's and the admin's own.
       // Slack needs the team set up, not Slack sign-in (controller ruling R5): each change checks the admin's own link.
       confirm: { elicitation: config.confirmElicitation !== false, slack: config.slack.teamId !== undefined } satisfies AgentXConfigurationConfirm,
