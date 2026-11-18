@@ -33,18 +33,48 @@ describe("the devcontainer docker wrapper", () => {
     for (const verb of ["run", "create"]) expect(run(["container", verb, ...asked], GATEWAY).seen).toEqual([verb, ...WALL, ...asked]);
   });
 
-  it("passes every other command through untouched (build, pull, exec, inspect, rm, volume, buildx, container ls)", () => {
-    for (const args of [["build", "-t", "x", "."], ["buildx", "build", "--load", "."], ["pull", "img"], ["exec", "-i", "c", "sh"], ["inspect", "--type", "container", "c"], ["rm", "--force", "--volumes", "c"], ["volume", "rm", "v"], ["container", "ls"], ["ps"], ["version"], []]) {
+  it("passes every other command through untouched (pull, exec, inspect, rm, volume, container ls, image ls, start)", () => {
+    for (const args of [["pull", "img"], ["image", "ls"], ["builder", "prune"], ["start", "c"], ["exec", "-i", "c", "sh"], ["inspect", "--type", "container", "c"], ["rm", "--force", "--volumes", "c"], ["volume", "rm", "v"], ["container", "ls"], ["ps"], ["version"], []]) {
       const result = run(args, GATEWAY);
       expect(result.status, args.join(" ")).toBe(0);
       expect(result.seen, args.join(" ")).toEqual(args);
     }
   });
 
+  // Lane L4-NETG2 (DEC 254zzz90): the image build (Dockerfile RUN, features' install.sh) is walled the same way.
+  it("puts the internal network on `docker build` (also `image build` and `builder build`), in front of what the CLI asked for, and adds nothing else", () => {
+    const asked = ["-f", "/tmp/Dockerfile.extended", "--build-arg", "A=b c", "-t", "img:tag", "--label", "x=y", "/ctx dir"];
+    for (const verb of [["build"], ["image", "build"], ["builder", "build"]]) {
+      const result = run([...verb, ...asked], GATEWAY);
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.seen).toEqual(["build", "--network", "rovara-snet", ...asked]);
+    }
+  });
+
+  it("refuses a build that names its own network, in any spelling, and runs nothing", () => {
+    for (const own of [["--network", "host"], ["--network=host"], ["--net", "bridge"], ["--net=bridge"], ["--network", "rovara-snet"], ["--network"]]) {
+      for (const verb of [["build"], ["image", "build"]]) {
+        const result = run([...verb, "-t", "x", ...own, "."], GATEWAY);
+        expect(result.status, own.join(" ")).toBe(125);
+        expect(result.seen).toBeUndefined();
+      }
+    }
+    // An option that merely starts like it is not the network option.
+    expect(run(["build", "--network-alias-nothing=1", "."], GATEWAY).status).toBe(0);
+  });
+
+  it("refuses buildx outright (BuildKit takes no named network, so a buildx build could not be walled): the devcontainer CLI then finds no buildx and uses the classic builder", () => {
+    for (const args of [["buildx", "version"], ["buildx", "build", "--load", "."], ["buildx", "bake"], ["buildx", "create"]]) {
+      const result = run(args, GATEWAY);
+      expect(result.status, args.join(" ")).toBe(125);
+      expect(result.seen).toBeUndefined();
+    }
+  });
+
   it("FAILS CLOSED: without the network or the name server in the environment, or with a value that is not a plain network name and an IPv4 address, no docker command runs at all", () => {
     for (const environment of [{}, { AGENTX_SANDBOX_NETWORK: "rovara-snet" }, { AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "dns.example.com" },
       { AGENTX_SANDBOX_NETWORK: "--privileged", AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "a b", AGENTX_SANDBOX_DNS: "172.28.250.2" }, { AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2 --dns 8.8.8.8" }]) {
-      for (const args of [["run", "image"], ["create", "image"], ["exec", "c"], ["ps"]]) {
+      for (const args of [["run", "image"], ["create", "image"], ["build", "."], ["image", "build", "."], ["exec", "c"], ["ps"]]) {
         const result = run(args, environment);
         expect(result.status, JSON.stringify(environment) + args.join(" ")).toBe(125);
         expect(result.seen).toBeUndefined();

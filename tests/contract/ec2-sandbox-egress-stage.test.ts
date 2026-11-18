@@ -15,24 +15,33 @@ const stage = readFileSync(new URL("../../packages/worker/ec2/sandbox-egress.sh"
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const WORKER_IMAGE = `111122223333.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:${"a".repeat(64)}`;
 
-interface Host { dir: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
+interface Host { dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
 interface Options {
   failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
+  // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
+  otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean;
 }
+const DAEMON_BEFORE = '{"data-root": "/mnt/workspace/.docker", "default-address-pools": [{"base":"172.28.0.0/16","size":24}]}\n';
+const TASK_NETWORK_ID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /** A fake host. The fake Docker keeps its networks and the gateway as files under `state`, so a later call sees what an earlier one did. */
 function host(options: Options = {}): Host {
   const dir = mkdtempSync(join(tmpdir(), "se-stage-"));
   const bin = join(dir, "bin");
   mkdirSync(bin);
-  const h: Host = { dir, envFile: join(dir, "worker.env"), calls: join(dir, "calls.log"), rules: join(dir, "rules"), rules6: join(dir, "rules6"), units: join(dir, "systemd"), restore: join(dir, "restore.sh"), resolv: join(dir, "resolv.conf"), state: join(dir, "state"), failure: join(dir, "failure") };
+  const h: Host = { dir, daemon: join(dir, "daemon.json"), firewall: join(dir, "firewall.sh"), envFile: join(dir, "worker.env"), calls: join(dir, "calls.log"), rules: join(dir, "rules"), rules6: join(dir, "rules6"), units: join(dir, "systemd"), restore: join(dir, "restore.sh"), resolv: join(dir, "resolv.conf"), state: join(dir, "state"), failure: join(dir, "failure") };
   mkdirSync(h.units);
   mkdirSync(join(h.state, "nets"), { recursive: true });
   writeFileSync(h.envFile, "AWS_REGION=us-west-2\nAGENTX_SANDBOX_IMAGE=x\n");
   writeFileSync(h.rules, options.noMetadataBlock === true ? "" : "DOCKER-USER -d 169.254.169.254/32 -j DROP\n");
   writeFileSync(h.rules6, "");
-  writeFileSync(h.resolv, "nameserver 10.42.0.2\nnameserver 169.254.169.253\n");
+  writeFileSync(h.resolv, `${options.loopbackResolver === true ? "nameserver 127.0.0.53\n" : ""}nameserver 10.42.0.2\nnameserver 169.254.169.253\n`);
+  writeFileSync(h.daemon, options.emptyDaemonJson === true ? "{}\n" : options.notJsonDaemon === true ? "[]\n" : options.otherDaemonDns === true ? '{"dns": ["8.8.8.8"], "data-root": "/x"}\n' : options.dnsAlreadySet === true ? '{"dns": ["172.28.250.2"], "data-root": "/x"}\n' : DAEMON_BEFORE);
+  writeFileSync(h.firewall, `#!/bin/bash\necho "firewall run" >>"${h.calls}"\n${options.failFirewall === true ? "exit 1" : "exit 0"}\n`);
+  chmodSync(h.firewall, 0o755);
+  if (options.staleTaskNetwork === true) writeFileSync(join(h.state, "nets", "agentx-task"), TASK_NETWORK_ID);
+  if (options.taskNetworkHeld === true) writeFileSync(join(h.state, "held"), "");
   writeFileSync(join(dir, "program"), options.emptyProgram === true ? "" : EGRESS_GATEWAY_SOURCE);
   writeFileSync(join(dir, "names"), `${(options.fewNames === true ? SANDBOX_REGISTRY_DENY.slice(0, 3) : options.badName === true ? [...SANDBOX_REGISTRY_DENY, "bad name"] : SANDBOX_REGISTRY_DENY).join("\n")}`);
   if (options.innerExistsRight === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|172.28.250.0/24 ");
@@ -47,14 +56,15 @@ esac`;
   fake("ip6tables", table(h.rules6, false));
   fake("timeout", 'while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"');
   fake("install", 'for last; do :; done; [[ "$*" == *-d* ]] && mkdir -p "$last"; exit 0');
-  fake("systemctl", "exit 0");
+  // A restart of Docker on the new file (the one with the gateway as name server) fails; on the old file it works.
+  fake("systemctl", options.failDockerRestart === true ? `[[ "$*" == "restart docker.service" ]] && grep -q '"dns"' "${h.daemon}" && exit 1\nexit 0` : "exit 0");
   fake("sleep", "exit 0");
   fake("docker", `S="${h.state}"
 case "$1" in
   network)
     case "$2" in
       inspect) f="$S/nets/\${@: -1}"; [[ -e "$f" ]] && cat "$f" || exit 1 ;;
-      rm) rm -f "$S/nets/$3" ;;
+      rm) [[ "$3" == agentx-task && -e "$S/held" ]] && exit 1; rm -f "$S/nets/$3" ;;
       create)
         shift 2; internal=false; inhibit=""; bridge=""; subnet=""
         while (($#)); do case "$1" in --internal) internal=true ;; --subnet) subnet=$2; shift ;; -o) case "$2" in com.docker.network.bridge.inhibit_ipv4=*) inhibit=\${2#*=} ;; com.docker.network.bridge.name=*) bridge=\${2#*=} ;; esac; shift ;; esac; name=$1; shift; done
@@ -64,6 +74,7 @@ case "$1" in
       connect) ${options.failConnect === true ? "exit 1" : `echo "$5" >>"$S/gw.nets"; for a; do :; done`} ;;
       *) exit 1 ;;
     esac ;;
+  info) ${options.dockerNotReady === true ? "exit 1" : "exit 0"} ;;
   rm) rm -f "$S/gw" "$S/gw.nets" "$S/gw.running" ;;
   create) ${options.failCreate === true ? "exit 1" : `for ((i=1;i<=$#;i++)); do [[ "\${!i}" == --network ]] && { j=$((i+1)); echo "\${!j}" >"$S/gw.nets"; }; done; : >"$S/gw"`} ;;
   start) ${options.failStart === true ? "exit 1" : `: >"$S/gw.running"`} ;;
@@ -84,6 +95,8 @@ esac`);
 function stageFor(h: Host): string {
   return stage
     .split("/usr/local/libexec/rovara-sandbox-egress-restore").join(h.restore)
+    .split("/usr/local/libexec/rovara-container-firewall").join(h.firewall)
+    .split("/etc/docker/daemon.json").join(h.daemon)
     .split("/etc/systemd/system").join(h.units)
     .split("/etc/resolv.conf").join(h.resolv)
     .split("/run/systemd/resolve/resolv.conf").join(`${h.resolv}.none`);
@@ -121,7 +134,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(outerCreate).not.toContain("--internal");
     // The gateway: created on the OUTER network at a fixed address, joined to the inner one at a fixed address, then started; nothing but its two networks.
     const create = log.find((line) => line.startsWith("docker create"))!;
-    expect(create).toContain("--name rovara-egw --label rovara.sandbox-egress=gateway --restart unless-stopped --network rovara-xnet --ip 172.28.251.2 --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only");
+    expect(create).toContain("--name rovara-egw --label rovara.sandbox-egress=gateway --restart unless-stopped --network rovara-xnet --ip 172.28.251.2 --dns 10.42.0.2 --dns 169.254.169.253 --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only");
     expect(create).toContain("--sysctl net.ipv4.ip_forward=0");
     expect(create).toContain("--pids-limit 512 --memory 512m");
     expect(create).not.toMatch(/--network host|--privileged|--cap-add|docker\.sock|--publish|-p /u);
@@ -176,6 +189,11 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     ["the gateway cannot be started", { failStart: true }, "could not start the sandbox egress gateway"],
     ["the gateway is not on both networks", { ghostNetworks: true }, "is not running on its two networks"],
     ["a sandbox's place cannot reach the gateway, or reaches a registry or a raw address", { failProbe: true }, "did not pass its checks"],
+    ["Docker already has another default name server (it is never overwritten)", { otherDaemonDns: true }, "default name server"],
+    ["daemon.json is not a JSON object", { notJsonDaemon: true }, "default name server"],
+    ["Docker does not restart on the new daemon file", { failDockerRestart: true }, "default name server"],
+    ["the container firewall cannot be put back after the restart", { failFirewall: true }, "default name server"],
+    ["Docker does not come back after the restart", { dockerNotReady: true }, "default name server"],
   ] as const)("FAILS THE BOOT (fail closed) when %s: a reason, no sandbox settings for the worker, no restore unit", (_name, options: Options, message) => {
     const h = host(options);
     const result = runStage(h);
@@ -191,8 +209,86 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
       const h = host(options);
       runStage(h);
       expect(envLines(h).join("\n")).not.toMatch(/agentx-task|bridge/u);
-      expect(calls(h).join("\n")).not.toMatch(/agentx-task|--network bridge|--network default/u);
+      // (The stage looks at `agentx-task` only to remove and wall it, never to use it.)
+      expect(calls(h).join("\n")).not.toMatch(/--network agentx-task|--network bridge|--network default/u);
     }
+  });
+
+  // ---- Lane L4-NETG2 (DEC 254zzz90): builds through the gateway, docker0 and agentx-task walled ----
+  it("makes the gateway the Docker daemon's default name server (one key added to daemon.json, Docker restarted once, the container firewall put back) BEFORE any wall or network, so a build container on the sandbox network asks the gateway", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    expect(readFileSync(h.daemon, "utf8")).toBe(`{"dns": ["172.28.250.2"], ${DAEMON_BEFORE.slice(1)}`);
+    expect((JSON.parse(readFileSync(h.daemon, "utf8")) as { dns: string[] }).dns).toEqual(["172.28.250.2"]);
+    expect(existsSync(`${h.daemon}.before-sandbox-egress`)).toBe(false);
+    const log = calls(h);
+    const restart = log.indexOf("systemctl restart docker.service");
+    expect(log.filter((line) => line === "systemctl restart docker.service")).toHaveLength(1);
+    expect(restart).toBeGreaterThan(-1);
+    expect(log[restart + 1]).toBe("firewall run");
+    expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker network create")));
+    expect(restart).toBeLessThan(log.findIndex((line) => line.startsWith("docker create")));
+  });
+
+  it("an empty daemon.json object gets the key without a trailing comma", () => {
+    const h = host({ emptyDaemonJson: true });
+    expect(runStage(h).status).toBe(0);
+    expect(JSON.parse(readFileSync(h.daemon, "utf8"))).toEqual({ dns: ["172.28.250.2"] });
+  });
+
+  it("does not restart Docker again when the gateway is already its name server (a second boot step or a rerun)", () => {
+    const h = host({ dnsAlreadySet: true });
+    expect(runStage(h).status).toBe(0);
+    expect(calls(h)).not.toContain("systemctl restart docker.service");
+    expect(readFileSync(h.daemon, "utf8")).toBe('{"dns": ["172.28.250.2"], "data-root": "/x"}\n');
+  });
+
+  it("puts the old daemon.json back (and restarts Docker on it) when Docker will not run on the new one, then fails the boot", () => {
+    const h = host({ failDockerRestart: true });
+    expect(runStage(h).status).not.toBe(0);
+    expect(readFileSync(h.daemon, "utf8")).toBe(DAEMON_BEFORE);
+    expect(calls(h).filter((line) => line === "systemctl restart docker.service")).toHaveLength(2);
+    expect(envLines(h)).toEqual(NO_SANDBOX_ENV);
+  });
+
+  it("walls docker0 and a left-over agentx-task bridge: nothing is forwarded from them and the host's own services are closed to them", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    const installed = rules(h);
+    expect(installed).toContain("DOCKER-USER -i docker0 -j DROP");
+    expect(installed).toContain("INPUT -i docker0 -j DROP");
+    expect(readFileSync(h.rules6, "utf8").split("\n")).toContain("INPUT -i docker0 -j DROP");
+    // Nothing is opened for docker0, and no agentx-task bridge rule appears when there is no such network.
+    expect(installed.filter((rule) => rule.includes("docker0")).sort()).toEqual(["DOCKER-USER -i docker0 -j DROP", "INPUT -i docker0 -j DROP"]);
+    expect(installed.some((rule) => /-i br-/u.test(rule))).toBe(false);
+    expect(calls(h)).toContain("docker network rm agentx-task");
+  });
+
+  it("walls a left-over agentx-task network by its bridge (br-<first 12 of its id>) when it cannot be removed, and removes it when it can", () => {
+    const held = host({ staleTaskNetwork: true, taskNetworkHeld: true });
+    expect(runStage(held).status).toBe(0);
+    expect(rules(held)).toEqual(expect.arrayContaining(["DOCKER-USER -i br-0123456789ab -j DROP", "INPUT -i br-0123456789ab -j DROP"]));
+    expect(existsSync(join(held.state, "nets", "agentx-task"))).toBe(true);
+    const free = host({ staleTaskNetwork: true });
+    expect(runStage(free).status).toBe(0);
+    // Walled first, then removed (a rule for a bridge that is gone is harmless; a network that stays is never open).
+    expect(rules(free)).toContain("DOCKER-USER -i br-0123456789ab -j DROP");
+    expect(existsSync(join(free.state, "nets", "agentx-task"))).toBe(false);
+  });
+
+  it("the gateway container asks the HOST's own resolvers by name (never its own address, which is the daemon default now), without loopback stubs", () => {
+    const h = host({ loopbackResolver: true });
+    expect(runStage(h).status).toBe(0);
+    const create = calls(h).find((line) => line.startsWith("docker create"))!;
+    expect(create).toContain("--ip 172.28.251.2 --dns 10.42.0.2 --dns 169.254.169.253 --user 1000:1000");
+    expect(create).not.toContain("127.0.0.53");
+    expect(create).not.toContain("--dns 172.28.250.2");
+  });
+
+  it("the stage never makes a way out for builds: no docker0 or agentx-task rule opens anything, and no rule mentions a build bridge as open", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    for (const rule of rules(h)) if (/docker0|br-/u.test(rule)) expect(rule).toMatch(/-j DROP$/u);
   });
 
   it("takes an internal network that is exactly as made, and removes and makes again one that is not (a network of this name from an earlier session is not trusted)", () => {
@@ -238,6 +334,13 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(run().status).toBe(0);
     expect(rules(h)).toContain("DOCKER-USER -i rvs+ ! -o rvs+ -j DROP");
     expect(existsSync(join(h.state, "gw.running"))).toBe(true);
+    expect(rules(h)).toEqual(expect.arrayContaining(["DOCKER-USER -i docker0 -j DROP", "INPUT -i docker0 -j DROP"]));
+    // The gateway is no longer Docker's name server (the file was replaced): the unit fails, so the worker does not start with builds that could resolve elsewhere.
+    const daemonNow = readFileSync(h.daemon, "utf8");
+    writeFileSync(h.daemon, '{"data-root": "/x"}\n');
+    expect(run().status).not.toBe(0);
+    writeFileSync(h.daemon, daemonNow);
+    expect(run().status).toBe(0);
     // The gateway cannot be started: the unit fails.
     spawnSync("rm", ["-f", join(h.state, "gw.running")]);
     writeFileSync(join(h.dir, "bin", "docker"), "#!/bin/bash\nexit 1\n");
