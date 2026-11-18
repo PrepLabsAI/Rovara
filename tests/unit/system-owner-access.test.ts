@@ -162,6 +162,14 @@ describe("a system owner's step", () => {
     expect((await w.access.checkStep({ taskId: "t3", developerId: systemOwnerIdOf(A, "payments"), project: "payments" })).allowed).toBe(false);
   });
 
+  it("stops when the row and the step agree with each other but the developer is another project's system owner (a step is for ITS project's owner only)", async () => {
+    const w = world();
+    await putTask(w, "t1", { ...systemTask(A, "billing", "nightly_run"), project: "payments" });
+    expect((await w.access.checkStep({ taskId: "t1", developerId: systemOwnerIdOf(A, "billing"), project: "payments" })).allowed).toBe(false);
+    await putTask(w, "t2", { ...systemTask(B, "payments", "nightly_run"), companyId: A });
+    expect((await w.access.checkStep({ taskId: "t2", developerId: systemOwnerIdOf(B, "payments"), project: "payments" })).allowed).toBe(false);
+  });
+
   it("two companies: another company's system owner never steps in this one, even on a task row that says so", async () => {
     const w = world(A);
     await putTask(w, "t1", systemTask(B, "payments", "nightly_run"));
