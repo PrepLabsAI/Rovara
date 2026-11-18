@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, projectRevisionKey, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
+  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
   type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -114,20 +114,42 @@ function setupRun(h: Harness, company: string, project: string, result: RunResul
  * L4-T2: the proposal row ("SETUP_APPLY") a person's "Use this setup" makes, with its candidate revision and the check's workspace. `state` is the row's; `check` is the check's own state: ready (workspace READY),
  * checking (PREPARING), failed (PREPARATION_FAILED, with the worker's recorded error) or none (no workspace row at all). `madeAt` is when the row was made (default: after the setup run started).
  */
-function setupApply(h: Harness, company: string, project: string, opts: { state: "checking" | "approved" | "rejected" | "discarded"; check: "ready" | "checking" | "failed" | "none"; madeAt?: string; row?: Record<string, unknown> }) {
+function setupApply(h: Harness, company: string, project: string, opts: { state: "checking" | "approved" | "rejected" | "discarded"; check: "ready" | "checking" | "failed" | "none"; madeAt?: string; row?: Record<string, unknown>; revision?: number; candidateGone?: true }) {
   const workspaceId = randomUUID();
+  const revision = opts.revision ?? 2;
   const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
-  const definition = { name: project, revision: 2, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
+  const definition = { name: project, revision, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
     repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
-  h.db.set({ ...projectRevisionKey(company, project, 2), entityType: "PROJECT", candidate: true, definition });
+  // A rejected or discarded candidate's revision is deleted by the decision (apply.ts), so `candidateGone` is what a real rejected row looks like.
+  if (opts.candidateGone !== true) h.db.set({ ...projectRevisionKey(company, project, revision), entityType: "PROJECT", candidate: true, definition });
   const at = opts.madeAt ?? new Date(NOW - 60_000).toISOString();
   if (opts.check !== "none") {
     const status = opts.check === "ready" ? "READY" : opts.check === "checking" ? "PREPARING" : "PREPARATION_FAILED";
     h.db.set({ ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, status });
     if (opts.check === "failed") h.db.set({ pk: workspaceKey(company, workspaceId).pk, sk: `${OPERATION_SK_PREFIX}${randomUUID()}`, kind: "prepare", error: "readiness check 0 (npm test) exited with 1", createdAt: at });
   }
-  h.db.set({ ...setupApplyKey(company, project), entityType: "SETUP_APPLY", orgId: company, project, taskId: "11111111-1111-4111-8111-111111111111", requestId: randomUUID(), by: ADA, digest: "d".repeat(64), baseRevision: 1, candidateRevision: 2,
-    state: opts.state, check: { workspaceId, revision: 2, startedAt: at, startedBy: ADA }, reply: {}, createdAt: at, ...(opts.state === "approved" ? { decidedAt: new Date(NOW - 30_000).toISOString(), decidedBy: ADA } : {}), ...opts.row });
+  h.db.set({ ...setupApplyKey(company, project), entityType: "SETUP_APPLY", orgId: company, project, taskId: "11111111-1111-4111-8111-111111111111", requestId: randomUUID(), by: ADA, digest: "d".repeat(64), baseRevision: 1, candidateRevision: revision,
+    state: opts.state, check: { workspaceId, revision, startedAt: at, startedBy: ADA }, reply: {}, createdAt: at, ...(opts.state === "approved" ? { decidedAt: new Date(NOW - 30_000).toISOString(), decidedBy: ADA } : {}), ...opts.row });
+}
+/**
+ * L4-T2b: a setup a person approved earlier, as a rejected or still-waiting newer proposal's row leaves it: the approved revision (the project's latest, so what tasks use), the catalog row that names it and the project's own
+ * check mark (`setupCheck`, the mark a start reads), with `check` being that mark's workspace state. Returns the row field to merge into the newer proposal's row (`earlierApproval`).
+ */
+function earlierApproval(h: Harness, company: string, project: string, check: "ready" | "checking" | "failed" | "none", at = new Date(NOW - 3_600_000).toISOString()): { earlierApproval: { revision: number; at: string } } {
+  const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
+  const definition = { name: project, revision: 2, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
+    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
+  h.db.set({ ...projectRevisionKey(company, project, 2), entityType: "PROJECT", definition });
+  h.db.set({ ...orgProjectCatalogKey(company, project), entityType: "PROJECT_CATALOG", latestRevision: 2 });
+  const workspaceId = randomUUID();
+  if (check !== "none") {
+    const status = check === "ready" ? "READY" : check === "checking" ? "PREPARING" : "PREPARATION_FAILED";
+    h.db.set({ ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, status });
+    if (check === "failed") h.db.set({ pk: workspaceKey(company, workspaceId).pk, sk: `${OPERATION_SK_PREFIX}${randomUUID()}`, kind: "prepare", error: "readiness check 0 (npm test) exited with 1", createdAt: at });
+  }
+  // The mark's start is recent so a check going reads as going (a preparation nobody finished for 50 minutes reads as failed).
+  h.db.set({ ...projectMetaKey(company, project), entityType: "PROJECT_META", status: "active", setupCheck: { workspaceId, revision: 2, startedAt: new Date(NOW - 60_000).toISOString(), startedBy: ADA } });
+  return { earlierApproval: { revision: 2, at } };
 }
 const READY = (over: Record<string, unknown> = {}) => ({ status: "ready", stop: "proposed", proposal: PROPOSAL(), summary: SUMMARY(), ...over });
 function journal(h: Harness, company: string, project: string, taskId: string, n: number, entry: Record<string, unknown>) {
@@ -417,7 +439,7 @@ describe("the checklist's rows, each from its own records", () => {
 // L4-T2 (setup review D1, G1, G6): "Setup run: Done" means a person APPROVED the setup and its check on a fresh machine is ready.
 describe("Done means approved (L4-T2)", () => {
   type Apply = Parameters<typeof setupApply>[3];
-  const table: Array<{ name: string; run: "ready" | "none" | "running"; apply?: Apply; state: string; approval: string; check?: string; reason?: RegExp }> = [
+  const table: Array<{ name: string; run: "ready" | "none" | "running"; apply?: Apply; state: string; approval: string; check?: string; reason?: RegExp; newer?: string }> = [
     { name: "a proposal only (nobody used it)", run: "ready", state: "needs_you", approval: "none" },
     { name: "no run and no setup", run: "none", state: "needs_you", approval: "none" },
     { name: "a candidate whose check is ready, waiting for a decision", run: "ready", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
@@ -430,7 +452,9 @@ describe("Done means approved (L4-T2)", () => {
     { name: "approved with no readable check", run: "ready", apply: { state: "approved", check: "none" }, state: "needs_you", approval: "approved", check: "unchecked" },
     { name: "rejected: the proposal is waiting again", run: "ready", apply: { state: "rejected", check: "ready" }, state: "needs_you", approval: "none" },
     { name: "discarded: the proposal is waiting again", run: "ready", apply: { state: "discarded", check: "ready" }, state: "needs_you", approval: "none" },
-    { name: "approved, then a newer run with a proposal nobody used", run: "ready", apply: { state: "approved", check: "ready", madeAt: new Date(NOW - 600_000).toISOString() }, state: "needs_you", approval: "approved", check: "ready" },
+    // L4-T2b: tasks keep using the approved setup, so a re-run's proposal nobody has used yet is named, not a reason to leave done.
+    { name: "approved, then a newer run with a proposal nobody used: still done, the proposal named", run: "ready", apply: { state: "approved", check: "ready", madeAt: new Date(NOW - 600_000).toISOString() }, state: "done", approval: "approved", check: "ready", newer: "needs_you" },
+    { name: "approved with a failed check, then a newer run with a proposal nobody used: needs you for the check", run: "ready", apply: { state: "approved", check: "failed", madeAt: new Date(NOW - 600_000).toISOString() }, state: "needs_you", approval: "approved", check: "failed", reason: /^test: npm test/u, newer: "needs_you" },
     { name: "approved with no run (a plan's setup update): done", run: "none", apply: { state: "approved", check: "ready" }, state: "done", approval: "approved", check: "ready" },
     { name: "a candidate waiting while no run exists (a plan's setup update)", run: "none", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
     { name: "a run going wins over an approved setup", run: "running", apply: { state: "approved", check: "ready" }, state: "running", approval: "approved", check: "ready" },
@@ -447,8 +471,112 @@ describe("Done means approved (L4-T2)", () => {
       expect(run.check?.status).toBe(row.check);
       if (row.reason === undefined) expect(run.check?.failedStep).toBeUndefined(); else expect(run.check?.failedStep).toMatch(row.reason);
       expect(run.approvedAt !== undefined).toBe(row.approval === "approved");
+      expect(run.newerProposal).toBe(row.newer);
     });
   }
+
+  describe("an approval outlives a newer proposal (L4-T2b)", () => {
+    const rejected = (h: Harness, state: "rejected" | "discarded", earlier?: ReturnType<typeof earlierApproval>) =>
+      setupApply(h, A, "alpha", { state, check: "ready", revision: 3, candidateGone: true, ...(earlier === undefined ? {} : { row: earlier }) });
+
+    it("approved, then a re-run's proposal was rejected or discarded: still done, with the approval and ITS check, and the newer proposal named", async () => {
+      for (const state of ["rejected", "discarded"] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        const earlier = earlierApproval(h, A, "alpha", "ready");
+        rejected(h, state, earlier);
+        const run = (await h.ok()).setupRun;
+        expect(run, state).toMatchObject({ state: "done", status: "ready", approval: "approved", check: { status: "ready" }, approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
+        expect(run.check?.failedStep).toBeUndefined();
+      }
+    });
+
+    it("approved, then a re-run's candidate is still waiting: done, with the newer proposal needing you (whatever its own check says)", async () => {
+      for (const [check, newer] of [["ready", "needs_you"], ["failed", "needs_you"], ["none", "needs_you"], ["checking", "checking"]] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        setupApply(h, A, "alpha", { state: "checking", check, revision: 3, row: earlierApproval(h, A, "alpha", "ready") });
+        const run = (await h.ok()).setupRun;
+        expect(run, check).toMatchObject({ state: "done", approval: "approved", check: { status: "ready" }, newerProposal: newer });
+        // The candidate's failed check is not the setup tasks use: nothing of it shows as the row's check.
+        expect(run.check?.failedStep).toBeUndefined();
+      }
+    });
+
+    it("the row is exactly what tasks use: the approved setup's own check decides, whatever happened to the newer proposal", async () => {
+      for (const [check, state, status] of [["failed", "needs_you", "failed"], ["checking", "running", "checking"], ["none", "needs_you", "unchecked"], ["ready", "done", "ready"]] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        rejected(h, "rejected", earlierApproval(h, A, "alpha", check));
+        const run = (await h.ok()).setupRun;
+        expect([run.state, run.approval, run.check?.status, run.newerProposal], check).toEqual([state, "approved", status, "rejected"]);
+        if (check === "failed") expect(run.check?.failedStep).toMatch(/^test: npm test/u);
+      }
+    });
+
+    it("never approved, then rejected: needs you, no approval; never approved with a candidate waiting: the candidate's own states", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      rejected(h, "rejected");
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      expect((await h.ok()).setupRun.newerProposal).toBeUndefined();
+      setupApply(h, A, "alpha", { state: "checking", check: "ready", revision: 3 });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "candidate" });
+    });
+
+    it("an earlier approval whose revision no longer reads back, or is another company's, is no approval", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      rejected(h, "rejected", { earlierApproval: { revision: 9, at: new Date(NOW - 1_000).toISOString() } });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      // Company B has revision 2 and a ready check under the same project name; company A's row naming revision 2 must not find them.
+      earlierApproval(h, B, "alpha", "ready");
+      rejected(h, "rejected", { earlierApproval: { revision: 2, at: new Date(NOW - 1_000).toISOString() } });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    });
+
+    it("a malformed earlier approval is ignored, never guessed", async () => {
+      for (const bad of [{ revision: "2", at: "x" }, { revision: 2 }, { revision: -1, at: "x" }, { revision: 1.5, at: "x" }, { revision: 2, at: "" }, "approved", null]) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        earlierApproval(h, A, "alpha", "ready");
+        rejected(h, "rejected", { earlierApproval: bad } as never);
+        expect((await h.ok()).setupRun, JSON.stringify(bad)).toMatchObject({ state: "needs_you", approval: "none" });
+      }
+    });
+
+    it("the first task and the progress follow the kept approval, and a running run or a failed one still wins", async () => {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      evalReport(h, A, "alpha", task, "confirmed");
+      rejected(h, "rejected", earlierApproval(h, A, "alpha", "ready"));
+      const body = await h.ok();
+      expect([body.firstTask.canStart, body.progress.nextRequired, body.setupRun.state]).toEqual([true, "firstTask", "done"]);
+      const failed = companyA();
+      setupRun(failed, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+      rejected(failed, "rejected", earlierApproval(failed, A, "alpha", "ready"));
+      expect((await failed.ok()).setupRun).toMatchObject({ state: "failed", approval: "approved" });
+      const running = companyA();
+      setupRun(running, A, "alpha", undefined);
+      rejected(running, "rejected", earlierApproval(running, A, "alpha", "ready"));
+      expect((await running.ok()).setupRun).toMatchObject({ state: "running", approval: "approved" });
+    });
+
+    it("two companies: B's approved project reads done for B alone, and A's rejected project with the same name never borrows it", async () => {
+      const h = companyA();
+      h.join(CAT, B, "admin"); h.project("beta", B);
+      setupRun(h, B, "beta", READY());
+      const earlier = earlierApproval(h, B, "beta", "ready");
+      setupApply(h, B, "beta", { state: "rejected", check: "ready", revision: 3, candidateGone: true, row: earlier });
+      // A's own project: a rejected proposal, no approval of its own.
+      setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
+      setupApply(h, A, "alpha", { state: "rejected", check: "ready", revision: 3, candidateGone: true });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      expect((await h.ok()).setupRun.approvedAt).toBeUndefined();
+      h.as(CAT, "s-cat");
+      expect((await h.ok(PATH("beta"))).setupRun).toMatchObject({ state: "done", approval: "approved", approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
+    });
+  });
 
   it("a failed or partial run stays failed whatever was approved before", async () => {
     const h = companyA();

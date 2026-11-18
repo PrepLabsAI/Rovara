@@ -25,13 +25,14 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, agentXError, companyScoped, redactAndCap, workspaceProjectIndexValue,
+  IMPLICIT_COMPANY_ID, OrgIdSchema, ProjectSetupEvalNoneBodySchema, ProjectSetupSkipBodySchema, SETUP_SKIPPABLE_ROWS, SETUP_STATUS_ROWS, SetupJournalEntrySchema, SetupProposalSchema, ProjectDefinitionSchema, agentXError, companyScoped, projectRevisionKey, redactAndCap, workspaceProjectIndexValue,
   type DocumentKey, type DocumentStore, type OrgId, type ProjectSetupChecklist, type SetupJournalEntry, type SetupProposal, type SetupApproval, type SetupRowState, type SetupSkippableRow, type SetupStatusRow, type StoredDocument,
   WORKSPACE_PROJECT_INDEX,
 } from "@agentx/contracts";
 import { readModelSelectionPolicy, PolicyUnreadable } from "../core/model-selection/policy-store.js";
 import { SETUP_AGENT_FAILURES, readState } from "../core/setup-agent/agent.js";
-import { readSetupApply } from "../core/setup-agent/apply.js";
+import { earlierApprovalOf, readSetupApply, setupApplyKey } from "../core/setup-agent/apply.js";
+import { setupStateOf } from "../core/setup-agent/check.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { evalDiscoveryKey, readEvalDiscovery } from "../core/setup-agent/eval-discovery.js";
 import { journalKey, setupAgentKey, setupPartition } from "../core/setup-agent/keys.js";
@@ -323,21 +324,52 @@ function testOutcomeOf(proposal: SetupProposal | undefined, entries: readonly Se
 }
 
 /** Where the setup stands in the approval (L4-T2): the proposal row's own state, and the check of the candidate it holds. Read through the same reader the setup page uses (`readSetupApply`), never a guess. */
+type NewerProposal = NonNullable<ProjectSetupChecklist["setupRun"]["newerProposal"]>;
 interface ApprovalRead {
   approval: SetupApproval;
   check?: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
   approvedAt?: string;
   /** When the proposal row was made: a setup run that started after it has a proposal nobody has used. */
   madeAt?: string;
+  /** With `approval: "approved"` kept from before (L4-T2b): the state of a newer proposal that has not replaced it. */
+  newer?: NewerProposal;
+}
+
+const checkOf = (state: { status: NonNullable<ApprovalRead["check"]>["status"]; failedStep?: string }): NonNullable<ApprovalRead["check"]> =>
+  ({ status: state.status, ...(state.failedStep === undefined ? {} : { failedStep: redactAndCap(state.failedStep, 300).text }) });
+
+/**
+ * L4-T2b: the setup a person approved earlier, when a newer proposal's row has replaced the approval's own (one row per project: every new candidate overwrites it, `apply.ts` keeps `earlierApproval`).
+ * What tasks use then is the project's latest revision, which a rejected or discarded candidate never replaced (`project-source.ts` reads the catalog's `latestRevision`; a rejection deletes the candidate revision;
+ * a candidate's check never writes the project's own mark), and a start is refused only by the project's own check mark (`start.ts` `setupStateOf`, read here the same way). So the check shown is that mark, judged
+ * against the approved revision. A revision that no longer reads back is no approval: undefined.
+ */
+async function keptApproval(flow: TaskFlowDeps, store: DocumentStore, companyId: OrgId, project: string, earlier: { revision: number; at: string }): Promise<{ check: NonNullable<ApprovalRead["check"]> } | undefined> {
+  const stored = await store.get(projectRevisionKey(companyId, project, earlier.revision));
+  const definition = ProjectDefinitionSchema.safeParse(stored?.["definition"]);
+  if (stored === undefined || !definition.success || definition.data.revision !== earlier.revision) return undefined;
+  return { check: checkOf(await setupStateOf(flow, project, definition.data)) };
 }
 
 async function approvalRead(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ApprovalRead> {
   const store = readOnlyStore(client, input.tableName);
   const flow = { store, now: () => new Date(input.now()), companyId } as unknown as TaskFlowDeps;
-  const row = await readSetupApply({ flow, store, companyId, now: input.now }, input.project);
+  const raw = await store.get(setupApplyKey(companyId, input.project));
   // A row for another project or company never counts (a stored row that does not read back as this project's is no approval).
-  if (row === undefined || row.project !== input.project || row.orgId !== companyId) return { approval: "none" };
-  const check = { status: row.checkState.status, ...(row.checkState.failedStep === undefined ? {} : { failedStep: redactAndCap(row.checkState.failedStep, 300).text }) };
+  if (raw === undefined || raw["entityType"] !== "SETUP_APPLY" || raw["project"] !== input.project || raw["orgId"] !== companyId) return { approval: "none" };
+  const madeAt = typeof raw["createdAt"] === "string" ? { madeAt: raw["createdAt"] } : {};
+  // A rejected or discarded candidate's revision is deleted, so the reader below has nothing to show for it (undefined).
+  const row = await readSetupApply({ flow, store, companyId, now: input.now }, input.project);
+  if (raw["state"] !== "approved") {
+    const earlier = earlierApprovalOf(raw);
+    const kept = earlier === undefined ? undefined : await keptApproval(flow, store, companyId, input.project, earlier);
+    if (earlier !== undefined && kept !== undefined) {
+      const newer: NewerProposal = raw["state"] === "checking" ? (row?.checkState.status === "checking" ? "checking" : "needs_you") : "rejected";
+      return { approval: "approved", check: kept.check, approvedAt: earlier.at, ...madeAt, newer };
+    }
+  }
+  if (row === undefined || row.project !== input.project || row.orgId !== companyId) return { approval: "none", ...madeAt };
+  const check = checkOf(row.checkState);
   if (row.state === "checking") return { approval: check.status === "checking" ? "checking" : "candidate", check, madeAt: row.createdAt };
   if (row.state === "approved") return { approval: "approved", check, madeAt: row.createdAt, ...(row.decidedAt === undefined ? {} : { approvedAt: row.decidedAt }) };
   return { approval: "none", madeAt: row.createdAt };
@@ -348,18 +380,19 @@ async function approvalRead(input: SetupStatusInput, client: Client, companyId: 
  *   a check going                       running  (Checking on a fresh machine)
  *   a candidate waiting for a decision  needs_you (Needs you: approve; a failed or stale check says why in `check`)
  *   a proposal nobody has used          needs_you (Needs you: review the setup)
- *   approved, check ready, no newer proposal   done
+ *   approved, check ready               done
  *   approved, check failed / stale      needs_you, with the check's reason
+ * L4-T2b: an approved setup stays the active one while a newer proposal is waiting, unused, being checked, rejected or discarded: tasks keep using the approved revision, so the state follows ITS check, and the newer
+ * proposal is only named (`newerProposal`), never a reason to leave done.
  */
-function setupRowState(run: { status: "ready"; proposalWaiting: boolean } | { status: "none" }, approval: ApprovalRead): SetupRowState {
-  if (approval.approval === "checking") return "running";
-  if (approval.approval === "candidate") return "needs_you";
+function setupRowState(run: { status: "ready"; proposalWaiting: boolean } | { status: "none" }, approval: ApprovalRead): { state: SetupRowState; newerProposal?: NewerProposal } {
   if (approval.approval === "approved") {
-    if (approval.check?.status === "checking") return "running";
-    if (approval.check?.status !== "ready") return "needs_you";
-    return run.status === "ready" && run.proposalWaiting ? "needs_you" : "done";
+    const newer = approval.newer ?? (run.status === "ready" && run.proposalWaiting ? "needs_you" : undefined);
+    const state = approval.check?.status === "checking" ? "running" : approval.check?.status === "ready" ? "done" : "needs_you";
+    return { state, ...(newer === undefined ? {} : { newerProposal: newer }) };
   }
-  return "needs_you";
+  if (approval.approval === "checking") return { state: "running" };
+  return { state: "needs_you" };
 }
 
 async function setupRunRow(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<ProjectSetupChecklist["setupRun"]> {
@@ -367,7 +400,7 @@ async function setupRunRow(input: SetupStatusInput, client: Client, companyId: O
   const view = (await readState({ store, companyId, now: input.now }, input.project, input.definition.revision)).view;
   const approval = await approvalRead(input, client, companyId);
   const approvalFacts = { approval: approval.approval, ...(approval.check === undefined ? {} : { check: approval.check }), ...(approval.approvedAt === undefined ? {} : { approvedAt: approval.approvedAt }) };
-  if (view.status === "none") return { state: setupRowState({ status: "none" }, approval), status: "none", ...approvalFacts };
+  if (view.status === "none") return { ...setupRowState({ status: "none" }, approval), status: "none", ...approvalFacts };
   const base = { status: view.status, ...(view.startedAt === undefined ? {} : { startedAt: view.startedAt }), ...approvalFacts };
   if (view.status === "running") return { state: "running", ...base };
   const summary = view.summary;
@@ -383,7 +416,7 @@ async function setupRunRow(input: SetupStatusInput, client: Client, companyId: O
   if (view.status === "ready" && summary?.partial !== true) {
     // The run's proposal is unused when the proposal row (a candidate made from a proposal) is older than the run, or there is none; a row made after the run started has dealt with it.
     const started = view.startedAt === undefined ? Number.NaN : Date.parse(view.startedAt), made = approval.madeAt === undefined ? Number.NaN : Date.parse(approval.madeAt);
-    return { state: setupRowState({ status: "ready", proposalWaiting: !(made >= started) }, approval), ...base, ...facts, testOutcome };
+    return { ...setupRowState({ status: "ready", proposalWaiting: !(made >= started) }, approval), ...base, ...facts, testOutcome };
   }
   const stop = view.stop;
   const failure = view.status === "failed" ? view.failure : stop === undefined ? undefined : (SETUP_AGENT_FAILURES as Record<string, string>)[stop];

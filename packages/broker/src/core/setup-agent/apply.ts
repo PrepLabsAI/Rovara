@@ -66,6 +66,19 @@ export interface SetupApplyRow {
   createdAt: string; decidedAt?: string; decidedBy?: string;
   /** L4-DR: the commit of each repository when the candidate's check was started (the code the check prepares), so the snapshot saved at approval is of THAT code and not of whatever landed meanwhile. Absent: no snapshot is saved. */
   baseCommits?: Record<string, string>;
+  /**
+   * L4-T2b: the last setup a person APPROVED for this project, kept when a newer candidate replaces this row (the one row per project is overwritten by every new candidate). `revision` is the revision the approval made the
+   * project's latest; `at` is when. Tasks keep using that revision after a later candidate is rejected or discarded (its candidate revision is deleted, and the catalog still names this one), so the checklist reads the approval from here.
+   */
+  earlierApproval?: { revision: number; at: string };
+}
+
+/** The approval a replaced row leaves behind: its own when it was approved, else the one it was itself carrying. Pure; a malformed value is no approval. */
+export function earlierApprovalOf(previous: Record<string, unknown> | undefined): SetupApplyRow["earlierApproval"] {
+  if (previous === undefined || previous["entityType"] !== "SETUP_APPLY") return undefined;
+  const own = previous["state"] === "approved" ? { revision: previous["candidateRevision"], at: previous["decidedAt"] } : previous["earlierApproval"];
+  const found = own as { revision?: unknown; at?: unknown } | null | undefined;
+  return typeof found?.revision === "number" && Number.isInteger(found.revision) && found.revision >= 0 && typeof found.at === "string" && found.at.length > 0 ? { revision: found.revision, at: found.at } : undefined;
 }
 
 /** Whether the project has a proposal waiting (its candidate revision exists and no decision was made). Another new revision is refused meanwhile. */
@@ -249,7 +262,9 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const now = new Date(deps.now()).toISOString();
   // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval). The candidate keeps the base's repositories.
   const baseCommits = await readBaseCommits(deps.flow, candidate);
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
+  // L4-T2b: the row about to be replaced may hold the project's approved setup; keep that fact on the new row (a row still waiting is refused below by the put's own condition, and an approval that lands first moves the catalog, which fails the check).
+  const earlierApproval = earlierApprovalOf(await deps.store.get(setupApplyKey(orgId, project)));
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
