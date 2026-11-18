@@ -4,7 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { agentSessionKey, intakeItemIdOf, ticketUpdatesSettingsKey, type CodeMilestone, type OrgId, type Principal, type TicketUpdateLevel } from "@agentx/contracts";
-import { hostedTicketUpdates, hostedTrackerFor } from "../../../packages/broker/src/aws/hosted-intake.js";
+import { hostedTaskShared, hostedTicketUpdates, hostedTrackerFor } from "../../../packages/broker/src/aws/hosted-intake.js";
 import { ticketSessionStartExtras } from "../../../packages/broker/src/aws/hosted-intake.js";
 import { claimIntakeItem, markIntakeStarted } from "../../../packages/broker/src/core/intake/store.js";
 import { bindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
@@ -12,6 +12,8 @@ import { createSessionStartExtras } from "../../../packages/broker/src/local/app
 import { originTicketOf, saveTicketUpdates, ticketStartedShared, THREAD_ROOT_EDIT_GAP_MS } from "../../../packages/broker/src/core/ticket-updates/index.js";
 import { answerEntriesOf, appendTaskLog, createTaskLogHooks, questionEntriesOf, readTaskLog } from "../../../packages/broker/src/core/task-log/index.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
+import { deployedSessionMembers } from "../../../packages/broker/src/core-host/deployed-decisions.js";
+import type { SessionMembers } from "../../../packages/broker/src/core/sessions/access.js";
 import { linearCommentIdFor } from "../../../packages/broker/src/plugins/tracker/linear/api.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -173,6 +175,49 @@ describe("hosted: a task only its owner can see, and not started from a ticket, 
       expect(await w.store.get({ pk: `DEVTASK#${t.taskId}`, sk: "TICKET_THREAD" })).toBeUndefined();
     });
   }
+});
+
+describe("hosted: L4-LP4 a web People entry makes a task shared for the ticket thread only while that person's project grant is live", () => {
+  // At the thread, a write above status_only already needs the ticket intake started this task from (the strict origin, which is itself shared), so what the records say is observed on the composed answer itself.
+  const WEB_ID = "b".repeat(64);
+  const membersOf = (company: OrgId, live: boolean) => deployedSessionMembers(company, {
+    membershipOf: async (personId) => (live && personId === WEB_ID ? { companyId: company, role: "member" as const } : undefined),
+    projectGrantRole: async (personId, project) => (live && personId === WEB_ID && project === "payments" ? "developer" as const : undefined),
+  });
+  async function raced(w: World) {
+    await w.setLevel(A, "payments", "full");
+    // A raced start: the ticket rule says no, so only the company's records can make the task shared.
+    const t = await w.task(A, "payments", "ENG-1", { origin: "raced" });
+    await w.store.put({ item: { pk: `DEVTASK#${t.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [{ developerId: "a".repeat(64), name: "Ola", role: "owner", method: "cloud" }, { developerId: WEB_ID, name: "Wes", role: "commenter", method: "cloud" }] } });
+    return t;
+  }
+  const sharedOf = (w: World, members: SessionMembers | undefined) => hostedTaskShared({ store: w.store, now: () => w.clock.now, companyId: A, members });
+
+  it("a web commenter whose grant is live makes it shared; one who lost the grant does not", async () => {
+    const w = await world();
+    const t = await raced(w);
+    expect(await sharedOf(w, membersOf(A, true))(A, t.taskId)).toBe(true);
+    expect(await sharedOf(w, membersOf(A, false))(A, t.taskId)).toBe(false);
+  });
+
+  it("a host that gave no members reader cannot check a web entry: not shared", async () => {
+    const w = await world();
+    const t = await raced(w);
+    expect(await sharedOf(w, undefined)(A, t.taskId)).toBe(false);
+  });
+
+  it("company B's members reader (the person is B's) does not make company A's task shared", async () => {
+    const w = await world();
+    const t = await raced(w);
+    expect(await sharedOf(w, membersOf(B, true))(A, t.taskId)).toBe(false);
+  });
+
+  it("a ticket-started task stays shared whatever the web entry says (the ticket rule comes first, as in #941)", async () => {
+    const w = await world();
+    await w.setLevel(A, "payments", "full");
+    const t = await w.task(A, "payments", "ENG-1");
+    expect(await sharedOf(w, membersOf(A, false))(A, t.taskId)).toBe(true);
+  });
 });
 
 describe("hosted: a task started from a ticket is shared for the ticket's thread above status only (owner decision 254zzq)", () => {

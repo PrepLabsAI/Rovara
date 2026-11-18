@@ -554,6 +554,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               for (const handler of hostedTicketUpdates({
                 companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log,
                 planSummaryOf: hostedPlanSummaryOf({ flow: flow.deps, registry, companyId, now }), taskLog,
+                members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }),
               })) lessons.milestones.register(handler);
             }
             lessons.attach();
