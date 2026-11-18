@@ -36,15 +36,16 @@ function cardOf(need: Need, input: { files: readonly EvalWrapperFileRecord[]; pr
   // Only this eval's own row; and an eval that is not the first of its file sees another eval's file only when it is exactly its own text.
   const own = input.files.find((row) => row.selection === need.selection && row.suiteRepository === (need.suite.repository ?? "") && row.language === need.language);
   const file = own !== undefined && (need.firstOfFile || own.match === "same" || own.status !== "present") ? own : undefined;
-  const pr = input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language && row.digest === need.digest) ?? input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language);
+  const pr = input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language && row.digest === need.digest) ?? input.prs.find((row) => (row.suiteRepository ?? "") === (need.suite.repository ?? "") && row.language === need.language && row.selection === need.selection);
   let step: EvalWrapperStep;
   let copyReason: EvalWrapperCopyReason | undefined;
-  if (file?.status === "present" && file.match === "outdated") step = "file_outdated";
+  if (file?.status === "present" && file.match === "other") step = "needs_file";
+  else if (file?.status === "present" && file.match === "outdated") step = "file_outdated";
   else if (file?.status === "present") step = file.test === "readable" ? "readable" : file.test === "unreadable" ? "unreadable" : file.test === "approved" ? "test_approved" : "file_found";
   else if (pr?.state === "open" || pr?.state === "opening" || pr?.state === "merged") step = "pull_request_open";
   else step = need.offered ? "needs_file" : "not_offered";
   // Why the file can only be copied (never opened by Rovara): the order is the most specific first.
-  if (file?.status === "other" || (file?.status === "present" && (step === "file_outdated"))) copyReason = "file_exists";
+  if (file?.status === "other" || (file?.status === "present" && (step === "file_outdated" || file.match === "other"))) copyReason = "file_exists";
   else if (need.kind === "custom") copyReason = "custom";
   else if (!need.firstOfFile) copyReason = "another_eval";
   else if (pr?.state === "closed" && pr.digest === need.digest) copyReason = "closed";
@@ -61,7 +62,7 @@ function cardOf(need: Need, input: { files: readonly EvalWrapperFileRecord[]; pr
     title: evalWrapperTitleOf(need.selection), step: shownStep, line: evalWrapperLine(shownStep, pr), offered: need.offered, canOpenPullRequest: canOpen,
     ...(copyReason === undefined || !need.offered ? {} : { copyOnly: { reason: copyReason, text: COPY_WORDS[copyReason] } }),
     ...(pr === undefined ? {} : { pullRequest: { state: pr.state, ...(pr.number === undefined ? {} : { number: pr.number }), ...(pr.url === undefined || !pr.url.startsWith("https://") ? {} : { url: pr.url }) } }),
-    ...(file?.status === "present" && file.match !== undefined ? { fileStatus: file.match } : {}),
+    ...(file?.status === "present" && file.match !== undefined && file.match !== "other" ? { fileStatus: file.match } : {}),
     dismissed, ...(file === undefined ? {} : { checkedAt: file.checkedAt }),
   };
 }

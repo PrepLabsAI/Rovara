@@ -425,7 +425,7 @@ describe("detecting the file on the DEFAULT branch (no 'run setup again')", () =
     w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: expected().content });
     await detectEvalWrappers(w.deps(), PROJECT, two, { force: true });
     const files = await listEvalWrapperFiles(w.deps(), PROJECT);
-    expect(files.map((row) => [row.selection, row.match]).sort()).toEqual([["evals/agent", "same"], ["evals/zz", "edited"]]);
+    expect(files.map((row) => [row.selection, row.match]).sort()).toEqual([["evals/agent", "same"], ["evals/zz", "other"]]);
     expect(wrapperFileFor(files, { repository: "api", selection: "evals/agent", firstOfFile: true }, "python")).toBeDefined();
     expect(wrapperFileFor(files, { repository: "api", selection: "evals/zz", firstOfFile: false }, "python")).toBeUndefined();
     const [first, second] = await cards(w, two);
@@ -436,6 +436,19 @@ describe("detecting the file on the DEFAULT branch (no 'run setup again')", () =
     expect((await cards(w, two))[0]).toMatchObject({ step: "test_approved" });
     expect(await recordEvalWrapperTest(w.deps(), PROJECT, { repository: "api", selection: "evals/zz", language: "python" }, "approved")).toBe(true);
     expect((await cards(w, two))[1]).toMatchObject({ step: "needs_file" });
+  });
+
+  it("another eval's own file put at the shared path is never this eval's file (re-check M1-mirror): the first eval is not approvable through the second's text", async () => {
+    const w = world();
+    const two = reportOf(suiteOf(ROWS), suiteOf({ ...ROWS, idField: "name" }, { selection: "evals/zz" }));
+    const second = evalWrapperFor({ command, report: reportPath, output: { ...ROWS, idField: "name" } })!;
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: second.content });
+    await detectEvalWrappers(w.deps(), PROJECT, two, { force: true });
+    const files = await listEvalWrapperFiles(w.deps(), PROJECT);
+    expect(files.find((row) => row.selection === "evals/agent")).toMatchObject({ match: "other" });
+    expect(wrapperFileFor(files, { repository: "api", selection: "evals/agent", firstOfFile: true }, "python")).toBeUndefined();
+    expect((await cards(w, two))[0]).toMatchObject({ step: "needs_file", copyOnly: { reason: "file_exists" }, canOpenPullRequest: false });
+    expect((await cards(w, two))[0]!.fileStatus).toBeUndefined();
   });
 
   it("an edited file that changes again starts its test over (review L4), and Check now has a floor", async () => {

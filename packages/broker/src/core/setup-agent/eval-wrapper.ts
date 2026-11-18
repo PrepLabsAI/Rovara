@@ -78,7 +78,7 @@ const FileRecordSchema = z.object({
   /** `present`: a file is there; `absent`: nothing is; `other`: something that is not a file (a folder or a link). */
   status: z.enum(["present", "absent", "other"]),
   /** For a present file: the same text Rovara would offer, a file edited since, or one made by an older template. An edited file is judged by whether a test run can read its results. */
-  match: z.enum(["same", "edited", "outdated"]).optional(),
+  match: z.enum(["same", "edited", "outdated", "other"]).optional(),
   defaultBranch: z.string().max(200).optional(),
   /** Of the file's text, so a test result follows exactly the text that was tested (an edited file that changes again starts over). */
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
@@ -152,7 +152,7 @@ export async function listEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "co
 export async function listEvalWrapperFiles(deps: Pick<EvalWrapperDeps, "store" | "companyId">, project: string): Promise<EvalWrapperFileRecord[]> {
   try {
     const rows = await queryAll(deps.store, { pk: setupPartition(deps.companyId, project), sk: { op: "beginsWith", prefix: EVAL_WRAPPER_FILE_SK_PREFIX } });
-    return rows.map((row) => parseFile(deps.companyId, project, row)).filter((row): row is EvalWrapperFileRecord => row !== undefined).slice(0, 8);
+    return rows.map((row) => parseFile(deps.companyId, project, row)).filter((row): row is EvalWrapperFileRecord => row !== undefined).slice(0, 64);
   } catch { return []; }
 }
 
@@ -357,7 +357,7 @@ async function openOne(deps: EvalWrapperDeps, project: string, input: { taskId: 
 }
 
 /** Reads the file at one need's path on the default branch and keeps what it found. A host that cannot answer changes nothing. Never touches the repository except by reading. */
-async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, need: Need, raw: EvalWrapperTarget): Promise<void> {
+async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now">, project: string, need: Need, raw: EvalWrapperTarget, siblings: readonly Need[] = []): Promise<void> {
   const host = raw.host;
   if (host.pathKind === undefined) return;
   const target = guardTarget(raw);
@@ -377,7 +377,9 @@ async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "no
       contentDigest = createHash("sha256").update(text, "utf8").digest("hex");
       const version = evalWrapperTemplateVersionOf(text);
       // The same text Rovara would offer; else a file an older Rovara template made; else one a person made or changed (judged by whether a test run can read its results, never by its text).
-      match = text === need.file.content ? "same" : version !== undefined && version < EVAL_WRAPPER_TEMPLATE_VERSION ? "outdated" : "edited";
+      // Another eval's own offered file at the same path (a monorepo's copy-only file put there): it would run THAT eval's command, so it is never this eval's file.
+      const another = siblings.some((entry) => entry.selection !== need.selection && entry.file.path === need.file.path && entry.file.content === text && entry.file.content !== need.file.content);
+      match = another ? "other" : text === need.file.content ? "same" : version !== undefined && version < EVAL_WRAPPER_TEMPLATE_VERSION ? "outdated" : "edited";
     }
   }
   const id = fileIdOf(project, raw.place, need.language, need.selection);
@@ -411,7 +413,7 @@ export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "
         const age = known === undefined ? Infinity : deps.now() - Date.parse(known.checkedAt);
         // A plain read leaves a young check alone; "Check now" looks again, but not more than once in `floorMs` (a person cannot drain the code host's quota).
         if (age < (options.force === true ? (options.floorMs ?? 0) : DETECT_FRESH_MS)) continue;
-        await detectOne(deps, project, need, raw);
+        await detectOne(deps, project, need, raw, needs);
       } catch { /* tried again at the next read */ }
     }
   } catch { /* the card reads the rows as they are */ }
