@@ -10,7 +10,7 @@ import {
   EVIDENCE_RAW_ARTIFACT, FAILURE_ATTRIBUTION_LIMITS, FAILURE_CAUSES_ARTIFACT, FailureCausesFileSchema, EvidenceRawSchema, createCandidateManifest, type CheckEntry, type ProjectCommand,
 } from "../../packages/contracts/src/index.js";
 import { collectEvidenceRaw, saveEvidenceRaw } from "../../packages/worker/src/verification/evidence-raw.js";
-import { commitsOfChanges, failureCausesOf } from "../../packages/worker/src/verification/failure-causes.js";
+import { commitsOfChanges, failureCausesAcrossRepositories, failureCausesOf } from "../../packages/worker/src/verification/failure-causes.js";
 import { evidenceTests, parseJsonReport, parseJunit, parseTestReport } from "../../packages/worker/src/verification/test-report.js";
 
 const run = promisify(execFile);
@@ -94,6 +94,62 @@ describe("failureCausesOf", () => {
   });
 });
 
+it("joins multi-repository failures by the test path prefix when repositories share a changed basename", () => {
+  const report = parseTestReport(JSON.stringify({ reportFormat: "CTRF", results: { tests: [
+    { name: "api fails", filepath: "packages/api/tests/shared.test.ts", status: "failed", failureMessage: "at packages/api/src/api/shared.ts:8" },
+    { name: "web fails", filepath: "packages/web/tests/shared.test.ts", status: "failed", failureMessage: "at packages/web/src/web/shared.ts:9" },
+    { name: "rooted fails", filepath: "/work/packages/api/tests/rooted.test.ts", status: "failed", failureMessage: "at /work/packages/api/src/api/shared.ts:10" },
+  ] } }))!;
+  const result = failureCausesAcrossRepositories({
+    report,
+    names: evidenceTests(report).names,
+    workspaceRoot: "/work",
+    checkDirectory: "/work",
+    repositories: [
+      { directory: "/work/packages/api", changes: [{ path: "src/api/shared.ts", status: "MODIFIED", hunks: [] }] },
+      { directory: "/work/packages/web", changes: [{ path: "src/web/shared.ts", status: "MODIFIED", hunks: [] }] },
+    ],
+  });
+  expect(result).toEqual([
+    { testId: "packages/api/tests/shared.test.ts::api fails", cause: { kind: "change", paths: ["src/api/shared.ts"], pathsCount: 1, basis: ["named_in_failure"] } },
+    { testId: "packages/web/tests/shared.test.ts::web fails", cause: { kind: "change", paths: ["src/web/shared.ts"], pathsCount: 1, basis: ["named_in_failure"] } },
+    { testId: "/work/packages/api/tests/rooted.test.ts::rooted fails", cause: { kind: "change", paths: ["src/api/shared.ts"], pathsCount: 1, basis: ["named_in_failure"] } },
+  ]);
+});
+
+it("routes prefix collisions, absolute paths, nested repositories, and check-relative files by resolved containment", () => {
+  const make = (filepath: string, message: string) => {
+    const report = parseTestReport(JSON.stringify({ reportFormat: "CTRF", results: { tests: [{ name: "fails", filepath, status: "failed", failureMessage: message }] } }))!;
+    return { report, names: evidenceTests(report).names };
+  };
+  const repo = (directory: string, path: string) => ({ directory, changes: [{ path, status: "MODIFIED" as const, hunks: [] }] });
+
+  const collision = make("api-gateway/tests/x.test.ts", "at api-gateway/src/gateway.ts:1");
+  expect(failureCausesAcrossRepositories({ report: collision.report, names: collision.names, workspaceRoot: "/work", checkDirectory: "/work", repositories: [repo("/work/api", "src/api.ts"), repo("/work/api-gateway", "src/gateway.ts")] })?.[0]?.cause).toMatchObject({ kind: "change", paths: ["src/gateway.ts"] });
+
+  const prefixOnly = make("api-gateway/tests/x.test.ts", "at src/api.ts:1");
+  expect(failureCausesAcrossRepositories({ report: prefixOnly.report, names: prefixOnly.names, workspaceRoot: "/work", checkDirectory: "/work", repositories: [repo("/work/api", "src/api.ts")] })).toEqual([
+    { testId: "api-gateway/tests/x.test.ts::fails", cause: { kind: "unknown", reason: "no_changed_file_named" } },
+  ]);
+
+  const absolute = make("/work/api/tests/x.test.ts", "at /work/api/src/api.ts:1");
+  expect(failureCausesAcrossRepositories({ report: absolute.report, names: absolute.names, workspaceRoot: "/work", checkDirectory: "/work", repositories: [repo("/work/api", "src/api.ts"), repo("/work/web", "src/web.ts")] })?.[0]?.cause).toMatchObject({ kind: "change", paths: ["src/api.ts"] });
+
+  const nested = make("packages/web/tests/x.test.ts", "at packages/web/src/web.ts:1");
+  expect(failureCausesAcrossRepositories({ report: nested.report, names: nested.names, workspaceRoot: "/work", checkDirectory: "/work/api", repositories: [repo("/work/api", "src/api.ts"), repo("/work/api/packages/web", "src/web.ts")] })?.[0]?.cause).toMatchObject({ kind: "change", paths: ["src/web.ts"] });
+
+  const checkRelative = make("web/x.test.ts", "at web/src/x.ts:1");
+  expect(failureCausesAcrossRepositories({ report: checkRelative.report, names: checkRelative.names, workspaceRoot: "/work", checkDirectory: "/work/api", repositories: [repo("/work/api", "web/src/x.ts"), repo("/work/web", "src/x.ts")] })?.[0]?.cause).toMatchObject({ kind: "change", paths: ["web/src/x.ts"] });
+
+  const escaped = make("../web/tests/x.test.ts", "at ../web/src/x.ts:1");
+  expect(failureCausesAcrossRepositories({ report: escaped.report, names: escaped.names, workspaceRoot: "/work", checkDirectory: "/work/api", repositories: [repo("/work/api", "src/api.ts")] })?.[0]?.cause).toEqual({ kind: "unknown", reason: "no_changed_file_named" });
+
+  const escapedWithCheckRepoChange = make("../web/tests/x.test.ts", "at src/api.ts:1");
+  expect(failureCausesAcrossRepositories({ report: escapedWithCheckRepoChange.report, names: escapedWithCheckRepoChange.names, workspaceRoot: "/work", checkDirectory: "/work/api", repositories: [repo("/work/api", "src/api.ts")] })).toEqual([
+    { testId: "../web/tests/x.test.ts::fails", cause: { kind: "unknown", reason: "no_changed_file_named" } },
+  ]);
+});
+
 describe("a real repository", () => {
   let root: string;
   beforeEach(async () => { root = await mkdtemp(join(tmpdir(), "failure-causes-")); });
@@ -164,6 +220,46 @@ describe("a real repository", () => {
     expect(JSON.stringify(seen[0]![1])).toMatch(/"commit":"[a-f0-9]{40}"/u);
   });
 
+  it("collectEvidenceRaw joins multi-repository failures and leaves raw evidence byte-identical", async () => {
+    const workspace = root;
+    const api = join(workspace, "api");
+    const web = join(workspace, "web");
+    const setupRepo = async (directory: string, file: string, baseText: string, changedText: string) => {
+      await mkdir(join(directory, file, ".."), { recursive: true });
+      const gitAt = async (...args: string[]) => (await run("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", "-c", "commit.gpgsign=false", ...args], { cwd: directory })).stdout.trim();
+      await gitAt("init", "-q");
+      await writeFile(join(directory, file), baseText);
+      await gitAt("add", "-A"); await gitAt("commit", "-q", "-m", "base");
+      const start = await gitAt("rev-parse", "HEAD");
+      await writeFile(join(directory, file), changedText);
+      await gitAt("add", "-A"); await gitAt("commit", "-q", "-m", "change");
+      return { startCommit: start, candidateTreeSha: await gitAt("rev-parse", "HEAD^{tree}") };
+    };
+    const apiGit = await setupRepo(api, "src/api.ts", "api0", "api1");
+    const webGit = await setupRepo(web, "src/web.ts", "web0", "web1");
+    await writeFile(join(api, "report.json"), JSON.stringify({ testResults: [{ name: "tests/x.test.ts", status: "failed", assertionResults: [{ fullName: "fails", status: "failed", failureMessages: ["at src/api.ts:1"] }] }] }));
+    const repositories = [
+      { repositoryId: "api", directory: api, ...apiGit },
+      { repositoryId: "web", directory: web, ...webGit },
+    ];
+    const apiCommand = { ...command(["run", "--reporter=json", "--outputFile=report.json"]), cwd: "api" };
+    const base = { rootPath: workspace, commands: [apiCommand], entries: [entry()], candidateDigest: DIGEST, repositories };
+    const causes: unknown[] = [];
+    const asked = await collectEvidenceRaw({ ...base, onFailureCauses: (_id, result) => causes.push(result) });
+    const plain = await collectEvidenceRaw(base);
+    expect(JSON.stringify(asked)).toBe(JSON.stringify(plain));
+    expect(causes).toMatchObject([[{ cause: { kind: "change", paths: ["src/api.ts"] } }]]);
+  });
+
+  it("keeps raw evidence byte-identical when a failed report has no per-test attribution data", async () => {
+    const box = await repository();
+    await write("report.json", JSON.stringify({ testResults: [{ name: "tests/cart.test.ts", status: "failed", assertionResults: [{ fullName: "fails", status: "failed" }] }] }));
+    const base = { rootPath: root, commands: [command(["run", "--reporter=json", "--outputFile=report.json"])], entries: [entry()], candidateDigest: DIGEST, repositories: [{ repositoryId: "api", directory: root, startCommit: box.start, candidateTreeSha: box.tree }] };
+    const withAttribution = await collectEvidenceRaw({ ...base, onFailureCauses: () => { throw new Error("no per-test failure text should be attributed"); } });
+    const withoutAttribution = await collectEvidenceRaw(base);
+    expect(JSON.stringify(withAttribution)).toBe(JSON.stringify(withoutAttribution));
+  });
+
   it("saveEvidenceRaw writes only evidence-raw.json for a failed check with more failing tests than the limit", async () => {
     const box = await repository();
     const many = JSON.stringify({ testResults: [{ name: join(root, "tests/cart.test.ts"), status: "failed", assertionResults: Array.from({ length: FAILURE_ATTRIBUTION_LIMITS.failuresMax + 1 }, (_, index) => ({ fullName: `t${String(index)}`, status: "failed", failureMessages: ["at x (/w/src/other.ts:1:1)"] })) }] });
@@ -176,7 +272,7 @@ describe("a real repository", () => {
     expect(saved).toEqual([EVIDENCE_RAW_ARTIFACT]);
   });
 
-  it("asks for nothing (no callback call) for a check that passed, for no change repository, and for several repositories", async () => {
+  it("asks for nothing for a passing check or when there are no change repositories", async () => {
     const box = await repository();
     await write("report.json", vitestReport(["at f (/work/repo/src/other.ts:12:5)"]));
     const calls: string[] = [];
@@ -185,7 +281,6 @@ describe("a real repository", () => {
     const commands = [command(["run", "--reporter=json", "--outputFile=report.json"])];
     await collectEvidenceRaw({ rootPath: root, commands, entries: [entry({ after: "passed", class: "passing" })], candidateDigest: DIGEST, repositories: [one], onFailureCauses });
     await collectEvidenceRaw({ rootPath: root, commands, entries: [entry()], candidateDigest: DIGEST, repositories: [], onFailureCauses });
-    await collectEvidenceRaw({ rootPath: root, commands, entries: [entry()], candidateDigest: DIGEST, repositories: [one, { ...one, repositoryId: "web" }], onFailureCauses });
     expect(calls).toEqual([]);
   });
 

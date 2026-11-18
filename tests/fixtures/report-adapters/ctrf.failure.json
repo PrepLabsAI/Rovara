@@ -1,0 +1,1 @@
+{"reportFormat":"CTRF","results":{"tests":[{"name":"same","filepath":"cart.test.ts","status":"failed","failureMessage":"AssertionError: src/cart.ts:8 expected value"}]}}

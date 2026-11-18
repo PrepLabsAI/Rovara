@@ -23,7 +23,7 @@ import { withIsolatedGit } from "../isolated-git.js";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { evidenceTests } from "./test-report.js";
-import { commitsOfChanges, failureCausesOf } from "./failure-causes.js";
+import { commitsOfChanges, failureCausesAcrossRepositories, failureCausesOf } from "./failure-causes.js";
 import { readCheckTests } from "./check-tests.js";
 import type { FlakyRerunResult } from "./flaky-rerun.js";
 
@@ -71,7 +71,7 @@ export interface CollectEvidenceInput {
   repositoryEdges?: EvidenceRaw["repositoryEdges"] | undefined;
   /**
    * TE-A6 (DEC 254zt): asked for by the caller that saves `failure-causes.json` (`saveEvidenceRaw`). Called once for each failed check whose failing tests could all be joined to the change, with the causes of
-   * those tests. Never changes the raw evidence this function returns, which is byte-identical with or without it. Only for a task with exactly one repository.
+   * those tests. Never changes the raw evidence this function returns, which is byte-identical with or without it. Multi-repository causes require each test path to identify its repository.
    */
   onFailureCauses?: ((checkId: string, causes: FailureCauses) => void) | undefined;
 }
@@ -150,14 +150,27 @@ export async function collectEvidenceRaw(input: CollectEvidenceInput): Promise<E
         if (flaky !== undefined && flaky.length > 0) { partial.tests.flakyOnRerun = flaky.slice(0, FLAKY_ON_RERUN_MAX); partial.tests.flakyOnRerunCount = flaky.length; }
         measured += parsed.total;
         // TE-A6: which change most likely broke each failing test. Fully optional and fail closed: any doubt leaves the check with its per-check line and writes nothing.
-        if (input.onFailureCauses !== undefined && entry.after === "failed" && input.repositories.length === 1 && input.repositoriesComplete !== false) {
+        if (input.onFailureCauses !== undefined && entry.after === "failed" && input.repositories.length > 0 && input.repositoriesComplete !== false) {
           try {
-            const repository = input.repositories[0]!;
-            const changes = (await diffs())?.[0]?.changes;
-            if (changes !== undefined && parsed.tests.some((test) => test.status === "failed" || test.status === "errored")) {
-              // One look at the history for the whole round, shared by every failed check.
-              commits ??= commitsOfChanges(repository, new Set(changes.filter((change) => change.status !== "DELETED").map((change) => change.path)));
-              const causes = failureCausesOf({ report: parsed, names: partial.tests.names, changes, commits: await commits });
+            const allChanges = await diffs();
+            if (allChanges !== undefined && parsed.tests.some((test) => test.status === "failed" || test.status === "errored")) {
+              let causes: FailureCauses | undefined;
+              if (input.repositories.length === 1) {
+                const repository = input.repositories[0]!;
+                const changes = allChanges[0]?.changes;
+                if (changes !== undefined) {
+                  commits ??= commitsOfChanges(repository, new Set(changes.filter((change) => change.status !== "DELETED").map((change) => change.path)));
+                  causes = failureCausesOf({ report: parsed, names: partial.tests.names, changes, commits: await commits });
+                }
+              } else {
+                const withCommits = await Promise.all(input.repositories.map(async (repository) => {
+                  const found = allChanges.find((candidate) => candidate.repositoryId === repository.repositoryId);
+                  if (found === undefined) return undefined;
+                  const commits = await commitsOfChanges(repository, new Set(found.changes.filter((change) => change.status !== "DELETED").map((change) => change.path)));
+                  return { directory: repository.directory, changes: found.changes, commits };
+                }));
+                if (withCommits.every((repository) => repository !== undefined)) causes = failureCausesAcrossRepositories({ report: parsed, names: partial.tests.names, workspaceRoot: input.rootPath, checkDirectory: resolve(input.rootPath, command.cwd), repositories: withCommits });
+              }
               if (causes !== undefined) input.onFailureCauses(entry.id, causes);
             }
           } catch { /* the check keeps its per-check line */ }

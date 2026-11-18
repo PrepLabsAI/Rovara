@@ -2,16 +2,16 @@
 // `attributeFailures`, and says "unknown" when it cannot be sure. The result is written as `failure-causes.json` beside `evidence-raw.json` (evidence-raw.ts); the broker reads it as untrusted input.
 //
 // What leaves this module: test ids (already in the evidence), the changed file paths the change itself touched, commit ids from the candidate's own history and fixed reason words. A failure's text is read here to look
-// for changed file names and is never kept or copied. Only a task with ONE repository is joined (a change in several repositories has paths that cannot be told apart), and every doubt is "no result", so the
+// for changed file names and is never kept or copied. Multi-repository tasks are joined only when the test's own report path identifies its repository; otherwise its result stays unknown, never a guessed path. Every doubt is "no result", so the
 // check keeps its per-check line. Never throws.
-import { posix } from "node:path";
+import { isAbsolute, posix, relative, resolve } from "node:path";
 import {
   FAILURE_ATTRIBUTION_LIMITS, FailureCausesSchema, attributeFailures, testIdOf,
   type EvidenceTest, type FailureCauses, type FailureChange,
 } from "@agentx/contracts";
 import { withIsolatedGit } from "../isolated-git.js";
 import type { CandidateChange } from "./diff.js";
-import { printedTestId, type ParsedTestReport } from "./test-report.js";
+import { printedTestId, type ParsedTestReport, type ReportedTest } from "./test-report.js";
 
 const COMMIT = /^[a-f0-9]{40}$/u;
 /** The most commits looked at, and the most bytes of their file lists read. Past either, no commit is named (the files still are). */
@@ -94,6 +94,51 @@ export function failureCausesOf(input: FailureCauseInput): FailureCauses | undef
     if (result.mode !== "per_test") return undefined;
     const causes = FailureCausesSchema.safeParse(result.results.map((row) => ({ testId: row.testId, cause: row.cause })));
     return causes.success && causes.data.length > 0 ? causes.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Multi-repository variant: every failure is attributed against only the changed files of the repository named by its report path. */
+export function failureCausesAcrossRepositories(input: {
+  report: ParsedTestReport;
+  names: readonly EvidenceTest[];
+  workspaceRoot: string;
+  checkDirectory?: string;
+  repositories: readonly { directory: string; changes: readonly CandidateChange[]; commits?: ReadonlyMap<string, string> }[];
+}): FailureCauses | undefined {
+  try {
+    const failing = input.names.filter((name) => name.status === "failed" || name.status === "errored");
+    if (failing.length === 0 || failing.length > FAILURE_ATTRIBUTION_LIMITS.failuresMax
+      || new Set(failing.map((name) => name.name)).size !== failing.length
+      || input.repositories.reduce((sum, repository) => sum + repository.changes.length, 0) > FAILURE_ATTRIBUTION_LIMITS.changesMax) return undefined;
+    let totalText = 0;
+    const testsById = new Map<string, ReportedTest>();
+    for (const test of input.report.tests) {
+      if (test.status !== "failed" && test.status !== "errored") continue;
+      const id = printedTestId(input.report.format, testIdOf(test));
+      if (!testsById.has(id)) testsById.set(id, test);
+      totalText += test.failureText?.length ?? 0;
+    }
+    if (totalText > FAILURE_ATTRIBUTION_LIMITS.totalTextMax) return undefined;
+    const roots = input.repositories.map((repository) => ({ ...repository, absolute: resolve(repository.directory) }))
+      .sort((a, b) => b.absolute.length - a.absolute.length);
+    const checkPath = input.checkDirectory === undefined ? undefined : resolve(input.checkDirectory);
+    const byTestId = new Map<string, FailureCauses[number]>();
+    for (const name of failing) {
+      const test = testsById.get(name.name);
+      const file = test?.file?.replaceAll("\\", "/");
+      const absolute = file === undefined ? undefined : isAbsolute(file) ? resolve(file) : checkPath === undefined ? undefined : resolve(checkPath, file);
+      const repository = roots.find((candidate) => {
+        if (absolute === undefined) return false;
+        const inside = relative(candidate.absolute, absolute);
+        return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside));
+      });
+      const result = failureCausesOf({ report: input.report, names: [name], changes: repository?.changes ?? [], commits: repository?.commits });
+      if (result === undefined || result.length !== 1) return undefined;
+      byTestId.set(name.name, result[0]!);
+    }
+    return failing.map((name) => byTestId.get(name.name)!);
   } catch {
     return undefined;
   }
