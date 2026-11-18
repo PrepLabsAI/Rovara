@@ -1,6 +1,7 @@
 // Lessons phase 1, the Beta strength (research Q3): a prior worth 4 uses at the project's clean-merge rate, over the evidence of the last 180 days. It replaces the Wilson bound, which is 0 for a lesson never loaded,
 // so a new lesson ranked as if it had failed. Pure maths first, then what the loader does with it.
 import { describe, expect, it } from "vitest";
+import type { JsonValue, StoredDocument } from "@agentx/contracts";
 import { betaStrength, legacyEvidence, priorRateOf } from "../../../packages/broker/src/lessons/strength.js";
 import { wilsonLower } from "../../../packages/broker/src/lessons/load.js";
 import { mergePk } from "../../../packages/broker/src/lessons/measure.js";
@@ -52,7 +53,7 @@ describe("the Beta score", () => {
 
 describe("the 180-day window and the legacy counters", () => {
   const now = 1_800_000_000_000;
-  const row = (extra: Record<string, unknown>) => ({ pk: evidencePk(WS, PROJECT), entityType: "LESSON_EVIDENCE", project: PROJECT, keepUntil: now + 30 * DAY, ...extra });
+  const row = (extra: { sk: string; [attribute: string]: JsonValue }): StoredDocument => ({ pk: evidencePk(WS, PROJECT), entityType: "LESSON_EVIDENCE", project: PROJECT, keepUntil: now + 30 * DAY, ...extra });
 
   it("only the last 180 days count: older 'for' rows drop out, newer ones stay", async () => {
     const docs = new MemoryDocumentStore();
@@ -132,5 +133,21 @@ describe("what the loader does with the strength", () => {
     await w.evidence.note({ workspaceId: WS, project: "proj-2", lessonId: "les_b0000001", kind: "for", weight: 1, at: w.clock.now(), id: "y" });
     const order = ids(await w.load({}, { ranking: { ...NO_FIT_FLOOR, newcomerSlots: 0 } }));
     expect(order).toEqual(["les_a0000001", "les_b0000001"]);
+  });
+});
+
+describe("when the signals read was cut short", () => {
+  it("no lesson is weighed by its old counters (a lesson with no row may only have been cut off), so one rule applies to all", async () => {
+    const w = await world();
+    const same = { title: "Retries", body: "Retry failed HTTP calls in the api service with withRetry" };
+    await w.add(fitting("les_aaaa0001", { ...same, counters: { loaded: 40, helpful: 38, harmful: 0, citationStale: 0 } }), fitting("les_bbbb0001", same));
+    const read = { ...(await w.signals.read({ workspaceId: WS, project: PROJECT }))! };
+    const scoreOf = async (truncated: boolean) => (await w.load({}, { ranking: { ...NO_FIT_FLOOR, newcomerSlots: 0 }, signals: { read: async () => ({ ...read, truncated }) } })).manifest.lessons.map((l) => [l.id, l.score] as const);
+    const whole = new Map(await scoreOf(false));
+    const cut = new Map(await scoreOf(true));
+    expect(whole.get("les_aaaa0001")!).toBeGreaterThan(whole.get("les_bbbb0001")!);
+    // The lesson with a good record loses what its old counters gave it; the one with none is unchanged (the same words, so the same fit).
+    expect(cut.get("les_aaaa0001")!).toBeLessThan(whole.get("les_aaaa0001")!);
+    expect(cut.get("les_bbbb0001")).toBe(whole.get("les_bbbb0001"));
   });
 });

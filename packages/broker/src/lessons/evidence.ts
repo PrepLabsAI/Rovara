@@ -61,7 +61,8 @@ export function documentEvidenceSink(store: Store, companyId: OrgId): EvidenceSi
       } catch { return false; }
     },
     async baseline(input) {
-      if (!mine(input) || !Number.isFinite(input.forW) || !Number.isFinite(input.againstW) || (input.forW <= 0 && input.againstW <= 0)) return false;
+      // Written even when both are 0: it is the marker that says "this lesson's evidence rows begin here", so a mark made later is never counted twice (by its row and by the baseline).
+      if (!mine(input) || !Number.isFinite(input.forW) || !Number.isFinite(input.againstW)) return false;
       try {
         await store.put({
           item: {

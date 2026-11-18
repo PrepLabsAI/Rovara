@@ -307,3 +307,58 @@ describe("the task's use reports are read exactly, and a read that fails defers 
     expect((await w.store.duePending(KEY, w.clock.now() + REVERT_WINDOW_MS + 1, 10)).map((p) => p.weight)).toEqual([1]);
   });
 });
+
+describe("the baseline never counts a mark twice, whichever mark comes first", () => {
+  it("a fresh lesson (0/0): three shared credits then a person's mark give exactly the sum of their own pieces (no baseline drift)", async () => {
+    const w = await world();
+    await w.add(lessonRecord({ id: "les_aaaa1111", counters: { loaded: 0, helpful: 0, harmful: 0, citationStale: 0 } }));
+    for (const [task, weight] of [["t1", 1 / 3], ["t2", 1 / 2], ["t3", 1]] as const) {
+      await w.store.addPending({ key: `helpful:${task}:les_aaaa1111`, workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", taskId: task, dueAt: w.clock.now() - 1, weight });
+    }
+    await settleHelpful(w.counters, KEY);
+    const forW = (await totalsOf(w)).evidence.get("les_aaaa1111")!.forW;
+    expect(forW).toBeCloseTo(1 / 3 + 1 / 2 + 1, 3);
+    expect((await w.store.get(KEY, "les_aaaa1111"))!.counters.helpful).toBe(3);
+  });
+
+  it("a fresh lesson whose first mark is 'wrong here' and second is 'helpful': 1 against and 1 for, not 2 against", async () => {
+    const w = await world();
+    await w.add(lessonRecord({ id: "les_aaaa1111" }));
+    await w.store.putManifest(manifest("task-1", ["les_aaaa1111"]));
+    const deps = { ...w.counters, access: allowAllAccess };
+    await recordFeedback(deps, { ...KEY, taskId: "task-1", lessonId: "les_aaaa1111", userId: "dev-ann", viewer: { principals: [], groups: [] }, kind: "wrong_here" });
+    await recordFeedback(deps, { ...KEY, taskId: "task-1", lessonId: "les_aaaa1111", userId: "dev-bob", viewer: { principals: [], groups: [] }, kind: "helpful" });
+    expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 1, againstW: 1 });
+  });
+
+  it("the 'ignored' path keeps a legacy lesson's counters as its baseline: 30 helpful marks are not thrown away by its first 'against'", async () => {
+    const judge = new Judge("same_ignored");
+    const w = await world();
+    await w.add(lessonRecord({ id: "les_aaaa1111", scope: { repos: ["api"], paths: ["src/**"] }, counters: { loaded: 40, helpful: 30, harmful: 0, citationStale: 0 }, lastHelpfulAt: w.clock.now() }));
+    await w.store.putManifest(manifest("task-1", ["les_aaaa1111"]));
+    const again = { kind: "send_back" as const, paths: ["src/a.ts"], text: "use the shared retry helper", at: 1, authorId: "dev-ann" };
+    await recordTaskOutcome({ ...w.counters, judge }, outcome({ corrections: [again] }));
+    expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 30, againstW: 1 });
+    // A later mark does not count the old ones twice.
+    await w.store.addPending({ key: "helpful:t9:les_aaaa1111", workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", taskId: "t9", dueAt: w.clock.now() - 1, weight: 1 });
+    await settleHelpful(w.counters, KEY);
+    expect((await totalsOf(w)).evidence.get("les_aaaa1111")).toEqual({ forW: 31, againstW: 1 });
+  });
+});
+
+describe("the evidence totals read each kind of row under its own budget", () => {
+  it("many pieces of evidence do not cut off the repeat counts or the questions that wait; a cut read says so (truncated) and the loader then uses no legacy counters", async () => {
+    const w = await world();
+    const sink = w.evidence;
+    for (let i = 0; i < 30; i += 1) await sink.note({ workspaceId: WS, project: PROJECT, lessonId: "les_aaaa1111", kind: "for", weight: 0.1, at: w.clock.now(), id: `t${i}` });
+    await sink.repeat({ workspaceId: WS, project: PROJECT, lessonId: "les_zzzz9999", taskId: "task-1", back: false, at: w.clock.now() });
+    await sink.writeFade(KEY, "les_zzzz9999", { renewals: 1, askedAt: w.clock.now() }, w.clock.now());
+    const cut = await readEvidenceTotals(w.documents, { companyId: A, project: PROJECT, now: w.clock.now(), windowMs: 180 * DAY, rowsMax: 10 });
+    expect(cut.truncated).toBe(true);
+    expect(cut.repeats.get("les_zzzz9999")).toEqual({ matched: 1, back: 0 });
+    expect(cut.asked.has("les_zzzz9999")).toBe(true);
+    const whole = await readEvidenceTotals(w.documents, { companyId: A, project: PROJECT, now: w.clock.now(), windowMs: 180 * DAY });
+    expect(whole.truncated).toBe(false);
+    expect(whole.evidence.get("les_aaaa1111")!.forW).toBeCloseTo(3, 3);
+  });
+});

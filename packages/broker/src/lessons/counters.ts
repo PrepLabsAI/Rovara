@@ -130,7 +130,7 @@ async function addHelpful(deps: CounterDeps, key: ScopeKey, lessonId: string, ex
   const now = deps.now();
   const updated = await deps.store.mutate(key, lessonId, (l) => ({ counters: { ...l.counters, helpful: l.counters.helpful + 1 }, lastHelpfulAt: now }));
   if (updated === undefined) return;
-  // The marks the lesson already had stand as its baseline (written once), so its first piece of evidence does not throw them away.
+  // The marks the lesson already had stand as its baseline (written once, even when it had none), so its first piece of evidence does not throw them away and no mark is counted twice.
   await deps.evidence?.baseline({ workspaceId: key.workspaceId, project: key.project, lessonId, forW: updated.counters.helpful - 1, againstW: updated.counters.harmful, at: now });
   await deps.evidence?.note({ workspaceId: key.workspaceId, project: key.project, lessonId, kind: "for", weight, at: now, id: evidenceId });
   await renewLesson(deps.store, key, lessonId, now, expiryDays, "helpful");
@@ -225,7 +225,11 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
     if (outcome.outcome === "merged" || outcome.outcome === "closed") {
       const taskDone = { workspaceId: key.workspaceId, project: key.project, lessonId, at: deps.now() };
       await deps.evidence?.repeat({ ...taskDone, taskId: outcome.taskId, back: ignored });
-      if (ignored) await deps.evidence?.note({ ...taskDone, kind: "against", weight: 1, id: `ignored:${outcome.taskId}` });
+      if (ignored) {
+        // This may be the lesson's first piece of evidence: its counters stand as the baseline first (the same rule as a person's mark), so the marks it already had are not thrown away.
+        await deps.evidence?.baseline({ ...taskDone, forW: lesson.counters.helpful, againstW: lesson.counters.harmful });
+        await deps.evidence?.note({ ...taskDone, kind: "against", weight: 1, id: `ignored:${outcome.taskId}` });
+      }
     }
     if (blamed) {
       // The task's record that this lesson was blamed: harm wins, so a later pass that rates the same task differently queues no helpful mark for it.

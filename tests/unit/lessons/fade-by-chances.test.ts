@@ -64,7 +64,7 @@ describe("fade by chances", () => {
     expect(await keepQuietLesson({ ...w.counters }, w.store, w.evidence, KEY, "les_aaaa1111")).toBe(true);
     expect((await w.store.get(KEY, "les_aaaa1111"))!.expiresAt).toBe(w.clock.now() + WINDOW);
     expect(await fadeRow(w)).toMatchObject({ renewals: 0 });
-    expect((await fadeRow(w))!.askedAt).toBeUndefined();
+    expect(await fadeRow(w)).not.toHaveProperty("askedAt");
     expect(await keepQuietLesson({ ...w.counters }, w.store, w.evidence, KEY, "les_missing1")).toBe(false);
   });
 

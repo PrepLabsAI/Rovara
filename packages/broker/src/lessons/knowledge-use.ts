@@ -29,7 +29,7 @@ export async function recordKnowledgeUseReport(input: {
     at: input.now(), ...input.ttl(input.ttlSeconds),
   };
   await input.store.put({ item: { pk: companyScoped(input.companyId, "KNOWLEDGE_USE"), sk: input.operationId, entityType: "KNOWLEDGE_USE", ...row } });
-  // The same row under the TASK's own partition (lessons phase 2: the clean-merge credit reads a task's reports exactly, not by scanning the company's operations). Best effort: a failure leaves the first row, and the credit then waits for a retry.
+  // The same row under the TASK's own partition (lessons phase 2: the clean-merge credit reads a task's reports exactly, not by scanning the company's operations). Best effort: when it fails the task has no copy, and a read of the task's reports then finds none (the credit takes the weaker road, shared among the Build step's lessons, never doubled).
   try { await input.store.put({ item: { pk: companyScoped(input.companyId, `KNOWLEDGE_USE_TASK#${delivery.project}#${delivery.taskId}`), sk: input.operationId, entityType: "KNOWLEDGE_USE", ...row } }); } catch { /* the operation's own row is kept */ }
   return checked;
 }
