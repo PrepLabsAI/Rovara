@@ -122,6 +122,10 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
   const sessionScan = { cursor: undefined as string | undefined };
   const notifyScan = { cursor: undefined as string | undefined };
   const mergeScan = { cursor: undefined as string | undefined, complete: false };
+  // L4-HW7: the merge's milestones (`merged`, `stuck`, the order warning) are the COMPANY's own milestone service, the one that has the handlers registered on it (the chat thread, the ticket write-back, the lessons
+  // and team-record capture, as on the laptop's one `milestones`), so each is told once and a handler that failed is told again by the lessons pass's `deliverDue`. Read at pass time: the company's lessons attach it to the
+  // flow before the first pass. A company whose lessons are not built has no milestone handler anywhere (nothing could be registered), so the rows and session lines are written as before and there is nobody to tell.
+  const mergeMilestones = (store: TaskFlow["deps"]["store"]): NonNullable<TaskFlow["deps"]["milestones"]> => flow.deps.milestones ?? createMilestoneService({ store, now });
   const noticesFor = (store: TaskFlow["deps"]["store"]) => createNoticeService({ store, registry, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification });
   return {
     "session-sweep": pass(async (store, deadlineMs) => {
@@ -148,7 +152,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         if (entry["event"] === "sweep.read_failed" || entry["event"] === "sweep.row_failed") failed += 1;
         log();
       };
-      const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: createMilestoneService({ store, now }), now, log: trackingLog,
+      const tracking = createMergeTrackingService({ flow: depsFor(recoveryStore(store, companyId)), registry, companyId, scan: mergeScan, people, settings, milestones: mergeMilestones(store), now, log: trackingLog,
         ciMode: ci.ciMode, ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });
