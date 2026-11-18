@@ -1,0 +1,9 @@
+{
+  "id": "order-status",
+  "category": "ordinary",
+  "question": "What is the status of order 1042?",
+  "must_contain": [
+    "shipped"
+  ],
+  "must_not_contain": []
+}
