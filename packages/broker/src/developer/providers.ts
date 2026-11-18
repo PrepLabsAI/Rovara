@@ -24,11 +24,23 @@ export class ProviderNotConfiguredError extends Error { override name = "Provide
 export interface SignInProvider {
   readonly method: DeveloperSignInMethod;
   /** `reauthenticate` (lane ID part 2): a step-up; a company sign-in is asked to sign the person in again (`prompt=login`, `max_age`). Slack ignores it. */
-  authorizeUrl(input: { state: string; nonce: string; redirectUri: string; reauthenticate?: { maxAgeSeconds: number } }): Promise<string>;
+  /**
+   * `workspaceHint` (L4-SIGNIN): a Slack workspace id the browser remembers, passed on as Slack's `team` so Slack opens on that workspace. Slack alone uses it, and only when
+   * any workspace may sign in; it is a convenience and never decides who is signed in (`complete` never sees it). Anything that is not a workspace id is dropped.
+   */
+  authorizeUrl(input: { state: string; nonce: string; redirectUri: string; reauthenticate?: { maxAgeSeconds: number }; workspaceHint?: string }): Promise<string>;
   complete(input: { code: string; nonce: string; redirectUri: string }): Promise<ProviderResult>;
 }
 
 const SCOPES = "openid email profile";
+
+/**
+ * L4-SIGNIN: the Slack workspace hint. Slack's `team` parameter of its OpenID Connect authorize link names the workspace the person means to sign in to
+ * (https://docs.slack.dev/authentication/sign-in-with-slack/). Only the plain id shape passes (a "T", then 6 to 15 capital letters or digits): anything
+ * else, including an enterprise id, a URL or a typed injection, is no hint.
+ */
+const SLACK_WORKSPACE_HINT = /^T[A-Z0-9]{6,15}$/u;
+export const slackWorkspaceHint = (value: unknown): string | undefined => (typeof value === "string" && SLACK_WORKSPACE_HINT.test(value) ? value : undefined);
 const TIMEOUT_MS = 8_000;
 
 async function call(fetchFn: typeof fetch, url: string, init: RequestInit, what: string): Promise<unknown> {
@@ -94,10 +106,12 @@ export function slackSignInProvider(input: {
   };
   return {
     method: "slack",
-    async authorizeUrl({ state, nonce, redirectUri }) {
+    async authorizeUrl({ state, nonce, redirectUri, workspaceHint }) {
       const { teamId, clientId } = await configured();
       const url = new URL("https://slack.com/openid/connect/authorize");
-      for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: clientId, state, nonce, redirect_uri: redirectUri, ...(input.anyWorkspace === true ? {} : { team: teamId }) })) url.searchParams.set(key, value);
+      // One workspace only: its own team, always (a hint never replaces it). Any workspace: the remembered one when it is a workspace id, else none.
+      const hinted = input.anyWorkspace === true ? slackWorkspaceHint(workspaceHint) : undefined;
+      for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: clientId, state, nonce, redirect_uri: redirectUri, ...(input.anyWorkspace === true ? (hinted === undefined ? {} : { team: hinted }) : { team: teamId }) })) url.searchParams.set(key, value);
       return url.toString();
     },
     async complete({ code, nonce, redirectUri }) {
