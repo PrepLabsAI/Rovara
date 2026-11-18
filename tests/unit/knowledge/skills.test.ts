@@ -11,6 +11,8 @@ import { createLocalLessons, type LocalLessons } from "../../../packages/broker/
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import { buildLessonsView } from "../../../packages/broker/src/lessons/view.js";
+import { documentEvidenceSink } from "../../../packages/broker/src/lessons/evidence.js";
+import { freshSignalsReader } from "../../../packages/broker/src/lessons/signals.js";
 import { lessonUsePk } from "../../../packages/broker/src/lessons/use-count.js";
 import type { ApproverDirectory } from "../../../packages/broker/src/lessons/ports.js";
 import {
@@ -489,6 +491,22 @@ describe('the "Make this a skill?" card', () => {
     const hidden = withLessonAudiences({ read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied: new Set(["bob"]) })])) });
     const deps: SkillDeps = { ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: hidden } };
     expect(await skillOffers(deps, KEY)).toEqual([]);
+  });
+  it("is not offered while phase 2 has weight against the lesson or has it under question: the card and the button read the one proven band (L4-INT)", async () => {
+    const w = await world();
+    const lesson = await proven(w);
+    const signals = freshSignalsReader(w.h.store, COMPANY, () => w.h.clock.now);
+    expect((await skillOffers({ ...w.deps, signals }, KEY)).map((offer) => offer.lessonId)).toEqual([lesson.id]);
+    await documentEvidenceSink(w.h.store, COMPANY).note({ workspaceId: COMPANY, project: "payments", lessonId: lesson.id, kind: "against", weight: 1, at: w.h.clock.now - DAY, id: "mark-1" });
+    expect(await skillOffers({ ...w.deps, signals }, KEY)).toEqual([]);
+    // The lessons page shows the same: its own signals reader sees the mark too.
+    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: w.lessons.owner.id }, "payments");
+    expect(view.skillOffers).toBeUndefined();
+    // The button re-reads it fresh and refuses.
+    expect(await draftSkillFromLesson({ ...w.deps, signals }, KEY, { lessonId: lesson.id, by: "ann" })).toEqual({ ok: false, code: "not_proven" });
+    // A reader that cannot answer is no proof: nothing is offered and nothing is drafted.
+    const blind = { read: async () => undefined };
+    expect(await skillOffers({ ...w.deps, signals: blind }, KEY)).toEqual([]);
   });
   it("is not offered for another company's lesson", async () => {
     const w = await world();

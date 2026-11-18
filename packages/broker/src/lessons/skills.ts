@@ -14,17 +14,17 @@
 //   - when a skill goes live the lessons it came from are retired ("became a skill"), so they are not loaded again.
 import { createHash } from "node:crypto";
 import {
-  ROVARA_SKILL_APPROVERS_REQUIRED, ROVARA_SKILL_DESCRIPTION_MAX, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_NAME, ROVARA_SKILL_PROVEN, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX,
+  ROVARA_SKILL_APPROVERS_REQUIRED, ROVARA_SKILL_DESCRIPTION_MAX, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_NAME, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX,
   ROVARA_SKILLS_PER_STEP_MAX, change, cleanLessonText, companyScoped, queryAll, when, type DocumentStore, type JsonValue, type RovaraSkillFile, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
-import { retireLesson } from "./curate.js";
-import { hasStaleCitation } from "./load.js";
-import { requireAudit } from "./policy.js";
+import { recordBecame, type BecameDeps } from "./became.js";
+import { emitAudit, requireAudit } from "./policy.js";
+import { provenLesson, provenSignalsOf, type ProvenSignal } from "./proven.js";
+import type { SignalsReader } from "./signals.js";
 import type { LessonAuditSink, ApproverDirectory } from "./ports.js";
 import { readVisible } from "./read-visible.js";
 import type { AccessCheckPort } from "./access-port.js";
 import type { LessonStore, ScopeKey } from "./store.js";
-import { independentSources } from "./value.js";
 import { countLessonUses } from "./use-count.js";
 import { idIn, sameId, type Lesson } from "./types.js";
 
@@ -32,8 +32,10 @@ const DAY_MS = 86_400_000;
 
 export interface SkillDeps {
   documents: DocumentStore; lessons: LessonStore; directory: ApproverDirectory; audit: LessonAuditSink; access: AccessCheckPort; now: () => number;
-  /** Where a retired lesson's vector is dropped (`retireLesson`). */
-  vectors?: Parameters<typeof retireLesson>[0]["vectors"];
+  /** Where a retired lesson's vector is dropped (`recordBecame`). */
+  vectors?: BecameDeps["vectors"];
+  /** Phase 2's computed signals, which the "proven" band reads (`proven.ts`). Every production caller passes one (`skill-graduation.ts`); absent, only the plain rule is applied. */
+  signals?: SignalsReader | undefined;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
 }
 
@@ -160,23 +162,18 @@ export function checkSkillText(content: string): SkillTextCheck {
 
 // ---- proof
 
-export interface ProvenInput { lesson: Lesson; tasks: number | undefined; now: number }
+export interface ProvenInput { lesson: Lesson; tasks: number | undefined; now: number; signal?: ProvenSignal | undefined }
 /**
- * A procedure lesson that has proved itself (design 6.3, start values `ROVARA_SKILL_PROVEN`): live and approved by a person (not on trial), used in at least 10 tasks (counted, never guessed: an uncounted lesson is not
- * proven), at least 30 days old, never marked wrong, no retire asked for, every citation still good, and two independent people behind it (or one person and a measured result). Pure.
+ * A procedure lesson that has proved itself: the ONE "proven" band (`proven.ts`, lessons phases 1 and 2: live and approved by a person, given to enough tasks over enough days, nothing against it, not under question, two
+ * independent people or a measured result), for a lesson of the procedure kind. Pure.
  */
 export function provenProcedure(input: ProvenInput): boolean {
-  const { lesson, tasks, now } = input;
-  if (lesson.type !== "procedure" || lesson.status !== "active" || lesson.trial !== undefined || lesson.reviewRequired === true) return false;
-  if (lesson.approvals.length === 0 || lesson.provenance.audience.kind !== "project" || hasStaleCitation(lesson)) return false;
-  if (lesson.counters.harmful > 0 || lesson.counters.citationStale > 0 || lesson.retireProposedAt !== undefined || lesson.possibleDuplicateOf !== undefined || lesson.contradictsWith !== undefined) return false;
-  if (tasks === undefined || tasks < ROVARA_SKILL_PROVEN.tasks || now - lesson.createdAt < ROVARA_SKILL_PROVEN.days * DAY_MS) return false;
-  return independentSources(lesson.provenance) >= 2 || (independentSources(lesson.provenance) >= 1 && lesson.provenance.measured);
+  return input.lesson.type === "procedure" && provenLesson(input);
 }
 
 export interface SkillOffer { lessonId: string; title: string; tasks: number; days: number }
 /** The "Make this a skill?" cards: the project's proven procedure lessons that no skill was made from. Counts only the active procedure lessons given (so one count call is bounded), at most `max` offers. */
-export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "now" | "access" | "log">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
+export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "now" | "access" | "log" | "signals">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
   const max = options.max ?? 20;
   const candidates = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
   if (candidates.length === 0) return [];
@@ -187,9 +184,10 @@ export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" 
   const open = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
   if (open.length === 0) return [];
   const counts = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: open.map((lesson) => lesson.id), now: deps.now() });
+  const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
   return open.flatMap((lesson) => {
     const count = counts.counts.get(lesson.id);
-    return provenProcedure({ lesson, tasks: count?.tasks, now: deps.now() }) ? [{ lessonId: lesson.id, title: lesson.title, tasks: count!.tasks, days: Math.floor((deps.now() - lesson.createdAt) / DAY_MS) }] : [];
+    return provenProcedure({ lesson, tasks: count?.tasks, now: deps.now(), signal: signalOf?.(lesson.id) }) ? [{ lessonId: lesson.id, title: lesson.title, tasks: count!.tasks, days: Math.floor((deps.now() - lesson.createdAt) / DAY_MS) }] : [];
   }).slice(0, max);
 }
 
@@ -226,7 +224,8 @@ export async function draftSkillFromLesson(deps: SkillDeps, key: ScopeKey, input
     const visible = await readVisible({ access: deps.access, key, viewer: undefined, lessons: [lesson], where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
     if (visible.length === 0) return { ok: false, code: "not_project_wide" };
   } catch { return { ok: false, code: "unreadable" }; }
-  if (!provenProcedure({ lesson, tasks, now: deps.now() })) return { ok: false, code: "not_proven" };
+  const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
+  if (!provenProcedure({ lesson, tasks, now: deps.now(), signal: signalOf?.(lesson.id) })) return { ok: false, code: "not_proven" };
   let existing: StoredDocument[];
   try { existing = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } }); } catch { return { ok: false, code: "unreadable" }; }
   const heads = existing.flatMap((row) => { const head = headOf(row); return head === undefined ? [] : [head]; });
@@ -337,9 +336,14 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
     if (!written.applied) return { ok: false, code: "conflict" };
   } catch { return { ok: false, code: "unreadable" }; }
   if (live) {
-    // The lessons it came from leave the load set ("became a skill"): best effort, and a lesson that stays is a repeat, never a gap.
+    // The lessons it came from leave the load set and keep a link to what they became ("became" a skill, by its name; the history stays): best effort, and a lesson that stays is a repeat, never a gap. A lesson that already
+    // became something else keeps its first link (`recordBecame`).
     for (const id of head.fromLessons) {
-      try { await retireLesson({ now: deps.now, audit: deps.audit, store: deps.lessons, ...(deps.vectors === undefined ? {} : { vectors: deps.vectors }) }, key, id, "became_skill", input.by); } catch { deps.log?.("skills.source_lesson_retire_failed", {}); }
+      try {
+        const linked = await recordBecame({ store: deps.lessons, now: deps.now, vectors: deps.vectors }, key, id, { kind: "skill", ref: input.name });
+        if (!linked.ok) deps.log?.("skills.source_lesson_not_linked", { code: linked.code });
+        else if (!linked.already) await emitAudit(deps.audit, { action: "lesson.retired", workspaceId: key.workspaceId, project: key.project, lessonId: id, actor: input.by, facts: { reason: "became_skill" } });
+      } catch { deps.log?.("skills.source_lesson_retire_failed", {}); }
     }
   }
   return { ok: true, approvals: approvals.length, live };

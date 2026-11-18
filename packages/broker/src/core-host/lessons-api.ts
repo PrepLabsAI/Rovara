@@ -41,6 +41,7 @@ import { AgentXError, AgentXNameSchema, LEARNING_SOURCE_KEYS, LearningSourcePaus
 import { z } from "zod";
 import { approveLesson, rejectLesson, retireByPerson, type ApprovalFailure } from "../lessons/approve.js";
 import { SKILL_STEPS_MAX, approveSkill, draftSkillFromLesson, editSkill, listSkills, retireSkill, type SkillDeps } from "../lessons/skills.js";
+import { skillDepsOf } from "../lessons/skill-graduation.js";
 import { recordFeedback } from "../lessons/counters.js";
 import { writeLearningMode, writeLearningModeFromSuggest } from "../lessons/document-settings.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -326,7 +327,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
 
     // Rovara skills (L4-AK3). Reads need the roster; every write is a person who decides (the library asks the approver directory now), never a script token (refused above), and is audited by the library before it is made.
     if (route === "skills" || route === "skill" || route.startsWith("skill-")) {
-      const skillDeps: SkillDeps = { documents: runtime.documents, lessons: runtime.store, directory: runtime.directory, audit: runtime.audit, access: runtime.access, now: options.now, vectors: runtime.vectors };
+      const skillDeps: SkillDeps = skillDepsOf(runtime, { companyId, now: options.now, log });
       let skillName: string | undefined;
       if (rawSkill !== undefined) skillName = rawSkill;
       if (route === "skills") {
