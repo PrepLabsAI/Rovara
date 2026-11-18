@@ -9,6 +9,7 @@
 //   DELETE /v1/dev/me/github                                 unlink the caller's own account
 //
 // Rules (the common brief's shared security rules):
+//   - Only the Rovara web app's own sign-in client (`caller.webApp`) may call any of these routes; the CLI's token and any other full-access client are refused (403).
 //   - Only the signed-in person, for themselves: the company and the person are the caller's LIVE membership (sign-in table) and verified token, read at every call; never a body, query, header or
 //     token claim. There is no route that links or unlinks anyone else.
 //   - The account is the one GitHub's own answer for the person who completed the authorization names (`GET /user`), never a number the browser sends. The state is 32 random bytes stored only as
@@ -18,11 +19,13 @@
 //     company (first link wins) or the caller already holds a different account; idempotent 200 when it is already theirs.
 //   - One account per person, one person per account, per company: the two rows are written in one conditional transaction.
 //   - The step-up (a factor Code owns, `requireFreshStepUp`) is checked at start AND at claim. Unlinking needs none: it only takes away what the person had.
-//   - Never logged or returned: the code, the state, the user token, anything GitHub said. Log lines carry event names and ids only.
+//   - Never logged or returned: the code, the state, the user token. The claim's answer names the linked account (GitHub's numeric id and login, to the person who just proved it is theirs); log lines carry
+//     event names and the person's id only; audit rows never carry the GitHub id or login.
+//   - A removed member's link rows stay until the person erase or the company purge (the identity point reads the member live, so a removed member resolves to nobody); re-adding the person revives it.
 import { createHash, randomBytes } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, isGithubLogin, linkGithubAccount, unlinkGithubAccount } from "../core/people/github-links.js";
 import { Membership, membershipKey } from "./company-check.js";
 import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
@@ -35,6 +38,7 @@ const CLAIM = `${GITHUB_LINK_PATH}/link/claim`;
 export const START_AGAIN = "Start again from Rovara.";
 export const LINK_NOT_SET_UP = "Connecting your GitHub account isn't set up on this Rovara yet. Ask the Rovara team.";
 export const LINK_UNAVAILABLE = "Your GitHub account could not be connected just now. Start again from Rovara.";
+export const LINK_WEB_ONLY = "Connecting your GitHub account is done in the Rovara web app.";
 export const LINK_STEP_UP = "Connecting your GitHub account needs a fresh sign-in check; sign in again and retry.";
 export const LINK_TAKEN = "This GitHub account is already connected to another member of your company.";
 export const LINK_HAS_ANOTHER = "You already have a GitHub account connected. Disconnect it first.";
@@ -131,6 +135,9 @@ async function spend(ctx: GithubLinkContext, secret: string, who: { companyId: s
 export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL, stepUp?: CallerStepUp): Promise<unknown> {
   // A session that is not a sign-in session (a registered service's own token has none) is never a person linking their own account.
   if (caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  // Only the Rovara web app's own sign-in client (full access AND marked `webApp` by the operator): another full-access client could get a step-up token, show GitHub's page to someone else
+  // and pass the code back, which would link that someone's account to this person. Cloud's cookie binding is the only thing tying the browser at GitHub to the person, and it is the web app's.
+  if (caller.webApp !== true) throw agentXError("FORBIDDEN", LINK_WEB_ONLY);
   const member = await liveMembership(ctx, caller, companyId);
   const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
   const store = ctx.wiring.store;
@@ -169,7 +176,7 @@ export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperC
     const expiresAt = Math.floor(nowMs / 1000) + GITHUB_LINK_TTL_SECONDS;
     try {
       const written = await store.put({
-        item: { ...stateKey(secret), entityType: "GITHUB_LINK_STATE", provider: STATE_PROVIDER, status: "live", ...who, createdAt: new Date(nowMs).toISOString(), expiresAt },
+        item: { ...stateKey(secret), entityType: "GITHUB_LINK_STATE", provider: STATE_PROVIDER, status: "live", ...who, createdAt: new Date(nowMs).toISOString(), expiresAt, [INDEX_EXPIRY_ATTRIBUTE]: expiresAt + 3600 },
         condition: when.absent(),
       });
       if (!written.applied) throw new Error("state");

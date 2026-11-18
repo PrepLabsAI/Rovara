@@ -114,19 +114,22 @@ export async function unlinkGithubAccount(store: Pick<DocumentStore, "get" | "de
   const personKey = githubPersonKey(company, personId);
   const row = await store.get(personKey);
   if (row === undefined) return false;
-  const accountId = row["githubUserId"];
-  const accountHeld = isGithubUserId(accountId) && await linkedGithubPerson(store, company, accountId) === personId;
+  const stored = row["githubUserId"];
+  const accountId = isGithubUserId(stored) ? stored : undefined;
+  const heldId = accountId !== undefined && await linkedGithubPerson(store, company, accountId) === personId ? accountId : undefined;
+  const accountText = typeof stored === "string" ? stored : "";
   if (options.audit !== undefined) {
     const removed = await store.transact([
-      ...(accountHeld ? [{ kind: "delete" as const, key: githubAccountKey(company, accountId) }] : []),
-      { kind: "delete", key: personKey },
+      // Each delete only while the row still names this person and account, so a racing second unlink never removes a row another member has written since.
+      ...(heldId !== undefined ? [{ kind: "delete" as const, key: githubAccountKey(company, heldId), condition: when.eq("personId", personId) }] : []),
+      { kind: "delete", key: personKey, condition: when.eq("githubUserId", accountText) },
       { kind: "put", item: auditItem(company, "unlinked", options.audit, personId) },
     ]);
     if (!removed.applied) throw new Error("the GitHub account link could not be removed");
     return true;
   }
-  if (accountHeld) await store.delete({ key: githubAccountKey(company, accountId) });
-  await store.delete({ key: personKey });
+  if (heldId !== undefined) await store.delete({ key: githubAccountKey(company, heldId), condition: when.eq("personId", personId) });
+  await store.delete({ key: personKey, condition: when.eq("githubUserId", accountText) });
   return true;
 }
 

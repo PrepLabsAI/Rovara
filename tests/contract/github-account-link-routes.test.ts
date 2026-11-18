@@ -7,7 +7,7 @@ import { AgentXError } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { LINK_HAS_ANOTHER, LINK_NOT_SET_UP, LINK_STEP_UP, LINK_TAKEN, START_AGAIN, githubAccountKey, githubAuditPk, githubPersonKey } from "../../packages/broker/src/aws/github-account-link-routes.js";
+import { LINK_HAS_ANOTHER, LINK_NOT_SET_UP, LINK_WEB_ONLY, LINK_STEP_UP, LINK_TAKEN, START_AGAIN, githubAccountKey, githubAuditPk, githubPersonKey } from "../../packages/broker/src/aws/github-account-link-routes.js";
 import { githubLinkOf, linkedGithubPerson } from "../../packages/broker/src/core/people/github-links.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
@@ -342,6 +342,46 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
     expect(audit.map((row) => row["action"])).toEqual(["linked", "unlinked"]);
     expect(audit.every((row) => row["personId"] === ADA && row["actor"] === ADA)).toBe(true);
     expect(JSON.stringify(audit)).not.toMatch(/ada-lovelace|"7"|githubUserId/);
+  });
+});
+
+describe("only the Rovara web app's own sign-in client may link (security review 1, Medium)", () => {
+  const notWebApp = (w: World) => w.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Other tool", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  it("a full-access client that is not the web app, even with a fresh step-up, is refused on every route: nothing is minted, GitHub is not asked, nothing is linked", async () => {
+    const w = world();
+    const state = await w.startState();
+    notWebApp(w);
+    const put = vi.spyOn(w.store, "put");
+    for (const answer of [await w.start(), await w.claim({ state, code: "ada-code" }), await w.read(), await w.unlink()]) {
+      expect(answer.status).toBe(403); expect(answer.body.error).toEqual({ code: "FORBIDDEN", message: LINK_WEB_ONLY });
+    }
+    expect(put).not.toHaveBeenCalled();
+    expect(w.github.requests).toHaveLength(0);
+    expect(await githubLinkOf(w.store, A, ADA)).toBeUndefined();
+  });
+  it("the Rovara CLI's own token (no client) is refused too", async () => {
+    const w = world(); delete w.claims.azp;
+    expect((await w.start()).status).not.toBe(200);
+    expect(w.github.requests).toHaveLength(0);
+  });
+});
+
+describe("state rows expire, and unlink never removes a row another member wrote since (security review 1, Low)", () => {
+  it("the state row carries the store's expiry attribute, a margin after its own expiry", async () => {
+    const w = world(); const state = await w.startState();
+    const row = await w.store.get({ pk: `GITHUB_LINK_STATE#${createHash("sha256").update(state).digest("hex")}`, sk: "META" });
+    expect(row?.["indexExpiresAt"]).toBe(Math.floor(NOW0 / 1000) + 600 + 3600);
+  });
+  it("an unlink whose account row changed hands between its read and its delete removes nothing of the other member's", async () => {
+    const w = world(); await w.link("ada-code");
+    const transact = w.store.transact.bind(w.store);
+    w.store.transact = (async (items: Parameters<typeof transact>[0]) => {
+      await w.store.put({ item: { ...githubAccountKey(A, "7"), entityType: "GITHUB_ACCOUNT_LINK", companyId: A, githubUserId: "7", login: "ada-lovelace", personId: BEA, linkedAt: TIME } });
+      return transact(items);
+    });
+    const answer = await w.unlink();
+    expect(answer.status).toBe(503);
+    expect(await linkedPerson(w, A, "7")).toBe(BEA);
   });
 });
 
