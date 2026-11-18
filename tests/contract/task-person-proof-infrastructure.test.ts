@@ -1,6 +1,7 @@
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutGcpPackControlPlane } from "../support/gcp-pack-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { Template } from "aws-cdk-lib/assertions";
@@ -297,7 +298,7 @@ describe("the named TEST proof-only installation gate", () => {
       // L4-HW8b: the broker's Slack poster variables and the Slack adapter secret's policy (tests/support/broker-slack-poster-template.ts) are asserted and taken out too; the legacy template has none.
       // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer is asserted and taken out (tests/support/dispatcher-hook-signer-template.ts); legacy has none.
       const environment = label === "named" ? "agentxlivetest123" : "staging";
-      const pinned = label === "legacy" ? template : withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutBrokerSlackPoster(structuredClone(template), environment))), environment));
+      const pinned = label === "legacy" ? template : withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutBrokerSlackPoster(withoutGcpPackControlPlane(structuredClone(template)), environment))), environment));
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;

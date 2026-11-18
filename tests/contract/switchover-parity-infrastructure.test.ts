@@ -11,6 +11,7 @@ import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { EgressAlarms } from "../../infra/lib/egress-alarms.js";
 import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
+import { withoutGcpPackFoundation } from "../support/gcp-pack-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 // The staging switch-over (DEC 227, option A) updates the old hosted stacks in place with Code's templates. These tests pin what must survive that update unchanged: the
@@ -29,7 +30,8 @@ const stagingStacks = (() => {
   const app = buildAgentXApp({ agentxEnv: "staging", agentxRegion: "us-west-2" });
   const stacks = app.node.children.filter((child): child is Stack => Stack.isStack(child));
   const byName = (name: string) => stacks.find((stack) => stack.stackName === name)!;
-  return { foundation: Template.fromStack(byName("agentx-staging-foundation")).toJSON() as { Resources: Record<string, Resource>; Outputs: Record<string, unknown> },
+  // L4-E8I: the GCP pack's foundation additions (parameter, condition, the allow list's conditional registries, three repositories, one statement) are asserted and taken out (gcp-pack-infrastructure.test.ts checks them in full).
+  return { foundation: withoutGcpPackFoundation(Template.fromStack(byName("agentx-staging-foundation")).toJSON()) as { Resources: Record<string, Resource>; Outputs: Record<string, unknown> },
     controlPlane: Template.fromStack(byName("agentx-staging-control-plane")).toJSON() as { Resources: Record<string, Resource> } };
 })();
 const withoutMetadata = (resource: Resource): Resource => {
@@ -109,7 +111,10 @@ describe("the staging foundation keeps the live DNS firewall and egress alarms",
       return Template.fromStack(new ProductionFoundationStack(app, "ExtraFoundation", { deploymentRegion: "us-west-2", naming: environmentNaming("staging") }));
     };
     const allow = Object.values(resourcesOf(foundation("pkgs.example.com"), "AWS::Route53Resolver::FirewallDomainList")).find((list) => list.Properties.Name === "agentx-staging-allow");
-    expect((allow!.Properties.Domains as unknown[]).at(-1)).toBe("pkgs.example.com");
+    // L4-E8I: the list is an Fn::If of itself with and without Google's two image registries (the pack's `pulled` group); an operator's extra domain is in both branches, before the registries.
+    const [, withRegistries, withoutRegistries] = (allow!.Properties.Domains as { "Fn::If": [string, string[], string[]] })["Fn::If"];
+    expect(withoutRegistries.at(-1)).toBe("pkgs.example.com");
+    expect(withRegistries.slice(-3)).toEqual(["pkgs.example.com", "gcr.io", "us-docker.pkg.dev"]);
   });
 
   it("is not in the legacy production foundation", () => {

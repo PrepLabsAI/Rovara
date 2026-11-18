@@ -11,7 +11,8 @@
 // references) and a hosted worker's (from these mirrored references) are the same catalog: the same ids, the same digests.
 import { ENVIRONMENT_NAME_PATTERN } from "./environments.js";
 import { OwnerListEntrySchema, parseImageReference, type OwnerListEntry } from "./owner-image-list.js";
-import { OWNER_STARTER_IMAGES, type OwnerStarterImage } from "./owner-starter-images.js";
+import { gcpPackGroupsOf, gcpPackGroupOf, gcpPackMirrorRepositoryName } from "./gcp-pack-images.js";
+import { OWNER_GCP_PACK_IMAGES, OWNER_STARTER_IMAGES, ownerGcpPackMirrorable, type OwnerGcpPackImage, type OwnerStarterImage } from "./owner-starter-images.js";
 
 /** An ECR registry host of one account and region: `<12 digits>.dkr.ecr.<region>.amazonaws.com`. */
 export const ECR_REGISTRY_PATTERN = /^[0-9]{12}\.dkr\.ecr\.[a-z]{2}(?:-[a-z]+)+-[0-9]\.amazonaws\.com$/u;
@@ -49,4 +50,44 @@ export function testServiceMirrorRepositories(env: string): TestServiceMirrorRep
 export function mirroredStarterEntries(registry: string, env: string): OwnerListEntry[] {
   if (typeof registry !== "string" || !ECR_REGISTRY_PATTERN.test(registry)) throw new Error("the test service mirror is an ECR registry of this account");
   return testServiceMirrorRepositories(env).map((repository) => OwnerListEntrySchema.parse({ reference: `${registry}/${repository.repositoryName}@sha256:${repository.digest}`, family: repository.starter.family, version: repository.starter.version }));
+}
+
+// ---- the GCP pack's copies (lane L4-E8I, owner decision 2026-11-18)
+//
+// Three more repositories in the same family of names, for the pack's MIRRORED images only (Spanner, fake-gcs-server, the goccy BigQuery emulator: `ownerGcpPackMirrorable`). Google's SDK image (Pub/Sub, Firestore, Datastore,
+// Bigtable) is never in this list: a worker pulls it from Google's registry by digest. They are separate from `testServiceMirrorRepositories` on purpose: the five starter repositories, the boot stage's `refs` and the copy script
+// stay exactly what they were, and a pack copy exists only where the infrastructure and the setting say so.
+
+/** One repository of the pack's mirror: the image it holds and the ECR repository name. */
+export interface GcpPackMirrorRepository {
+  readonly image: OwnerGcpPackImage;
+  /** `agentx-<env>--test-services/<family>-<version>/<family>`, outside the environment's pull-through prefix (`agentx-<env>/`) like the starter copies. */
+  readonly repositoryName: string;
+  /** The image's 64 hex digest (the copy's digest: a copy by digest keeps the index manifest byte for byte). */
+  readonly digest: string;
+  /** `<version>-<first 12 of the digest>`: unique per digest, so an immutable tag never has to move. A label only. */
+  readonly tag: string;
+}
+
+/** The pack's mirror repositories of an environment, in the pack list's order. Throws on a name that is not an environment name. */
+export function gcpPackMirrorRepositories(env: string): GcpPackMirrorRepository[] {
+  return ownerGcpPackMirrorable().map((image) => {
+    const parsed = parseImageReference(image.reference);
+    if (parsed?.digest === undefined) throw new Error("a pack image is not pinned by digest");
+    return { image, repositoryName: gcpPackMirrorRepositoryName(env, image.family, image.version), digest: parsed.digest, tag: `${image.version}-${parsed.digest.slice(0, 12)}` };
+  });
+}
+
+/**
+ * The owner-list entries a hosted worker runs for the pack, for the groups `groups` (a stack parameter value or the laptop's list): the MIRRORED images named by the install's own ECR copy (`<registry>/<repository>@sha256:<digest>`),
+ * the PULLED images by their source reference on Google's registry (the same digest, never copied). Every entry passes the owner-list schema. Nothing of a group that is not named. Throws on a registry that is not an ECR registry.
+ */
+export function gcpPackWorkerEntries(registry: string, env: string, groups: string | undefined): OwnerListEntry[] {
+  if (typeof registry !== "string" || !ECR_REGISTRY_PATTERN.test(registry)) throw new Error("the test service mirror is an ECR registry of this account");
+  const on = gcpPackGroupsOf(groups);
+  const copies = new Map(gcpPackMirrorRepositories(env).map((repository) => [repository.image.family, repository]));
+  return OWNER_GCP_PACK_IMAGES.filter((image) => on.has(gcpPackGroupOf(image.family))).map((image) => {
+    const copy = copies.get(image.family);
+    return OwnerListEntrySchema.parse({ reference: copy === undefined ? image.reference : `${registry}/${copy.repositoryName}@sha256:${copy.digest}`, family: image.family, version: image.version });
+  });
 }

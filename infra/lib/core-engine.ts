@@ -27,7 +27,7 @@ import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch 
 import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
-  TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
+  GCP_PACK_PARAMETER_DEFAULT, GCP_PACK_PARAMETER_VALUES, TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
@@ -77,6 +77,8 @@ export class CoreEngine extends Construct {
   readonly testServices: CfnParameter;
   /** DEC 254zm: `none` (the default) or `mirrored`, packed for the broker and the dispatcher (`ti`) and given whole to the session steps. */
   readonly testServiceImages: CfnParameter;
+  /** L4-E8I: the GCP pack groups (`off`, the default, or a colon list such as `mirrored:pulled`), packed for the broker and the dispatcher (`gp`) and given whole to the session steps. */
+  readonly gcpPack: CfnParameter;
   private readonly answersModel: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
@@ -141,6 +143,12 @@ export class CoreEngine extends Construct {
     this.testServiceImages = new CfnParameter(stack, "TestServiceImages", { type: "String", default: TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, allowedValues: [...TEST_SERVICE_IMAGES_PARAMETER_VALUES], description: "Test service images: none (the default) or mirrored once the starter copies are checked" });
     addBrokerSetting(broker, props.naming, "testServiceImages", this.testServiceImages.valueAsString);
     addPackedSetting(dispatcher, "testServiceImages", this.testServiceImages.valueAsString);
+    // L4-E8I (owner DEC 254zzz62): the GCP pack (Pub/Sub, Firestore, Datastore, Bigtable, Spanner, Cloud Storage, BigQuery stand-ins). `off` (the default) is exactly the template before this setting. The same parameter, with the same values, is on the
+    // foundation (which holds the worker host's egress and the three image copies): `agentx config set testServices.gcpPack` sets both. Packed (`gp`) for the broker and the dispatcher, where it adds the pack's images to the hosted catalog; the session
+    // steps carry it into a worker's boot (control-plane.ts). Kept across upgrades (OPERATOR_PARAMETERS).
+    this.gcpPack = new CfnParameter(stack, "TestServicesGcpPack", { type: "String", default: GCP_PACK_PARAMETER_DEFAULT, allowedValues: [...GCP_PACK_PARAMETER_VALUES], description: "GCP test services pack: off (the default), or the groups on (mirrored, pulled, bigquery), colon-separated" });
+    addBrokerSetting(broker, props.naming, "gcpPack", this.gcpPack.valueAsString);
+    addPackedSetting(dispatcher, "gcpPack", this.gcpPack.valueAsString);
     // L4-AM (DEC 254zzn(2)): the hosted answers model, for the BROKER only (the answers and the start-box classifier run there; the dispatcher runs coding steps, which keep the agent model). A
     // stack parameter, so an upgrade keeps it (OPERATOR_PARAMETERS); packed (`aa`), because the broker's 4 KB has no room for another variable. Empty (the default): answers and the
     // classifier use the agent model, exactly as before. A Claude engine name only (the answers purpose runs on the company's own Anthropic account). No IAM, no secret.

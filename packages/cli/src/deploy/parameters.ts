@@ -69,7 +69,8 @@ export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningK
  */
 export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = {
   access: [],
-  foundation: [],
+  // L4-E8I: the GCP pack setting (agentx config set testServices.gcpPack), also a parameter of the control plane; the foundation holds the worker hosts' egress and the pack's image copies.
+  foundation: ["TestServicesGcpPack"],
   identity: [],
   // The AI navigation model the customer chose (agentx config set models.e2eAgent): a stack parameter and not a model role, so it is not in the settings the upgrade's answers read.
   // MODEL3: the fallback model the customer chose (agentx config set models.fallback), also a parameter of the Slack stack.
@@ -87,6 +88,8 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     "TestServices",
     // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
     "TestServiceImages",
+    // L4-E8I: the GCP pack groups (off | mirrored | pulled | ... colon-separated), also on the foundation; set by the operator, kept across upgrades.
+    "TestServicesGcpPack",
     // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
     "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.

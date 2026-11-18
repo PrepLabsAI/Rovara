@@ -1,6 +1,8 @@
 import {
   Aws,
+  CfnCondition,
   CfnOutput,
+  CfnParameter,
   type CfnTag,
   Fn,
   RemovalPolicy,
@@ -12,7 +14,7 @@ import {
   aws_logs as logs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { NAT_EGRESS_ADDRESSES_OUTPUT } from "@agentx/contracts";
+import { GCP_PACK_PARAMETER_DEFAULT, GCP_PACK_PARAMETER_VALUES, GCP_PACK_PULL_REGISTRY_HOSTS, NAT_EGRESS_ADDRESSES_OUTPUT, gcpPackPullsFromSource } from "@agentx/contracts";
 import { AgentDnsFirewall, EGRESS_ALLOW_DOMAINS_CONTEXT_KEY, installAgentAllowDomains, parseExtraAllowDomains } from "./agent-dns-firewall.js";
 import { EgressAlarms, alertsTopicFromName } from "./egress-alarms.js";
 import { Ec2WorkerFoundation } from "./ec2-workers.js";
@@ -221,11 +223,18 @@ export class ProductionFoundationStack extends Stack {
     // Named environments: the machines in the VPC resolve only an allowlist, and unusual egress raises an alarm. The legacy production template stays as it is.
     if (naming.env !== undefined) {
       const baseAllowDomains = installAgentAllowDomains(props.deploymentRegion, Aws.ACCOUNT_ID);
+      // L4-E8I (owner DEC 254zzz62): the GCP pack setting, the same parameter and values as the control plane's (`agentx config set testServices.gcpPack` sets both). Here it decides one thing: whether the worker hosts may resolve and
+      // reach Google's two image registries to pull the pack's source-pulled image. Off (the default): nothing is added to the DNS firewall.
+      const gcpPack = new CfnParameter(this, "TestServicesGcpPack", { type: "String", default: GCP_PACK_PARAMETER_DEFAULT, allowedValues: [...GCP_PACK_PARAMETER_VALUES], description: "GCP test services pack: off (the default), or the groups on (mirrored, pulled, bigquery), colon-separated" });
+      const pullsFromSource = new CfnCondition(this, "GcpPackPullsFromSource", {
+        expression: Fn.conditionOr(...GCP_PACK_PARAMETER_VALUES.filter((value) => gcpPackPullsFromSource(value)).map((value) => Fn.conditionEquals(gcpPack.valueAsString, value))),
+      });
       const dnsFirewall = new AgentDnsFirewall(this, "AgentDnsFirewall", {
         env: naming.env,
         vpcId: vpc.ref,
         baseAllowDomains,
         extraAllowDomains: parseExtraAllowDomains(this.node.tryGetContext(EGRESS_ALLOW_DOMAINS_CONTEXT_KEY), baseAllowDomains),
+        pullFromSource: { condition: pullsFromSource, hosts: GCP_PACK_PULL_REGISTRY_HOSTS },
       });
       // The project list's id, for whatever keeps the approved project domains on it (the template never owns its contents).
       new CfnOutput(this, "ProjectAllowListId", { value: dnsFirewall.projectAllowListId });

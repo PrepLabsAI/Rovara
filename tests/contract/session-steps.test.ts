@@ -11,7 +11,7 @@ import { hostedWorkersRunTestServices } from "../../packages/broker/src/aws/host
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices"> = {}) {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices" | "testServicesGcpPack"> = {}) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -107,6 +107,23 @@ describe("session steps", () => {
     // A named launch renders it the same way.
     const named = { workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false, workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`, invokePublicKey: "QUJD", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", modelProvider: "amazon-bedrock", modelId: "m", promptCacheRetention: "long" as const, logGroupName: "/agentx/x/worker", environmentKind: "named" as const, bootStage2Sha256: "b".repeat(64), testServices: true as const };
     expect(ec2WorkerBootScript(named, bootScript)).toContain("export AGENTX_TEST_SERVICES='1'");
+  });
+
+  it("L4-E8I: a launch carries the GCP pack setting only with test services on and a non-off setting, rendered as ROVARA_TEST_SERVICES_GCP_PACK; otherwise the user data is byte-identical", async () => {
+    const launch = async (more: Pick<SessionStepsDependencies, "testServices" | "testServicesGcpPack">) => {
+      const { handler } = setup(undefined, {}, more);
+      const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
+      return gunzipSync(Buffer.from(result.userData, "base64")).toString("utf8");
+    };
+    const base = await launch({ testServices: true });
+    expect(base).not.toContain("ROVARA_TEST_SERVICES_GCP_PACK");
+    expect(await launch({ testServices: true, testServicesGcpPack: "mirrored:pulled" })).toContain("export ROVARA_TEST_SERVICES_GCP_PACK='mirrored:pulled'");
+    expect((await launch({ testServices: true, testServicesGcpPack: "pulled" })).replace("export ROVARA_TEST_SERVICES_GCP_PACK='pulled'\n", "")).toBe(base);
+    // Without test services the setting is not passed on, whatever it says.
+    expect(await launch({ testServices: false, testServicesGcpPack: "pulled" })).toBe(await launch({}));
+    expect(await launch({ testServicesGcpPack: "pulled" })).not.toContain("ROVARA_TEST_SERVICES_GCP_PACK");
+    const source = readFileSync(new URL("../../packages/broker/src/aws/session-steps.ts", import.meta.url), "utf8");
+    expect(source).toContain("hostedGcpPackSetting(process.env)");
   });
 
   it("DEC 254zm: the deployed handler reads whether workers run test services from the switch AND the TestServiceImages setting (exactly mirrored)", () => {

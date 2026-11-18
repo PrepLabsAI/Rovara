@@ -9,7 +9,7 @@
 // (task-flow/dispatch.ts), and every other step runs as before.
 //
 // Leaf module: it reads only the environment it is given, and makes no AWS call.
-import { TEST_SERVICE_IMAGES_SETTING_VARIABLE, ownerCatalogOf, ownerStarterEntries, type VerifiedCatalog } from "@agentx/contracts";
+import { GCP_PACK_PARAMETER_DEFAULT, GCP_PACK_PARAMETER_VALUES, GCP_PACK_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, ownerCatalogOf, ownerGcpPackEntries, ownerGcpPackImagesFor, ownerStarterEntries, type VerifiedCatalog } from "@agentx/contracts";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
 import { TEST_SERVICES_UNAVAILABLE_VARIABLE, testServicesSwitchedOn } from "../core/test-env/test-services-switch.js";
 
@@ -33,12 +33,26 @@ export function markHostedTestServices(env: Record<string, string | undefined>, 
   return env[TEST_SERVICES_UNAVAILABLE_VARIABLE];
 }
 
-let starterCatalog: VerifiedCatalog | undefined;
 /**
- * The hosted catalog source: the owner starter list compiled into this release (contracts owner-starter-images.ts, a guard file), as `ownerCatalogOf` makes it, the same catalog the laptop builds from the same list.
- * No signing key and no download: Code's release is the trust anchor, exactly as on a laptop. Undefined while test services are switched off.
+ * The GCP pack setting (lane L4-E8I, the stack parameter TestServicesGcpPack packed `gp`, read as ROVARA_TEST_SERVICES_GCP_PACK) in effect: exactly one of the parameter's non-off values, else undefined (off, unset, a typo: fail closed).
+ * Only a launch that runs test services carries it (`hostedWorkersRunTestServices`).
+ */
+export function hostedGcpPackSetting(env: Record<string, string | undefined>): string | undefined {
+  const value = env[GCP_PACK_SETTING_VARIABLE];
+  return value !== undefined && value !== GCP_PACK_PARAMETER_DEFAULT && GCP_PACK_PARAMETER_VALUES.includes(value) && hostedWorkersRunTestServices(env) ? value : undefined;
+}
+
+const catalogs = new Map<string, VerifiedCatalog | undefined>();
+/**
+ * The hosted catalog source: the owner starter list compiled into this release (contracts owner-starter-images.ts, a guard file), as `ownerCatalogOf` makes it, the same catalog the laptop builds from the same list, then the GCP pack's
+ * images of the groups the install's setting switches on (none by default: the catalog is the starters alone). No signing key and no download: Code's release is the trust anchor, exactly as on a laptop. Undefined while test services are
+ * switched off. The catalog names an image by its catalog repository and digest, never by where a worker pulls it from, so it is the same whether a pack image is copied into the install's ECR or pulled from Google.
  */
 export function hostedServiceCatalog(env: NodeJS.ProcessEnv): ServiceCatalogSource | undefined {
   if (!testServicesSwitchedOn(env)) return undefined;
-  return async () => (starterCatalog ??= ownerCatalogOf(ownerStarterEntries()));
+  const pack = hostedGcpPackSetting(env) ?? "";
+  return async () => {
+    if (!catalogs.has(pack)) catalogs.set(pack, ownerCatalogOf([...ownerStarterEntries(), ...ownerGcpPackEntries(ownerGcpPackImagesFor({ [GCP_PACK_SETTING_VARIABLE]: pack }))]));
+    return catalogs.get(pack);
+  };
 }
