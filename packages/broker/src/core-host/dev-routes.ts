@@ -12,6 +12,7 @@
 //     old workflow routes' request and answer (`{ task }`), so Cloud's Send back and Accept findings work for a task of either engine. Served only when the deployment wires the money
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
 //     (the install's owner role), which a hosted company never uses for who owns a task;
+//   - the company's agent directory (`GET /v1/app/agents`, lead 4 L4-MF3): read only, for a LIVE company owner or administrator only (agent-directory-routes.ts);
 //   - how we work (`GET /v1/app/projects/<p>/how-we-work`, `.../playbook`): read only, for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-PB, DEC 254zzj);
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
@@ -76,6 +77,7 @@ import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } fro
 import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
 import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "./start-suggest-routes.js";
 import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
+import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -253,7 +255,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isAgentDirectoryPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -602,6 +604,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
           if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log });
+        }
+        if (isAgentDirectoryPath(path, request.method)) {
+          // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.
+          return await routeHostedAgentDirectory({
+            request, path, companyId: target.runtime.companyId, role: membership.role, developerId: developerIdOf(caller.principal),
+            store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
+          });
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {

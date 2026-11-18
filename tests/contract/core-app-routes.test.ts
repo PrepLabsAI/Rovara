@@ -77,6 +77,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/search", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
     // L4-B3b: approving the project's test environment (the state read keeps its own row above).
     ["POST", "/v1/app/projects/payments/test-environment/approve", "full"],
+    // Lead 4 L4-MF3: the company-wide agent directory (a live company owner or administrator reads it).
+    ["GET", "/v1/app/agents", "full"],
     // L4-D: confirm, discard and decide a setup candidate.
     ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
     // Lead 4 C1: the wiki's corrections (additive: no existing row changed).

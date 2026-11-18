@@ -254,6 +254,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/app/projects/{project}/wiki/search", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}", requires: "full" },
   { method: "GET", path: "/v1/app/projects/{project}/wiki/pages/{pageId}/sources", requires: "full" },
+  // Lead 4 L4-MF3: the company-wide agent directory (core-host/agent-directory-routes.ts): full access only, then a LIVE company owner or administrator (anyone else gets a fixed 403). Read only.
+  { method: "GET", path: "/v1/app/agents", requires: "full" },
   // L4-D (DEC 254z b): "Use this setup" (a candidate and its check), dropping it, and deciding it (a fresh step-up, then the risk-based approver rule: a project maintainer for low and
   // medium risk, a company owner or admin for high).
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/confirm", requires: "full" },
