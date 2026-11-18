@@ -2,12 +2,12 @@
 // companies with the same project name never see or change each other's lessons; only a project or company admin sets the learning mode; every write is audited; an erased person's words never come back.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, LessonViewSchema, companyScoped, learningModeLockKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
+import { AgentXError, LEARNED_CONTEXT_FEATURE, LessonViewSchema, companyScoped, learningModeLockKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
-import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, SUMMARY_NEEDS_ADMIN, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
+import { createLessonsApi, encodeLessonCursor, isLessonsApiPath, LESSONS_OFF, MEASURE_NEEDS_ADMIN, MODE_NEEDS_ADMIN, NO_SUCH_PROJECT, SUMMARY_NEEDS_ADMIN, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { DocumentPresetStore, DocumentTier0Settings, writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
@@ -54,7 +54,7 @@ function peopleOf(erased: Set<string>): HostedLessonPeople & { asked: string[] }
   };
 }
 
-interface World { world: FakeWorld; lessons: Map<OrgId, CoreLessons>; tasks: Map<OrgId, string>; people: ReturnType<typeof peopleOf>; erased: Set<string> }
+interface World { world: FakeWorld; lessons: Map<OrgId, CoreLessons>; tasks: Map<OrgId, string>; spaces: Map<OrgId, string>; people: ReturnType<typeof peopleOf>; erased: Set<string> }
 
 async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" }): Promise<World> {
   const world = createFakeWorld();
@@ -65,6 +65,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
   const people = peopleOf(erased);
   const lessons = new Map<OrgId, CoreLessons>();
   const tasks = new Map<OrgId, string>();
+  const spaces = new Map<OrgId, string>();
   for (const companyId of [A, B]) {
     await registerProject(world, companyId);
     const runtime = createCoreRuntime({
@@ -77,8 +78,9 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
     const principal = localOwnerPrincipal({ companyId });
     const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
     tasks.set(companyId, task.taskId);
+    spaces.set(companyId, task.workspaceId);
   }
-  return { world, lessons, tasks, people, erased };
+  return { world, lessons, tasks, spaces, people, erased };
 }
 
 function api(w: World, over: Partial<LessonsApiOptions> = {}) {
@@ -120,7 +122,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", `${P}/lessons/les_aaaa1111/retire-request`, {}], ["GET", `${P}/tasks/${randomUUID()}/lessons`],
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
   ["POST", `${P}/lessons/mode/trial-offer`, { decision: "accept" }],
-  ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }],
+  ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }], ["GET", `${P}/lessons/measure`],
 ];
 
 describe("the paths", () => {
@@ -131,7 +133,7 @@ describe("the paths", () => {
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
-      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary",
+      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure",
     ]].sort());
     expect(rows.every((route) => route.requires === "full")).toBe(true);
     const samples = [...rows.map((route) => route.path.replace(/\{[A-Za-z]+\}/g, "x1")), "/v1/dev/projects/x1", "/v1/dev/projects/x1/lessons/", "/v1/dev/projects/x1/lessons/a/b", "/v1/dev/projects/x1/lessons/a/approve/b", "/v1/dev/projects/x1/tasks/t1", "/v1/dev/projects/x1/lessonsx"];
@@ -782,5 +784,74 @@ describe("the weekly summary setting", () => {
     const { api: target } = api(w, { lessonsOf: async (companyId) => (companyId === A ? { ...real, runtime: { ...real.runtime, audit: failing } } : undefined) });
     expect(await call(target, "a-admin", "PUT", PATH, { on: true })).toMatchObject({ ok: false, code: "AUDIT_UNAVAILABLE" });
     expect(await call(api(w).api, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { on: false } });
+  });
+});
+
+describe("lessons phase 0: the measurement read (GET lessons/measure)", () => {
+  const PATH = `${P}/lessons/measure`;
+  const approved = (companyId: string, id: string) => lesson(companyId, id, { approvals: [{ approvalId: "a1", by: "person-1", at: 1, mode: "one" }], title: "Retry helper", body: "Wrap network calls in withRetry instead of looping by hand." });
+  /** One live load of the company's task through the real dispatch glue, and the merged and reverted milestones of its task. */
+  async function drive(w: World, companyId: OrgId): Promise<void> {
+    await put(w, companyId, approved(companyId, `les_${companyId === A ? "aaaa" : "bbbb"}1111`));
+    const lessons = w.lessons.get(companyId)!;
+    await lessons.host.learnedFor({ workspaceId: w.spaces.get(companyId)!, operationId: `op-${companyId}`, workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE] });
+    // The measurement is not waited for by the load: let it settle.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  it("a project admin and a company admin read the numbers; a contributor is refused, an outsider is told nothing, a script token never reads", async () => {
+    const w = await setUp();
+    await drive(w, A);
+    const { api: target } = api(w);
+    for (const person of ["a-admin", "a-maint"]) {
+      const answer = await call(target, person, "GET", PATH);
+      expect(answer, person).toMatchObject({ ok: true, body: { project: "payments", windowDays: 30, floor: 0.35, cleanMerge: { merged: 0, reverted: 0, clean: 0, rate: null }, truncated: false, unreadable: 0 } });
+    }
+    expect(await call(target, "a-contrib", "GET", PATH)).toEqual({ ok: false, code: "FORBIDDEN", status: 403, message: MEASURE_NEEDS_ADMIN });
+    expect(await call(target, "a-out", "GET", PATH)).toEqual({ ok: false, code: "NOT_FOUND", status: 404, message: NO_SUCH_PROJECT });
+    expect(await call(target, "a-admin", "GET", PATH, undefined, undefined, { scriptToken: { tokenId: "t1" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    for (const method of ["POST", "PUT", "DELETE"]) expect(await call(target, "a-admin", method, PATH, {})).toMatchObject({ ok: false, code: "NOT_FOUND" });
+  });
+
+  it("the numbers come from the live dispatch: a load writes a row and the merge and the revert of the task make the clean-merge count", async () => {
+    const w = await setUp();
+    await drive(w, A);
+    const { api: target } = api(w);
+    const before = await call(target, "a-admin", "GET", PATH);
+    expect(before).toMatchObject({ ok: true, body: { loads: 1, lessonsInUse: 1, loadedLessons: 1 } });
+    const host = w.lessons.get(A)!.host;
+    const at = new Date(w.world.clock.now).toISOString();
+    await host.milestone.on({ kind: "merged", orgId: A, taskId: w.tasks.get(A)!, at, text: "merged" });
+    expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { cleanMerge: { merged: 1, reverted: 0, clean: 1, rate: 1 } } });
+    await host.noteReverted(w.tasks.get(A)!);
+    expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { cleanMerge: { merged: 1, reverted: 1, clean: 0, rate: 0 } } });
+  });
+
+  it("two companies with one project name: each company's admin sees only its own numbers, and company B's milestone for A's task writes nothing", async () => {
+    const w = await setUp();
+    await drive(w, A);
+    await drive(w, B);
+    const hostB = w.lessons.get(B)!.host;
+    const at = new Date(w.world.clock.now).toISOString();
+    // B's host is told about A's task (a wrong routing): the task is not B's, so nothing is written anywhere.
+    await hostB.milestone.on({ kind: "merged", orgId: B, taskId: w.tasks.get(A)!, at, text: "merged" });
+    await hostB.noteReverted(w.tasks.get(A)!);
+    await w.lessons.get(A)!.host.milestone.on({ kind: "merged", orgId: A, taskId: w.tasks.get(A)!, at, text: "merged" });
+    const { api: target } = api(w);
+    expect(await call(target, "a-admin", "GET", PATH)).toMatchObject({ ok: true, body: { loads: 1, cleanMerge: { merged: 1, reverted: 0 } } });
+    expect(await call(target, "b-admin", "GET", PATH)).toMatchObject({ ok: true, body: { loads: 1, cleanMerge: { merged: 0, reverted: 0 } } });
+    const rowsOf = async (company: OrgId, kind: string) => (await w.world.store.query({ pk: companyScoped(company, `${kind}#payments`) })).items;
+    expect((await rowsOf(A, "LESSON_FIT")).length).toBe(1);
+    expect((await rowsOf(B, "LESSON_FIT")).length).toBe(1);
+    expect((await rowsOf(B, "LESSON_MERGE")).length).toBe(0);
+    expect(JSON.stringify(await rowsOf(A, "LESSON_FIT"))).not.toContain(B);
+  });
+
+  it("with the switch off nothing is read, and a company the switch does not cover is told lessons are off", async () => {
+    const w = await setUp({ [CORE_LESSONS_VARIABLE]: `on:${A}` });
+    const off = api(w, { lessonsSwitch: { mode: "off" } });
+    expect(await call(off.api, "a-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF", message: LESSONS_OFF });
+    expect(off.companyOf).not.toHaveBeenCalled();
+    expect(await call(api(w, { lessonsSwitch: { mode: "on-for", companies: [A] } }).api, "b-admin", "GET", PATH)).toMatchObject({ ok: false, code: "LESSONS_SWITCHED_OFF" });
   });
 });
