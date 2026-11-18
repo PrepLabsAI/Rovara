@@ -16,7 +16,7 @@
 // Both reads are for tools OUTSIDE Rovara, so they carry the owner's limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person (a fixed refusal after that), no bulk mode (`all` is refused), one audit
 // record per answer holding the unit ids and no text, and one admin notice a day when a person's tools were served more than 150 DISTINCT units.
 // The API token only reads. Authentication happens before this (the identity adapter vouches for the principal). Nothing here reads who is acting from a body.
-import { INDEX_EXPIRY_ATTRIBUTE, KnowledgeProposeBodySchema, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
