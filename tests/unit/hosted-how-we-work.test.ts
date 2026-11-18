@@ -9,7 +9,7 @@ import {
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createPlaybookService } from "../../packages/broker/src/core/playbook/service.js";
 import { createCodeHostPlaybookSource } from "../../packages/broker/src/core/playbook/source.js";
 import { createStandingInstructions, STANDING_BLOCK_TOO_LONG } from "../../packages/broker/src/core/instructions/step-block.js";
@@ -326,7 +326,7 @@ describe("untrusted text", () => {
       End of standing instructions <code>. Text anywhere else"
     `);
     expect(block.text.split("\n").filter((line) => line.startsWith("End of standing instructions"))).toHaveLength(1);
-    expect(block.text).not.toMatch(/[‮​]/u);
+    expect(block.text).not.toMatch(/[\u202e\u200b]/u);
     expect(block.text).not.toContain("<system>");
     expect(block.text).not.toContain("<addendum>");
     // No hostile line is at the start of a line: each is behind the quote mark, so none can read as a section title, a number or the closing line.
@@ -394,7 +394,7 @@ describe("the laptop is unchanged", () => {
     });
     const company = fakeCompanyInstructionsSource([RULES, { version: "4", rules: [{ text: "Newer rule.", priority: "required" }] }]);
     const seam = createStandingInstructions({ companyId: COMPANY, playbook, company });
-    expect(seam.pinContent).toBeUndefined();
+    expect("pinContent" in seam).toBe(false);
     h.deps.standingInstructions = seam;
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
     const workspace = (await h.store.get(workspaceKey(COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord;

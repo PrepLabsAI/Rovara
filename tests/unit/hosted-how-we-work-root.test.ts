@@ -5,7 +5,6 @@ import { PLAYBOOK_FILE_PATH, projectRevisionKey, orgProjectCatalogKey, type Json
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
-import { fakeCompanyInstructionsSource } from "../support/company-instructions-fake.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", () => ({ codeAdapterModules: () => adapters.modules }));
