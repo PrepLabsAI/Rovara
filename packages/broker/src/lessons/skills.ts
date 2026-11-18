@@ -172,6 +172,9 @@ export function provenProcedure(input: ProvenInput): boolean {
   return input.lesson.type === "procedure" && provenLesson(input);
 }
 
+/** The most lessons (with no skill made from them yet) whose visibility is checked for one list of cards, and the most visible ones whose uses are counted. */
+const SKILL_OFFER_CANDIDATES_MAX = 200;
+const SKILL_OFFER_COUNTED_MAX = 50;
 export interface SkillOffer { lessonId: string; title: string; tasks: number; days: number }
 /** The "Make this a skill?" cards: the project's proven procedure lessons that no skill was made from and that the whole project may read. Counts only the active procedure lessons given (so one count call is bounded), at most `max` offers. */
 export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" | "access" | "now" | "signals" | "log">, key: ScopeKey, options: { max?: number } = {}): Promise<SkillOffer[]> {
@@ -179,10 +182,11 @@ export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" 
   const active = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
   if (active.length === 0) return [];
   const used = new Set((await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } })).flatMap((row) => headOf(row)?.fromLessons ?? []));
-  const unused = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
+  // At most SKILL_OFFER_CANDIDATES_MAX lessons with no skill yet are checked, then at most SKILL_OFFER_COUNTED_MAX of the ones the whole project may read are counted: a run of private lessons at the front never hides a visible one, and the reads stay bounded.
+  const unused = active.filter((lesson) => !used.has(lesson.id)).slice(0, SKILL_OFFER_CANDIDATES_MAX);
   if (unused.length === 0) return [];
   // A card shows a lesson's title, so it is shown only for a lesson the WHOLE project may read (the same test the draft applies: read as for nobody in particular).
-  const open = await readVisible({ access: deps.access, key, viewer: undefined, lessons: unused, where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
+  const open = (await readVisible({ access: deps.access, key, viewer: undefined, lessons: unused, where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) })).slice(0, SKILL_OFFER_COUNTED_MAX);
   if (open.length === 0) return [];
   const counts = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: open.map((lesson) => lesson.id), now: deps.now() });
   const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
