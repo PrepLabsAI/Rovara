@@ -52,6 +52,10 @@ import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 const MAX_DISPATCH_ATTEMPTS = 5;
 /** Days an evidence pack stored under the `evidence-record` tag value is kept before the bucket expires it. */
 export const EVIDENCE_RECORD_RETENTION_DAYS = 365;
+
+/** L4-IAMR: the one statement that lets the dispatcher read a company's stored artifacts (named environments): its Sid and the two key prefixes it names, tests/contract/dispatcher-artifacts-read.test.ts pins them. */
+export const DISPATCHER_ARTIFACTS_READ_SID = "ReadCompanyArtifacts";
+export const DISPATCHER_ARTIFACTS_READ_PREFIXES = ["private/*", "workspaces/*"] as const;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
 export const SLACK_MAX_RECEIVE_COUNT = 5;
 // What the ingress Lambda may read of a turn record for the Details view (spec 014 FR-024):
@@ -390,6 +394,12 @@ export class ControlPlaneStack extends Stack {
     state.grantReadWriteData(dispatcher);
     // The dispatcher holds a CHECKS reference's kind to the admission it names; it reads only the immutable admission objects.
     dispatcher.addToRolePolicy(new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("workflow-e2e-admissions/*")] }));
+    // L4-IAMR (owner decision 2026-11-18, DEC 254zzz26), named environments only (the core engine's): the dispatcher's company-bound artifact reader (createCompanyArtifactReader, for the
+    // second eval pass and the like) reads a company's stored artifacts. Read only: GetObject on the two prefixes the reader's keys live under, no List, no Put, no other prefix, no other
+    // bucket. The bucket is S3-managed encrypted (no KMS key), so no kms grant. Every read is still checked in code against company, workspace owner and the ARTIFACT row.
+    if (naming.env !== undefined) {
+      dispatcher.addToRolePolicy(new iam.PolicyStatement({ sid: DISPATCHER_ARTIFACTS_READ_SID, actions: ["s3:GetObject"], resources: DISPATCHER_ARTIFACTS_READ_PREFIXES.map((prefix) => artifacts.arnForObjects(prefix)) }));
+    }
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
     state.addGlobalSecondaryIndex({
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
