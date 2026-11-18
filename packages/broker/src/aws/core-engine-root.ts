@@ -49,6 +49,7 @@ import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
+import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf, type EvalEnvironmentSource } from "../core/setup-agent/eval-environment-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -252,9 +253,9 @@ export function policyHookSettingsFromEnvironment(env: NodeJS.ProcessEnv): Hoste
  * approval through the install's bound `eval-reservation` adapter only, and the company's base-score cache. The approver's CURRENT role is the hosted members reader
  * (`deployedSessionMembers`: live `COMPANY_MEMBER#` membership in THIS company, the broker's project grant), never the role stored at approval or a role the gateway names.
  */
-export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void): EvalPlanSources {
+export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource): EvalPlanSources {
   return createEvalPlanSources({
-    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people),
+    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }),
     ...(log === undefined ? {} : { log: (event) => { log({ event: `core_engine.${event}` }); } }),
   });
 }
@@ -957,7 +958,13 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           onEvents: async (operation, events) => { await Promise.all([lessons?.host.onEvents(operation, events), wikiOnEvents(operation, events)]); },
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
-          evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
+          // L4-EVS2: and the environment the sealed eval runs in, for this company's project only: its saved image (a cloud registry's login only; none without an image registry that can serve a pull), else its approved
+          // install steps, else none.
+          evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log, createEvalEnvironmentSource({
+            store: registry.require("storage"), companyId, now: () => now().getTime(), env, repositoryPaths: repositoryPathsOf(runtime.flow.deps.projects),
+            savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
+            log: (event) => { log({ event: `core_engine.${event}` }); },
+          })),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
           setupAgent: { mayStillRun: async () => false },

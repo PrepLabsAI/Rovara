@@ -118,6 +118,7 @@ import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
+import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf } from "../../core/setup-agent/eval-environment-source.js";
 import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
@@ -742,7 +743,12 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(browserEvidence === undefined ? {} : { browserEvidenceSignIn: browserEvidence.signInReader }),
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the
     // registry's `eval-reservation` adapter; a laptop binds none, so it never answers and an eval reads "spend not approved" (zero calls).
-    evalPlan: createEvalPlanSources({ store, companyId, registry }),
+    // L4-EVS2: the sealed eval's environment (this project's saved image when this computer can serve a pull, else its approved install steps, else none), read for the run's own company and project.
+    evalPlan: createEvalPlanSources({ store, companyId, registry, environment: createEvalEnvironmentSource({
+      store, companyId, now: () => clock().getTime(), env: options.environment ?? process.env, repositoryPaths: repositoryPathsOf(projectSource),
+      savedEnv: () => evalSavedEnvDepsOf({ store, registry: registry.require("image-registry"), envName: "local", now: () => clock().getTime(), env: options.environment ?? process.env }),
+      log: (event) => { log({ component: "eval-environment", event }); },
+    }) }),
   });
   // The owner's moves on a task already running (send back, review findings, continue): with a run limit held, a round is not started on a task that has spent its limit (or whose spend cannot be told); the limit is the one the model proxy holds the task to.
   const taskActions = createTaskActions(flow.deps, options.runLimit === false ? {} : { roundCap: async (task) => ({ limitUsd: taskLimitUsd(task), spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) }) });
