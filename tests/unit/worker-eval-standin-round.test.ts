@@ -114,6 +114,18 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     expect(looks).toHaveLength(1);
     expect(looks[0]!.ids).toEqual(["q0", "q1", "q3", "q4", "q5"]);
   });
+  it("batch b20 (E56 x E34): a fill-pass run whose answers were thrown away never drops a real failure as a gap (its old stage hit a gap, its new stage failed)", async () => {
+    // Run 0: the first big run (no gap; every new answer fails). The fill pass asks all three again. Run 1: the fill pass's old stage, which hits a gap. Run 2: the fill pass's new stage fails (provider error), so the pass is dropped.
+    // Runs 3 and 4: the suspect re-asks, which report no stand-in at all, so the only old-side gap record would be the thrown-away run 1.
+    const { input, requests } = await setup({ n: 3, gapOf: (side, _ids, index) => (index === 1 ? true : side === "new" && index === 0 ? false : undefined) });
+    const run = input.questionPlan.run;
+    input.questionPlan = { ...input.questionPlan, fillMissingRows: async () => ["q0", "q1", "q2"], run: async (request: Parameters<typeof run>[0]) => { if (requests.length === 2) { requests.push(request); throw new Error("provider down"); } return run(request); } };
+    const output = await runEvalRound(input);
+    expect(requests.map((r) => `${r.side}:${String(r.runs)}`).slice(0, 5)).toEqual(["new:1", "old:3", "new:1", "old:3", "new:3"]);
+    if (output.status !== "done") throw new Error("done");
+    expect(output.result.excluded.filter((q) => q.reason === "stand_in_gap")).toEqual([]);
+    expect(output.result.label).toBe("Worse on eval");
+  });
 });
 
 describe("the counts travel in the evidence and survive the artifact", () => {

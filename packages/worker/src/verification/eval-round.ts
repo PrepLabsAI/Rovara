@@ -345,12 +345,17 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
     const current = evalSuspects(questions); const mayBeSuspects = new Set([...current.down, ...current.up, ...gaps]);
     if (gaps.length > 0 && fits(4 * gaps.length + 6 * Math.min(mayBeSuspects.size, 20)) && reserve("re-asks", 4 * gaps.length)) {
       const before = stop;
+      // Batch b20 (E56 x E34): a dropped pass leaves no trace in the stand-in record either (its gap runs and counts are restored), so a thrown-away run can never mark a real failure as a gap.
+      const gapMark = gapRuns.length; const countsMark = standInCounts;
       const oldAgain = await run("old", gaps, 3); const afterOld = stop;
       const newAgain = oldAgain === undefined ? undefined : await run("new", gaps, 1);
       if (oldAgain !== undefined && newAgain !== undefined) {
         const refilled = new Set(gaps);
         questions = questions.map(q => (refilled.has(q.id) ? { ...q, old: oldAgain.get(q.id)!.samples, first: newAgain.get(q.id)!.samples[0]! } : q));
-      } else if (oldAgain === undefined || afterOld === before) stop = before; // a failed stage is dropped; an overrun the old stage reported with data stays
+      } else {
+        gapRuns.length = gapMark; standInCounts = countsMark;
+        if (oldAgain === undefined || afterOld === before) stop = before; // a failed stage is dropped; an overrun the old stage reported with data stays
+      }
     }
   }
   if (config.subsetSupported) {
