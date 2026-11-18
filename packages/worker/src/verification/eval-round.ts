@@ -3,6 +3,7 @@ import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import {
   captureEvalRoundEvidence, type EvalRoundEvidence, type EvalEvidenceNotice, inertEvidenceText, EVAL_NOT_RUN_CLASSES, EvalBaseRecordSchema, EVAL_QUESTION_LIMIT, evalSuspects, evalNeedsSecondLook, agentFeedbackFor, evalBaseCacheKey, evalCheckResult, evalNotRunResult, evalSetHashOf, hiddenEvalSetFor, isEvalBaseAttestation,
+  evalStandInNotCompared, evalStandInResultOf, type EvalStandInCounts, type EvalStandInResult,
   type EvalQuestionComparison, type EvalQuestionSamples, type EvalNotRunReason, type EvalPacingLimits, type BaseScoreCache, type EvalBaseAttestation, type EvalAgentFeedback, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalCheckResult, type EvalRoundFacts, type EvalRoundKind, type HiddenEvalMount, type HiddenEvalSetSource, type MeasuresFile,
 } from "@agentx/contracts";
 import { readReportPartsFile } from "./report-file.js";
@@ -62,6 +63,8 @@ export interface EvalQuestionPlan {
     readonly report: EvalReportLocation; readonly facts: EvalRoundFacts;
     readonly calls: number; readonly costMicros: number; readonly changedPromptCalls: number;
     readonly attestation?: EvalBaseAttestation;
+    /** L4-E56: only when the round has outside-HTTP stand-ins: whether this run hit a gap (Rovara made up an answer; an unreadable stand-in counts as a hit) and the round's counts as they stand. */
+    readonly standIns?: { readonly hitGap: boolean; readonly counts: EvalStandInCounts };
   }>;
 }
 export interface EvalRoundInput {
@@ -199,16 +202,23 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   let comparisonQuestions: EvalQuestionComparison[] | undefined;
   let changedPromptCalls = 0;
   let excluded: EvalCheckResult["excluded"] = [];
+  // L4-E56: the stand-in. `gapRuns` is every sandbox run in order (side, questions, whether it hit a gap); `standInCounts` the round's counts as of the last run; `notCompared` the questions dropped from both sides.
+  const gapRuns: { side: "old" | "new"; ids: readonly string[]; hitGap: boolean }[] = [];
+  let standInCounts: EvalStandInCounts | undefined;
+  const notCompared = new Set<string>();
+  const standInResult = (): EvalStandInResult | undefined => (standInCounts === undefined ? undefined : evalStandInResultOf(standInCounts, notCompared.size));
   let cacheState: "hit" | "not_used" = "not_used";
   const finish = (result: EvalCheckResult): EvalRoundOutput => {
     const count = excluded.length;
-    const exclusionSummary = count === 0 ? "" : ` ${count} question${count === 1 ? "" : "s"} added, removed or edited: not compared.`;
-    const evidence = hidden ? result : { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...estimates], summary: result.summary + exclusionSummary };
+    const gaps = excluded.filter(q => q.reason === "stand_in_gap").length; const others = count - gaps;
+    const exclusionSummary = (others === 0 ? "" : ` ${others} question${others === 1 ? "" : "s"} added, removed or edited: not compared.`) + (gaps === 0 ? "" : ` ${gaps} question${gaps === 1 ? "" : "s"} not compared: an outside service's answer was made up by Rovara.`);
+    const standIns = hidden ? undefined : standInResult();
+    const evidence = hidden ? result : { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...estimates], summary: result.summary + exclusionSummary, ...(standIns === undefined ? {} : { standIns }) };
     const output = done(evidence, cacheState, plan.hiddenMount === undefined ? {} : { hiddenMount: plan.hiddenMount });
     if (output.status !== "done") return output;
     return { ...output, ...(!hidden && usage !== undefined ? { usage } : {}), evidence: context === undefined ? {} : captureEvalRoundEvidence({ context,
       ...(hidden ? result.outcome === "ran" ? { privatePass: result.label !== "Worse on eval" } : { privateSet: true } : {
-        excluded, notices: evidenceNotices, ...(comparisonQuestions === undefined ? {} : { comparison: { questions: comparisonQuestions, changedPromptCalls, hiddenSetUsed: false, subsetSupported: input.questionPlan!.subsetSupported, sameJudgeFamily: input.questionPlan!.sameJudgeFamily === true } }),
+        excluded, notices: evidenceNotices, ...(standInResult() === undefined ? {} : { standIns: standInResult()! }), ...(comparisonQuestions === undefined ? {} : { comparison: { questions: comparisonQuestions, changedPromptCalls, hiddenSetUsed: false, subsetSupported: input.questionPlan!.subsetSupported, sameJudgeFamily: input.questionPlan!.sameJudgeFamily === true } }),
       }),
     }) };
 
@@ -282,6 +292,7 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
       if (output.calls === 0 && output.facts.notRun > 0 && (output.facts.byClass.cap ?? 0) > 0) { stop = "cap"; return undefined; }
       if (side === "old" && (!isEvalBaseAttestation(output.attestation) || output.attestation.baseCommit !== input.key.baseCommit)) { stop = "base_round_unattested"; return undefined; }
       if (!whole(output.calls) || !whole(output.changedPromptCalls) || output.changedPromptCalls > output.calls) { stop = "invalid_question_data"; return undefined; }
+      if (output.standIns !== undefined) { gapRuns.push({ side, ids: [...ids], hitGap: output.standIns.hitGap === true }); standInCounts = output.standIns.counts; }
       calls += output.calls;
       if (whole(output.costMicros)) cost += output.costMicros; else costKnown = false;
       usage = { calls: calls - initialCalls, ...(costKnown ? { costMicros: cost - initialCost } : {}) };
@@ -306,7 +317,17 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   const first = await run("new", ids, 1);
   if (first === undefined) return refuse(stop ?? "provider_error");
   let questions: EvalQuestionComparison[] = untouched.map(q => ({ id: q.id, category: q.category, old: byId.get(q.id)!.samples, first: first.get(q.id)!.samples[0]!, edited: q.baseHash !== q.headHash }));
-  const judge = (): EvalCheckResult => { comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
+  // L4-E56: a question that failed in a run that hit a gap (the LATEST run that asked it on a side: a re-ask of few questions clears what the first big run could not tell apart) is dropped from BOTH sides: a gap in Rovara's stand-in is
+  // never the customer's regression, so it can never be "Worse on eval". A gap that changed no outcome costs nothing. Applied before every verdict.
+  const failedSomewhere = (q: EvalQuestionComparison): boolean => [...q.old, q.first, ...(q.freshOld ?? []), ...(q.freshNew ?? []), ...(q.moreNew ?? [])].some(sample => !sample.pass);
+  const dropGaps = (): void => {
+    if (gapRuns.length === 0) return;
+    const dropped = evalStandInNotCompared(gapRuns, new Set(questions.filter(failedSomewhere).map(q => q.id)));
+    if (dropped.size === 0) return;
+    for (const id of dropped) { if (!notCompared.has(id)) { notCompared.add(id); excluded = [...excluded, { id: inertEvidenceText(id, 160), reason: "stand_in_gap" as const }]; } }
+    questions = questions.filter(q => !dropped.has(q.id));
+  };
+  const judge = (): EvalCheckResult => { dropGaps(); if (questions.length === 0) { comparisonQuestions = undefined; return evalNotRunResult({ roundKind: input.roundKind, reason: "too_few_questions", hiddenSetUsed: hidden }); } comparisonQuestions = questions; return evalCheckResult({ roundKind: input.roundKind, questions, changedPromptCalls, hiddenSetUsed: hidden, subsetSupported: config.subsetSupported, sameJudgeFamily: config.sameJudgeFamily === true }); };
   if (config.subsetSupported) {
     const suspects = evalSuspects(questions); const selected = [...suspects.down, ...suspects.up];
     if (selected.length > 0 && reserve("re-asks", 6 * selected.length)) {
@@ -316,7 +337,9 @@ export async function completeEvalRound(input: EvalRoundInput, plan: Extract<Eva
   }
   // A confirmed failure survives an outage/cap on later work. Never turn it into Not run.
   if (judge().label !== "Worse on eval" && stop === undefined && evalNeedsSecondLook(questions)) {
-    const more = reserve("second look", 2 * ids.length) ? await run("new", ids, 2) : undefined;
+    // Questions already dropped for a gap are not asked again.
+    const lookIds = ids.filter(id => !notCompared.has(id));
+    const more = lookIds.length > 0 && reserve("second look", 2 * lookIds.length) ? await run("new", lookIds, 2) : undefined;
     questions = questions.map(q => ({ ...q, moreNew: more?.get(q.id)?.samples }));
   }
   const judged = judge();
