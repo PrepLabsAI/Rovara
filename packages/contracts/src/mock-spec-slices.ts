@@ -2,36 +2,67 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
+import { GITHUB_SPEC_EXCERPT, GITHUB_SPEC_PIN, STRIPE_SPEC_EXCERPT, STRIPE_SPEC_PIN } from "./mock-spec-excerpts.generated.js";
 import { fixtureSetDigest, type FixtureSet } from "./service-mocks.js";
 
 const Sha256 = z.string().regex(/^[a-f0-9]{64}$/u);
 const Plain = z.string().min(1).max(200).regex(/^[^\p{Cc}\p{Cf}]*$/u);
-const operationSchema = z.object({ operationId: Plain, method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]), path: z.string().min(1).max(300), requiredResponseFields: z.array(Plain).max(32) }).strict();
-export const MockSpecCatalogEntrySchema = z.object({ vendor: z.enum(["stripe", "github"]), specVersion: Plain, specSha256: Sha256, specSource: z.string().min(1).max(4096), operations: z.array(operationSchema).min(1).max(16) }).strict();
+const operationSchema = z.object({ operationId: Plain, method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]), path: z.string().min(1).max(300), requiredResponseFields: z.array(Plain).max(80) }).strict();
+const UpstreamSchema = z.object({ url: z.string().url().max(300), file: Plain, commit: z.string().regex(/^[a-f0-9]{40}$/u), retrievedAt: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u), license: Plain }).strict();
+export const MockSpecCatalogEntrySchema = z.object({ vendor: z.enum(["stripe", "github"]), specVersion: Plain, specSha256: Sha256, specSource: z.string().min(1).max(100_000), upstream: UpstreamSchema, operations: z.array(operationSchema).min(1).max(16) }).strict();
 export type MockSpecCatalogEntry = z.infer<typeof MockSpecCatalogEntrySchema>;
 
+type FieldSpec = { type?: string; enum?: readonly unknown[]; nullable?: boolean };
+interface ExcerptOperation { operationId: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; status: string; list: boolean; required: string[]; fields: Record<string, FieldSpec> }
+const asObject = (value: unknown, what: string): Record<string, unknown> => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`vendor spec excerpt has no ${what}`);
+  return value as Record<string, unknown>;
+};
+
+/** Reads the operations out of a pinned excerpt (see scripts/extract-mock-spec-excerpts.ts for what an excerpt keeps). The caller has already checked the excerpt against its hash pin. */
+function excerptOperations(specSource: string): ExcerptOperation[] { return readExcerpt(specSource).operations; }
+
+/** The operations of a pinned excerpt, and the published paths it names as not extracted (a mock of one of those is never read against a kept operation that the same actual path also fits). */
+function readExcerpt(specSource: string): { operations: ExcerptOperation[]; notExtracted: string[] } {
+  const root = asObject(JSON.parse(specSource), "root");
+  const notExtracted = z.array(z.string().min(1).max(300)).parse(root["x-rovara-not-extracted-paths"] ?? []);
+  const schemas = asObject(asObject(root.components, "components").schemas, "schemas");
+  const operations: ExcerptOperation[] = [];
+  for (const [path, item] of Object.entries(asObject(root.paths, "paths"))) {
+    for (const [method, raw] of Object.entries(asObject(item, `path ${path}`))) {
+      const operation = asObject(raw, `${method} ${path}`);
+      const responses = Object.entries(asObject(operation.responses, "responses"));
+      if (responses.length !== 1) throw new Error(`vendor spec excerpt keeps exactly one success response for ${method} ${path}`);
+      const [status, response] = responses[0]!;
+      const schema = asObject(asObject(asObject(asObject(response, "response").content, "content")["application/json"], "json").schema, "schema");
+      const list = schema.type === "array";
+      const ref = (list ? asObject(schema.items, "items") : schema).$ref;
+      const name = typeof ref === "string" ? /^#\/components\/schemas\/([^/]+)$/u.exec(ref)?.[1] : undefined;
+      if (name === undefined) throw new Error(`vendor spec excerpt response of ${method} ${path} is not a schema reference`);
+      const named = asObject(schemas[name], `schema ${name}`);
+      const required = z.array(Plain).parse(named.required);
+      const properties = asObject(named.properties, `properties of ${name}`);
+      const fields: Record<string, FieldSpec> = {};
+      for (const field of required) fields[field] = asObject(properties[field], `property ${name}.${field}`);
+      operations.push({ operationId: z.string().min(1).parse(operation.operationId), method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).parse(method.toUpperCase()), path, status, list, required, fields });
+    }
+  }
+  return { operations, notExtracted };
+}
+
+const catalogEntryOf = (vendor: "stripe" | "github", specSource: string, pin: { specSha256: string; specVersion: string; upstream: MockSpecCatalogEntry["upstream"] }): MockSpecCatalogEntry => ({
+  vendor, specVersion: pin.specVersion, specSha256: pin.specSha256, specSource, upstream: pin.upstream,
+  operations: excerptOperations(specSource).map(({ operationId, method, path, required }) => ({ operationId, method, path, requiredResponseFields: required })),
+});
+
 /**
- * Illustrative test catalog excerpts: hand-written stubs shaped like the vendors' OpenAPI.
- * Replace these with real pinned vendor extracts before the catalog ships.
+ * The vendors' published OpenAPI, as small pinned excerpts (generated by scripts/extract-mock-spec-excerpts.ts from github.com/stripe/openapi and github.com/github/rest-api-description,
+ * both MIT; commit, date and licence notice are in each entry's `upstream` and in THIRD_PARTY_NOTICES.md). The sha-256 of each excerpt is pinned in the generated file; a changed byte is refused.
  */
-export const MOCK_SPEC_CATALOG = [
-  {
-    vendor: "github", specVersion: "rovara-test-excerpt-1", specSha256: "1002a151c4f815ebc5abac7a2b5d93a481f7850406c21f44ce752f777e02eff5",
-    specSource: "openapi: 3.1.0\ninfo: { title: GitHub REST API, version: rovara-test-excerpt-1 }\npaths:\n  /repos/{owner}/{repo}/issues:\n    get: { operationId: issues/list }\n  /repos/{owner}/{repo}/issues/{issue_number}:\n    get: { operationId: issues/get }\n",
-    operations: [
-      { operationId: "issues/list", method: "GET", path: "/repos/{owner}/{repo}/issues", requiredResponseFields: ["number", "title", "state"] },
-      { operationId: "issues/get", method: "GET", path: "/repos/{owner}/{repo}/issues/{issue_number}", requiredResponseFields: ["number", "title", "state"] },
-    ],
-  },
-  {
-    vendor: "stripe", specVersion: "rovara-test-excerpt-1", specSha256: "24a324eadcc430c06c7ff4b45927a846a91a379f2b869d536b95f812d1b7245f",
-    specSource: "openapi: 3.1.0\ninfo: { title: Stripe API, version: rovara-test-excerpt-1 }\npaths:\n  /v1/charges:\n    post: { operationId: createCharge }\n  /v1/refunds:\n    post: { operationId: createRefund }\n",
-    operations: [
-      { operationId: "createCharge", method: "POST", path: "/v1/charges", requiredResponseFields: ["id", "object", "amount"] },
-      { operationId: "createRefund", method: "POST", path: "/v1/refunds", requiredResponseFields: ["id", "object", "charge"] },
-    ],
-  },
-] as const satisfies readonly MockSpecCatalogEntry[];
+export const MOCK_SPEC_CATALOG: readonly MockSpecCatalogEntry[] = [
+  catalogEntryOf("github", GITHUB_SPEC_EXCERPT, GITHUB_SPEC_PIN),
+  catalogEntryOf("stripe", STRIPE_SPEC_EXCERPT, STRIPE_SPEC_PIN),
+];
 
 const MockSpecFindingSchema = Plain;
 export const MockSpecSliceSchema = z.object({ schemaVersion: z.literal(1), companyId: Plain, project: z.string().regex(AGENTX_NAME_PATTERN), mockDigest: Sha256, vendor: z.enum(["stripe", "github", "unknown"]), specVersion: Plain.nullable(), specSha256: Sha256.nullable(), operations: z.array(operationSchema).max(16), cutAt: z.string().datetime(), result: z.enum(["matches", "mismatch", "no_spec"]), findings: z.array(MockSpecFindingSchema).max(100) }).passthrough();
@@ -51,24 +82,62 @@ function pathMatches(template: string, actual: string): boolean {
   return new RegExp(`^${expression}/?$`, "u").test(actual);
 }
 
-/** Runs offline against the catalog excerpt. A catalog miss is explicit no_spec; response drift is advisory mismatch. */
+const JSON_TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
+  string: (value) => typeof value === "string",
+  integer: (value) => typeof value === "number" && Number.isInteger(value),
+  number: (value) => typeof value === "number" && Number.isFinite(value),
+  boolean: (value) => typeof value === "boolean",
+  object: (value) => value !== null && typeof value === "object" && !Array.isArray(value),
+  array: (value) => Array.isArray(value),
+};
+const MAX_LIST_ITEMS_CHECKED = 20;
+
+/** The problems of one answer body against one operation's pinned response schema. Names come from the spec, never from the body, so no recorded value is echoed. */
+function responseProblems(operation: ExcerptOperation, body: unknown): string[] {
+  const items = operation.list ? (Array.isArray(body) ? body.slice(0, MAX_LIST_ITEMS_CHECKED) : undefined) : [body];
+  if (items === undefined) return [`${operation.operationId}: the response should be a list, as the pinned spec says.`];
+  const problems = new Set<string>();
+  for (const item of items) {
+    if (!JSON_TYPE_CHECKS.object!(item)) { problems.add(`${operation.operationId}: the response should be an object, as the pinned spec says.`); continue; }
+    for (const field of operation.required) {
+      if (!Object.hasOwn(item as object, field)) { problems.add(`${operation.operationId}: response is missing "${field}", which the pinned spec requires.`); continue; }
+      const value = (item as Record<string, unknown>)[field];
+      const spec = operation.fields[field]!;
+      if (value === null) { if (spec.nullable !== true && spec.type !== undefined) problems.add(`${operation.operationId}: "${field}" is null, which the pinned spec does not allow.`); continue; }
+      if (spec.type !== undefined && JSON_TYPE_CHECKS[spec.type]?.(value) !== true) problems.add(`${operation.operationId}: "${field}" is not the ${spec.type} the pinned spec says.`);
+      else if (spec.enum !== undefined && !spec.enum.includes(value)) problems.add(`${operation.operationId}: "${field}" is not one of the values the pinned spec lists.`);
+    }
+  }
+  return [...problems];
+}
+
+/**
+ * Runs offline against the pinned catalog excerpt (its bytes are checked against the pinned hash first). A catalog miss is explicit no_spec; response drift is an advisory mismatch: the status the
+ * spec documents, the required fields, their types and enum values. Only a success (2xx) answer is read against the success schema: the excerpt keeps no error shapes.
+ */
 export function validateMockAgainstSpec(set: FixtureSet, catalog: MockSpecCatalogEntry): { result: "matches" | "mismatch" | "no_spec"; operations: MockSpecCatalogEntry["operations"]; findings: string[] } {
   const entry = MockSpecCatalogEntrySchema.parse(catalog);
   if (mockSpecCatalogEntryDigest(entry) !== entry.specSha256) throw new Error("vendor spec catalog hash mismatch");
-  const findings: string[] = [];
+  const { operations: known, notExtracted } = readExcerpt(entry.specSource);
+  const findings = new Set<string>();
+  let hasOperation = false;
+  let readSuccess = false;
   for (const fixture of set.entries) {
-    const operation = entry.operations.find((candidate) => candidate.method === fixture.request.method && pathMatches(candidate.path, fixture.request.path));
+    if (notExtracted.some((template) => pathMatches(template, fixture.request.path))) continue;
+    const operation = known.find((candidate) => candidate.method === fixture.request.method && pathMatches(candidate.path, fixture.request.path));
     if (operation === undefined) continue;
+    hasOperation = true;
+    const status = fixture.response.status;
+    if (status < 200 || status > 299) continue;
+    readSuccess = true;
+    if (String(status) !== operation.status) findings.add(`${operation.operationId}: answers ${String(status)}, but the pinned spec documents ${operation.status}.`);
     let response: unknown;
-    try { response = JSON.parse(fixture.response.body); } catch { findings.push(`${operation.operationId}: response is not JSON.`); continue; }
-    if (response === null || typeof response !== "object" || Array.isArray(response) || operation.requiredResponseFields.some((field) => !Object.hasOwn(response, field))) {
-      findings.push(`${operation.operationId}: response is missing fields required by the pinned spec.`);
-    }
+    try { response = JSON.parse(fixture.response.body); } catch { findings.add(`${operation.operationId}: response is not JSON.`); continue; }
+    for (const problem of responseProblems(operation, response)) findings.add(problem);
   }
-  const operations = entry.operations;
-  const hasOperation = set.entries.some((fixture) => operations.some((operation) => operation.method === fixture.request.method && pathMatches(operation.path, fixture.request.path)));
-  if (!hasOperation) findings.push("No published spec operation matches this mock.");
-  return { result: !hasOperation ? "no_spec" : findings.length === 0 ? "matches" : "mismatch", operations, findings };
+  if (!hasOperation) findings.add("No published spec operation matches this mock.");
+  else if (!readSuccess) findings.add("Only error answers match a published spec operation, and the pinned excerpt keeps no error shapes.");
+  return { result: !hasOperation || !readSuccess ? "no_spec" : findings.size === 0 ? "matches" : "mismatch", operations: entry.operations, findings: [...findings].slice(0, 100) };
 }
 
 /** Pin at approval time. The returned record is separate from FixtureSet and never affects its canonical digest. */
