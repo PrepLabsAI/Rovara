@@ -28,10 +28,12 @@ const State = z.enum(SETUP_ROW_STATES);
  * none: no setup of Rovara's has been turned into a candidate (no run yet, a run still going, a proposal nobody has used, or one a person rejected or discarded).
  * candidate: a setup was made into a candidate revision and waits for a person's decision (its check is ready, or it failed or went stale: `check` says which).
  * checking: that candidate's check is running on a fresh machine.
- * approved: a person approved a candidate revision. The row is done only when its check is also ready.
+ * approved: a person approved a candidate revision. The row is done only when its check is also ready. A newer proposal (a re-run's) never takes it away: the approved setup is what tasks use until another is approved (`newerProposal`).
  */
 export const SETUP_APPROVALS = ["none", "candidate", "checking", "approved"] as const;
 export type SetupApproval = (typeof SETUP_APPROVALS)[number];
+/** L4-T2b: with `approval: "approved"`, a newer proposal that has not replaced it. needs_you: it waits for a person (a run's proposal nobody used, or a candidate waiting for its decision). checking: its check is running. rejected: it was rejected or discarded. */
+export const SETUP_NEWER_PROPOSALS = ["needs_you", "checking", "rejected"] as const;
 /** The status of a setup check, as the project's setup state words it (`setupStateOf`). */
 export const SETUP_CHECK_STATUSES = ["unchecked", "outdated", "checking", "failed", "ready"] as const;
 
@@ -83,6 +85,8 @@ export const ProjectSetupChecklistSchema = z.object({
     check: z.object({ status: z.enum(SETUP_CHECK_STATUSES), failedStep: z.string().max(300).optional() }).passthrough().optional(),
     /** With `approval: "approved"`: when the person approved it. */
     approvedAt: z.string().max(40).optional(),
+    /** L4-T2b: with `approval: "approved"`, a newer proposal that waits or was rejected (see SETUP_NEWER_PROPOSALS). The row's state follows the approved setup's own check, not this. Absent: none. */
+    newerProposal: z.enum(SETUP_NEWER_PROPOSALS).optional(),
     /** The command that failed and the last lines of its (redacted, bounded) output, as the run's journal shows them. Only on a failed run that kept a journal. */
     failedCommand: z.object({ n: z.number().int().min(1), command: z.string().max(2_000), exitCode: z.number().int().nullable(), timedOut: z.boolean(), lastLines: z.array(z.string().max(300)).max(20) }).passthrough().optional(),
   }).passthrough(),
