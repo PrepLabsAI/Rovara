@@ -142,6 +142,16 @@ describe("the real GitHub client under the adapters", () => {
     expect(await read(undefined)).toEqual({ webFlow: false });
     // The host's web committer, by its id: an edit made on the web pages.
     expect(await read({ author: rae, committer: rae, webFlow: true })).toEqual({ author: rae, committer: { login: "web-flow", hostUserId: "19864447", accountType: "person" }, webFlow: true });
+    // A malformed author is no account: a record with no login, a login that is not text or is over 200 characters, a non-object; and an id that is not a positive whole number is no id.
+    for (const raw of [{}, "someone", 42, { login: "" }, { login: 7, id: 5, type: "User" }, { login: "x".repeat(201), id: 5, type: "User" }]) {
+      world.api.commitReads.rawAuthor = raw;
+      expect(await read(undefined), JSON.stringify(raw)).toEqual({ webFlow: false });
+    }
+    for (const id of [-5, 0, 1.5, "7"]) {
+      world.api.commitReads.rawAuthor = { login: "rae", id, type: "User" };
+      expect(await read(undefined), String(id)).toEqual({ author: { login: "rae", accountType: "person" }, webFlow: false });
+    }
+    delete world.api.commitReads.rawAuthor;
     // An account that only CALLS itself web-flow is not the host's web committer.
     expect((await read({ author: rae, committer: { login: "web-flow", hostUserId: "42", accountType: "person" }, webFlow: false }))?.webFlow).toBe(false);
   });

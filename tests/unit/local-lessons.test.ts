@@ -62,7 +62,7 @@ function identityWithAnn(): IdentityProvider {
   };
 }
 
-async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
+async function world(options: { identity?: IdentityProvider; defaultSwitch?: boolean; codeHost?: boolean; host?: object; enabled?: boolean; candidates?: () => unknown[]; approvers?: Approvers } = {}): Promise<World> {
   const h = createHarness({ audit: "recording" });
   await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPOSITORY }] });
   const owner = localOwnerPrincipal({ companyId: COMPANY });
@@ -78,7 +78,7 @@ async function world(options: { defaultSwitch?: boolean; codeHost?: boolean; hos
   const lessons = createLocalLessons({
     flow: h.deps, registry, companyId: COMPANY, owner, blobs: { get: async () => undefined } as never, milestones: { register: (handler) => { handlers.push(handler); return () => undefined; } },
     audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
-    approvers: options.approvers ?? createLocalOwnerApprovers({ owner, verifySession: (token) => token === PROOF_TOKEN }), identity: identityWithAnn(),
+    approvers: options.approvers ?? createLocalOwnerApprovers({ owner, verifySession: (token) => token === PROOF_TOKEN }), identity: options.identity ?? identityWithAnn(),
     model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: providerFetch(prompts, options.candidates ?? (() => [])) },
     ...(options.defaultSwitch === true ? {} : { enabled: () => enabled }), now: () => h.clock.now, log: (entry) => { logs.push(JSON.stringify(entry)); },
   });
@@ -740,7 +740,7 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
   const by = (id: string): CommitIdentity => ({ author: { login: `user-${id}`, hostUserId: id, accountType: "person" }, committer: { login: `user-${id}`, hostUserId: id, accountType: "person" }, webFlow: false });
   const candidate = { type: "pitfall", title: "Network calls use withRetry", description: "Retries go through the retry helper.", body: "Wrap network calls in withRetry from the retry helper instead of a hand-written loop.", scope: {}, stages: ["IMPLEMENT"], citations: [], evidenceSpanIds: ["S1"] };
 
-  async function editWorld(identityOf: CommitIdentity | undefined) {
+  async function editWorld(identityOf: CommitIdentity | undefined, identity?: IdentityProvider) {
     const host = {
       kind: "github",
       repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true, defaultBranch: "main" }),
@@ -750,7 +750,7 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
       },
       getChangeRequest: async () => ({ ref: { repository: { url: REPOSITORY }, id: "7", url: URL }, state: "open", sourceBranch: "agentx/branch", targetBranch: "main", headRevision: HEAD, title: "Add", body: "" }),
     };
-    const w = await world({ candidates: () => [candidate], host });
+    const w = await world({ candidates: () => [candidate], host, ...(identity === undefined ? {} : { identity }) });
     await w.h.store.update({ key: taskKey(w.taskId), ops: [change.set(["workflow", "pullRequests"], [{ repositoryId: "demo", number: 7, url: URL, headSha: BASE, headTreeSha: "d".repeat(40), candidateDigest: "c".repeat(64), required: true, state: "OPEN" }])] });
     const push = { task: { taskId: w.taskId, orgId: COMPANY, project: "payments" } as never, pullRequest: { repositoryId: "demo", number: 7, url: URL }, repository: { url: REPOSITORY, codeHost: host as never, scope: { orgId: COMPANY } }, base: BASE, head: HEAD, headRef: "agentx/branch" };
     return { w, push };
@@ -775,6 +775,15 @@ describe("a person's edit to Rovara's pull request, on a laptop (L4-LM1c)", () =
       await w.lessons.tick();
       expect(w.prompts, account).toEqual([]);
     }
+  });
+
+  it("an identity point that names the owner's id for another company's principal places nobody here", async () => {
+    const owner = localOwnerPrincipal({ companyId: COMPANY });
+    const careless: IdentityProvider = { ...createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [OWNER_ACCOUNT] }), resolveExternalAccount: async () => ({ companyId: "org_zzzzzzzzzzzzzzzzzzzz", personId: owner.personId, displayName: "Elsewhere", roles: [], provider: "test" }) };
+    const { w, push } = await editWorld(by("owner-gh"), careless);
+    await w.lessons.noteHumanEdit(push);
+    await w.lessons.tick();
+    expect(w.prompts).toEqual([]);
   });
 
   it("a bot's push, and the switch off, queue nothing", async () => {

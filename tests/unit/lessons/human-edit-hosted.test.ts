@@ -209,7 +209,7 @@ describe("what is ignored or refused", () => {
   it("a push whose person is not a member of this company, or is not on the project's roster, or is erased, teaches nothing and calls no model", async () => {
     for (const [name, identityOf, over] of [
       ["an account of no member", { author: acct("zed", "7777"), committer: acct("zed", "7777"), webFlow: false } as CommitIdentity, undefined],
-      ["a member of another company (even from a careless identity point)", { author: acct("lou", "1003"), committer: acct("lou", "1003"), webFlow: false } as CommitIdentity, { identity: careless }],
+      ["a member of another company (even from a careless identity point)", { author: acct("lou", "1003"), committer: acct("lou", "1003"), webFlow: false } as CommitIdentity, { identity: careless, people: { roster: ["member-lou"] } }],
       ["a member off the roster", personKim, undefined],
       ["an erased member", personRae, { people: { erased: ["member-rae"] } }],
     ] as const) {
