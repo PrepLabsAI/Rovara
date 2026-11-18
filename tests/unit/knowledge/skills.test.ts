@@ -173,6 +173,16 @@ describe("the draft is made by code from the lesson's own words", () => {
     expect(await listSkills(w.deps, KEY)).toHaveLength(0);
   });
 
+  it('the "Make this a skill?" card never names a lesson the whole project may not read: its title is not shown, as the draft is refused (L4-INT)', async () => {
+    const w = await world();
+    const lesson = procedure(w, { provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: ["task-hidden"], measured: false, audience: { kind: "project" } } });
+    await put(w, lesson);
+    await used(w, lesson.id, 10);
+    const through = (denied: Set<string>): SkillDeps => ({ ...w.deps, access: { mayRead: async (_org, _viewer, places) => places.map(() => true), taskVisibility: withLessonAudiences({ read: async (_org, ids) => new Map(ids.map((id) => [id, { kind: "shared" as const }])) }, { read: async (_org, ids) => new Map(ids.map((id) => [id, wideAudience({ project: "payments", denied })])) }) } });
+    expect((await skillOffers(through(new Set()), KEY)).map((offer) => offer.lessonId)).toEqual([lesson.id]);
+    expect(await skillOffers(through(new Set(["bob"])), KEY)).toEqual([]);
+  });
+
   it("a name that is taken by another skill gets a short suffix from the lesson's id; a chosen name that is taken is refused", async () => {
     const w = await world();
     const first = await proven(w);
