@@ -16,7 +16,7 @@ import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointe
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, OrgIdSchema, agentXError } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
@@ -158,6 +158,11 @@ export interface CoreTaskEntry {
    * Absent: the deployment does not serve it (the admin route keeps its answer for a core workspace).
    */
   stopWorkspaceForAdmin?(workspaceId: string, administrator: { id: string }, authorize: (project: string) => Promise<void>): Promise<{ taskId: string; nothingRunning: boolean }>;
+  /**
+   * L4-U5b: remembers the chat conversation a core task was started from, so what the task later tells that conversation (`core/channel/thread-notices.ts`) has somewhere to go. The company is the CALLER'S live membership's,
+   * the task must be one this caller may act on, and the conversation's tenant must belong to that company; anything else records nothing (`false`). Written once: a repeat changes nothing. Absent: the deployment keeps no thread.
+   */
+  recordThread?(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean>;
 }
 
 /**
@@ -195,8 +200,18 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
 export function coreTaskEntryFrom(
   routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
+  /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
+  recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
 ): CoreTaskEntry {
   return {
+    ...(recordThread === undefined ? {} : {
+      async recordThread(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean> {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return false; }
+        if (deployed === undefined) return false;
+        try { return await recordThread(deployed, input); } catch { return false; }
+      },
+    }),
     async route(request, caller) {
       let deployed: DeployedCaller | undefined;
       let unreadable = false;

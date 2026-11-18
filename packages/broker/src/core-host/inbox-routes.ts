@@ -5,6 +5,7 @@
 // a body. Every row is checked again against the person's session access now (`core/notify/inbox.ts`), so a person who lost access reads nothing. Refusals are fixed words that echo nothing.
 import { agentXError } from "@agentx/contracts";
 import { listInbox, markInboxRead } from "../core/notify/inbox.js";
+import { listProjectNotices, type ProjectNoticeDeps } from "../core/notify/project-notices.js";
 import { createSessionAccess, type SessionMembers } from "../core/sessions/access.js";
 import { sessionOpenPath } from "../core/decisions/open-path.js";
 import { developerIdOf } from "../core/sessions/create.js";
@@ -12,7 +13,7 @@ import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { DocumentStore, OrgId } from "@agentx/contracts";
 
-export const INBOX_PATH = /^\/v1\/app\/inbox(?:\/read)?$/u;
+export const INBOX_PATH = /^\/v1\/app\/inbox(?:\/read|\/project-notices)?$/u;
 export const INBOX_SIGN_IN_AGAIN = "Sign in again.";
 export const INBOX_BAD_REQUEST = "That request is not valid.";
 const CURSOR_MAX = 200;
@@ -26,6 +27,8 @@ export interface InboxRoutesDeps {
   origin: () => string;
   members: SessionMembers;
   now?: () => number;
+  /** L4-U5b: the live reads the project notices are checked against (does the person still administer the project, is its setup still broken). Absent: no project notice is ever shown. */
+  projectNotices?: Pick<ProjectNoticeDeps, "administers" | "setupRead"> | undefined;
 }
 
 export function createInboxRoutes(deps: InboxRoutesDeps): (request: BrokerRequest, caller: TaskCaller) => Promise<BrokerResponse | undefined> {
@@ -46,6 +49,11 @@ export function createInboxRoutes(deps: InboxRoutesDeps): (request: BrokerReques
       return json(200, { marked: await markInboxRead({ store: deps.store, now }, who, fields["ids"] as unknown[]) });
     }
     if (request.method !== "GET") return undefined;
+    if (url.pathname === "/v1/app/inbox/project-notices") {
+      if (url.search !== "") throw agentXError("CONFIG_INVALID", INBOX_BAD_REQUEST);
+      // The project notices are written under the recipient's PERSON id (what the hosted recipient read names and `administers` is asked about), not the session inbox's hashed developer id.
+      return json(200, deps.projectNotices === undefined ? { items: [] } : await listProjectNotices({ store: deps.store, now, ...deps.projectNotices }, { companyId: deps.companyId, developerId: caller.principal.personId }));
+    }
     const limitText = url.searchParams.get("limit");
     const cursor = url.searchParams.get("cursor") ?? undefined;
     if (cursor !== undefined && cursor.length > CURSOR_MAX) throw agentXError("CONFIG_INVALID", INBOX_BAD_REQUEST);

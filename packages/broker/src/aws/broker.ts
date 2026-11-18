@@ -286,7 +286,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -6295,6 +6295,11 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
     throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   }
+  // L4-U5b: a company the core serves starts the task on the core (no channel share: the core has none) and remembers this Slack thread, so the task's pause at Build, its pull request and its end are told here too.
+  // Only where Slack runs in company mode (the thread can then be remembered and told); the single-workspace install keeps the start it always had.
+  const onCore = dependencies.workspaces === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
+    brokerLogLine);
+  if (onCore !== undefined) return { task: { taskId: onCore.taskId } };
   const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
   const routeDeps = developerTaskRouteDependencies({ ...slackCallerRouteDependencies(dependencies), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller, thread);
   const request = {
@@ -15599,6 +15604,8 @@ function buildBrokerHandler(callbackSigningKey: string) {
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
     // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
     ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
+    // L4-U5b: where Slack runs in company mode, a core task started from a Slack thread is told its milestones there, through its own company's workspace token only.
+    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine }) }),
   });
   builtCoreRoot = coreRoot;
   // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
