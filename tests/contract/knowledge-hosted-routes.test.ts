@@ -128,6 +128,10 @@ describe("the knowledge routes at the developer router", () => {
     const others = all.filter((row) => !added.includes(row));
     expect(others).toHaveLength(DEV_ROUTES.length - 3);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
+    // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
+    const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));
+    expect(switchRows).toEqual(["GET /v1/dev/company/lessons/local-tools full", "PUT /v1/dev/company/lessons/local-tools full", "GET /v1/dev/projects/{project}/lessons/local-tools full", "PUT /v1/dev/projects/{project}/lessons/local-tools full"]);
+    expect(createHash("sha256").update(others.filter((row) => !switchRows.includes(row)).join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST_BEFORE_JA7);
   });
 });
 
@@ -139,4 +143,7 @@ describe("the knowledge routes at the developer router", () => {
 // removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
 // Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full) and #1086 removes GET /v1/dev/me/sign-in-factors (full). Taking out exactly those two rows and putting the
 // removed one back after DELETE /v1/dev/company/members/{personId}/sign-ins/{method} gives the previous pin 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0.
+// L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
+// removing exactly those 4 rows gives back the pin below.
+const OTHER_ROWS_DIGEST_BEFORE_JA7 = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
 const OTHER_ROWS_DIGEST = "def66b837d965162d878b558394161c74f0d3c9499b3b3eb8dc127970f7cdddd";

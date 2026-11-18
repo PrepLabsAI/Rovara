@@ -176,6 +176,11 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
   { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },
+  // L4-JA7: "Knowledge stays in Rovara" (the company) and "local coding tools can fetch lessons" (a project) (core-host/knowledge-switch-api.ts). Full access only; live membership and role decide (company: an owner or admin; project: its admin, or a company owner or admin).
+  { method: "GET", path: "/v1/dev/company/lessons/local-tools", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/lessons/local-tools", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/local-tools", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/lessons/local-tools", requires: "full" },
   // L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (core-host/lessons-slack-switch-api.ts). Full access only; the person is the signed-in caller, never a path or body.
   { method: "GET", path: "/v1/dev/me/lessons-slack", requires: "full" },
   { method: "PUT", path: "/v1/dev/me/lessons-slack", requires: "full" },
