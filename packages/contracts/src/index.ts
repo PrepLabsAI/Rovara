@@ -309,6 +309,7 @@ export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
+export * from "./gcp-pack-images.js";
 export * from "./owner-image-list.js";
 export * from "./owner-starter-images.js";
 export * from "./test-service-mirror.js";

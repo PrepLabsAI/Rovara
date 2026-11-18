@@ -16,6 +16,7 @@
 import { z } from "zod";
 import { AwsServiceIdSchema, CatalogIdSchema, ConnectTemplateSchema, DnsLabelSchema, EnvNameSchema, TEST_ENV_HELPER_CATALOG_NAMES, TEST_ENV_RESERVED_ALIASES, catalogIdName } from "./test-env-dependency.js";
 import { reservedDependencyEnvName } from "./test-services-shared.js";
+import { GCP_FAKE_PROJECT_ID } from "./gcp-pack-images.js";
 import { AWS_PLAN_SERVICES_MAX, awsEmulatorServiceRow, awsServiceKeyOrSelf } from "./aws-emulator-service-keys.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -41,6 +42,13 @@ export const CATALOG_FIXED_ARGS = {
   mysql_flush_log_lazily: { argv: ["--innodb-flush-log-at-trx-commit=0"], families: ["mysql"] },
   redis_save_off: { argv: ["--save", ""], families: ["redis"] },
   redis_appendonly_off: { argv: ["--appendonly", "no"], families: ["redis"] },
+  // The GCP pack (gcp-pack-images.ts). Google's SDK image has no entrypoint, so the command is the whole argument list; the other images keep their own entrypoint and take flags only.
+  gcp_pubsub_start: { argv: ["gcloud", "beta", "emulators", "pubsub", "start", "--quiet", "--host-port=0.0.0.0:8085"], families: ["pubsub"] },
+  gcp_firestore_start: { argv: ["gcloud", "emulators", "firestore", "start", "--quiet", "--host-port=0.0.0.0:8080"], families: ["firestore"] },
+  gcp_datastore_start: { argv: ["gcloud", "emulators", "firestore", "start", "--quiet", "--database-mode=datastore-mode", "--host-port=0.0.0.0:8080"], families: ["datastore"] },
+  gcp_bigtable_start: { argv: ["gcloud", "beta", "emulators", "bigtable", "start", "--quiet", "--host-port=0.0.0.0:8086"], families: ["bigtable"] },
+  gcs_http_memory: { argv: ["-scheme", "http", "-backend", "memory", "-port", "4443"], families: ["gcs"] },
+  bigquery_fake_project: { argv: [`--project=${GCP_FAKE_PROJECT_ID}`], families: ["bigquery"] },
 } as const satisfies Record<string, { argv: readonly string[]; families: readonly string[] }>;
 export type CatalogFixedArgId = keyof typeof CATALOG_FIXED_ARGS;
 export const CATALOG_FIXED_ARG_IDS = Object.keys(CATALOG_FIXED_ARGS) as [CatalogFixedArgId, ...CatalogFixedArgId[]];
