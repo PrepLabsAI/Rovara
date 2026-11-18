@@ -68,6 +68,14 @@ describe("setup eval health", () => {
     const extra = world(); extra.input.run = async ({ call }) => { for (let i = 0; i < 7; i++) await call(frame); throw new Error("must stop earlier"); };
     expect((await runEvalHealth(extra.input)).status).toBe("not_run"); expect(extra.ledger).toHaveLength(6);
   });
+  // L4-VX: a project's own eval cannot know Rovara's eval-set hash, so a measures file without one is measured against Rovara's own hash; a file that names a different one is still refused (the "hash" case below).
+  it("measures an eval whose file names no eval-set hash, and saves the baseline under Rovara's own key", async () => {
+    const w = world(); const run = w.input.run.bind(w.input);
+    w.input.run = async request => { const output = await run(request); delete output.measures.eval_set_hash; return output; };
+    const result = await runEvalHealth(w.input);
+    expect(result.status).toBe("measured");
+    expect((await w.cache.read(key))?.questions?.map(q => q.samples.length)).toEqual([3, 3]);
+  });
   it.each(["missing", "duplicate", "hash", "attestation", "numeric", "no_calls"])("does not cache incomplete or untrusted %s evidence", async kind => {
     const w = world(); const run = w.input.run.bind(w.input);
     w.input.run = async request => {

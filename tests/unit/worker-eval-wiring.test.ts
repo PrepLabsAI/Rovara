@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { attestRovaraOnlyBaseCheckout, evalResultFromArtifact, EvalRoundArtifactSchema, type EvalRequest, type EvalSpendGrant } from "@agentx/contracts";
-import { evalFinalCheckForTask, evalGatewayOriginFrom, evalGatewayTokenSource, evalHostSourcesFor, EVAL_GATEWAY_URL_VARIABLE, type EvalHostSources } from "../../packages/worker/src/verification/eval-wiring.js";
+import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalGatewayOriginFrom, evalGatewayTokenSource, evalHostSourcesFor, EVAL_GATEWAY_URL_VARIABLE, type EvalHostSources } from "../../packages/worker/src/verification/eval-wiring.js";
 import { runFinalCheckEval } from "../../packages/worker/src/verification/eval-final-check.js";
 import type { FreshEvalSandbox, FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { collectModelBridge } from "../../packages/worker/src/model-helper-bridge-client.js";
@@ -124,7 +124,7 @@ describe("off by default", () => {
     const main = readFileSync(join(__dirname, "../../packages/worker/src/main.ts"), "utf8");
     expect(main).toContain('from "./verification/eval-wiring.js"');
     expect(main).toMatch(/const evalRequested = invocation\.payload\.evalRequest !== undefined;/u);
-    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: process\.env, controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
+    expect(main).toMatch(/evalFinalCheckForTask\(\{ requested: evalRequested, environment: evalEnvironmentWithGateway\(process\.env, invocation\.payload\.evalGatewayUrl\), controlPlaneUrl, capability: invocation\.callbackCapability, sources: evalRequested \? evalHostSourcesFor\(invocation, \{ controlPlaneUrl,/u);
     // DEC 253n(2): the fresh check sandbox is the worker's own (its environment, Docker and workspace key), built per check from the delivered plan.
     expect(main).toMatch(/fresh: \{ environment: process\.env, docker: createDockerCli\(\), workspaceKey: \(\) => setupWorkspaceKey\(rootPath\) \} \}\) : undefined \}\)/u);
     expect(main).toMatch(/\.\.\.\(evalFinalCheck === undefined \? \{\} : \{ evalFinalCheck \}\)/u);
@@ -302,5 +302,60 @@ describe("one invocation is never another's (two companies)", () => {
     const sourceB = evalGatewayTokenSource({ origin: GATEWAY, controlPlaneUrl: CONTROL, capability: CAP_B, fetch: net.fetchImpl });
     expect(await sourceA()).toBe(TOKEN_A); expect(await sourceB()).toBe(TOKEN_B); expect(await sourceA()).toBe(TOKEN_A);
     expect(net.accessRequests().map((r) => r.headers["x-agentx-callback-capability"])).toEqual([CAP_A, CAP_B]);
+  });
+});
+
+// Lead 4 L4-EVW: a hosted worker has no setting of its own; the broker delivers the gateway's origin with the eval request.
+describe("the gateway origin the broker delivers (hosted worker)", () => {
+  it("adds the delivered origin when the host sets none, without changing the host's environment", () => {
+    const host: NodeJS.ProcessEnv = { OTHER: "1" };
+    const merged = evalEnvironmentWithGateway(host, GATEWAY);
+    expect(merged[EVAL_GATEWAY_URL_VARIABLE]).toBe(GATEWAY);
+    expect(merged["OTHER"]).toBe("1");
+    expect(host).toEqual({ OTHER: "1" });
+    expect(evalGatewayOriginFrom(merged)).toBe(GATEWAY);
+  });
+  it("returns the host's own environment itself when nothing is delivered (a laptop, an older broker, no gateway): byte-identical", () => {
+    const host: NodeJS.ProcessEnv = { OTHER: "1" };
+    expect(evalEnvironmentWithGateway(host, undefined)).toBe(host);
+    expect(evalEnvironmentWithGateway({}, undefined)).toEqual({});
+  });
+  it.each(["http://gateway.example.test", `${GATEWAY}/v1`, "https://u:p@gateway.example.test", `${GATEWAY}?a=b`, "not a url", "", "   ", `https://${"a".repeat(600)}.example.test`, 5 as unknown as string])("refuses a delivered value that is not an https origin (%s)", (bad) => {
+    const host: NodeJS.ProcessEnv = { OTHER: "1" };
+    const merged = evalEnvironmentWithGateway(host, bad);
+    expect(merged).toBe(host);
+    expect(evalGatewayOriginFrom(merged)).toBeUndefined();
+  });
+  it("the host's own setting always wins, whether it is good, empty-looking or one that keeps the eval off", () => {
+    const good = { [EVAL_GATEWAY_URL_VARIABLE]: "https://own.example.test" };
+    expect(evalEnvironmentWithGateway(good, GATEWAY)).toBe(good);
+    expect(evalGatewayOriginFrom(evalEnvironmentWithGateway(good, GATEWAY))).toBe("https://own.example.test");
+    // set to something that makes the eval stay off (http): the delivered value does not turn it on
+    const off = { [EVAL_GATEWAY_URL_VARIABLE]: "http://gateway.example.test" };
+    expect(evalEnvironmentWithGateway(off, GATEWAY)).toBe(off);
+    expect(evalGatewayOriginFrom(evalEnvironmentWithGateway(off, GATEWAY))).toBeUndefined();
+    // blank counts as unset (the same trim the reader applies)
+    expect(evalGatewayOriginFrom(evalEnvironmentWithGateway({ [EVAL_GATEWAY_URL_VARIABLE]: "  " }, GATEWAY))).toBe(GATEWAY);
+  });
+  it("binds the eval with the delivered origin and with nothing else, and the token goes to that origin only", async () => {
+    const b = await sources(); const net = network();
+    const hosted = (delivered: string | undefined) => evalFinalCheckForTask({ requested: true, environment: evalEnvironmentWithGateway({}, delivered), controlPlaneUrl: CONTROL, capability: CAP_A, sources: b.sources, fetch: net.fetchImpl });
+    expect(hosted(undefined)).toBeUndefined();
+    expect(hosted("http://gateway.example.test")).toBeUndefined();
+    expect(net.sent).toEqual([]);
+    const artifact = await run(hosted(GATEWAY));
+    expect(artifact).toMatchObject({ outcome: "done", roundKind: "check_unsealed" });
+    expect(net.gatewayRequests().length).toBeGreaterThan(0);
+    for (const r of net.gatewayRequests()) expect(r.headers["x-api-key"]).toBe(TOKEN_A);
+    for (const r of net.sent) if (new URL(r.url).origin !== GATEWAY) expect(JSON.stringify(r)).not.toContain(TOKEN_A);
+  });
+  it("a task token minted for another origin than the delivered one is never sent anywhere", async () => {
+    const b = await sources(); const net = network({ baseUrl: "https://elsewhere.example.test" });
+    const ports = evalFinalCheckForTask({ requested: true, environment: evalEnvironmentWithGateway({}, GATEWAY), controlPlaneUrl: CONTROL, capability: CAP_A, sources: b.sources, fetch: net.fetchImpl });
+    const artifact = await runFinalCheckEval(request, ports, facts());
+    expect(["cap", "provider_error"]).toContain(reason(artifact));
+    expect(net.gatewayRequests()).toEqual([]);
+    for (const r of net.sent) expect(JSON.stringify(r)).not.toContain(TOKEN_A);
+    expect(b.runs).toEqual([]);
   });
 });

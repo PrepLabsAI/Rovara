@@ -9,7 +9,7 @@
 // the company's own (`cache(companyId)`) and read at the plan's own key. Any fault, a missing source, or an answer over `EVAL_PLAN_DELIVERY_MAX_BYTES` is "not_available": the worker then reads
 // "not connected" and spends nothing. A refusal is one fixed sentence that names no company, project or source.
 import {
-  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey,
+  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor,
   type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalPlanDelivery, type EvalSpendApproval,
 } from "@agentx/contracts";
 import { isLiveOperation } from "../e2e/uploads-chunks.js";
@@ -21,7 +21,11 @@ const NOT_AVAILABLE: EvalPlanDelivery = Object.freeze({ status: "not_available" 
 export interface EvalPlanScope { readonly companyId: string; readonly project: string }
 
 /** The run's own pinned base: each repository's base commit, from the operation's own stored dispatch payload (`workflowBase`, the broker's pin), never the request. Undefined when it has none. */
-export interface EvalPlanRun { readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined }
+export interface EvalPlanRun {
+  readonly bases: ReadonlyArray<{ readonly repositoryId: string; readonly baseCommitSha: string }> | undefined;
+  /** L4-EVH: the digest of the one approved spend item the run was made under (a health run's request). Set: only that item answers, so a re-approval in between gives no plan and no grant. */
+  readonly spendDigest?: string | undefined;
+}
 
 /** One consistent read of the plan and its approval: both of the SAME approved spend item (EVAL-PLAN-SNAPSHOT). */
 export interface EvalPlanRead {
@@ -29,6 +33,11 @@ export interface EvalPlanRead {
   readonly plan: unknown;
   /** The persisted spend approval of the very item `plan` was read with (F3e `createEvalSpendCapabilities(...).approval`, bound to that item's digest), or undefined when it is not wired here. */
   readonly approval: EvalSpendApproval | undefined;
+  /**
+   * L4-EVS: the environment the sealed eval runs in (the project's saved image with a short-lived pull login, or its approved install steps), or undefined (the bare worker image). Read with the plan so it is
+   * the project's own; this handler re-checks the scope (a saved image's repository must be this company's and this project's) and the shape, and drops anything else.
+   */
+  readonly environment?: unknown;
 }
 
 /** The broker's trusted sources. Each one is asked only for the run's own scope, and each answer is checked against it again here. */
@@ -53,14 +62,19 @@ export interface EvalPlanDeliveryDeps {
   readonly companyId: string;
   /** The project of the task this operation belongs to, read from the company's own store; undefined when it cannot be read or is another company's. */
   projectOf(operation: EvalPlanDeliveryOperation): Promise<string | undefined>;
+  /**
+   * L4-EVH: the plan of an opt-in health run's own preparation (a prepare operation whose stored dispatch carries `evalHealth`). Asked with the run's own request and claim (never the request's body); the reader
+   * re-checks the claim and everything the yes rested on (deliverEvalHealthPlan). Absent: a health run is not served here.
+   */
+  readonly health?: { read(lease: { requestId: string; claimId: string }, scope: EvalPlanScope): Promise<EvalPlanRead | undefined> } | undefined;
   /** One fixed event name per fail-closed answer (no value of the request, the plan or the sources). */
-  readonly log?: (event: "eval_plan_scope_mismatch" | "eval_plan_unavailable" | "eval_plan_oversize") => void;
+  readonly log?: (event: "eval_plan_scope_mismatch" | "eval_plan_unavailable" | "eval_plan_oversize" | "eval_environment_invalid" | "eval_environment_scope_mismatch") => void;
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 
 /** The base-score cache parts the round looks up for a public eval: the plan's key, its base eval set, no hidden set, and its measured settings. Undefined when the plan does not name them. */
-function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyParts | undefined {
+export function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyParts | undefined {
   const key = record(plan["key"]); const inputs = record(plan["inputs"]);
   const evalSetHash = typeof plan["baseEvalSetHash"] === "string" ? plan["baseEvalSetHash"] : plan["evalSetHash"];
   if (key === undefined || inputs === undefined || typeof evalSetHash !== "string" || typeof inputs["settingsFingerprint"] !== "string") return undefined;
@@ -79,16 +93,19 @@ async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string
 /** The sources of this run's own company and project, or `not_available`. Throws only the fixed refusal, for a caller that is not this run. */
 export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operation: EvalPlanDeliveryOperation): Promise<EvalPlanDelivery> {
   const payload = record(operation.dispatch?.payload);
-  if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || !isLiveOperation(operation.status) || operation.companyId !== deps.companyId
-    || payload === undefined || !EvalRequestSchema.safeParse(payload["evalRequest"]).success) throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
+  // L4-EVH: a health run's own preparation (read only, pinned, carrying `evalHealth`) is the other operation that asks; its lease is the stored dispatch's, never the request's.
+  const healthLease = operation.kind === "prepare" && deps.health !== undefined && isLiveOperation(operation.status) && operation.companyId === deps.companyId && payload !== undefined ? PrepareEvalHealthSchema.safeParse(payload["evalHealth"]) : undefined;
+  const healthJob = healthLease?.success === true ? healthLease.data : undefined;
+  if (healthJob === undefined && (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || !isLiveOperation(operation.status) || operation.companyId !== deps.companyId
+    || payload === undefined || !EvalRequestSchema.safeParse(payload["evalRequest"]).success)) throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
   const project = await deps.projectOf(operation);
   if (typeof project !== "string" || project === "") throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
   const scope: EvalPlanScope = Object.freeze({ companyId: deps.companyId, project });
   const log = (event: Parameters<NonNullable<EvalPlanDeliveryDeps["log"]>>[0]): void => { try { deps.log?.(event); } catch { /* logging never changes the answer */ } };
   try {
-    const base = WorkflowReviewBaseSchema.safeParse(payload["workflowBase"]);
+    const base = WorkflowReviewBaseSchema.safeParse(payload?.["workflowBase"]);
     // One read: the plan and the approval of the same approved item (never two reads a re-approval could fall between).
-    const found = await deps.sources.read(scope, Object.freeze({ bases: base.success ? base.data : undefined }));
+    const found = healthJob !== undefined ? await deps.health!.read({ requestId: healthJob.requestId, claimId: healthJob.claimId }, scope) : await deps.sources.read(scope, Object.freeze({ bases: base.success ? base.data : undefined }));
     const plan = record(found?.plan);
     if (found === undefined || plan === undefined) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
     const key = record(plan["key"]);
@@ -101,7 +118,15 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
       if (grant.success && grant.data.company === scope.companyId && grant.data.project === scope.project) approval = grant.data;
       else if (grant.success) log("eval_plan_scope_mismatch");
     }
-    const answer = EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline: await baselineOf(deps.sources.cache(scope.companyId), plan) });
+    // L4-EVS: the environment is delivered only when it is whole and its saved image is this project's own; otherwise the eval runs on the bare image, as before (it is never a reason to withhold the plan).
+    let environment: Extract<EvalPlanDelivery, { status: "ready" }>["environment"];
+    if (found.environment !== undefined) {
+      const parsed = EvalEnvironmentSchema.safeParse(found.environment);
+      if (!parsed.success) log("eval_environment_invalid");
+      else if (parsed.data.kind === "saved" && !savedEnvRepositoryIsFor(parsed.data.repository, { orgId: scope.companyId, projectId: scope.project })) log("eval_environment_scope_mismatch");
+      else environment = parsed.data;
+    }
+    const answer = EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline: await baselineOf(deps.sources.cache(scope.companyId), plan), ...(environment === undefined ? {} : { environment }) });
     if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
     if (Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_plan_oversize"); return NOT_AVAILABLE; }
     return answer.data;

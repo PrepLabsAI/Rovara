@@ -9,6 +9,9 @@ import type { TaskTokenDeadline } from "./deadline.js";
 
 export interface TaskTokenRecords { operation: OperationRecord; workspace: WorkspaceRecord; task: TaskRecord }
 const refused = () => agentXError("CALLBACK_FORBIDDEN", "this operation has no model access");
+const NO_TASK = Symbol("task-token-no-task");
+/** True only for the refusal of an operation whose workspace has no task pointer at all (L4-EVH: the one case where the route may try an eval health run's own description). Same error, same message, as before. */
+export const hasNoTask = (error: unknown): boolean => typeof error === "object" && error !== null && (error as Record<symbol, unknown>)[NO_TASK] === true;
 /** Four point reads for a new workspace (five for legacy); no task/operation enumeration, and every record belongs to the same company and workspace. */
 export async function readTaskTokenRecords(deps: Pick<TaskFlowDeps, "store" | "companyId">, scope: TaskTokenOperation, deadline?: TaskTokenDeadline): Promise<TaskTokenRecords> {
   deadline?.check();
@@ -25,6 +28,7 @@ export async function readTaskTokenRecords(deps: Pick<TaskFlowDeps, "store" | "c
   if (!WorkspaceStatusSchema.safeParse(workspace.status).success || workspace.closedAt !== undefined || ["CLOSING", "CLOSED", "STOPPED"].includes(workspace.status)) throw refused();
   deadline?.check();
   const pointer = fromDocument<TaskPointerRecord>(await deps.store.get(location.taskPointerKey()));
+  if (pointer === undefined) throw Object.assign(refused(), { [NO_TASK]: true });
   if (typeof pointer?.taskId !== "string" || !/^[A-Za-z0-9_.:-]{1,128}$/u.test(pointer.taskId)) throw refused();
   deadline?.check();
   const task = fromDocument<TaskRecord>(await deps.store.get(taskKey(pointer.taskId)));

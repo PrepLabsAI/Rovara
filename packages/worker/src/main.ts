@@ -19,7 +19,7 @@ import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { installBuildSystemProfiles } from "./build-systems.js";
 import { modelFallbackReporter, resolveTaskSessionModel, secondReviewerRuntimes, taskMissingKeyAuthorizer } from "./task-model.js";
 import { createDefaultPiSessionAdapter } from "./pi-session.js";
-import { evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";
+import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
@@ -36,6 +36,7 @@ import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
 import { runSetupProveJob } from "./setup-prove.js";
+import { runEvalHealthRider } from "./eval-health-run.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -162,6 +163,12 @@ const state = createWorkerServerState(
             });
           } finally { unregister(); }
         }
+        // L4-EVH: an opt-in eval health run measures the project's evals on this read-only, pinned preparation of main and posts the one result to the broker (eval-health-run.ts).
+        if (invocation.payload.evalHealth !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try { await runEvalHealthRider({ rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal }); } finally { unregister(); }
+        }
         return {
           manifestPath: ".agentx/preparation-manifest.json",
           projectName: manifest.projectName,
@@ -185,7 +192,7 @@ const state = createWorkerServerState(
         const missingKeyAuthority=taskMissingKeyAuthorizer(invocation.payload,authorizeModelFallback,proxy,process.env);
         // Plan v3.2 row 20.2: the final-check eval's ports, for a task that asks for it, only when the host switched it on (ROVARA_EVAL_GATEWAY_URL) and the trusted sources are delivered. Otherwise none: the request reads "not connected" with zero calls.
         const evalRequested = invocation.payload.evalRequest !== undefined;
-        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: process.env, controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
+        const evalFinalCheck = evalFinalCheckForTask({ requested: evalRequested, environment: evalEnvironmentWithGateway(process.env, invocation.payload.evalGatewayUrl), controlPlaneUrl, capability: invocation.callbackCapability, sources: evalRequested ? evalHostSourcesFor(invocation, { controlPlaneUrl,
           // DEC 253n(2): the fresh check sandbox (TE-B1), built per check from the delivered plan's confirmed command and the check's pinned candidate.
           fresh: { environment: process.env, docker: createDockerCli(), workspaceKey: () => setupWorkspaceKey(rootPath) } }) : undefined });
         return runTaskInvocation(invocation, {

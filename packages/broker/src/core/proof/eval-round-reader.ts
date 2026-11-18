@@ -35,8 +35,8 @@ async function readRounds(actions: TestProofActions, task: { ownerKey: string; w
         const matches = listing.filter(item => item.name === EVAL_ROUND_ARTIFACT);
         if (matches.length > 1) return undefined;
         const artifact = matches[0]; if (artifact === undefined) continue;
-        const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
-        if (!artifact.objectKey.startsWith(prefix) || artifact.objectKey.split("/").some(part => part === "." || part === "..")) return undefined;
+        const prefixes = [`private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`, `workspaces/${task.workspaceId}/operations/${operation.id}/`]; // the operation's own folder in either shape: Cloud's owner-keyed one, or the core callback's (services/callbacks.ts artifactObjectKey)
+        if (!prefixes.some(prefix => artifact.objectKey.startsWith(prefix)) || artifact.objectKey.split("/").some(part => part === "." || part === "..")) return undefined;
         if (bytesLeft <= 0) return undefined;
         const text = await actions.readArtifact(artifact.objectKey, bytesLeft);
         if (!active || typeof text !== "string" || text.length > bytesLeft) return undefined;

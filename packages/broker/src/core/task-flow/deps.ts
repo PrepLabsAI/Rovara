@@ -352,6 +352,11 @@ export interface TaskFlowDeps {
    */
   modelAccess?: { route(): Promise<InvocationModelRoute | undefined> };
   /**
+   * The model gateway's https origin (the install's `ROVARA_CORE_MODEL_GATEWAY_URL`, already checked), set by the dispatcher only where the gateway is configured. A task step that carries an `evalRequest` and goes to a worker that lists
+   * EVAL_GATEWAY_FEATURE is sent it as `evalGatewayUrl`, so the hosted worker can bind the final-check eval with no setting of its own. Absent (a laptop, no gateway): nothing is sent and the eval reads "not connected", exactly as before.
+   */
+  evalGatewayUrl?: string;
+  /**
    * DEC 254n (1): the company's engine model check, asked once before a task starts (after the access and project checks, before the limits, the admission and any write). An answer is the
    * refusal (fixed words) and the start writes nothing but its refusal audit; undefined lets the start go on. Absent: no check, exactly as before.
    */

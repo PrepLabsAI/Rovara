@@ -95,7 +95,9 @@ export interface HostedSetupRunWiring {
    */
   eval?: { monthlyCap?: EvalDiscoveryConfirmDeps["monthlyCap"]; readFile?: EvalDiscoveryConfirmDeps["readFile"];
     /** D5: true only where a health runner reads the person's yes (`readEvalHealthRequest`). Absent: the card shows no health button and `eval-health` is not served. No deployment wires one yet. */
-    healthRuns?: boolean } | undefined;
+    healthRuns?: boolean;
+    /** L4-EVH: starts the health run for the project's waiting yes (the broker claims it and hands it to a worker). Best effort; never throws, and the person's answer does not wait on the worker. Absent: nothing starts here (the card shows no button). */
+    healthRun?: (project: string) => Promise<unknown> } | undefined;
   /** A person's display name, for "stopped by". Absent or unknown: "Unknown". */
   displayName?: ((personId: string) => Promise<string | undefined>) | undefined;
 }
@@ -376,7 +378,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     if (input.request.method === "GET" && tail === "eval") {
       const approval = input.wiring.approval;
       if (approval === undefined || input.wiring.eval === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
-      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns }, project, input.principal)) });
+      return json(200, { project, ...(await readEvalCard({ store: flow.store, companyId, members: approval.evalMembers, monthlyCap: input.wiring.eval.monthlyCap, healthRuns: input.wiring.eval.healthRuns, now: input.now }, project, input.principal)) });
     }
     if (input.request.method === "GET" && tail === undefined) {
       const apply = input.wiring.approval === undefined ? undefined : await applyView(input, deps, project);
@@ -454,7 +456,10 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
         // The opt-in (D5): a person's yes, kept as one request row. Nothing runs here; the host's health runner reads the row.
         const body = parsed(EvalHealthRequestBodySchema, raw);
         await recorded(input, auditEvent(input, "eval.health_requested", `eval.health:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
-        return json(200, { project, ...(await requestEvalHealthCheck({ store: flow.store, companyId, now: input.now, members: approval.evalMembers }, project, body, input.principal)) });
+        const asked = await requestEvalHealthCheck({ store: flow.store, companyId, now: input.now, members: approval.evalMembers }, project, body, input.principal);
+        // The yes is kept; now the broker re-reads everything it rested on and starts the run (a repeat of the same yes starts nothing again).
+        if (!asked.duplicate) await Promise.resolve(evalWiring.healthRun?.(project)).catch(() => undefined);
+        return json(200, { project, ...asked });
       }
       if (input.freshStepUp === undefined) throw agentXError("NOT_FOUND", EVAL_APPROVAL_UNAVAILABLE);
       const stepUp = await input.freshStepUp(SETUP_DECIDE_ON_A_PAGE);

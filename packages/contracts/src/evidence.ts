@@ -557,6 +557,8 @@ export const EvidenceViewReaderSchema = forwardReader(EvidenceViewSchema);
 export const EVIDENCE_RAW_ARTIFACT = "evidence-raw.json";
 /** The worker feature that reads `evidenceCapture` (a CHECKS run writes `evidence-raw.json`). The broker sends the field only when the proof switch is on, and never to a worker that does not list this. */
 export const EVAL_ROUND_FEATURE = "task.evalRound.v1" as const;
+/** The worker feature that reads `evalGatewayUrl` (the model gateway's https origin the broker delivers with an eval request, so a hosted worker needs no setting of its own). Sent only to a worker that lists it. */
+export const EVAL_GATEWAY_FEATURE = "task.evalGateway.v1" as const;
 export const EVIDENCE_CAPTURE_FEATURE = "task.evidenceCapture.v1" as const;
 export const EVIDENCE_RAW_MAX_BYTES = 2 * 1_048_576;
 export const EvidenceRawCheckSchema = z
