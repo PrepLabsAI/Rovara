@@ -19,6 +19,8 @@ import type { Lesson } from "./types.js";
 export const LOCAL_LESSONS_PER_MINUTE = 60;
 export const KNOWLEDGE_UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
 export const KNOWLEDGE_NO_SUCH_PROJECT = "No such project.";
+/** A suggestion's request is at most this many bytes (the fields come to under 2 KB, even with every character escaped in JSON: advice 80, reason 160, where 200, five paths of 200, a repository address). */
+export const PROPOSE_BODY_BYTES_MAX = 8_192;
 
 export type KnowledgeTool = "lessons" | "areas";
 
@@ -175,6 +177,8 @@ export function createKnowledgeServer(options: KnowledgeServeOptions): Knowledge
     let exists: boolean;
     try { exists = await options.projectExists(project); } catch { throw agentXError("RUNTIME_UNAVAILABLE", KNOWLEDGE_UNAVAILABLE); }
     if (!exists) throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT);
+    // One TOTAL limit on the request: the fields' own limits come to well under this, so a larger body is not a suggestion and is not parsed.
+    if (call.body !== undefined && Buffer.byteLength(call.body, "utf8") > PROPOSE_BODY_BYTES_MAX) throw agentXError("CONFIG_INVALID", "body: is too large");
     let raw: unknown;
     try { raw = call.body === undefined || call.body === "" ? {} : JSON.parse(call.body); } catch { throw agentXError("CONFIG_INVALID", "body: is not JSON"); }
     const checked = KnowledgeProposeBodySchema.safeParse(raw);
