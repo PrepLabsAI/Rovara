@@ -258,6 +258,15 @@ describe("graduating over the API", () => {
     expect(seen).toEqual([{ lessonId: "les_proc0002", by: "a-maint", name: "other-queue" }]);
   });
 
+  it("the skills door of the lessons API reads the same band, fresh: a lesson with a mark against it is refused as not proven", async () => {
+    const w = await setUp();
+    await proven(w, A, "les_proc0003", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue. 2. Register the handler. 3. Add an alarm." });
+    const { api: target } = api(w);
+    await w.lessons.get(A)!.runtime.evidence.note({ workspaceId: A, project: "payments", lessonId: "les_proc0003", kind: "against", weight: 1, at: w.world.clock.now, id: "mark-1" });
+    expect(await call(target, "a-maint", "POST", `${P}/lessons/les_proc0003/skill`, {})).toMatchObject({ ok: false, code: "FORBIDDEN", message: "That lesson has not proved itself yet, so it cannot become a skill." });
+    expect(await call(target, "a-maint", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+  });
+
   it("the whole path over the API: the card, the draft, two people approve, and the lesson is retired with became -> skill; the card is gone", async () => {
     const w = await setUp();
     await proven(w, A, "les_proc0001", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth." });

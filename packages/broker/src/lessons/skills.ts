@@ -364,7 +364,8 @@ async function sourcesStillProven(deps: SkillDeps, key: ScopeKey, fromLessons: r
   if (fromLessons.length === 0) return true;
   try {
     const lessons = (await Promise.all(fromLessons.map((id) => deps.lessons.get(key, id)))).filter((lesson): lesson is Lesson => lesson !== undefined);
-    if (lessons.length === 0) return true;
+    // A source lesson that cannot be read now (erased, purged) is not proof: the skill waits.
+    if (lessons.length !== fromLessons.length) return false;
     const counted = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: lessons.map((lesson) => lesson.id), now: deps.now() });
     const signalOf = deps.signals === undefined ? undefined : await provenSignalsOf(deps.signals, key);
     return lessons.every((lesson) => provenProcedure({ lesson, tasks: counted.counts.get(lesson.id)?.tasks, now: deps.now(), signal: signalOf?.(lesson.id) }));
