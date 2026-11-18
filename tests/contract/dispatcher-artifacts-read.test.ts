@@ -4,6 +4,7 @@
 //   2. nothing wider: no list, no put, no delete, no `*` resource, no other prefix, no other bucket, no KMS (the bucket is S3-managed encrypted, so there is no key to grant);
 //   3. the permissions boundary and the deploy role allow it (evaluated from code, no AWS call), and the deploy role needs no new action to put it on the dispatcher's role;
 //   4. the legacy template does not change.
+import { isDeepStrictEqual } from "node:util";
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -15,7 +16,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: unknown };
+type Statement = { Sid?: string; Effect: string; Action: string | string[]; NotAction?: string | string[]; Resource: unknown; Condition?: unknown };
 type Resource = { Type: string; Properties: Record<string, unknown> };
 type Json = { Resources: Record<string, Resource> };
 
@@ -59,12 +60,16 @@ const admissionStatement = (json: Json): Statement => ({ Effect: "Allow", Action
 function violations(json: Json): string[] {
   const found: string[] = [];
   const statements = dispatcherStatements(json);
-  const touching = statements.filter((statement) => list(statement.Action).some((action) => /^(s3|kms|\*):?/u.test(String(action))));
+  // A statement with NotAction (or no Action) reaches S3 and KMS too, so it counts as touching them (review L1).
+  const touching = statements.filter((statement) => "NotAction" in statement || statement.Action === undefined || list(statement.Action).some((action) => /^(s3:|\*)/u.test(String(action))));
+  // KMS: the dispatcher already signs with the invoke signing key (kms:Sign) and nothing else; any other KMS action (Decrypt, GenerateDataKey, ...) is a violation.
+  const kmsOther = statements.flatMap((statement) => list(statement.Action)).filter((action) => /^kms:/u.test(String(action)) && action !== "kms:Sign");
+  if (kmsOther.length > 0) found.push(`KMS actions on the dispatcher beyond kms:Sign: ${kmsOther.join(",")}`);
   const own = touching.filter((statement) => statement.Sid === DISPATCHER_ARTIFACTS_READ_SID);
   if (own.length !== 1) found.push(`expected exactly one ${DISPATCHER_ARTIFACTS_READ_SID} statement, found ${own.length}`);
-  else if (JSON.stringify(own[0]) !== JSON.stringify(expectedStatement(json))) found.push(`the ${DISPATCHER_ARTIFACTS_READ_SID} statement is not the exact one: ${JSON.stringify(own[0])}`);
+  else if (!isDeepStrictEqual(own[0], expectedStatement(json))) found.push(`the ${DISPATCHER_ARTIFACTS_READ_SID} statement is not the exact one: ${JSON.stringify(own[0])}`);
   const rest = touching.filter((statement) => statement.Sid !== DISPATCHER_ARTIFACTS_READ_SID);
-  if (rest.length !== 1 || JSON.stringify(rest[0]) !== JSON.stringify(admissionStatement(json))) found.push(`other S3 or KMS statements on the dispatcher: ${JSON.stringify(rest)}`);
+  if (rest.length !== 1 || !isDeepStrictEqual(rest[0], admissionStatement(json))) found.push(`other S3 or KMS statements on the dispatcher: ${JSON.stringify(rest)}`);
   return found;
 }
 
@@ -96,8 +101,10 @@ describe("the dispatcher's read of company artifacts (L4-IAMR)", () => {
     expect(violations(namedJson)).toEqual([]);
   });
 
-  it("holds every other S3 or KMS grant of the dispatcher exactly as it was: the one admission read, no list, no put, no key", () => {
-    const touching = dispatcherStatements(namedJson).filter((statement) => list(statement.Action).some((action) => /^(s3|kms):/u.test(String(action))));
+  it("holds every other S3 grant of the dispatcher exactly as it was: the one admission read, no list, no put, and no KMS beyond its existing kms:Sign", () => {
+    const kms = dispatcherStatements(namedJson).flatMap((statement) => list(statement.Action)).filter((action) => /^kms:/u.test(String(action)));
+    expect(kms).toEqual(["kms:Sign"]);
+    const touching = dispatcherStatements(namedJson).filter((statement) => list(statement.Action).some((action) => /^s3:/u.test(String(action))));
     expect(touching).toHaveLength(2);
     expect(touching.filter((statement) => statement.Sid !== "ReadCompanyArtifacts")).toEqual([admissionStatement(namedJson)]);
     for (const statement of touching) {
@@ -118,7 +125,7 @@ describe("the dispatcher's read of company artifacts (L4-IAMR)", () => {
     const statements = dispatcherStatements(legacyJson);
     expect(statements.some((statement) => statement.Sid === DISPATCHER_ARTIFACTS_READ_SID)).toBe(false);
     expect(JSON.stringify(legacyJson)).not.toContain("/workspaces/*");
-    const touching = statements.filter((statement) => list(statement.Action).some((action) => /^(s3|kms):/u.test(String(action))));
+    const touching = statements.filter((statement) => list(statement.Action).some((action) => /^s3:/u.test(String(action))));
     expect(touching).toEqual([admissionStatement(legacyJson)]);
   });
 
@@ -151,7 +158,8 @@ describe("the dispatcher's read of company artifacts (L4-IAMR)", () => {
         { Effect: "Allow", Action: "kms:Decrypt", Resource: "*" },
         { Effect: "Allow", Action: "s3:GetObject", Resource: "*" },
         { Effect: "Allow", Action: "s3:PutObject", Resource: "*" },
-      ] satisfies Statement[]) {
+        { Sid: "Other", Effect: "Allow", NotAction: "iam:*", Resource: "*" },
+      ] as unknown as Statement[]) {
         const copy = structuredClone(namedJson);
         const roleId = dispatcherRoleIdOf(copy);
         const policy = Object.values(copy.Resources).find((resource) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource.Properties.Roles).includes(roleId))!;
