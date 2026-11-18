@@ -25,6 +25,7 @@ import {
 } from "./eval-health-request.js";
 import { baseOf, createEvalPlanSources } from "./eval-plan-source.js";
 import { readApprovedEvalPlan, roleFor } from "./eval-spend.js";
+import { settleEvalWrapperTest } from "./eval-wrapper.js";
 
 export interface EvalHealthRunDeps {
   store: DocumentStore;
@@ -77,6 +78,21 @@ async function planFor(deps: EvalHealthRunDeps, project: string, row: EvalHealth
   return await sources.read({ companyId: deps.companyId, project }, { bases, spendDigest: row.spendDigest });
 }
 
+/** The reasons that say the run could not READ the eval's results (the wrapper file's whole job). Every other "not run" reason is about the run itself (it never happened, was stopped or ran out), so the file's test stays approved. */
+const UNREADABLE_REASONS: ReadonlySet<EvalHealthNotRunReason> = new Set<EvalHealthNotRunReason>(["invalid_results", "incomplete_questions"]);
+
+/**
+ * The run's answer for a wrapped eval's file (DEC 254zzz43): `readable` when the results were read in full (a measured result, or a baseline the project already held), `unreadable` when they could not be read.
+ * Only for the approved plan THIS request was made under, in this request's own company and project; a replaced approval records nothing. Best effort: it never changes the run's own outcome.
+ */
+async function settleWrapperTest(deps: EvalHealthRunDeps, project: string, row: Pick<EvalHealthRequestRecord, "spendDigest">, result: "readable" | "unreadable"): Promise<void> {
+  try {
+    const found = await readApprovedEvalPlan(table(deps), project);
+    if (found === undefined || found.spend.digest !== row.spendDigest) return;
+    await settleEvalWrapperTest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, found.plan, result);
+  } catch { /* the file keeps its state: the card still reads "test approved" */ }
+}
+
 /** Writes one move: its audit record first, then the conditional write. A failed audit stops the move. */
 async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, reason: EvalHealthNotRunReason, claimId?: string): Promise<EvalHealthStart> {
   try { await deps.audit({ action: "eval.health_not_run", project, requestId: row.requestId, reason }); } catch { return { outcome: "nothing" }; }
@@ -127,7 +143,9 @@ export async function startEvalHealthRun(deps: EvalHealthRunDeps, project: strin
     if (reusedSummary !== undefined) {
       try { await deps.audit({ action: "eval.health_reused", project, requestId: row.requestId }); } catch { return { outcome: "nothing" }; }
       // From `requested` straight to finished: the plain mark with the result (no claim, no worker).
-      return await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { result: reusedSummary }) ? { outcome: "reused", requestId: row.requestId } : { outcome: "nothing" };
+      if (!await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { result: reusedSummary })) return { outcome: "nothing" };
+      await settleWrapperTest(deps, project, row, "readable");
+      return { outcome: "reused", requestId: row.requestId };
     }
     // A baseline that is being measured right now (a task's, or another check) is not measured twice.
     const mark = cache.startMeasurement === undefined ? undefined : await cache.startMeasurement(parts);
@@ -195,7 +213,9 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     const end = async (reason: EvalHealthNotRunReason): Promise<EvalHealthRecorded> => {
       const settled = await settleNotRun(deps, project, row, reason, claim.claimId);
       await finish(deps, cache, parts, claim.mark);
-      return settled.outcome === "not_run" ? { outcome: "not_run" } : { outcome: "refused" };
+      if (settled.outcome !== "not_run") return { outcome: "refused" };
+      if (UNREADABLE_REASONS.has(reason)) await settleWrapperTest(deps, project, row, "unreadable");
+      return { outcome: "not_run" };
     };
     if (body.result.status === "not_run") return await end(body.result.reason);
     const cap = await capOf(deps, project);
@@ -213,7 +233,9 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     if (summary === undefined) return await end("invalid_results");
     const done = await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { claimId: claim.claimId, result: summary });
     await finish(deps, cache, parts, claim.mark);
-    return done ? { outcome: "finished" } : { outcome: "refused" };
+    if (!done) return { outcome: "refused" };
+    await settleWrapperTest(deps, project, row, "readable");
+    return { outcome: "finished" };
   } catch { return { outcome: "refused" }; }
 }
 
