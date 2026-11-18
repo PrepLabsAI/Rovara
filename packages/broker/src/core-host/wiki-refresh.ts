@@ -58,9 +58,11 @@ export function hostedUnattendedTasks(flow: TaskFlowDeps): UnattendedTasks {
       return micros === undefined ? undefined : micros / 1_000_000;
     },
     async read(taskId) {
-      const task = await flow.store.get(taskKey(taskId)) as { closedAt?: unknown; workflow?: { stage?: unknown; state?: unknown } } | undefined;
+      const task = await flow.store.get(taskKey(taskId)) as { closedAt?: unknown; purpose?: unknown; setupAgentResult?: { status?: unknown } | null; workflow?: { stage?: unknown; state?: unknown } } | undefined;
       if (task === undefined) return undefined;
-      const end = task.workflow?.stage === "MERGED" ? "succeeded" : task.closedAt !== undefined || task.workflow?.stage === "CLOSED" ? "cancelled" : undefined;
+      // A setup run (a repair draft, L4-SR2) ends with its stored result, not with a stage: the reservation is settled as soon as the run reported (a run closed by a cancel reads as cancelled below).
+      const setupEnd = task.purpose === "setup_agent" && task.setupAgentResult !== undefined && task.setupAgentResult !== null ? (task.setupAgentResult.status === "ready" ? "succeeded" : "failed") : undefined;
+      const end = task.workflow?.stage === "MERGED" ? "succeeded" : task.closedAt !== undefined || task.workflow?.stage === "CLOSED" ? "cancelled" : setupEnd;
       return { ...(end === undefined ? {} : { end }), waiting: end === undefined && (task.workflow?.state === "WAITING" || task.workflow?.state === "BLOCKED") };
     },
     async cancel(taskId) { await cancelTask(flow, taskId); },
@@ -134,7 +136,11 @@ export function createHostedWikiRefresh(inputs: HostedWikiRefreshInputs): (proje
  * The `automation-stop` job's hosted service for a company the system runs ceiling covers: it settles the reservation of each open unattended run whose task ended and stops one that outlived its minutes
  * (`sweepUnattendedRuns`). Nothing opens a run except the wiki refresh, so on a company with none it reads an empty partition.
  */
-export function createHostedAutomationStop(inputs: { flow: TaskFlowDeps; companyId: OrgId; admission: Admission; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined }): CoreService {
+export function createHostedAutomationStop(inputs: {
+  flow: TaskFlowDeps; companyId: OrgId; admission: Admission; now: () => number; log?: ((entry: Record<string, unknown>) => void) | undefined;
+  /** L4-SR2: the repair drafts' progress pass (core-host/setup-repair.ts), run in the same per-minute job after the sweep. A fault there is logged and never fails the sweep. */
+  repairs?: { advanceAll(budgetMs: number): Promise<{ projects: number; advanced: number }> } | undefined;
+}): CoreService {
   const deps: UnattendedStartDeps = {
     automation: { enabled: () => false }, companyId: inputs.companyId, admission: inputs.admission, audit: inputs.flow.audit,
     starter: { start: async () => { throw agentXError("NOT_AVAILABLE_HERE", "this sweep starts nothing"); }, read: async () => undefined },
@@ -149,6 +155,17 @@ export function createHostedAutomationStop(inputs: { flow: TaskFlowDeps; company
       });
     },
   };
-  return { pass: async () => ({ ...(await sweepUnattendedRuns(deps)) }) };
+  return {
+    pass: async ({ budgetMs }) => {
+      const swept = await sweepUnattendedRuns(deps);
+      if (inputs.repairs === undefined) return { ...swept };
+      try {
+        return { ...swept, repairs: { ...(await inputs.repairs.advanceAll(budgetMs)) } };
+      } catch (error) {
+        inputs.log?.({ component: "setup-repair", event: "setup_repair.pass_failed", error: error instanceof Error ? error.name : "unknown" });
+        return { ...swept, repairs: "failed" };
+      }
+    },
+  };
 }
 

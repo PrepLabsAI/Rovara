@@ -1,4 +1,4 @@
-492 record kinds: 122 company-scoped, 22 install-wide, 348 needs-company. 242 routes: 63 company-scoped, 10 install-wide, 169 needs-company.
+493 record kinds: 122 company-scoped, 22 install-wide, 349 needs-company. 242 routes: 63 company-scoped, 10 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -413,6 +413,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:SETUP_UPDATE_OFFER | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SETUP_REPAIR | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SETUP_REPAIR_CURRENT | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
+| record | entity:SETUP_REPAIR_REVISION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SHARED_TASK | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:SIGN_IN_CLIENT | company-scoped | sign-in table | no | - | T3: global client-id namespace; runtime company ownership (absent means implicit), operator install-level exception; audience and writes serialized by registry revision. |
 | record | entity:SIGN_IN_CLIENT_REGISTRY; pk:SIGNIN_CLIENTS | install-wide | sign-in table | no | - | T3 ANSWER-2: opaque registry revision serializes the global client-id/audience namespace; no person or secret data. |
@@ -831,7 +832,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | packages/broker/src/core/agents/store.ts:105 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/automatic-runs/end.ts:46 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/automatic-runs/view.ts:27 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
-| packages/broker/src/core/automation/run-seam.ts:177 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
+| packages/broker/src/core/automation/run-seam.ts:187 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/build-step/publish.ts:107 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
 | packages/broker/src/core/chains/runner.ts:122 | scoped-key (not a hit) | company-scoped | Partition constructor carries the org/company; see key constructors in record inventory. |
 | packages/broker/src/core/chains/runner.ts:536 | out-of-scope | needs-company | No per-row company check at this query; upstream authorization is not counted as row-level isolation proof (T1/T2/T8). |
@@ -1019,9 +1020,9 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/automatic-runs/end.ts:70:56:sk | watch.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | automaticRunWatchKey, projectPk |
 | forwarding | packages/broker/src/core/automation/authority.ts:15:127:sk | approvalProofKey(proof) | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, proofUseKey |
 | forwarding | packages/broker/src/core/automation/kit.ts:52:41:entityType | entityType | Generic runtime entityType forwarding; preserves caller/loaded record identity rather than assigning a new record family. | agentRequestKey |
-| forwarding | packages/broker/src/core/automation/run-seam.ts:101:124:sk | requestId | Runtime sort component forwarded within the feeding partition; not an independent record family. | openRunKey |
-| forwarding | packages/broker/src/core/automation/run-seam.ts:183:19:pk | text(row["pk"]) | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | openRunKey |
-| forwarding | packages/broker/src/core/automation/run-seam.ts:183:40:sk | text(row["sk"]) | Runtime sort component forwarded within the feeding partition; not an independent record family. | openRunKey |
+| forwarding | packages/broker/src/core/automation/run-seam.ts:109:124:sk | requestId | Runtime sort component forwarded within the feeding partition; not an independent record family. | openRunKey |
+| forwarding | packages/broker/src/core/automation/run-seam.ts:193:19:pk | text(row["pk"]) | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | openRunKey |
+| forwarding | packages/broker/src/core/automation/run-seam.ts:193:40:sk | text(row["sk"]) | Runtime sort component forwarded within the feeding partition; not an independent record family. | openRunKey |
 | forwarding | packages/broker/src/core/build-step/autofix.ts:213:17:pk | row.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | dispatchRowKey, taskKey |
 | forwarding | packages/broker/src/core/build-step/autofix.ts:213:29:sk | row.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | dispatchRowKey, taskKey |
 | forwarding | packages/broker/src/core/chains/branches.ts:31:55:computed | [key] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/core/chains/branches.ts (count) |

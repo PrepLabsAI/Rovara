@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, type SetupAgentLimits, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -195,6 +195,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   let personSeq: number | undefined;
   /** Set when the run was aborted from outside (a person's Stop): the end is then bounded (`SETUP_STOP_FINISH_MS`). */
   let cancelled = false;
+  /** Why the gateway paused nightly upkeep under this run, when its fixed sentence was what refused a call (L4-SR2). */
+  let upkeepPause: UpkeepPauseReason | undefined;
   /** The command place of each journal entry a person's command wrote (so a website it hit is asked for with the command's place, from which the broker finds who typed it). */
   const seqOfEntry = new Map<number, number>();
 
@@ -248,7 +250,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
         // A spent budget on the proxy (the model call itself was refused for it) is the budget limit, in the run's own words.
         const outcome = assistantOutcome(event);
         const failure = failedTurn(outcome);
-        if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) governor.stop("budget_used");
+        // L4-SR2: the gateway's upkeep cap refused a call of an unattended repair draft (HTTP 422 `upkeep_paused`, read from its fixed sentence). The run ends and says why; the broker only takes the word from an unattended draft.
+        const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
+        if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); void session?.abort().catch(() => undefined); }
+        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) governor.stop("budget_used");
         else if (failure instanceof AgentXError && failure.code === "MODEL_NOT_ALLOWED") governor.stop("infrastructure");
       }
       // The limits are looked at AFTER the turn's tokens were counted, so a turn that crossed the budget is seen at once.
@@ -326,8 +331,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     let failed = false;
     try {
       await session.prompt(setupAgentInstructions({ repositories, limits, ...(input.metaRepo === undefined ? {} : { metaRepo: input.metaRepo }) }));
-    } catch {
+    } catch (error) {
       failed = true;
+      const paused = upkeepPauseReasonOfText(error instanceof Error ? error.message : undefined);
+      if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); }
     }
     // ---- hosts_waiting: the agent has nothing else to do, and a website it asked for waits for an administrator. The run parks: no model call is made (so nothing is spent), the sandbox and the workspace are kept,
     // the wall clock stops, and the run asks the broker now and then. When an ask is answered it goes on with one more prompt; 24 hours parked ends it `hosts_waiting` with the partial proposal it has. A person's
@@ -399,7 +406,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     };
     const ended = cancelled ? await withinMs(finishRun(), input.stopFinishMs ?? SETUP_STOP_FINISH_MS) : await finishRun();
     const proposal = ended?.proposal;
-    const summary = ended?.summary ?? governor.summary();
+    const endedSummary = ended?.summary ?? governor.summary();
+    const summary = upkeepPause === undefined ? endedSummary : { ...endedSummary, pause: upkeepPause };
     // What is left unsent goes now, once; the broker keeps the first entry for a position.
     await flushLast(ports, pendingEntries);
     // The eval report goes once through the run's own setup callback. A refusal leaves the run's proposal as it is: the setup page then shows no eval to confirm.

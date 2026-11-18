@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, SYSTEM_OWNER_PROVIDER, systemOwnerIdOf, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import { NO_PROJECT_GRANT, NOT_A_MEMBER_HERE, hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, SYSTEM_RUN_KINDS_LIVE, SYSTEM_TASK_PURPOSES, liveSystemKindOf, systemPrincipalOf } from "../../packages/broker/src/core/system-runs/access.js";
+import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const A: OrgId = IMPLICIT_COMPANY_ID;
@@ -33,12 +35,13 @@ async function putTask(w: World, taskId: string, fields: Record<string, unknown>
 const systemTask = (company: OrgId, project: string, purpose: string) => ({ companyId: company, developerId: systemOwnerIdOf(company, project), project, purpose });
 
 describe("the closed table", () => {
-  it("names three purposes; the free one and the wiki refresh are live, the repair draft stays named and refused", () => {
+  it("names three purposes; the free one and the two AI ones (the wiki refresh, the repair draft) are live, each AI one behind its marks", () => {
     expect(Object.keys(SYSTEM_TASK_PURPOSES).sort()).toEqual(["nightly_run", "setup_agent", "wiki_build"]);
-    expect([...SYSTEM_RUN_KINDS_LIVE]).toEqual(["setup_check", "nightly_check", "wiki_refresh"]);
+    expect([...SYSTEM_RUN_KINDS_LIVE]).toEqual(["setup_check", "nightly_check", "wiki_refresh", "repair_draft"]);
     expect(liveSystemKindOf("nightly_run")).toBe("nightly_check");
     expect(liveSystemKindOf("wiki_build")).toBe("wiki_refresh");
-    for (const purpose of ["setup_agent", "task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), JSON.stringify(purpose) ?? "undefined").toBeUndefined();
+    expect(liveSystemKindOf("setup_agent")).toBe("repair_draft");
+    for (const purpose of ["task", "", "__proto__", "constructor", "toString", 5, null, undefined, {}]) expect(liveSystemKindOf(purpose), JSON.stringify(purpose) ?? "undefined").toBeUndefined();
   });
 });
 
@@ -48,7 +51,7 @@ describe("a system owner's start", () => {
     expect(await w.access.checkStart(principalOf(A, "payments"), "payments", "nightly_run")).toEqual({ allowed: true });
   });
 
-  it.each([["setup_agent"], ["task"], [undefined], ["__proto__"], ["nightly_run "]])("is refused for the purpose %j (the repair draft waits, and an ordinary task is never a system owner's)", async (purpose) => {
+  it.each([["setup_agent"], ["task"], [undefined], ["__proto__"], ["nightly_run "]])("is refused for the purpose %j with no origin (a repair draft needs the origin and the upkeep switch, and an ordinary task is never a system owner's)", async (purpose) => {
     const verdict = await world().access.checkStart(principalOf(A, "payments"), "payments", purpose);
     expect(verdict).toEqual({ allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED });
   });
@@ -135,7 +138,7 @@ describe("a system owner's step", () => {
     expect((await w.access.checkStep({ taskId: "t1", developerId: systemOwnerIdOf(A, "payments"), project: "payments" })).allowed).toBe(true);
   });
 
-  it.each([["setup_agent"], [undefined], ["task"]])("stops for the purpose %j (the repair draft waits)", async (purpose) => {
+  it.each([["setup_agent"], [undefined], ["task"]])("stops for the purpose %j with no marks (the repair draft needs its pointer and the upkeep switch)", async (purpose) => {
     const w = world();
     const base: Record<string, unknown> = { ...systemTask(A, "payments", "x") };
     delete base["purpose"];
@@ -258,5 +261,122 @@ describe("the wiki refresh (L4-P2): a system owner's wiki_build task needs marks
     const w = worldWithMark();
     await putTask({ ...w, flag: { on: true }, membershipCalls: [] }, "t1", systemTask(A, "payments", "nightly_run"));
     expect((await w.access.checkStep({ taskId: "t1", developerId: owner(), project: "payments" })).allowed).toBe(true);
+  });
+});
+
+
+describe("the repair draft (L4-SR2): a system owner's setup_agent task needs the origin, the project's setup pointer and the project's upkeep switch, each read now", () => {
+  const owner = (project = "payments") => systemOwnerIdOf(A, project);
+  const rig = (company: OrgId = A) => {
+    const store = new MemoryDocumentStore();
+    const state = { gate: true, upkeep: true as unknown, upkeepAsked: [] as string[] };
+    const access = hostedTaskAccess({
+      companyId: company, storage: async () => store, systemRunsOn: () => state.gate, membershipOf: async () => undefined, projectGrant: async () => false,
+      upkeepOn: async (project) => { state.upkeepAsked.push(project); if (state.upkeep === "throw") throw new Error("down"); return state.upkeep as boolean; },
+    });
+    return { store, state, access };
+  };
+  // What the task flow's start writes: the digest of the starter's provider and person id (never the plain id).
+  const pointerOwner = (personId: string, provider: string = SYSTEM_OWNER_PROVIDER): string => developerIdOf({ provider, personId });
+  const setupPointer = async (store: MemoryDocumentStore, fields: Record<string, unknown> = {}, company: OrgId = A, project = "payments") => {
+    await store.put({ item: { ...setupAgentKey(company, project), entityType: "SETUP_AGENT", orgId: company, project, taskId: "t1", requestId: "r", requestedBy: pointerOwner(owner()), basedOnRevision: 1, startedAt: "2026-11-17T08:00:00.000Z", limits: {}, ...fields } });
+  };
+  const task = (store: MemoryDocumentStore, fields: Record<string, unknown> = {}) => store.put({ item: { pk: "DEVTASK#t1", sk: "META", entityType: "DEVELOPER_TASK", ...systemTask(A, "payments", "setup_agent"), ...fields } });
+  const step = { taskId: "t1", developerId: owner(), project: "payments" };
+
+  // MUTANT origin: the start is accepted for a setup_agent purpose without the `nightly` origin.
+  it("a start needs the origin `nightly` (only the repair starter sets it) AND the project's upkeep switch on now", async () => {
+    const w = rig();
+    const principal = principalOf(A, "payments");
+    expect(await w.access.checkStart(principal, "payments", "setup_agent", "nightly")).toEqual({ allowed: true });
+    for (const origin of [undefined, "app", "event", "schedule", "chain", "automatic", "NIGHTLY", "nightly "]) {
+      expect(await w.access.checkStart(principal, "payments", "setup_agent", origin), String(origin)).toEqual({ allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED });
+    }
+  });
+
+  // MUTANT upkeep: the start does not read the project's upkeep switch.
+  it("a start is refused while the project's upkeep switch is off, unreadable or malformed (and the switch asked is THIS project's)", async () => {
+    const w = rig();
+    const principal = principalOf(A, "payments");
+    for (const value of [false, "throw", undefined, "true", 1, null]) {
+      w.state.upkeep = value;
+      expect((await w.access.checkStart(principal, "payments", "setup_agent", "nightly")).allowed, String(value)).toBe(false);
+    }
+    expect([...new Set(w.state.upkeepAsked)]).toEqual(["payments"]);
+  });
+
+  it("a start is refused without an upkeep reader at all (never accepted by default) and while the company's gate is off", async () => {
+    const bare = hostedTaskAccess({ companyId: A, storage: async () => new MemoryDocumentStore(), systemRunsOn: () => true, membershipOf: async () => undefined, projectGrant: async () => false });
+    expect((await bare.checkStart(principalOf(A, "payments"), "payments", "setup_agent", "nightly")).allowed).toBe(false);
+    const w = rig();
+    w.state.gate = false;
+    expect((await w.access.checkStart(principalOf(A, "payments"), "payments", "setup_agent", "nightly")).allowed).toBe(false);
+  });
+
+  // MUTANT mark: a step of a setup_agent task is accepted on the purpose alone.
+  it("a step goes on only while the project's setup pointer names THIS task for this project's system owner", async () => {
+    const w = rig();
+    await task(w.store);
+    expect(await w.access.checkStep(step)).toEqual({ allowed: false, message: SYSTEM_OWNER_NOT_ALLOWED });
+    await setupPointer(w.store, { requestedBy: pointerOwner(MEMBER, "hosted") });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store, { requestedBy: pointerOwner(owner("billing")) });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    // The plain id, and the system owner's id under another provider, are not the system start's digest.
+    await setupPointer(w.store, { requestedBy: owner() });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store, { requestedBy: pointerOwner(owner(), "hosted") });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    // A person's later run replaced the pointer: the draft's steps end at once.
+    await setupPointer(w.store, { taskId: "someone-elses-run" });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store);
+    expect(await w.access.checkStep(step)).toEqual({ allowed: true });
+  });
+
+  // MUTANT step upkeep: a step is accepted without reading the upkeep switch again.
+  it("a step stops the moment the project's upkeep switch goes off (read again at every step), and when the company's gate goes off", async () => {
+    const w = rig();
+    await task(w.store);
+    await setupPointer(w.store);
+    expect((await w.access.checkStep(step)).allowed).toBe(true);
+    w.state.upkeep = false;
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    w.state.upkeep = "throw";
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    w.state.upkeep = true;
+    expect((await w.access.checkStep(step)).allowed).toBe(true);
+    w.state.gate = false;
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+  });
+
+  it("the pointer is read in this company and project only, and a pointer row that is not a setup pointer is no mark", async () => {
+    const w = rig();
+    await task(w.store);
+    await setupPointer(w.store, {}, B);
+    await setupPointer(w.store, {}, A, "billing");
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store, { entityType: "SOMETHING_ELSE" });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store, { orgId: B });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+    await setupPointer(w.store, { taskId: 7 });
+    expect((await w.access.checkStep(step)).allowed).toBe(false);
+  });
+
+  it("the other purposes never read the setup pointer or the upkeep switch (a nightly run and a wiki refresh behave as before)", async () => {
+    const w = rig();
+    await task(w.store, { purpose: "nightly_run" });
+    expect((await w.access.checkStep(step)).allowed).toBe(true);
+    expect(w.state.upkeepAsked).toEqual([]);
+    expect((await w.access.checkStart(principalOf(A, "payments"), "payments", "wiki_build", "nightly")).allowed).toBe(true);
+    expect(w.state.upkeepAsked).toEqual([]);
+  });
+
+  it("a person's setup run (a live member developer) keeps the setup run's own rule and is never given the system rule", async () => {
+    const w = rig();
+    await w.store.put({ item: { pk: "DEVTASK#t9", sk: "META", entityType: "DEVELOPER_TASK", companyId: A, developerId: MEMBER, project: "payments", purpose: "setup_agent" } });
+    expect((await w.access.checkStep({ taskId: "t9", developerId: MEMBER, project: "payments" })).allowed).toBe(false);
+    expect(w.state.upkeepAsked).toEqual([]);
   });
 });

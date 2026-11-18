@@ -9,6 +9,7 @@
 //   - a host is a plain DNS name: an address literal never parses (the design refuses those without a card);
 //   - where a value came from is one of `observed:<run>#<n>`, `recipe:<id>@<rev>` or `person`, besides the file-and-line, `model` and `detector:` sources the proposal already has.
 import { z } from "zod";
+import { UpkeepPauseReasonSchema } from "./upkeep.js";
 
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
 function line(max: number, min = 1) {
@@ -177,6 +178,8 @@ export const SetupRunSummarySchema = z
     hostAsks: z.number().int().min(0).max(SETUP_AGENT_LIMITS_MAX.hostAsks),
     /** True when the run stopped before it finished: the proposal holds what the run learned so far. A limit stop is always partial. */
     partial: z.boolean(),
+    /** L4-SR2: why the gateway paused nightly upkeep under an unattended repair draft's run (HTTP 422 `upkeep_paused`). Only the worker sets it, from the gateway's fixed sentence; absent on every other run. */
+    pause: UpkeepPauseReasonSchema.optional(),
   })
   .strict()
   .refine((summary) => !isSetupRunLimitStop(summary.stop) || summary.partial, { message: "a limit stop keeps a partial proposal", path: ["partial"] });
