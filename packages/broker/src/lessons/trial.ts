@@ -14,6 +14,7 @@ import type { LessonDeps } from "./ports.js";
 import { mayNameInRepository, viewedForLessons } from "./project-repo-audience.js";
 import { nextVersion, type LessonStore, type ScopeKey } from "./store.js";
 import { peopleOf, type Lesson } from "./types.js";
+import { citesSlackReply } from "./weak-source.js";
 
 export const TRIAL_STABLE_AFTER_DAYS = 14;
 export const TRIAL_STABLE_MIN_LOADS = 3;
@@ -238,6 +239,8 @@ export function trialBlockers(lesson: Lesson, tier: Lesson["tier"], context: Tri
   if (!TRIAL_TYPES.has(lesson.type)) why.push("type_not_allowed");
   if (lesson.provenance.minTrust === "outsider") why.push("outsider_source");
   if (lesson.provenance.memberCorrection !== true) why.push("not_member_correction");
+  // A reply in a chat thread never goes live without a person, whatever else backs the lesson (DEC 24).
+  if (citesSlackReply(lesson.provenance)) why.push("slack_source");
   if (lesson.provenance.claimsSupported !== true) why.push("claims_not_supported");
   if (viewedForLessons(lesson, context.projectRepos).provenance.audience.kind !== "project") why.push("restricted_source");
   if (lesson.type === "review_check") why.push("review_check");

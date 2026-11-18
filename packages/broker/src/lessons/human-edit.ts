@@ -114,7 +114,7 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
     try {
       // The switch first, before anything is read: Off, Collect and a lessons switch that is off read nothing for this pull request.
       if (!modeAllows((await resolveLearning(deps.settings, input.workspaceId, input.project)).mode, "reflect")) return;
-      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId });
+      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, withoutSlack: true });
       if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return;
       const found = (base.repoChanges ?? []).find((change) => change.link.toLowerCase() === input.link.toLowerCase());
       if (found === undefined) return;

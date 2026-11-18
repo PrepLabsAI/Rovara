@@ -36,7 +36,8 @@ export async function recordEndedTask(input: {
   origin: string | undefined;
 }): Promise<{ written: number }> {
   if (input.record.companyId !== input.companyId) throw new TeamRecordCompanyError();
-  const subject = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId });
+  // The Team record never keeps a chat reply, so it never asks for the thread (Slack is read once, by the lessons, at the task's end).
+  const subject = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId, withoutSlack: true });
   if (subject === undefined) return { written: 0 };
   const { facts } = subject;
   const project = facts.project;

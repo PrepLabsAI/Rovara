@@ -21,7 +21,9 @@ import { textReaderOf } from "../core/build-step/plan-input.js";
 import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
-import type { ChannelCompanyOf } from "../core/channel/company.js";
+import type { ChannelCompanyOf, ChannelMemberRule } from "../core/channel/company.js";
+import { slackThreadSource } from "../lessons/slack-wiring.js";
+import { eraseSlackOptOut } from "../lessons/slack-switch.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
@@ -83,8 +85,12 @@ export interface CoreLessonsOptions {
   /** The lessons of another company, for a message of the shared reflection queue that names it. Undefined: lessons are off for that company (the message is removed). */
   hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>;
   edition?: Edition;
-  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places. Absent: one company, whose every tenant is. */
+  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places and the task's Slack thread. Absent: one company, whose every tenant is. */
   channelCompanyOf?: ChannelCompanyOf;
+  /** Whether a person is one the host serves now (owner decision 131's explicit-member rule), for the people whose replies in a task's Slack thread are read. Absent: every linked person. */
+  channelMemberRule?: ChannelMemberRule;
+  /** Sends the `thread_messages` command for a deployment whose Slack adapter is not in the registry (a signed webhook adapter). Absent: the registry's in-process `channel` adapter, and none means no Slack source. */
+  slackThreadCommand?: Parameters<typeof slackThreadSource>[0]["sendCommand"];
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -155,6 +161,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   const sources = createLocalLessonSources({
     flow: deps, companyId, ownerId: SYSTEM_ACTOR.id, repos: repositories, readObject: readText, now, log: (event, fields) => log(event, fields),
     hosted: { people: options.people, ...(options.personOfAccount === undefined ? {} : { personOfAccount: options.personOfAccount }) },
+    // L4-SRC-SL: the task's own Slack thread, read once at task end. Only where the Slack adapter declares it can read a thread (`history`); everywhere else no span is made and nothing changes.
+    slack: slackThreadSource({ store: deps.store, companyId, registry, companyOf: options.channelCompanyOf, isMember: options.channelMemberRule, sendCommand: options.slackThreadCommand, now, lessonStore: () => runtime.store }),
   });
   const host = createLessonsHost({
     flow: deps, runtime, companyId, blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
@@ -308,6 +316,8 @@ export async function erasePersonLessons(input: { store: DocumentStore; audit: A
     // The weekly summary's "sent this week" row of the person.
     await removeAll(companyScoped(companyId, `LESSON_DIGEST#${project}`), (row) => row.sk !== `SENT#${personId}`);
   }
+  // The person's own "Don't learn from my Slack messages" row (one per person, in the company's partition, not under any project).
+  rows += await eraseSlackOptOut(store, companyId, personId);
   input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
   return { projects: projects.length, purged, scrubbed, rows };
 }

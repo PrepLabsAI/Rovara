@@ -43,6 +43,7 @@ import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
 import { createLocalLessonSources } from "./lessons-sources.js";
+import { slackThreadSource } from "../../lessons/slack-wiring.js";
 import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
@@ -159,7 +160,10 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   const model = createLocalPipelineModel({ choice: options.model.choice, keys: options.model.keys, companyId, providers: options.model.providers, endpoints: options.model.endpoints, fetch: options.model.fetch, now, metering: options.metering });
   const spend = createLocalLearningSpend(options.admission, companyId);
-  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields) });
+  // L4-SRC-SL: the owner's own replies in the task's Slack thread, read once at task end (the adapter must declare `history`; any other adapter or none: no span). The lessons store is built just below and asked at each read.
+  const sourcesRuntime: { current?: LessonsRuntime } = {};
+  const slack = slackThreadSource({ store: flow.store, companyId, registry, now, lessonStore: () => { if (sourcesRuntime.current === undefined) throw new Error("the lessons runtime is not built yet"); return sourcesRuntime.current.store; } });
+  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields), slack });
 
   const runtime = createLessonsRuntime({
     store: flow.store, companyId, now, log: (event, fields) => log(event, fields), audit: options.audit, reader,
@@ -171,6 +175,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     // A reason that was recorded is cleared when it is read once its cause is gone (a provider was connected).
     pauseStillApplies: async (_workspaceId, _project, code) => (code === "no_provider" ? (await options.model.choice()) === undefined : true),
   });
+
+  sourcesRuntime.current = runtime;
 
   // The lessons file of each repository: off per repository until the owner switches it on, then one weekly pull request that proposes the lessons learned only from that repository's own words.
   const repoFile: RepoFileRuntime = {

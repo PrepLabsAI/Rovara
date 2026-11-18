@@ -53,7 +53,7 @@ export interface TaskSubjectSource {
    */
   projectOf?(input: { workspaceId: string; taskId: string }): Promise<string | undefined>;
   /** `context: "human_edit"`: only the task's own facts and steering are wanted (a human edit's reflection keeps the intent and plan); the pull request's comments are not read from the host. */
-  read(input: { workspaceId: string; taskId: string; context?: "human_edit" }): Promise<TaskSubjectBase | undefined>;
+  read(input: { workspaceId: string; taskId: string; context?: "human_edit"; /** The task's Slack thread is read only once, when the task has really ended: a send-back of an open task, a revert's re-reflection and the repo-only pass never read it. */ withoutSlack?: true }): Promise<TaskSubjectBase | undefined>;
 }
 
 export interface TaskLearningDeps {
@@ -129,7 +129,7 @@ async function subjectFrom(deps: TaskLearningDeps, base: TaskSubjectBase, worksp
 
 /** The subject of one task (also for the nightly work source, which re-reflects a task whose change was later reverted: pass `outcome: "reverted"`). Undefined when there are no facts. */
 export async function subjectForTask(deps: TaskLearningDeps, input: { workspaceId: string; taskId: string; outcome?: ReflectSubject["outcome"] }): Promise<ReflectSubject | undefined> {
-  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId });
+  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}) });
   return base === undefined ? undefined : subjectFrom(deps, base, input.workspaceId, input.outcome);
 }
 
@@ -261,7 +261,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
       if (project === undefined) return final("no_facts");
       if (!modeAllows((await resolveLearning(deps.settings, input.workspaceId, project)).mode, "reflect")) return final("off");
     }
-    const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId });
+    const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}) });
     if (base === undefined || base.facts.workspaceId !== input.workspaceId) return final("no_facts");
     // An eval or replay run is not learned from: no rows are read, no outcome is counted, no model is called.
     if (isEvalRunMark(base.facts.rest.evalRun)) return final("eval_run");

@@ -77,8 +77,9 @@ async function noteProjectVolume(deps: LessonDeps, store: LessonStore, key: Scop
  * The sources a candidate is attributed to, for spike counting and for holds: the sources of the evidence it cites, plus every non-person source in the
  * prompt (a channel, CI, a tracker feed). A member who merely appears in the prompt, without being cited, is not blamed for a flood around them.
  */
-export const attributableSources = (provenance: { sources: readonly string[]; inputSources: readonly string[] }): string[] =>
-  [...new Set([...provenance.sources, ...provenance.inputSources.filter((s) => memberOfSource(s) === undefined)])];
+export const attributableSources = (provenance: { sources: readonly string[]; inputSources: readonly string[]; sourceKinds?: readonly string[] }): string[] =>
+  // A lesson that cites a reply in a chat thread is also attributed to the "Slack threads" source of "Where Rovara learns from" (`kind:slack_reply`), so pausing that row holds it.
+  [...new Set([...provenance.sources, ...provenance.inputSources.filter((s) => memberOfSource(s) === undefined), ...(provenance.sourceKinds?.includes("slack_reply") === true ? ["kind:slack_reply"] : [])])];
 
 /** True when any of a lesson\'s attributable sources is paused: the lesson is held. */
 export const isHeldBySource = (flags: ProjectFlags, sources: readonly string[]): boolean => sources.some((s) => pausedKey(flags, s) !== undefined);
