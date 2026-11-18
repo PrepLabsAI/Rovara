@@ -176,6 +176,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
       return teaches(task, input.workspaceId) ? task.project : undefined;
     },
     async read(input): Promise<TaskSubjectBase | undefined> {
+      // Lead 4 L4-LP3Wc: a kind of evidence a person paused is a stop: none of its spans is gathered here (no finding, check text, close reason or pull request comment is read, and the code host is not asked for comments).
+      const skip: ReadonlySet<string> = input.skip ?? new Set();
       const task = await readTask(flow, input.taskId);
       if (!teaches(task, input.workspaceId)) return undefined;
       const workspaceId = input.workspaceId;
@@ -202,21 +204,21 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         }
       }
       let findings = 0;
-      for (const review of workflow?.reviews ?? []) {
+      for (const review of skip.has("review_finding") ? [] : workflow?.reviews ?? []) {
         for (const finding of review.findings) {
           if (finding.origin !== "INTRODUCED" || findings >= MAX_FINDINGS) continue;
           findings += 1;
           spans.push({ kind: "review_finding", text: finding.text, trust: AGENT_TEXT_TRUST, sourceKey: `review:${review.role.toLowerCase()}` });
         }
       }
-      if (workflow?.fixSource === "ci") for (const problem of (workflow.fixProblems ?? []).slice(0, MAX_CI_PROBLEMS)) spans.push({ kind: "ci_failure", text: `${CI_FAILURE_PREFIX}${problem}`, trust: AGENT_TEXT_TRUST, sourceKey: "ci" });
-      const closer = [...(workflow?.decisions ?? [])].reverse().find((decision) => decision.decision === "REJECT" && decision.actorRole === "TASK_OWNER");
+      if (workflow?.fixSource === "ci" && !skip.has("ci_failure")) for (const problem of (workflow.fixProblems ?? []).slice(0, MAX_CI_PROBLEMS)) spans.push({ kind: "ci_failure", text: `${CI_FAILURE_PREFIX}${problem}`, trust: AGENT_TEXT_TRUST, sourceKey: "ci" });
+      const closer = skip.has("close_reason") ? undefined : [...(workflow?.decisions ?? [])].reverse().find((decision) => decision.decision === "REJECT" && decision.actorRole === "TASK_OWNER");
       const closerId = closer === undefined ? undefined : deciderOf(closer);
       const closerTrust = closerId === undefined ? undefined : await standingOf(closerId, project);
       if (closer !== undefined && closerId !== undefined && closerTrust !== undefined) spans.push({ kind: "close_reason", text: closer.reason, trust: closerTrust, authorId: closerId });
 
       const repoChanges: RepoChangeRequest[] = [];
-      if (input.context !== "human_edit") {
+      if (input.context !== "human_edit" && !skip.has("pr_comment")) {
         let taken = 0;
         for (const pullRequest of (workflow?.pullRequests ?? []).slice(0, MAX_PULL_REQUESTS)) {
           if (taken >= MAX_PULL_REQUEST_COMMENTS) break;
@@ -231,7 +233,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
 
       const outcome = outcomeOf(workflow);
       const links = (workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.url).slice(0, 32);
-      const sendBackRequestIds = (workflow?.decisions ?? []).filter(isHumanSendBack).map((decision) => decision.requestId).slice(0, MAX_SEND_BACK_IDS);
+      const sendBackRequestIds = skip.has("send_back") ? [] : (workflow?.decisions ?? []).filter(isHumanSendBack).map((decision) => decision.requestId).slice(0, MAX_SEND_BACK_IDS);
       let mergedCommit: string | undefined;
       if (outcome === "merged" && base !== undefined) {
         const merged = (workflow?.pullRequests ?? []).find((pullRequest) => pullRequest.repositoryId === base.repository && pullRequest.state === "MERGED");

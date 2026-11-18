@@ -11,6 +11,7 @@ import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-d
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
+import { setLearningSourcePause } from "../../../packages/broker/src/lessons/learning-sources.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import { ReflectMessageSchema, SEND_BACK_REFLECTIONS_MAX, parseReflectMessage, reflectLeaseOutcome, reflectQueueOf, sendBackRequestId } from "../../../packages/broker/src/lessons/reflect-queue.js";
@@ -156,6 +157,22 @@ describe("queueing: a person's send-back, behind the switch and the mode, for th
     await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
     expect(await queued(fake)).toEqual([]);
     // Refused by the round bound itself, not by a failed send.
+    expect(logs).not.toContain("send_back_not_queued");
+  });
+
+  it("Decisions in tasks paused (L4-LP3Wc): a send-back queues no reflection and nothing about it is read; resumed, the next one queues; another company's pause stops nothing here", async () => {
+    const { world: fake, companies, logs } = await world({ [CORE_LESSONS_VARIABLE]: "on" });
+    const a = companies.get(A)!;
+    const pause = (workspaceId: OrgId, paused: boolean) => setLearningSourcePause({ store: a.lessons!.runtime.store, audit: a.lessons!.runtime.audit, now: () => fake.clock.now }, { workspaceId, project: "payments" }, "owner", "task_decisions", paused);
+    expect(await pause(B, true)).toMatchObject({ ok: true, changed: true });
+    expect(await pause(A, true)).toMatchObject({ ok: true, changed: true });
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "first, in a person's words" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect(await queued(fake)).toEqual([]);
+    expect(await pause(A, false)).toMatchObject({ ok: true, changed: true });
+    await decide(fake, a.taskId, [{ source: "SEND_BACK", reason: "second, in a person's words" }]);
+    await a.runtime.flow.deps.lessonsSentBack!(a.taskId);
+    expect((await queued(fake)).map((m) => m["round"])).toEqual([2]);
     expect(logs).not.toContain("send_back_not_queued");
   });
 

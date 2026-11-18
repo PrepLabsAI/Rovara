@@ -44,6 +44,8 @@ export interface TaskOutcome {
   corrections: readonly TaskCorrection[];
   /** An eval run writes no counters. */
   evalRun?: boolean;
+  /** Lead 4 L4-LP3Wc: the project paused "After merge": no merge mark is queued for this task (a revert never gets here). Corrections are still rated. */
+  skipOutcomeMarks?: true;
 }
 
 /**
@@ -213,7 +215,7 @@ export async function recordTaskOutcome(deps: CounterDeps, outcome: TaskOutcome)
       await deps.store.markOnce(key, `reverted:${outcome.taskId}:${lessonId}`);
       continue;
     }
-    if (outcome.outcome === "merged" && outcome.sendBacks <= 1 && !unjudged && !ignored) {
+    if (outcome.outcome === "merged" && outcome.skipOutcomeMarks !== true && outcome.sendBacks <= 1 && !unjudged && !ignored) {
       // A task end delivered again after its mark settled, or after that task's revert took the mark back, queues nothing (the settled and reverted once-keys are the record): a repeat extends nothing and counts nothing.
       // Nor does a lesson this task already blamed.
       if (await deps.store.seenOnce(key, `helpful-final:${outcome.taskId}:${lessonId}`) || await deps.store.seenOnce(key, `reverted:${outcome.taskId}:${lessonId}`) || await deps.store.seenOnce(key, `harmful:${outcome.taskId}:${lessonId}`)) continue;

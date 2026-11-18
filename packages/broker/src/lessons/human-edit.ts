@@ -17,9 +17,10 @@ import { newTaskFailureTally, withFailuresCountedOnce, type TaskFailureTally } f
 import { attachCapLadder, noteTaskHeld, readTaskHeld, reflectRepoOnly, withEdits } from "./repo-reflect.js";
 import type { ProcessDeps } from "./process.js";
 import { isEvalRunMark } from "./eval-run.js";
+import { pausedKindsFor, withoutPausedSpans } from "./paused-kinds.js";
 import { reflectSubject, type ReflectDeps } from "./reflect.js";
 import type { EvidenceSpan, ReflectSubject } from "./reflect-input.js";
-import type { LearnResult, TaskSubjectSource } from "./task-end.js";
+import { withoutPausedEvidence, type LearnResult, type TaskSubjectSource } from "./task-end.js";
 import { buildTaskReflectSubject } from "./task-subject.js";
 
 export interface HumanEditExtractorDeps {
@@ -63,8 +64,11 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       if (input.authors.length > MAX_EDIT_AUTHORS) return none;
       const learning = await resolveLearning(deps.settings, input.workspaceId, input.project);
       if (!modeAllows(learning.mode, "reflect")) return { ...none, off: true };
+      // Lead 4 L4-LP3Wc: "Edits to Rovara's pull requests" paused: a stop. The edit's lines are not read, no author is looked up, no model is called, and nothing is kept (the pull request's comments reflection of the task is the other row's).
+      const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project });
+      if (paused.has("human_edit")) return { ...none, off: true };
       await onActive();
-      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, context: "human_edit" });
+      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, context: "human_edit", ...(paused.size === 0 ? {} : { skip: paused }) });
       if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return none;
       // An edit to an eval or replay run's pull request teaches nothing; refused before any author is looked up.
       if (isEvalRunMark(base.facts.rest.evalRun)) return none;
@@ -77,7 +81,7 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
       }
       if (!allowed) return none;
       const editSpans = input.files.map((file) => editSpan(file, input));
-      const context = (base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind));
+      const context = withoutPausedSpans((base.facts.rest.spans ?? []).filter((span) => CONTEXT_KINDS.has(span.kind)), paused);
       const links = [...new Set([...(base.facts.rest.links ?? []), input.link])];
       const subject: ReflectSubject = buildTaskReflectSubject({
         ...base.facts, sendBacks: [],
@@ -114,8 +118,12 @@ export function createHumanEditExtractor(deps: HumanEditExtractorDeps): HumanEdi
     try {
       // The switch first, before anything is read: Off, Collect and a lessons switch that is off read nothing for this pull request.
       if (!modeAllows((await resolveLearning(deps.settings, input.workspaceId, input.project)).mode, "reflect")) return;
-      const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId });
-      if (base === undefined || base.facts.workspaceId !== input.workspaceId || base.facts.project !== input.project || base.facts.taskId !== input.taskId) return;
+      // Lead 4 L4-LP3Wc: a paused kind is not read (the source skips it) and is removed again from what it gave; no pause of edits (checked before) and a pause of review comments leaves no comment to reflect on.
+      const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: input.project });
+      if (paused.has("human_edit")) return;
+      const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(paused.size === 0 ? {} : { skip: paused }) });
+      if (given === undefined || given.facts.workspaceId !== input.workspaceId || given.facts.project !== input.project || given.facts.taskId !== input.taskId) return;
+      const base = withoutPausedEvidence(given, paused);
       const found = (base.repoChanges ?? []).find((change) => change.link.toLowerCase() === input.link.toLowerCase());
       if (found === undefined) return;
       const owned = withEdits(found, { place: input.scope, audience: input.audience, spans: edits });
