@@ -39,7 +39,7 @@ async function world(options: { learning?: Partial<LearningSettings>; gateFails?
   for (const name of [...Object.getOwnPropertyNames(Object.getPrototypeOf(w.store) as object), ...Object.getOwnPropertyNames(store)]) {
     const original = store[name];
     if (typeof original !== "function" || name === "constructor") continue;
-    store[name] = (...args: unknown[]) => { if (JSON.stringify(args, (_k, v) => (typeof v === "bigint" ? String(v) : v)).includes("#WIKI#")) events.push(`store.${name}`); return (original as (...a: unknown[]) => unknown).apply(w.store, args); };
+    store[name] = (...args: unknown[]) => { if (JSON.stringify(args, (_k, v: unknown) => (typeof v === "bigint" ? String(v) : v)).includes("#WIKI#")) events.push(`store.${name}`); return (original as (...a: unknown[]) => unknown).apply(w.store, args); };
   }
   const routes = createCoreDevRoutes({
     app, companyOf: async (c) => ({ companyId: c.principal.companyId, role: "owner" }),
@@ -79,7 +79,7 @@ describe("the MCP wiki tools answer the company switch", () => {
       h.events.length = 0;
       const answer = await h.tool(path);
       expect(answer?.statusCode, path).toBe(200);
-      const body = JSON.parse(answer!.body as string) as unknown;
+      const body = JSON.parse(answer!.body) as unknown;
       expect(WikiToolsOffSchema.parse(body), path).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
       expect(JSON.stringify(body)).not.toMatch(/A-alpha|B-alpha|overview|web/u);
       // The order: the person's standing, then the gate, and then nothing at all (no repositories read, no prune, no wiki row asked for).
@@ -94,7 +94,7 @@ describe("the MCP wiki tools answer the company switch", () => {
     for (const path of [paths[0], paths[1]]) {
       const answer = await h.scriptToken(path);
       expect(answer?.statusCode, path).toBe(200);
-      expect(JSON.parse(answer!.body as string)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
+      expect(JSON.parse(answer!.body)).toEqual({ status: "off", reason: "company_stays", message: KNOWLEDGE_STAYS_SENTENCE });
     }
   });
 
@@ -111,7 +111,7 @@ describe("the MCP wiki tools answer the company switch", () => {
     // Switching it on and off again leaves no trace.
     await h.stays(FAKE_COMPANY, true);
     await h.stays(FAKE_COMPANY, false);
-    expect(JSON.parse((await h.tool(paths[0]))!.body as string)).toMatchObject({ project: "alpha", state: "ready" });
+    expect(JSON.parse((await h.tool(paths[0]))!.body)).toMatchObject({ project: "alpha", state: "ready" });
   });
 
   it("switch ON: the Rovara web app's own Wiki tab is NOT held back (only tools outside Rovara are)", async () => {
@@ -135,12 +135,12 @@ describe("the MCP wiki tools answer the company switch", () => {
     expect(b?.statusCode).toBe(200);
     expect(b!.body).toContain("B-alpha");
     expect(b!.body).not.toMatch(/A-alpha|Your company keeps/u);
-    expect(JSON.parse((await h.tool(paths[1]))!.body as string)).toMatchObject({ status: "off" });
+    expect(JSON.parse((await h.tool(paths[1]))!.body)).toMatchObject({ status: "off" });
     // And the other way round.
     await h.stays(FAKE_COMPANY, false);
     await h.stays(OTHER, true);
     expect((await h.tool(paths[1]))!.body).toContain("A-alpha");
-    expect(JSON.parse((await h.tool(paths[1], OTHER))!.body as string)).toMatchObject({ status: "off", message: KNOWLEDGE_STAYS_SENTENCE });
+    expect(JSON.parse((await h.tool(paths[1], OTHER))!.body)).toMatchObject({ status: "off", message: KNOWLEDGE_STAYS_SENTENCE });
   });
 
   it("a person with no standing on the project still gets 'project not found', never the sentence (the switch cannot be used to probe projects)", async () => {
@@ -171,7 +171,7 @@ describe("the MCP wiki tools answer the company switch", () => {
     for (const over of [{ preset: "regulated" as const }, { preset: "regulated" as const, mode: "Off" as const }]) {
       const h = await world({ learning: over });
       const answer = await h.tool(paths[0]);
-      expect(JSON.parse(answer!.body as string)).toEqual({ status: "off", reason: "regulated", message: KNOWLEDGE_STAYS_SENTENCE });
+      expect(JSON.parse(answer!.body)).toEqual({ status: "off", reason: "regulated", message: KNOWLEDGE_STAYS_SENTENCE });
     }
   });
 });
@@ -201,8 +201,8 @@ describe("wikiToolsGate", () => {
     const h = await world();
     await h.stays(FAKE_COMPANY, true);
     const { routeHostedWiki } = await import("../../packages/broker/src/core-host/wiki-routes.js");
-    const answer = await routeHostedWiki({ request: { method: "GET", path: paths[0], headers: {} }, path: paths[0], personId: "p", companyId: FAKE_COMPANY as OrgId, store: h.w.store, now: () => h.w.clock.now, wiring: { standing: async () => ({ access: "view" }), projectRepositories: async () => ["web"], toolGate: async (companyId, project) => await wikiToolsGate({ localTools: h.localTools }, { workspaceId: companyId, project }) } });
-    expect(JSON.parse(answer.body as string)).toMatchObject({ status: "off" });
+    const answer = await routeHostedWiki({ request: { method: "GET", path: paths[0], headers: {} }, path: paths[0], personId: "p", companyId: FAKE_COMPANY, store: h.w.store, now: () => h.w.clock.now, wiring: { standing: async () => ({ access: "view" }), projectRepositories: async () => ["web"], toolGate: async (companyId, project) => await wikiToolsGate({ localTools: h.localTools }, { workspaceId: companyId, project }) } });
+    expect(JSON.parse(answer.body)).toMatchObject({ status: "off" });
   });
   it("throws LocalLessonsUnavailable when the setting cannot be read", async () => {
     setLearnedLessonsGate(() => true);
@@ -212,7 +212,7 @@ describe("wikiToolsGate", () => {
 
 describe("the web app marker reaches the wiki route", () => {
   it("deployedCallerFromMembership carries webApp only when the broker's sign-in set it", async () => {
-    const caller = deployedCallerFromMembership(async () => ({ companyId: FAKE_COMPANY as OrgId, role: "member" }));
+    const caller = deployedCallerFromMembership(async () => ({ companyId: FAKE_COMPANY, role: "member" }));
     const base = { developerId: "dev-1", sessionId: "s1", name: "Ann" };
     expect((await caller(base))?.webApp).toBeUndefined();
     expect((await caller({ ...base, webApp: true }))?.webApp).toBe(true);
