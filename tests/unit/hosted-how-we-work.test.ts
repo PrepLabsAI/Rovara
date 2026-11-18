@@ -3,7 +3,7 @@
 // the start does not change a running task, and another company's rules never appear.
 import { describe, expect, it } from "vitest";
 import {
-  PLAYBOOK_FILE_PATH, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, change, queryAll,
+  PLAYBOOK_FILE_PATH, WORKER_INVOCATION_FEATURES, projectPlaybookKey, WorkerInvocationSchema, change, queryAll,
   type CompanyInstructionsSnapshot, type OrgId, type WorkerInvocation,
 } from "@agentx/contracts";
 import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-registry.js";
@@ -197,6 +197,30 @@ describe("a task keeps the rules it started under (the pin)", () => {
     const tooMany = await setup({ company: [{ version: "1", rules: Array.from({ length: 31 }, (_, i) => ({ text: `rule ${String(i)}`, priority: "required" as const })) }] });
     await expect(tooMany.h.flow.start(tooMany.h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     for (const world of [invalid, down, tooMany]) expect((await world.h.flow.list(world.h.owner)).tasks).toEqual([]);
+  });
+});
+
+describe("a hosted start writes nothing of the repository's file into the company's stored How we work", () => {
+  it("a file that carries a design review setting (or none) leaves the stored item and its audit as they were; the laptop's own sync still writes", async () => {
+    const file = `${FILE}designReview:\n  mode: never\n  tier: light\n  allowSkip: true\n  capUsdPerTask: 1\n  highRiskApprover:\n    kind: maintainers\n`;
+    const { h, dispatcher, broker } = await setup({ file, company: [RULES] });
+    const before = JSON.stringify(await h.store.get(projectPlaybookKey(COMPANY, "payments")) ?? null);
+    const auditBefore = h.audit.length;
+    h.deps.standingInstructions = broker;
+    const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true });
+    expect(JSON.stringify(await h.store.get(projectPlaybookKey(COMPANY, "payments")) ?? null)).toBe(before);
+    expect(h.audit.length).toBe(auditBefore);
+    // The step still carries the file's How we work (the pin has its text).
+    const pin = ((await h.store.get(workspaceKey(COMPANY, started.task.workspaceId))) as unknown as WorkspaceRecord).standingPin;
+    expect((await dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: pin }))!.text).toContain("PROJECT-RULE");
+  });
+
+  it("a file that parses but fails the recipe's own guards refuses the start with the reason, and a stored pin like it ends the step with the fixed sentence (never a raw error)", async () => {
+    const emoji = "😀";
+    const { h, dispatcher } = await setup({ file: `version: 1\nrules: "${emoji.repeat(3_900)}"`, company: [RULES] });
+    await expect(h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "x", workflow: true })).rejects.toMatchObject({ code: expect.stringMatching(/PROCESS_UNAVAILABLE|CONFIG_INVALID/u) as string });
+    expect((await h.flow.list(h.owner)).tasks).toEqual([]);
+    await expect(dispatcher.forOperation({ project: "payments", mode: "PLAN", pinned: { playbook: { commit: "a".repeat(40), file: { version: 1, rules: emoji.repeat(3_900) } } } })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
   });
 });
 

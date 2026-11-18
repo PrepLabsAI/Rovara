@@ -19,6 +19,8 @@ export function hostedStandingInstructions(options: { registry: AdapterRegistry;
   const projects = createStoreProjectSource(store, companyId);
   const playbook = createPlaybookService({
     companyId, store, audit: registry.require("audit-sink"), projects, now: options.now,
+    // The company's stored How we work item (its design review setting) is never written from a task start here: only the file's text is read.
+    syncStored: false,
     source: createCodeHostPlaybookSource({ companyId, projects, codeHosts: registry.names("code-host").length > 0 ? registry : undefined, now: () => options.now().getTime() }),
   });
   return createStandingInstructions({
