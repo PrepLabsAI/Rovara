@@ -19,7 +19,7 @@ const token = (n: number) => ["tok", String(n), "abcdefghij"].join("_");
 describe("the Linear OAuth client", () => {
   it("builds the consent address with PKCE S256 and no admin scope", () => {
     const url = new URL(linearAuthorizeUrl(LINEAR_APP, "state-value", "v".repeat(43)));
-    expect(url.searchParams.get("scope")).toBe("read,comments:create,issues:create");
+    expect(url.searchParams.get("scope")).toBe("read,write,comments:create,issues:create");
     expect(url.searchParams.get("actor")).toBe("app");
     expect(url.searchParams.get("code_challenge")).toBe(createHash("sha256").update("v".repeat(43)).digest("base64url"));
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
@@ -61,6 +61,19 @@ describe("the Linear OAuth client", () => {
     expect(await revokeLinearToken({ fetch: fetch, token: token(3) })).toBe(true);
     expect(new URLSearchParams(seen[0]!.body as string).get("token")).toBe(token(3));
     expect(await revokeLinearToken({ fetch: vi.fn(async () => { throw new Error("down"); }), token: token(3) })).toBe(false);
+  });
+  it("sends the token_type_hint it is given; 2xx and 400 (already revoked) are done, anything else is not", async () => {
+    const seen: RequestInit[] = [];
+    const answering = (status: number) => vi.fn(async (_url: string | URL | Request, init?: RequestInit) => { seen.push(init!); return new Response("", { status }); });
+    expect(await revokeLinearToken({ fetch: answering(200), token: token(4), hint: "refresh_token" })).toBe(true);
+    const sent = new URLSearchParams(seen[0]!.body as string);
+    expect(sent.get("token")).toBe(token(4));
+    expect(sent.get("token_type_hint")).toBe("refresh_token");
+    expect(await revokeLinearToken({ fetch: answering(200), token: token(5), hint: "access_token" })).toBe(true);
+    expect(new URLSearchParams(seen[1]!.body as string).get("token_type_hint")).toBe("access_token");
+    expect(new URLSearchParams(seen[1]!.body as string).get("token")).toBe(token(5));
+    expect(await revokeLinearToken({ fetch: answering(400), token: token(4), hint: "access_token" })).toBe(true);
+    for (const status of [401, 429, 500, 503]) expect(await revokeLinearToken({ fetch: answering(status), token: token(4), hint: "access_token" })).toBe(false);
   });
 });
 

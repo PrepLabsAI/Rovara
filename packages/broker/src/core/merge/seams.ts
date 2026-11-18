@@ -7,7 +7,7 @@
 //  - who a person is on the code host, and whether they may approve: `MergePeople` (people.ts), filled by the identity port in Code and by the team's members in Cloud;
 //  - the audit ledger: W0's `AuditSink`; the approval of a merge: W0's `Approvers`.
 import type {
-  Autonomy, ChangeRequestStatus, CodeMilestone, CodeSettings, CodeHost, CheckRunner, HostScope, MergeTrackingItem, OrgId, PluginKind, TransactItem, WorkflowSnapshot,
+  Autonomy, ChangeRequestStatus, CodeMilestone, CodeSettings, CodeHost, CheckRunner, HostScope, MergeTrackingItem, OrgId, PageBudget, PluginKind, TransactItem, WorkflowSnapshot,
 } from "@agentx/contracts";
 
 /** The part of a task record the merge code reads. The record itself is the task-flow lane's. */
@@ -75,6 +75,24 @@ export interface PassObservation {
   status: ChangeRequestStatus;
   ci: MergeTrackingItem["ci"];
 }
+
+/**
+ * L4-LM1c: what a tracking pass tells learning when a pull request's head is NOT one of the commits Rovara itself pushed (somebody pushed to the branch). Coordinates only, and the repository's own code host with the
+ * company's scope: the receiver proves who wrote the new commits and reads them. `base` is the last commit Rovara pushed (the pass's `recordedHead`, else the workflow's head); `head` is the head the host shows now.
+ */
+export interface HumanEditPush {
+  task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot };
+  pullRequest: { repositoryId: string; number: number; url: string };
+  repository: { url: string; codeHost: CodeHost; scope: HostScope };
+  base: string;
+  head: string;
+  /** The pull request's source branch. */
+  headRef: string;
+  /** What the receiver may spend on the host in this pass (its own small allowance inside the pass's). */
+  budget?: PageBudget | undefined;
+}
+/** Told once for each head a person's push gave the pull request, after the pass proved the head is not Rovara's. Best effort: the pass never fails for it (a code host's "slow down" still goes up to the sweep). */
+export type HumanEditSink = (push: HumanEditPush) => Promise<void>;
 
 /**
  * Optional hooks a pass calls at its end, best effort: a failure is logged and never fails the pass. The track record (a person's request for changes, a close without a merge) and the

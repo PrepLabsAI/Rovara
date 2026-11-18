@@ -7,15 +7,19 @@
 // or email adapter that can send queues and delivers nothing (`canNotify` is false).
 import type { DocumentStore, OrgId, RealtimePublisher, RegistryView } from "@agentx/contracts";
 import { readTaskThread } from "../core/channel/threads.js";
-import { deliverAttention, queueAttention, type AttentionBudget, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
+import { deliverAttention, queueAttention, type AttentionBudget, type PeopleOf, type AttentionDeliveryDependencies, type AttentionOutcome } from "../core/notify/attention.js";
 import type { SessionChange } from "../core/sessions/summary.js";
 
-type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded">;
+type DeliveryOptions = Pick<AttentionDeliveryDependencies, "link" | "maxTargets" | "footer" | "thread" | "companyOf" | "access" | "address" | "urgent" | "emailLinks" | "doneToldInThread" | "planCarded" | "upkeep">;
 
 export interface NoticeServiceOptions extends DeliveryOptions {
   store: DocumentStore;
   /** The hosted core: when nothing can message anyone, still keep each person's in-app inbox rows (and nothing else). Absent: a host that can tell nobody queues nothing, as before. */
   inbox?: boolean;
+  /** Called after attention rows were written for a change (the hosted attention email's reverse index, `core/notify/person-index.ts`). Never a reason for the queue to fail. Absent: nothing. */
+  remember?: (change: SessionChange) => Promise<void>;
+  /** The task's People (co-owners and commenters) as attention ids: told with the owner and the followers (`attentionRecipients`). Absent: nobody else on the task is told, as before. */
+  peopleOf?: PeopleOf;
   /** Where the adapters are: the `channel` points, the `email` point and, for the open pages' hint, the `realtime` point. */
   registry: Pick<RegistryView, "get" | "names">;
   now?: () => Date;
@@ -41,11 +45,12 @@ export function createNoticeService(options: NoticeServiceOptions): NoticeServic
     async queue(change) {
       // Nothing can message anyone: the hosted core still keeps the inbox rows (no pending rows, which nothing would deliver); every other host queues nothing.
       if (!canNotify() && options.inbox !== true) return;
-      await queueAttention({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), realtime: realtime(), ...(canNotify() ? {} : { pending: false }) }, change);
+      const told = await queueAttention({ store, now: clock, ...(options.log === undefined ? {} : { log: options.log }), realtime: realtime(), ...(options.peopleOf === undefined ? {} : { peopleOf: options.peopleOf }), ...(canNotify() ? {} : { pending: false }) }, change);
+      if (told > 0 && options.remember !== undefined) { try { await options.remember(change); } catch { /* never a reason for the queue to fail */ } }
     },
     async deliver(budget = {}) {
       if (!canNotify()) return undefined;
-      const { store: _store, registry: _registry, now: _now, log, ...rest } = options; // eslint-disable-line @typescript-eslint/no-unused-vars -- the rest are the delivery's own options
+      const { store: _store, registry: _registry, now: _now, log, peopleOf: _peopleOf, ...rest } = options; // eslint-disable-line @typescript-eslint/no-unused-vars -- the rest are the delivery's own options
       return deliverAttention({
         store, registry, now: () => clock().getTime(), ...rest, thread: options.thread ?? ((org: OrgId, sessionId: string) => readTaskThread(store, org, sessionId)), ...(log === undefined ? {} : { log }),
       }, budget);

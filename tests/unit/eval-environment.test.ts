@@ -145,7 +145,8 @@ describe("useSavedEnvironment", () => {
     await mkdir(checkoutA, { recursive: true }); await mkdir(checkoutB, { recursive: true });
     const [a, b] = [savedEnvironment("company-a", "project-a"), savedEnvironment("company-b", "project-a")];
     expect(a.repository).not.toBe(b.repository);
-    const [ra, rb]: Array<{ options?: unknown; removed: number }> = [{ removed: 0 }, { removed: 0 }];
+    const ra: { options?: unknown; removed: number } = { removed: 0 };
+    const rb: { options?: unknown; removed: number } = { removed: 0 };
     expect(await useSavedEnvironment({ environment: a, checkout: checkoutA, docker: dockerNever, extract: fakeExtract(seedA, ra) })).toBe(true);
     expect(await useSavedEnvironment({ environment: b, checkout: checkoutB, docker: dockerNever, extract: fakeExtract(seedB, rb) })).toBe(true);
     expect((ra.options as { ref: { repository: string } }).ref.repository).toBe(a.repository);

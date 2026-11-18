@@ -69,6 +69,7 @@ export function fakeWorld(): FakeWorld {
     async decidePlan(input) { calls.push({ name: "decidePlan", input }); return actions.next; },
     async decideDesign(input) { calls.push({ name: "decideDesign", input }); return actions.next; },
     async addComment(input) { calls.push({ name: "addComment", input }); return actions.next; },
+    async planFeature(input) { calls.push({ name: "planFeature", input }); return actions.next; },
     async lessonAction(input) { calls.push({ name: "lessonAction", input }); return actions.next; },
     async lessonRepoAction(input) { calls.push({ name: "lessonRepoAction", input }); return actions.next; },
     async lessonLocalToolsAction(input) { calls.push({ name: "lessonLocalToolsAction", input }); return actions.next; },

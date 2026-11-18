@@ -27,6 +27,10 @@ export function fakeLinear(now: () => number) {
   const grants: Grant[] = [];
   const accessOf = new Map<string, Grant>();
   const revoked: string[] = [];
+  /** Every revoke call as sent: the token and its token_type_hint, in order. */
+  const revokeCalls: Array<{ token: string; hint: string | null }> = [];
+  /** What the revoke endpoint answers next: a status, or "down" (the call throws). */
+  let revokeAnswer: number | "down" = 200;
   const requests: Array<{ url: string; body: string; authorization: string }> = [];
   let refreshCalls = 0;
   const apiKeys = new Map<string, FakeWorkspace>();
@@ -36,7 +40,7 @@ export function fakeLinear(now: () => number) {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const issue = (grant: Grant) => {
     const access = mint("access"); grant.access.add(access); accessOf.set(access, grant);
-    return { access_token: access, refresh_token: grant.current, token_type: "Bearer", expires_in: 86_400, scope: "read,comments:create,issues:create" };
+    return { access_token: access, refresh_token: grant.current, token_type: "Bearer", expires_in: 86_400, scope: "read,write,comments:create,issues:create" };
   };
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -72,7 +76,11 @@ export function fakeLinear(now: () => number) {
       return json({ error: "unsupported_grant_type" }, 400);
     }
     if (url === "https://api.linear.app/oauth/revoke") {
-      const token = new URLSearchParams(body).get("token") ?? "";
+      const form = new URLSearchParams(body);
+      const token = form.get("token") ?? "";
+      revokeCalls.push({ token, hint: form.get("token_type_hint") });
+      if (revokeAnswer === "down") throw new Error("down");
+      if (revokeAnswer !== 200) return new Response("", { status: revokeAnswer });
       revoked.push(token);
       const grant = accessOf.get(token) ?? grants.find((g) => g.current === token);
       if (grant !== undefined) grant.revoked = true;
@@ -106,7 +114,8 @@ export function fakeLinear(now: () => number) {
     return json({ error: "not linear" }, 404);
   });
   return {
-    fetch, requests, revoked, grants, comments,
+    fetch, requests, revoked, revokeCalls, grants, comments,
+    answerRevokeWith(value: number | "down") { revokeAnswer = value; },
     /** A per-project Linear API key for `workspace` (the path PR 20's goldens compare with). */
     apiKeyFor(workspace: FakeWorkspace): string { const key = ["lin", "api", String(++counter), randomBytes(6).toString("hex")].join("_"); apiKeys.set(key, workspace); return key; },
     /** An issue in `workspace`, readable by its key (`ENG-1`) or its id. */

@@ -1,5 +1,6 @@
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { Template } from "aws-cdk-lib/assertions";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -231,24 +232,35 @@ describe("the named TEST proof-only installation gate", () => {
     // removed those are exactly #872's approved pins (named fd809c0e/98b1dae8, foreign ca40bea2/694d8393). Batch 13 (rule D; #886/#906, DEC 254z-amend3 / 254zm): and re-pinned for
     // test services' additions only (TestServices and TestServiceImages parameters, td/ti in the broker's and the dispatcher's AGENTX_SETTINGS, the session steps' two variables).
     // Verified on this tree: with exactly those taken out, the code/next + #891 values above hold. Legacy unchanged.
+    // Machine size stack (#877 infra + #887 + DEC 254zr, 2026-11-17): named, foreign AND legacy re-pinned. The session provisioner's RunInstances grant carries the ec2:InstanceType allow-list
+    // (infra/lib/session-lifecycle.ts, session-lifecycle-infrastructure.test.ts pins it exactly): six types in #877/#887, ten with DEC 254zr. Verified: removing only the four types m6g.4xlarge,
+    // m6g.8xlarge, m6i.4xlarge and m6i.8xlarge from every ec2:InstanceType list gives the #887 head's digests (named 69aa57be..., foreign 3c33651d..., legacy f9e67a89...; the same without the route),
+    // so DEC 254zr moves these pins by exactly those four strings. The older pins below this note did not hold at the #887 head either (its six types moved them first).
+    // Batch 14 (DEC 254zr/zv/zz machine sizes, DEC 254u dispatcher read, DEC 254zx email): all six re-pinned on the combined tree. A full synth of every stack (legacy, named staging,
+    // foreign) against batch 13's head 84be8d7b7 differs ONLY in: the provisioner's ec2:InstanceType allow-list (10 types), the x86_64 AL2023 AMI parameter in ResolveWorkerAmi, the provisioner
+    // state machine definition (#877/#887/#901); the attention email's 3 parameters, condition, rule and 5 conditional resources plus `ae` in AGENTX_SETTINGS (#907, off by default); and, in the
+    // proof install, the dispatcher's one GetItem COMPANY_MEMBER#* statement (#875, DEC 254u) and the proof function's CurrentVersion id (its code changed). Nothing else moved.
+    // Batch 14 combined (DEC 254zzl-amend3, DEC 254zzn(2)): named and foreign re-pinned again; legacy unchanged. Against the first batch-14 synth the templates differ ONLY in the
+    // CoreSystemRuns parameter (default off) and its condition, the hourly upkeep-night schedule (existing invoke role, DISABLED unless that condition holds), the CoreAnswersModel
+    // parameter (default empty), `aa`/`sy` in the broker's and `sy` in the dispatcher's AGENTX_SETTINGS, and the proof function's CurrentVersion id (its code changed).
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "bfaeec0be69165a797add99c89111629b3b0461600c39a5f4800391756ab83b2",
-        withoutRoute: "bdf5fe0ee2b1f890357d82e40d33cefc0040b86f2b82f82eb694b4c72546910c",
+        withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce",
+        withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "c1e861032104271daeb6f062e953c509c9ad87378b0a01b6cfe8d23293314c12",
-        withoutRoute: "5b025719156499cad762121451e545c5df08161f67419cc78f74a649e6310e99",
+        withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc",
+        withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7",
       },
       {
         label: "legacy",
         template: legacy,
-        withRoute: "4f2ed4957fd06301c6f9875da12ed59f4a53c3a641be42c8728eaedfc2173e43",
-        withoutRoute: "f7dbb84a614daa78c400aa943fa7dd97ab738ae75da0a5f8013e9be15e7f157b",
+        withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
+        withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
@@ -277,7 +289,7 @@ describe("the named TEST proof-only installation gate", () => {
       });
       // DEC 254h: GitHub sign-in's named-environment additions are asserted and taken out (tests/support/github-signin-template.ts); legacy has none.
       // ENV-ROOM 2's additions (the broker names parameter and the IAM room made for it) are asserted and taken out first (tests/support/broker-environment-template.ts).
-      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(structuredClone(template)), label === "named" ? "agentxlivetest123" : "staging");
+      const pinned = label === "legacy" ? template : withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(structuredClone(template))), label === "named" ? "agentxlivetest123" : "staging");
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
@@ -342,8 +354,9 @@ describe("the named TEST proof-only installation gate", () => {
     const policy = Object.entries(resources).find(([id, resource]) => id.includes("TaskPersonProofDispatcherPolicy") && resource.Type === "AWS::IAM::Policy")?.[1];
     expect(policy).toBeDefined();
     const statements = (policy!.Properties!.PolicyDocument as { Statement: Array<Record<string, unknown>> }).Statement;
-    expect(statements).toHaveLength(3);
-    const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem"));
+    expect(statements).toHaveLength(4);
+    const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem") && JSON.stringify(statement.Condition).includes("DEVELOPER#*"));
+    const companyMemberGetItem = statements.find((statement) => JSON.stringify(statement.Condition ?? {}).includes("COMPANY_MEMBER#*"));
     const denyUnprojectedGetItem = statements.find((statement) => statement.Sid === "DenyGetItemUnlessSpecificAttributes");
     const invoke = statements.find((statement) => JSON.stringify(statement.Action).includes("lambda:InvokeFunction"));
     const dispatcherEntries = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
@@ -360,6 +373,16 @@ describe("the named TEST proof-only installation gate", () => {
       Condition: {
         "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
         "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName"] },
+        Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
+      },
+    });
+    expect(companyMemberGetItem).toEqual({
+      Effect: "Allow",
+      Action: ["dynamodb:GetItem"],
+      Resource: [{ "Fn::GetAtt": [tableId, "Arn"] }],
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy"] },
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     });

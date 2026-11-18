@@ -505,6 +505,11 @@ export interface HostedSecurityInputs {
   callbackSigningKey?: string;
   /** The root wires the per-run stop (see `HostedAdmissionOptions.runStopWired`). */
   runStopWired?: boolean;
+  /**
+   * Who may decide a core task as its owner (web task channel C6): the deployment's live owner rule (the task's own person, or a People co-owner, each under the live proof) over this company's own
+   * store. Absent: only the task's own person (the dispatcher decides nothing for a person).
+   */
+  taskOwner?: (input: { companyId: OrgId; store: DocumentStore; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => Promise<boolean>;
   /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
   projectTaskCap?: ProjectTaskCap | undefined;
 }
@@ -532,6 +537,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
       create: (context, registry) => createHostedApprovers({
         store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
         ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
+        ...(inputs.taskOwner === undefined ? {} : { taskOwner: (asked: { companyId: OrgId; principal: Principal; task: { taskId: string; developerId: string; project: string } }) => inputs.taskOwner!({ ...asked, store: registry.require("storage") }) }),
       }),
     }),
     coreAdapter({

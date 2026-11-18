@@ -1,8 +1,8 @@
 // Plug-in foundations, task P3: GitHub's words to the neutral ones, and back. Pure functions: no I/O, and `github-app.ts` is not edited. Every untrusted
 // text from GitHub is cut to the port's bounds here, so a long comment never fails a read that was otherwise fine.
-import { agentXError, GITHUB_ACTIONS_APP_ID, type Check, type HostAccountKind, type MergeableState, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type HostScope, type MergeResult } from "@agentx/contracts";
+import { agentXError, GITHUB_ACTIONS_APP_ID, type CommitIdentity, type Check, type HostAccountKind, type MergeableState, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFile, type ChangeRequestRef, type ChangeRequestStatus, type HostScope, type MergeResult } from "@agentx/contracts";
 import type {
-  GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, MergePullRequestResult, PullRequestCheck, PullRequestStatus,
+  GitHubCommitIdentity, GitHubPullRequestChangedFile, GitHubPullRequestDetails, GitHubPullRequestFeedback, MergePullRequestResult, PullRequestCheck, PullRequestStatus,
 } from "./provider.js";
 
 const TEXT_MAX = 65_536;
@@ -25,6 +25,14 @@ export function detailsOf(repositoryUrl: string, details: GitHubPullRequestDetai
     title: cut(details.title, 500), body: cut(details.body, TEXT_MAX),
     ...(details.authoredByApp === undefined ? {} : { authoredByRovara: details.authoredByApp }), ...(details.baseRepositoryId === undefined ? {} : { baseRepositoryId: details.baseRepositoryId }),
   };
+}
+
+/** Who GitHub says wrote a commit, in the port's words (L4-LM1c): an account by login and stable id with its kind; an unlinked author or committer is left out. */
+export function commitIdentityOf(identity: GitHubCommitIdentity): CommitIdentity {
+  const account = (value: GitHubCommitIdentity["author"]) => (value === undefined ? undefined : { login: value.login, ...(value.id === undefined ? {} : { hostUserId: String(value.id) }), accountType: accountKindOf(value.type) });
+  const author = account(identity.author);
+  const committer = account(identity.committer);
+  return { ...(author === undefined ? {} : { author }), ...(committer === undefined ? {} : { committer }), webFlow: identity.webFlow === true };
 }
 
 /** GitHub's account types in Rovara's words: a `User` is a person, a `Bot` a bot, anything else (an `Organization`, a type GitHub adds, nothing) is `other`. */

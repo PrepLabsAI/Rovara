@@ -19,6 +19,21 @@ export const WIKI_MAP_OUT_OF_TIME = "Rovara ran out of time before reaching this
 /** The whole map is made within this many milliseconds; a repository not reached by then is "unavailable" with the sentence above. */
 export const WIKI_MAP_DEADLINE_MS = 25_000;
 const READ_TIMEOUT_MS = 8_000;
+// The host timeout is a hint to adapters; the broker also bounds the await itself.
+// A late answer cannot resume this computation or start a subsequent read.
+async function boundedRead<T>(read: (timeoutMs: number) => Promise<T>, deps: FileMapDeps, until: number): Promise<T> {
+  const remaining = until - deps.now();
+  if (remaining <= 0) throw new Error("wiki map deadline");
+  const timeoutMs = Math.min(READ_TIMEOUT_MS, remaining);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => read(timeoutMs)),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { reject(new Error("wiki map read timeout")); }, timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
 const ACTIVITY_CONCURRENCY = 4;
 const MIN_FILES_FOR_MODULE_PAGE = 3;
 const FIXED_PAGES = 4; // the start page and three fixed project pages (overview, glossary, how to run and test)
@@ -75,11 +90,11 @@ async function walkFolders(host: FileMapHost, repo: FileMapRepository, commit: s
   while (queue.length > 0) {
     const next: Array<{ path: string; depth: number }> = [];
     for (const [index, folder] of queue.entries()) {
-      if (out.budgetUsed >= WIKI_MAP_LIMITS.directoryWalkRequests || deps.now() > until || out.entries.length > WIKI_MAP_LIMITS.treeEntries) { out.unread += queue.length - index + next.length; return out; }
+      if (out.budgetUsed >= WIKI_MAP_LIMITS.directoryWalkRequests || deps.now() >= until || out.entries.length > WIKI_MAP_LIMITS.treeEntries) { out.unread += queue.length - index + next.length; return out; }
       if (folder.depth >= WIKI_MAP_LIMITS.directoryWalkDepth) { out.unread += 1; continue; }
       out.budgetUsed += 1;
       let listed;
-      try { listed = await host.directoryEntries!({ url: repo.url }, folder.path, commit, deps.scope, { timeoutMs: READ_TIMEOUT_MS }); } catch { out.failed = true; out.unread += 1; continue; }
+      try { listed = await boundedRead((timeoutMs) => host.directoryEntries!({ url: repo.url }, folder.path, commit, deps.scope, { timeoutMs }), deps, until); } catch { out.failed = true; out.unread += 1; continue; }
       if (!listed.complete) out.cut += 1;
       for (const child of listed.entries) {
         const path = folder.path === "" ? child.name : `${folder.path}/${child.name}`;
@@ -106,12 +121,12 @@ async function measureActivity(host: FileMapHost, repo: FileMapRepository, commi
   const worker = async (): Promise<void> => {
     while (cursor < targets.length && !slowDown) {
       if (spent + 2 > budget) { stopped ??= "budget"; return; }
-      if (deps.now() > until) { stopped ??= "time"; return; }
+      if (deps.now() >= until) { stopped ??= "time"; return; }
       const area = targets[cursor++]!;
       // Reserve the worst case (a folder with no commits costs a second request), so the requests made never exceed the budget; the unused one is given back below.
       spent += 2;
       try {
-        const read = await host.commitActivity!({ url: repo.url }, commit, deps.scope, { since, path: area.path, cap: 100, timeoutMs: READ_TIMEOUT_MS });
+        const read = await boundedRead((timeoutMs) => host.commitActivity!({ url: repo.url }, commit, deps.scope, { since, path: area.path, cap: 100, timeoutMs }), deps, until);
         if (read.count > 0) spent -= 1;
         area.commits = read.count;
         if (read.capped) area.commitsCapped = true;
@@ -148,14 +163,14 @@ export async function mapRepository(repo: FileMapRepository, deps: FileMapDeps, 
     languages: [], areas: [], testFolders: [], skippedFolders: [], activity: { status: "unavailable", days: WIKI_MAP_ACTIVITY_DAYS }, pages: { repository: 1, modules: 0, modulesCapped: false },
   };
   const host = repo.host;
-  if (deps.now() > until) return { ...base, unavailable: WIKI_MAP_OUT_OF_TIME };
+  if (deps.now() >= until) return { ...base, unavailable: WIKI_MAP_OUT_OF_TIME };
   if (host.repositoryTree === undefined) return { ...base, unavailable: WIKI_MAP_NO_LISTING };
   let commit: string;
   let read;
   try {
-    commit = await host.baseBranchHead({ url: repo.url }, repo.defaultBranch, deps.scope);
+    commit = await boundedRead(() => host.baseBranchHead({ url: repo.url }, repo.defaultBranch, deps.scope), deps, until);
     if (!/^[a-f0-9]{40}$/u.test(commit)) throw new Error("not a commit");
-    read = await host.repositoryTree({ url: repo.url }, commit, deps.scope, { timeoutMs: READ_TIMEOUT_MS });
+    read = await boundedRead((timeoutMs) => host.repositoryTree!({ url: repo.url }, commit, deps.scope, { timeoutMs }), deps, until);
   } catch (error) {
     deps.log?.({ event: "wiki_map.repository_unreadable", reason: error instanceof Error ? error.name : "unknown" });
     return { ...base, unavailable: unavailableFor(error) };

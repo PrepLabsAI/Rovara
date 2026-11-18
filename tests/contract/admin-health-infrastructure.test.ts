@@ -191,6 +191,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/candidate-check.ts", "packages/broker/src/core/test-env/night-status.ts",
       // Tickets that ask for work: a ticket's item (30 days while it waits, 400 once started), the event and change claims (30 and 7 days), the owner's notices (30 days), the poll's hourly read counts (2 hours), Rovara's notes of its own writes, and the ticket updates' claims and counts.
       "packages/broker/src/core/intake/store.ts", "packages/broker/src/core/intake/poll.ts", "packages/broker/src/core/intake/notices.ts", "packages/broker/src/core/intake/own-writes.ts", "packages/broker/src/core/ticket-updates/handler.ts",
+      // L4-LP: the ticket updates' claims and counts moved unchanged into claims.ts; the ticket thread's state row (400 days) and the task log's rows (400 days) are new rows with their own retention.
+      "packages/broker/src/core/ticket-updates/claims.ts", "packages/broker/src/core/ticket-updates/thread.ts", "packages/broker/src/core/task-log/store.ts",
       // Context sources: a project's pending and decided changes (90 days), the usage counters of one stage (3 days), the text a task kept from a source and its citations (14 days), and the request item of a
       // connection change (7 days). A connection's own record, a project's source document and a registered server are durable and carry no expiry.
       "packages/broker/src/context-sources/store.ts", "packages/broker/src/context-sources/usage.ts", "packages/broker/src/context-sources/quotes.ts", "packages/broker/src/context-sources/citations.ts",
@@ -198,6 +200,8 @@ describe("the health route's grants (A13)", () => {
       // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
       "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
+      // Nightly upkeep (lead 4 N1): the last-night, per-night and pause-notice marker rows expire after 62 days (`upkeepExpiryOf`); the switch row (SETTINGS) is durable and carries no expiry.
+      "packages/broker/src/core/upkeep/keys.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
       // Spend holds (switch-on lane L8): a hold's row and its open-hold index row expire 30 days after the hold's own expiry (the sweep gives an open one back first). The day row and the task
@@ -226,6 +230,9 @@ describe("the health route's grants (A13)", () => {
       // Wiki for agents (#896; DEC 254zzd, owner-approved): the WIKI_AGENT_USE_REF row (an operation's pointer to its task, 30 days) and the WIKI_AGENT_USE row (which pages a step was
       // given and read, 180 days), then expired. The project's "Give the wiki to agents" switch row carries no expiry.
       "packages/broker/src/core/wiki/agent-context.ts",
+      // Web task channel C8 (option b): the attention email's reverse index, one ATTENTION_PERSON row per company and hashed person id, kept 90 days after it was last written, then expired. Not a
+      // durable record (each new attention row for the person writes it again).
+      "packages/broker/src/core/notify/person-index.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);

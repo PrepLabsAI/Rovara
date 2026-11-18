@@ -237,6 +237,24 @@ export const SETUP_HOST_KIND = "setup-host";
 export const hostAskDigest = (ask: Pick<SetupHostAsk, "host" | "askedAt">): string => createHash("sha256").update(`setup-host\n${ask.host}\n${ask.askedAt}`).digest("hex");
 /** The revision a host ask is decided at. An ask has one version. */
 export const HOST_ASK_REVISION = 1;
+/** The request id a host ask's decision is made under: it names the ask as the person saw it (the host and when it was asked), so a later ask for the same host is another decision. */
+export const hostDecisionRequestId = (ask: Pick<SetupHostAsk, "orgId" | "project" | "host" | "askedAt">): string =>
+  `host-${createHash("sha256").update(`${hostAskSubjectId(ask.orgId, ask.project, ask.host)}\n${ask.askedAt}`).digest("hex").slice(0, 40)}`;
+
+/**
+ * A host's own rule for who decides a website ask (L4-SF d: hosted Code). The laptop passes none: only the install's owner decides. A host passes the person's LIVE standing check, read inside the decision,
+ * and the fixed words of a refusal. A website for a setup run is always high risk (it changes what a repository's code can reach), whatever the answer.
+ */
+export interface SetupHostApproval {
+  /** Whether this verified approver may give this answer for this host of this project, read now. A throw or anything but `true` is a refusal. */
+  mayDecide: (approver: Principal, input: { project: string; host: string; outcome: "approve" | "reject" }) => Promise<boolean>;
+  refusal: string;
+}
+
+/** The open ask for a host of a project, from the project's own asks (undefined: none open). */
+export async function readOpenHostAsk(table: Table, orgId: OrgId, project: string, host: string): Promise<SetupHostAsk | undefined> {
+  return (await listHostAsks(table, orgId, project, ["open"])).find((ask) => ask.host === host);
+}
 
 /** The open ask a subject id names, found in the company's index of open asks. */
 async function openAskBySubject(store: Pick<DocumentStore, "query">, orgId: OrgId, subjectId: string): Promise<SetupHostAsk | undefined> {
@@ -252,7 +270,7 @@ async function openAskBySubject(store: Pick<DocumentStore, "query">, orgId: OrgI
  * The gate's subject for a host ask. Approving lets the install's machines reach the host when they next start; refusing keeps the host out for a week. It decides nothing about the project's code. The owner is the
  * approver (Code's one company has one owner); a repository collaborator's comment is never one (`SubjectRefusal`). Both outcomes settle the ask, its index row and the open counter in the decision's transaction.
  */
-export function createSetupHostSubject(options: { store: DocumentStore; prodDeny?: (project: string) => Promise<TestEnvProdDeny | undefined>; sandboxDenied?: ((project: string) => readonly string[]) | undefined }): DecisionSubject {
+export function createSetupHostSubject(options: { store: DocumentStore; approval?: SetupHostApproval | undefined; prodDeny?: (project: string) => Promise<TestEnvProdDeny | undefined>; sandboxDenied?: ((project: string) => readonly string[]) | undefined }): DecisionSubject {
   return {
     kind: SETUP_HOST_KIND,
     async load(companyId, subjectId): Promise<LoadedSubject | undefined> {
@@ -269,7 +287,17 @@ export function createSetupHostSubject(options: { store: DocumentStore; prodDeny
     },
     async apply(loaded, attempt: DecisionAttempt, approvers: readonly Principal[], at: string): Promise<AppliedDecision> {
       const { ask } = loaded.state as { ask: SetupHostAsk };
-      if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", "Only the owner decides a website for a setup run.");
+      if (options.approval === undefined) {
+        if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", "Only the owner decides a website for a setup run.");
+      } else {
+        if (attempt.outcome !== "approve" && attempt.outcome !== "reject") throw new SubjectRefusal("invalid_outcome", "A website ask is approved or refused.");
+        // Every approver, read live against this ask; a read that fails is a refusal.
+        for (const approver of approvers) {
+          let allowed: unknown;
+          try { allowed = await options.approval.mayDecide(approver, { project: ask.project, host: ask.host, outcome: attempt.outcome }); } catch { allowed = false; }
+          if (allowed !== true) throw new SubjectRefusal("not_the_approver", options.approval.refusal);
+        }
+      }
       const approver = approvers[0]!;
       const now = Date.parse(at);
       const open: TransactItem[] = [

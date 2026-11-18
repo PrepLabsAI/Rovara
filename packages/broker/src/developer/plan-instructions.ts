@@ -198,6 +198,8 @@ export function planDocumentInstructions(input: {
   requiredParts?: boolean;
   /** Add the plan quality guidance to a coding plan's instructions (the delivery drops it for a worker that cannot read the members it names). */
   planQuality?: boolean;
+  /** L4-SC (DEC 254z c): a coding plan may propose the task's setup changes (`setupChanges`). Absent: the prompt stays as it was. */
+  setupChanges?: boolean;
 }): string {
   const checks = input.kind === "plan";
   const featureE2E = input.kind === "plan" && input.e2ePlanningContext !== undefined;
@@ -230,6 +232,7 @@ export function planDocumentInstructions(input: {
     ...(retiredIds.length === 0 ? [] : [`These claim IDs were removed earlier and must not be used again: ${retiredIds.join(", ")}.`]),
     ...(checks ? ["`checks` goes in the coding plan only. Each check lists in `proves` the IDs of the claims it proves. Checks may prove Not changing items: use `nc1`, `nc2` and so on, counting the `notChanging` entries from 1."] : []),
     ...(checks && input.requiredParts === true ? [PLAN_PARTS_SENTENCE] : []),
+    ...(checks && input.setupChanges === true ? [SETUP_CHANGES_INSTRUCTION] : []),
     ...(checks && input.planQuality === true ? [PLAN_QUALITY_GUIDANCE] : []),
     ...(e2eContext === undefined ? [] : [
       "E2EFeaturePlanIntent has exactly these members: { schemaVersion: 1, requestedTargetIds: string[], portableOperationRefs?: { operationId, applicationId, requestedTargetIds, packageExportSubpath, moduleSpecifier, callableSelector: { kind: \"default\" } | { kind: \"named\", exportName } }[], mockFixtureRefs?: { componentId, requestedTargetId, operationId, sourcePath, sourceSha256 }[], accountContextRefs: { applicationId, profileId, sourcePath, sourceSha256 }[], scenarios: { scenarioId, requirementId, requestedTargetIds, required, accountProfileId, minimumEvidence: \"source\" | \"mock-contract\" | \"runtime\" | \"external-live\", requiredRealComponentIds: string[], steps: E2EStep[], assertions: E2EAssertion[] }[], semanticExportDeltas: { applicationId, operationId, requestedTargetIds, expectedExportNames: string[], reason }[] }. Each scenario needs at least one assertion; `invoke-contract` steps must use a listed operation and a target listed on that operation.",
@@ -256,6 +259,19 @@ export function planDocumentInstructions(input: {
     ...(input.previous === undefined ? [] : [previousPlanDocumentBlock(input.previous)]),
   ].join("\n\n");
 }
+
+/**
+ * L4-SC (DEC 254z c): what a coding planner is told about proposing the task's setup changes. The planner proposes; a maintainer approves the list with the plan; the coding agent never writes a mock.
+ */
+export const SETUP_CHANGES_INSTRUCTION = [
+  "Setup change: when this task adds an outside service the tests call, a service the tests talk to, a variable the code reads, or a setup or test command, add a `setupChanges` member to the coding plan.",
+  "It is a list of at most 8 items. Each has `id` (\"s1\", \"s2\" and so on), `kind`, `reason` (one sentence) and optionally `cite` ({ path, line }) naming the file that made you propose it. By kind:",
+  "- \"mock\": a fake Rovara makes from an OpenAPI description that already exists in the repository: { service, variable (the base-URL variable the code reads, in capitals), spec (the workspace path of that file) }. At most 4.",
+  "- \"command\": { area: \"setup\" or \"test\", repo (the repository name), line (one command with no shell operators) }.",
+  "- \"variable\": { name } (a name only, never a value).",
+  "- \"dependency\": { service }.",
+  "A maintainer approves this list with the plan, and it applies to this task only; after the pull request merges, a maintainer is asked to update the project's setup. The coding agent never writes a mock or a fixture: do not plan to add or change one that is not in this list. Leave `setupChanges` out when the task changes no setup.",
+].join(" ");
 
 /** The document name a prompt uses for a kind: "requirements", "design" or "coding plan". */
 export function planDocumentKindName(kind: PlanDocumentKind): string {

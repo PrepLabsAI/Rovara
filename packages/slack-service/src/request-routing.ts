@@ -49,6 +49,12 @@ export interface RequestRoutingDependencies {
   answered?(message: SlackRequestMessage): Promise<void>;
   /** Answers the request as the chat agent does any chat request. */
   answer(message: SlackRequestMessage): Promise<void>;
+  /**
+   * Lead 4 J2 (DEC 254z, 254zza): the smart Just answer. Tried first for a question and for an unclear message the classifier read cleanly. `handled`: the answer (or its fixed refusal) is in the thread,
+   * and nothing else is done for this request. `declined`: nothing was said, and the request goes the way it always did (the chat agent for a question, the card for an unclear message). Absent: every
+   * request goes the way it always did. Never throws.
+   */
+  justAnswer?(message: SlackRequestMessage): Promise<"handled" | "declined">;
   /** Tells the thread's queued-request count that this request is done (the chat agent's path does so itself). */
   finish(subject: string): Promise<void>;
   log: ServiceLog;
@@ -89,6 +95,20 @@ async function routeOnce(message: SlackRequestMessage, deps: RequestRoutingDepen
   }
   const choiceId = routedChoiceId(message.eventId);
   deps.log("route.classified", { eventId: message.eventId, choiceId, kind: route.kind, outcome: route.outcome, latencyMs: Math.max(0, now() - startedAt) });
+  // Answer first (DEC 254z): a question, or an unclear message the classifier read cleanly, is answered by the answer service. A classifier that failed (unavailable, invalid, timeout) still gets the card.
+  if (deps.justAnswer !== undefined && (route.kind === "question" || (route.kind === "unclear" && route.outcome === "ok"))) {
+    let outcome: "handled" | "declined" = "declined";
+    try {
+      outcome = await deps.justAnswer(message);
+    } catch (error) {
+      deps.log("route.just_answer_failed", { eventId: message.eventId, errorName: errorName(error) });
+    }
+    deps.log("route.just_answer", { eventId: message.eventId, choiceId, outcome });
+    if (outcome === "handled") {
+      await finishQuietly(message, deps);
+      return;
+    }
+  }
   if (route.kind === "question") {
     await deps.answer(message);
     return;
@@ -149,7 +169,10 @@ export function createChoiceOffer(deps: {
   const now = deps.now ?? Date.now;
   return async (input) => {
     try {
-      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, ...workflowChoicePut({ ...input, nowMs: now() }) }));
+      // Lead 4 J2: an answer's unpressed choice does not keep a later card out of the thread (the card's request is newer).
+      const put = workflowChoicePut({ ...input, nowMs: now() });
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: put.Item, ConditionExpression: `${put.ConditionExpression} OR (fromAnswer = :answer AND attribute_not_exists(selectedPath))`,
+        ExpressionAttributeValues: { ...put.ExpressionAttributeValues, ":answer": true } }));
     } catch (error) {
       if (!(error instanceof Error && error.name === "ConditionalCheckFailedException")) throw error;
       // This choice was answered already, or another one waits in the thread: nothing more to ask.

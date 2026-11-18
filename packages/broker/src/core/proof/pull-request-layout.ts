@@ -48,6 +48,8 @@ export interface LayoutInput {
   /** The Reviews drawer's extra lines (reviewer models and the same-model note), already inert. */
   reviewExtra: readonly string[];
   linearCloseLine: string | undefined;
+  /** L4-SC: the "Setup change" section (`setupChangeSection`, already inert), shown whole after the verdict list; absent or empty: nothing. */
+  setupChange?: readonly string[];
   /** The date of the pull request (ISO), for the age of a recorded fake. */
   asOf: string;
 }
@@ -214,6 +216,6 @@ export function layoutBlockLines(input: LayoutInput, level: number): { verdict: 
     ...(verdict.drawers.screenshots === undefined ? [] : details(verdict.drawers.screenshots, bodyOf(screenshots))),
     ...(verdict.drawers.used === undefined ? [] : details(verdict.drawers.used, bodyOf(used))),
   ];
-  const lines = [`## ${verdict.heading}`, "", ...six, "", ...list, ...drawers, ...(input.linearCloseLine === undefined ? [] : [input.linearCloseLine])];
+  const lines = [`## ${verdict.heading}`, "", ...six, "", ...list, ...(input.setupChange ?? []), ...drawers, ...(input.linearCloseLine === undefined ? [] : [input.linearCloseLine])];
   return { verdict, lines };
 }

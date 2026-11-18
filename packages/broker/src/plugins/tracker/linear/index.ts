@@ -9,8 +9,8 @@
 // Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (`core/intake`).
 import { createHash } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema,
-  type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerEvent, type TrackerEvents, type TrackerItem,
+  agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema, TrackerParentSchema,
+  type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 import { workspaceOfIssueUrl } from "./api.js";
@@ -22,8 +22,16 @@ type OrgId = Extract<HostScope, { orgId: string }>["orgId"];
 /** Posts a comment on a Linear issue as the install's own account. The hosted product's port has more methods (rewrite and delete of its own comments); the adapter uses `reply` only. */
 export interface LinearReplyPort {
   /** Posts the comment. `commentKey` is a stable name for it: the same key again is the same comment (a retry is never a second post). */
-  reply(input: { orgId: OrgId; issueKey: string; text: string; commentKey?: string | undefined; workspace?: string | undefined }): Promise<{ commentId: string; workspace?: string | undefined } | void>;
+  reply(input: { orgId: OrgId; issueKey: string; text: string; commentKey?: string | undefined; workspace?: string | undefined; parentId?: string | undefined }): Promise<{ commentId: string; workspace?: string | undefined } | void>;
+  /**
+   * Rewrites a comment the install wrote on this issue (the same port's own comment: an edit notifies nobody). The comment must be on the issue named (and in its workspace); the same text again changes nothing. Absent:
+   * the adapter has no `updateComment`, and the project's tickets stay on one-shot comments.
+   */
+  edit?(input: { orgId: OrgId; issueKey: string; commentId: string; text: string; workspace?: string | undefined }): Promise<void>;
 }
+
+/** A Linear comment's id is a UUID; anything else is never passed on as one. */
+const COMMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 export const LINEAR_TRACKER_KIND = "linear";
 
@@ -47,6 +55,8 @@ export interface LinearIssueRead {
   /** The issue's link on linear.app. */
   url: string;
   updatedAt?: string | undefined;
+  project?: { id: string; name: string; url?: string | undefined } | undefined;
+  parent?: { id: string; title: string; url?: string | undefined } | undefined;
 }
 
 export interface LinearTrackerAccess {
@@ -170,26 +180,45 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
       // An answer for another issue than the one asked about is no answer.
       if (issue === undefined || normalizeIssueKey(issue.key) !== key) throw agentXError("RUNTIME_UNAVAILABLE", "the tracker has no such item");
       const link = linearLink(issue.url);
+      const rawParent = issue.project === undefined ? issue.parent === undefined ? undefined : { kind: "parent_issue", id: issue.parent.id, title: cut(issue.parent.title, 200), url: issue.parent.url }
+        : { kind: "project", id: issue.project.id, title: cut(issue.project.name, 200), url: issue.project.url };
+      const parent = TrackerParentSchema.safeParse(rawParent);
       return TrackerItemSchema.parse({
         ref: { tracker: LINEAR_TRACKER_KIND, id: key, ...(link === undefined ? {} : { url: link }) },
         title: cut(issue.title, 1_000), body: cut(issue.description, 65_536), status: NEUTRAL_STATUS_OF[issue.stateType],
         ...(issue.assignee === undefined || issue.assignee === "" ? {} : { assignee: cut(issue.assignee, 200) }),
         labels: [...issue.labels].filter((label) => label !== "").slice(0, 100).map((label) => cut(label, 200)),
         ...(issue.updatedAt === undefined ? {} : { updatedAt: issue.updatedAt }),
+        ...(parent.success ? { parent: parent.data } : {}),
       });
     },
     ...(access.hook === undefined ? {} : { events: linearEvents(access) }),
   };
   if (access.reply !== undefined) {
     const reply = access.reply;
-    tracker.comment = async (ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<void> => {
+    tracker.comment = async (ref: TrackerItemRef, body: UntrustedText, scope: HostScope, options?: TrackerCommentOptions): Promise<TrackerCommentResult | void> => {
       const orgId = orgOf(scope);
       const key = keyOf(ref);
       if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
+      if (options?.parentId !== undefined && !COMMENT_ID.test(options.parentId)) throw agentXError("CONFIG_INVALID", "the comment to reply to is not a Linear comment id");
       // The issue found must be in the ticket's own workspace (an issue key repeats across workspaces), and the same key again is the same comment.
       const workspace = ref.url === undefined ? undefined : workspaceOfIssueUrl(ref.url);
-      await reply.reply({ orgId, issueKey: key, text: body, ...(options?.key === undefined ? {} : { commentKey: options.key }), ...(workspace === undefined ? {} : { workspace }) });
+      const posted = await reply.reply({
+        orgId, issueKey: key, text: body, ...(options?.key === undefined ? {} : { commentKey: options.key }), ...(workspace === undefined ? {} : { workspace }), ...(options?.parentId === undefined ? {} : { parentId: options.parentId }),
+      });
+      return posted === undefined || typeof posted.commentId !== "string" || !COMMENT_ID.test(posted.commentId) ? undefined : { commentId: posted.commentId };
     };
+    if (reply.edit !== undefined) {
+      const edit = reply.edit.bind(reply);
+      tracker.updateComment = async (ref: TrackerItemRef, commentId: string, body: UntrustedText, scope: HostScope): Promise<void> => {
+        const orgId = orgOf(scope);
+        const key = keyOf(ref);
+        if (body.length === 0 || body.length > COMMENT_MAX_CHARS) throw agentXError("CONFIG_INVALID", "the comment is empty or too long");
+        if (!COMMENT_ID.test(commentId)) throw agentXError("CONFIG_INVALID", "the comment is not a Linear comment id");
+        const workspace = ref.url === undefined ? undefined : workspaceOfIssueUrl(ref.url);
+        await edit({ orgId, issueKey: key, commentId, text: body, ...(workspace === undefined ? {} : { workspace }) });
+      };
+    }
   }
   if (access.moveIssue !== undefined) {
     const move = access.moveIssue;

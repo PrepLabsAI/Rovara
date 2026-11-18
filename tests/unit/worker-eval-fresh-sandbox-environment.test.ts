@@ -105,7 +105,7 @@ function fakeDaemon(options: DaemonOptions = {}) {
         const defaultPlay = async (k: "install" | "eval"): Promise<Play> => { if (k === "eval") await writeFile(join(checkout, REPORT.argument), REPORT_BYTES); return { code: 0 }; };
         const play: Play = await (options.play ?? defaultPlay)(kind, checkout, container.args, plays[kind]++);
         for (const [path, text] of Object.entries(play.files ?? {})) { await mkdir(join(checkout, path, ".."), { recursive: true }); await writeFile(join(checkout, path), text); }
-        container.log = play.log;
+        if (play.log !== undefined) container.log = play.log;
         if (play.code === "timeout") return Promise.resolve({ exitCode: null, stdout: "", stderr: "", timedOut: true });
         if (play.code === "hang") {
           await new Promise<void>((resolve) => { waiters.push(resolve); });

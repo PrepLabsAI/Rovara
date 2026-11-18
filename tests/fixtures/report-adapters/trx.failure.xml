@@ -1,0 +1,1 @@
+<TestRun><Results><UnitTestResult testName="same" outcome="Failed"><Output><ErrorInfo><Message><![CDATA[assert: src/cart.cs:8 expected value]]></Message><StackTrace>at Cart.Run() in src/cart.cs:line 8</StackTrace></ErrorInfo></Output></UnitTestResult></Results></TestRun>

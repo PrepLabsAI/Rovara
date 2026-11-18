@@ -8,6 +8,8 @@ const APPROVED_ENV = "agentxlivetest123";
 const APPROVED_ACCOUNT = "944937319445";
 const APPROVED_REGION = "us-east-1";
 const DEVELOPER_ATTRIBUTES = ["pk", "sk", "developerId", "provider", "issuer", "subject", "slackUserId", "revoked", "displayName"];
+/** Web task channel C3 (plan 4.1 rule 3, DEC 254u): the reviewed Membership record's fields, exactly the runtime's TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES. */
+const COMPANY_MEMBER_ATTRIBUTES = ["pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy"];
 
 export interface TaskPersonProofProps {
   readonly naming: AgentXNaming;
@@ -99,6 +101,16 @@ export class TaskPersonProof extends Construct {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     };
+    const companyMemberRead = {
+      Effect: "Allow",
+      Action: ["dynamodb:GetItem"],
+      Resource: [props.developerSignInTable.tableArn],
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["COMPANY_MEMBER#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": COMPANY_MEMBER_ATTRIBUTES },
+        Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
+      },
+    };
     const denyUnprojectedDeveloperRead = {
       Sid: "DenyGetItemUnlessSpecificAttributes",
       Effect: "Deny",
@@ -116,7 +128,7 @@ export class TaskPersonProof extends Construct {
     const dispatcherPolicy = new iam.CfnPolicy(this, "DispatcherPolicy", {
       policyName: `${APPROVED_ENV}-task-person-proof-dispatcher`,
       roles: [props.dispatcher.role.roleName],
-      policyDocument: { Version: "2012-10-17", Statement: [developerRead, denyUnprojectedDeveloperRead, invokeProof] },
+      policyDocument: { Version: "2012-10-17", Statement: [developerRead, companyMemberRead, denyUnprojectedDeveloperRead, invokeProof] },
     });
     dispatcherPolicy.cfnOptions.condition = install;
 

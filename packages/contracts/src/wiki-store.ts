@@ -19,6 +19,9 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 
 // ---- Limits -----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
+/** Most flag rows (open AND resolved: resolved rows are not pruned yet) one `openClaimFlagPages` read looks at; more than this is read as "any page may be flagged". */
+export const WIKI_FLAG_SCAN_MAX = 2_000;
+
 export const WIKI_LIMITS = {
   /** Pages in one project's wiki (W0's `pagesPerProject`). */
   pagesPerProject: 300,
@@ -189,6 +192,8 @@ export const WikiNoteApprovalSchema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("approved"), by: WikiPersonIdSchema, at: isoTime }).strict(),
 ]);
 export type WikiNoteApproval = z.infer<typeof WikiNoteApprovalSchema>;
+export const WikiNoteChangedAcknowledgementSchema = z.object({ by: WikiPersonIdSchema, at: isoTime }).strict();
+export type WikiNoteChangedAcknowledgement = z.infer<typeof WikiNoteChangedAcknowledgementSchema>;
 
 /** A note by a named person, pinned to a page. Shown to people at once; given to agents only once approved. It survives every refresh (it is stored apart from the page). */
 export const WikiNoteSchema = z.object({
@@ -199,6 +204,8 @@ export const WikiNoteSchema = z.object({
   createdAt: isoTime,
   /** A file the note is tied to (its author and the admins are asked to check it when the file changes). */
   file: z.object({ repo: WikiRepoSchema, path: WikiPathSchema }).strict().optional(),
+  /** The author or a maintainer acknowledged that the tied file changed. */
+  changedAcknowledgement: WikiNoteChangedAcknowledgementSchema.optional(),
   approval: WikiNoteApprovalSchema,
 }).strict();
 export type WikiNote = z.infer<typeof WikiNoteSchema>;
@@ -275,7 +282,8 @@ export const WikiAnswerRecordWriteSchema = z.object({
   pagesRead: z.array(WikiPageIdSchema).max(20),
 }).strict();
 export type WikiAnswerRecordWrite = z.infer<typeof WikiAnswerRecordWriteSchema>;
-export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number };
+/** `notRight`: the asker pressed "Not right" on this answer (J5; the one change a record gets after it is written). */
+export type WikiAnswerRecord = WikiAnswerRecordWrite & { createdAt: string; expiresAt: number; notRight?: boolean };
 
 // ---- Keys: in wiki-keys.ts (the key builders the company inventory reads), re-exported here --------------------------------------------------------------------------------------
 export * from "./wiki-keys.js";
@@ -283,6 +291,7 @@ export * from "./wiki-keys.js";
 // ---- Read routes (W2; Cloud's Wiki tab calls them as the signed-in person) ------------------------------------------------------------------------------------------------------------
 //
 //   GET /v1/app/projects/{project}/wiki                               the page index and the last build's state
+//   GET /v1/app/projects/{project}/wiki/search?q=                      bounded title, summary and page-text results
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}                one page: prose, claims (no quotes), notes (pending ones marked), open flag count
 //   GET /v1/app/projects/{project}/wiki/pages/{pageId}/sources        the files and lines the page cites, at their commits (no quotes)
 //
@@ -302,10 +311,21 @@ export const WikiIndexResponseSchema = z.object({
   project: WikiProjectSchema,
   /** `empty`: no page yet ("No wiki yet. A project admin builds it on Project setup."). */
   state: z.enum(["empty", "ready"]),
+  /** The project's company-and-project scoped switch. Missing or unreadable switch rows mean false. */
+  agentsEnabled: z.boolean(),
   pages: z.array(WikiIndexEntrySchema).max(WIKI_LIMITS.pagesPerProject),
   lastBuild: WikiLastBuildSchema.optional(),
 }).strict();
 export type WikiIndexResponse = z.infer<typeof WikiIndexResponseSchema>;
+
+/** Bounded title, summary and page-text search for one project. Snippets contain only page prose, never stored citations. */
+export const WikiSearchResponseSchema = z.object({
+  project: WikiProjectSchema,
+  query: z.string().min(1).max(80),
+  results: z.array(z.object({ pageId: WikiPageIdSchema, title: z.string(), summary: z.string(), snippet: z.string().max(240) }).strict()).max(20),
+  trustLine: z.literal(WIKI_TRUST_LINE),
+}).strict();
+export type WikiSearchResponse = z.infer<typeof WikiSearchResponseSchema>;
 
 /** A claim as people see it: no quotes. */
 export const WikiShownClaimSchema = z.object({
@@ -408,6 +428,8 @@ export interface WikiStore {
   pageSink(project: string): WikiPageSink;
   /** The page index (bounded by `WIKI_LIMITS.pagesPerProject`). */
   readIndex(project: string): Promise<WikiIndexEntry[]>;
+  /** Page title, summary and text blocks for bounded search; does not read notes or flags. */
+  readPageBody(project: string, pageId: string): Promise<{ title: string; summary: string; blocks: WikiBlock[] } | undefined>;
   readPage(project: string, pageId: string, audience: WikiAudience): Promise<WikiPageRead | undefined>;
   /** Writes (or rewrites) one page: its index row and body together. Notes and flags on it are kept. Refused past `pagesPerProject` pages. */
   writePage(project: string, page: WikiPageWrite): Promise<void>;
@@ -427,10 +449,17 @@ export interface WikiStore {
   addNote(project: string, note: WikiNoteAdd): Promise<WikiNote>;
   /** Approves a pending note (the caller checked the approver is a maintainer or a company owner or admin). Answers undefined when there is no such note. */
   approveNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined>;
+  /** Records that the note's author or a maintainer reviewed its changed file. */
+  acknowledgeNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined>;
   deleteNote(project: string, pageId: string, noteId: string): Promise<boolean>;
   addFlag(project: string, flag: WikiFlagAdd): Promise<WikiFlag>;
   /** Resolves every open flag on a page (a refresh rewrote it). */
   resolveFlags(project: string, pageId: string): Promise<number>;
+  /**
+   * The pages of the project that have an open CLAIM-level flag (a "Mark wrong" on one claim, or a J1/J5 flag), with the time of the newest such flag. Page-level flags are not here (the index says
+   * `flagged`). Reads at most `WIKI_FLAG_SCAN_MAX` flag rows; `complete` is false when there were more (the caller must then treat every page as possibly flagged, never a partial answer).
+   */
+  openClaimFlagPages(project: string): Promise<{ pages: Array<{ pageId: string; latestAt: string }>; complete: boolean }>;
   writeBuild(project: string, record: WikiBuildRecord): Promise<void>;
   readBuild(project: string, buildId: string): Promise<WikiBuildRecord | undefined>;
   /** The most recent build (by start time), if any. */
@@ -439,6 +468,13 @@ export interface WikiStore {
   writeAnswer(project: string, record: WikiAnswerRecordWrite): Promise<WikiAnswerRecord>;
   /** An answer record, or undefined when there is none or it has expired. */
   readAnswer(project: string, answerId: string): Promise<WikiAnswerRecord | undefined>;
+  /**
+   * The project's answer records that have not expired, in key order (J5: the gap list is read from them), at most `scanMax` of them; `more` is true when there were more rows than that. Records carry their asker's id:
+   * the caller must never show it.
+   */
+  listAnswers(project: string, scanMax: number): Promise<{ records: WikiAnswerRecord[]; more: boolean }>;
+  /** The asker presses "Not right" (J5): sets the record's `notRight` once. `marked` the first time, `already` after, undefined when there is no such record, it has expired, or it is not this person's. */
+  markAnswerNotRight(project: string, answerId: string, personId: string): Promise<"marked" | "already" | undefined>;
   /** Deletes up to `limit` (default and most `WIKI_ANSWER_SWEEP_MAX`) answer records of the project whose time is past. Answers how many went. */
   expireAnswers(project: string, limit?: number): Promise<number>;
   /** The person-erase step: the person's notes and answer records are deleted and their "Mark wrong" reasons removed, in every given project. */

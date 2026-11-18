@@ -38,6 +38,7 @@ import { createThreadApi } from "./thread-api.js";
 import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
+import { createAnswerChoices, createAnswerDoor } from "./slack-answer-door.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { createContinuationRecorder } from "./thread-continuation.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
@@ -51,7 +52,7 @@ export function createSlackServiceDelivery(options: Parameters<typeof createWork
       return (await clients.forThread(thread)).web.postMessage(thread.channelId, threadTs, text, { ...(blocks === undefined ? {} : { blocks }), ...(signal === undefined ? {} : { signal }) });
     },
     async delete(thread: SlackThread, ts: string) { await (await clients.forThread(thread)).web.delete(thread.channelId, ts); },
-    async update(thread: SlackThread, ts: string, text: string) { await (await clients.forThread(thread)).web.update(thread.channelId, ts, text); },
+    async update(thread: SlackThread, ts: string, text: string, blocks?: unknown[]) { await (await clients.forThread(thread)).web.update(thread.channelId, ts, text, blocks === undefined ? {} : { blocks }); },
     async ephemeral(thread: SlackThread, userId: string, text: string) { await (await clients.forThread(thread)).web.postEphemeral(thread.channelId, thread.threadTs, userId, text); },
     async userName(thread: Pick<SlackThread, "teamId">, userId: string) { return (await clients.forThread(thread)).userName(userId); },
   };
@@ -146,6 +147,17 @@ function threadApi(message: Pick<SlackRequestMessage, "thread" | "userId">): Sla
   const signedFetch = createSignedServiceFetch({ region, credentials, thread: message.thread, userId: message.userId });
   return withSlackThreadRoutes(createThreadApi({ controlPlaneUrl, signedFetch }), { controlPlaneUrl, signedFetch });
 }
+
+// Lead 4 J2: the smart Just answer in Slack. The control plane decides who may ask and which project (from the verified thread and member); a decline leaves every request going the way it always did.
+const answerChoices = createAnswerChoices({ documentClient, tableName: threadsTableName, log });
+const answerDoor = createAnswerDoor({
+  api: threadApi,
+  post: (thread, text, blocks) => postToSlack(thread, text, blocks),
+  update: (thread, ts, text, blocks) => slackDelivery.update(thread, ts, text, blocks),
+  remove: (thread, ts) => slackDelivery.delete(thread, ts),
+  choices: answerChoices,
+  log,
+});
 
 const threads: ThreadStore = {
   async load(subject) {
@@ -477,6 +489,8 @@ const channelConsumer = channelRequestQueueUrl === undefined || channelEventQueu
             ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }),
               offer: createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => slackAdapter.post(thread, text, blocks), log }),
               notify: async (thread, text) => { await slackAdapter.post(thread, text); },
+              // The adapter cannot edit a message, so the answer is posted once, without a "Looking..." line.
+              justAnswer: createAnswerDoor({ api: threadApi, post: (thread, text, blocks) => slackAdapter.post(thread, text, blocks), choices: answerChoices, log }),
               answer, finish: (subject) => threads.finish(subject), log })
             : handleTaskQuestion(message, { taskId: routing.taskId, noteTs: routing.noteId, chat: routing.chat }, {
               ...(requestRouter === undefined ? {} : { route: requestRouter }),
@@ -528,7 +542,7 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
   : route === "suggest"
   ? routeSlackRequest(message, {
     // Decision 147: the person AgentX answered here may reply without a mention for the next 24 hours.
-    answered: (request) => rememberAnswered(request.thread, request.userId), ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
+    answered: (request) => rememberAnswered(request.thread, request.userId), ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice, justAnswer: answerDoor,
     notify: async (thread, text, blocks) => { await postToSlack(thread, text, blocks); },
     // Decision 134: a clear small change starts Quick on its own, through the broker's check and the requester's own start.
     autoStart: async ({ message: request, requestId }) => {
