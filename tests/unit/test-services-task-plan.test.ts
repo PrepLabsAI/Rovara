@@ -135,8 +135,8 @@ describe("when a task may use an environment with dependencies", () => {
   });
 
   it("is not used with tx off, whatever else is on (today's behaviour for anything it did not know)", () => {
-    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_ENVIRONMENT: "1" })).toBe("dependencies_not_connected");
-    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_SERVICES: "true" })).toBe("dependencies_not_connected");
+    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
+    expect(environmentUnusedReason(asEnvironment(body()), { ROVARA_TEST_SERVICES: "0" })).toBe("dependencies_not_connected");
     expect(environmentUnusedReason(asEnvironment(body({ dependencies: undefined })), {})).toBeUndefined();
   });
 
@@ -198,7 +198,7 @@ describe("the plan of a run with dependencies", () => {
     const h = await pinned();
     let reads = 0;
     h.deps.serviceCatalog = async () => { reads += 1; return catalog(); };
-    expect(await planOf(h, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
+    expect(await planOf(h, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
     expect(reads).toBe(0);
   });
 });
@@ -222,7 +222,7 @@ describe("the plan a coding run is sent (the working sandbox gets the dependenci
     const reads = vi.fn();
     const counting = new Proxy(h.store, { get: (target, name, receiver) => { const value: unknown = Reflect.get(target, name, receiver); return typeof value === "function" ? (...args: unknown[]) => { reads(name); return (value as (...a: unknown[]) => unknown).apply(target, args); } : value; } });
     h.deps.store = counting;
-    expect(await implementPlan(h, { ROVARA_TEST_ENVIRONMENT: "1" })).toBeUndefined();
+    expect(await implementPlan(h, { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" })).toBeUndefined();
     expect(await implementPlan(h, { ROVARA_TEST_ENVIRONMENT: "0", ROVARA_TEST_SERVICES: "1" })).toBeUndefined();
     expect(reads).not.toHaveBeenCalled();
     const without = await pinned(body({ dependencies: undefined }));
@@ -269,7 +269,7 @@ describe("dependencies and a dev container (not available yet)", () => {
   });
 
   it("also refuses test services off, and a backing that is not real catalog software, at proposal", async () => {
-    await expect(propose({ env: { ROVARA_TEST_ENVIRONMENT: "1" } }, body())).rejects.toThrow(/not switched on/u);
+    await expect(propose({ env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" } }, body())).rejects.toThrow(/not switched on/u);
     const fake = postgres({ backing: { kind: "fake", fixtureSetRef: "a".repeat(64), unmatched: "fail" }, connect: { env: [], hostAliases: [] } });
     await expect(propose({}, body({ dependencies: [fake] }))).rejects.toThrow(/not available yet/u);
   });

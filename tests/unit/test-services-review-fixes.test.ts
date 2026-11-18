@@ -97,7 +97,7 @@ describe("a re-propose keeps what is approved", () => {
 
   it("with test services off, a proposal that keeps the approved dependency unchanged is still proposable; a new or changed one is not", async () => {
     const h = await approved();
-    h.deps.env = { ROVARA_TEST_ENVIRONMENT: "1" };
+    h.deps.env = { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "0" };
     const more = body([dep()], { repos: [{ repositoryId: "service", setupCommands: [], checks: [{ id: "unit", label: "Unit tests", command: cmd("pytest", ["-q", "-x"]), kind: "test" }] }] });
     expect((await h.propose(more)).digest).toBeDefined();
     await expect(h.propose(body([dep({ reset: "between_checks" })]))).rejects.toThrow(/not switched on/u);

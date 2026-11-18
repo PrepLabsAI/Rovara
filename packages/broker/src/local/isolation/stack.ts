@@ -177,7 +177,10 @@ export interface GuardServices {
   slots?: { first: number; last: number };
   maxNetworks?: number;
   maxContainers?: number;
+  /** The most memory one helper may be given, in MiB (default 1024, DEC 254zm 2). */
   maxMemoryMiB?: number;
+  /** The share of the Docker VM's memory all the helpers and programs together may be given, in percent (default 40; never above 75). */
+  maxMemoryPercent?: number;
 }
 
 export interface GuardInput extends HelperCommon {
@@ -255,7 +258,7 @@ export function guardPolicy(input: GuardInput): Record<string, unknown> {
     user: "1000:1000",
     port: SOCKET_GUARD_PORT,
     maxSandboxes: input.maxSandboxes ?? 16,
-    ...(input.services === undefined ? {} : { services: { images: [...input.services.images], guardImage: input.services.guardImage, runDirectory: input.services.runDirectory, bindDirectory: input.services.bindDirectory, socketGroup: input.services.socketGroup, ...(input.services.slots === undefined ? {} : { slots: input.services.slots }), ...(input.services.maxNetworks === undefined ? {} : { maxNetworks: input.services.maxNetworks }), ...(input.services.maxContainers === undefined ? {} : { maxContainers: input.services.maxContainers }), ...(input.services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: input.services.maxMemoryMiB }) } }),
+    ...(input.services === undefined ? {} : { services: { images: [...input.services.images], guardImage: input.services.guardImage, runDirectory: input.services.runDirectory, bindDirectory: input.services.bindDirectory, socketGroup: input.services.socketGroup, ...(input.services.slots === undefined ? {} : { slots: input.services.slots }), ...(input.services.maxNetworks === undefined ? {} : { maxNetworks: input.services.maxNetworks }), ...(input.services.maxContainers === undefined ? {} : { maxContainers: input.services.maxContainers }), ...(input.services.maxMemoryMiB === undefined ? {} : { maxMemoryMiB: input.services.maxMemoryMiB }), ...(input.services.maxMemoryPercent === undefined ? {} : { maxMemoryPercent: input.services.maxMemoryPercent }) } }),
     ...(input.devcontainerRegistries === undefined || input.devcontainerRegistries.length === 0 ? {} : { devcontainer: { registries: [...input.devcontainerRegistries] } }),
     ...(input.browserEvidence === undefined ? {} : { browserEvidence: { image: input.browserEvidence.image, seccomp: input.browserEvidence.seccomp } }),
   };

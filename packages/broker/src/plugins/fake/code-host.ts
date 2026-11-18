@@ -3,7 +3,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, CommitFilesInputSchema, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
-  type BranchPage, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
+  type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
   type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type CommitFilesInput, type CommitFilesResult, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef, type SummaryCheckPost,
@@ -127,6 +127,64 @@ export class FakeCodeHost implements CodeHost {
     const at = model.revision(revision);
     const matches = [...at.entries].filter(([path]) => isAiInstructionPath(path)).sort(([a], [b]) => a.localeCompare(b));
     return { files: matches.slice(0, max).map(([path, type]) => ({ path, type })), complete: !model.incompleteTrees.has(revision) && matches.length <= max };
+  }
+
+  /** Wiki W0: every entry at a revision (directories derived from the paths). A tree marked incomplete answers only the first half of its entries, as a host that cut its listing would. */
+  async repositoryTree(repository: RepositoryRef, revision: string, scope: HostScope): Promise<RepositoryTreeRead> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    const at = model.revision(revision);
+    const entries = new Map<string, TreeEntry>();
+    for (const [path, type] of [...at.entries].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      const parts = path.split("/");
+      for (let depth = 1; depth < parts.length; depth += 1) { const dir = parts.slice(0, depth).join("/"); if (!entries.has(dir)) entries.set(dir, { path: dir, kind: "dir" }); }
+      entries.set(path, { path, kind: type === "symlink" ? "symlink" : type === "submodule" ? "submodule" : "file" });
+    }
+    const all = [...entries.values()];
+    const incomplete = model.incompleteTrees.has(revision);
+    return { entries: incomplete ? all.slice(0, Math.ceil(all.length / 2)) : all, complete: !incomplete };
+  }
+
+  /** Wiki W0: the direct children of a directory at a revision. */
+  async directoryEntries(repository: RepositoryRef, path: string, revision: string, scope: HostScope): Promise<DirectoryRead> {
+    this.checkScope(scope);
+    const at = this.registered(repository).revision(revision);
+    const prefix = path === "" ? "" : `${path}/`;
+    if (path !== "" && at.entries.has(path)) throw agentXError("RUNTIME_UNAVAILABLE", "the path is not a directory");
+    const children = new Map<string, TreeEntryKind>();
+    for (const [full, type] of at.entries) {
+      if (!full.startsWith(prefix)) continue;
+      const rest = full.slice(prefix.length).split("/");
+      children.set(rest[0]!, rest.length > 1 ? "dir" : type === "symlink" ? "symlink" : type === "submodule" ? "submodule" : "file");
+    }
+    if (path !== "" && children.size === 0) throw agentXError("RUNTIME_UNAVAILABLE", "the host has no such directory");
+    return { entries: [...children].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([name, kind]) => ({ name, kind })), complete: true };
+  }
+
+  /** Wiki W0: the first-parent history of a revision, newest first, counted for the commits that changed something at or under `path`. Times come from `model.commitTimes`. */
+  async commitActivity(repository: RepositoryRef, revision: string, scope: HostScope, options: { since: string; path?: string; cap: number; timeoutMs?: number }): Promise<CommitActivityRead> {
+    this.checkScope(scope);
+    const model = this.registered(repository);
+    if (!Number.isInteger(options.cap) || options.cap < 1 || options.cap > 100) throw agentXError("CONFIG_INVALID", "the commit count limit is invalid");
+    const since = Date.parse(options.since);
+    if (!Number.isFinite(since)) throw agentXError("CONFIG_INVALID", "the start of the window is invalid");
+    const within = (candidate: string): boolean => options.path === undefined || candidate === options.path || candidate.startsWith(`${options.path}/`);
+    const touched: string[] = [];
+    for (let sha: string | undefined = revision; sha !== undefined;) {
+      const at = model.revision(sha);
+      const parent = at.parents[0] === undefined ? undefined : model.revision(at.parents[0]);
+      const names = new Set([...at.entries.keys(), ...(parent?.entries.keys() ?? [])]);
+      let changed = false;
+      for (const name of names) {
+        if (!within(name)) continue;
+        if (at.entries.get(name) !== parent?.entries.get(name) || at.files.get(name) !== parent?.files.get(name)) { changed = true; break; }
+      }
+      if (changed) touched.push(model.commitTimes.get(sha) ?? "1970-01-01T00:00:00.000Z");
+      sha = at.parents[0];
+    }
+    const inWindow = touched.filter((time) => Date.parse(time) >= since);
+    if (inWindow.length === 0) return { count: 0, capped: false, ...(touched[0] === undefined ? {} : { latestAt: touched[0] }) };
+    return { count: Math.min(inWindow.length, options.cap), capped: inWindow.length > options.cap, latestAt: inWindow[0]! };
   }
 
   async tree(repository: RepositoryRef, revision: string, scope: HostScope): Promise<string> {

@@ -209,6 +209,10 @@ export function companyScopedGitHubProvider(client: GitHubCodeHostProvider, opti
   if (deleteLessonsBranch !== undefined) scoped.deleteLessonsBranch = async (url, branch, scope) => deleteLessonsBranch(url, branch, await companyScope(url, scope));
   const listTreeAtCommit = client.listTreeAtCommit?.bind(client);
   if (listTreeAtCommit !== undefined) scoped.listTreeAtCommit = async (url, commit, scope, treeOptions) => listTreeAtCommit(url, commit, await companyScope(url, scope), treeOptions);
+  const listDirectoryAtCommit = client.listDirectoryAtCommit?.bind(client);
+  if (listDirectoryAtCommit !== undefined) scoped.listDirectoryAtCommit = async (url, path, commit, scope, dirOptions) => listDirectoryAtCommit(url, path, commit, await companyScope(url, scope), dirOptions);
+  const listCommitActivity = client.listCommitActivity?.bind(client);
+  if (listCommitActivity !== undefined) scoped.listCommitActivity = async (url, commit, scope, activityOptions) => listCommitActivity(url, commit, await companyScope(url, scope), activityOptions);
   const fileDetailsError = client.fileDetailsError?.bind(client);
   if (fileDetailsError !== undefined) scoped.fileDetailsError = (error) => fileDetailsError(error);
   const getPullRequestFileRevisions = client.getPullRequestFileRevisions?.bind(client);

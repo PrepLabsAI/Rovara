@@ -1,6 +1,9 @@
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { SlackTeamIdSchema, TaskDispatchProofRequestSchema, SlackWorkspaceScopeSchema, agentXError } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SlackTeamIdSchema, TaskDispatchProofRequestSchema, SlackWorkspaceScopeSchema, agentXError } from "@agentx/contracts";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { slackDirectory } from "../developer/slack-directory.js";
 import { createTaskPersonProofHandler } from "./task-person-proof-handler.js";
 
@@ -67,9 +70,25 @@ async function legacyHandler(event: unknown, context: TaskPersonProofLambdaConte
   return proof(event);
 }
 
-export function createTaskPersonProofRuntime(options: { workspaces?: SlackCallerWorkspaces; fetch?: typeof fetch; env?: NodeJS.ProcessEnv } = {}) {
+/**
+ * L2-2 PR 18d: in company mode, a proof for the install's own work (no workspace named at all, or both scopes naming the implicit company and the install's team) keeps
+ * today's handler; anything else takes the company path, which checks the scope in full.
+ */
+export function proofIsInstalls(event: unknown, legacyTeamId: string | undefined): boolean {
+  if (legacyTeamId === undefined || event === null || typeof event !== "object" || Array.isArray(event)) return false;
+  const outer = (event as { workspace?: unknown }).workspace;
+  const request = (event as { request?: unknown }).request;
+  const inner = request !== null && typeof request === "object" && !Array.isArray(request) ? (request as { workspace?: unknown }).workspace : undefined;
+  if (outer === undefined && inner === undefined) return true;
+  const install = (scope: unknown) => scope !== null && typeof scope === "object" && !Array.isArray(scope)
+    && (scope as { teamId?: unknown }).teamId === legacyTeamId && (scope as { companyId?: unknown }).companyId === IMPLICIT_COMPANY_ID;
+  return install(outer) && install(inner);
+}
+
+export function createTaskPersonProofRuntime(options: { workspaces?: SlackCallerWorkspaces; legacyTeamId?: string; fetch?: typeof fetch; env?: NodeJS.ProcessEnv; legacy?: typeof legacyHandler } = {}) {
+  const legacy = options.legacy ?? legacyHandler;
   return async (event: unknown, context: TaskPersonProofLambdaContext) => {
-    if (options.workspaces === undefined) return legacyHandler(event, context);
+    if (options.workspaces === undefined || proofIsInstalls(event, options.legacyTeamId)) return legacy(event, context);
     const env = options.env ?? process.env;
     if (env.AGENTX_ENV !== "agentxlivetest123" || (env.AWS_REGION ?? "us-east-1") !== "us-east-1") throw UNAVAILABLE();
     const parsed = TaskDispatchProofRequestSchema.safeParse(event);
@@ -92,4 +111,11 @@ export function createTaskPersonProofRuntime(options: { workspaces?: SlackCaller
     })(parsed.data);
   };
 }
-export const handler = createTaskPersonProofRuntime();
+/** L2-2 PR 18d: Slack company mode (slack-company-wiring.ts); off (the default, and while this function has no switch variables), today's proof. */
+export function proofFromEnvironment(env: NodeJS.ProcessEnv): ReturnType<typeof createTaskPersonProofRuntime> {
+  const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
+  const dynamo = new DynamoDBClient(region);
+  const wiring = slackCompanyDependenciesFromEnvironment(env, { documentClient: DynamoDBDocumentClient.from(dynamo), dynamo, secrets: new SecretsManagerClient(region) });
+  return wiring === undefined ? createTaskPersonProofRuntime() : createTaskPersonProofRuntime({ workspaces: wiring.workspaces, legacyTeamId: wiring.legacyTeamId });
+}
+export const handler = proofFromEnvironment(process.env);

@@ -42,6 +42,8 @@ import {
 } from "./failed-cancel-release.js";
 import { blockStoppedWorkflowRun, type StoppedRunOperation } from "./workflow-cancel-reconcile.js";
 import type { SlackThreadPlace } from "./unwaited-tasks.js";
+import { slackNoteIsInstalls } from "./slack-company-notices.js";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 
 export { FAILED_CANCEL_GRACE_MS, FAILED_CANCEL_RELEASED_MESSAGE } from "./failed-cancel-release.js";
 
@@ -67,6 +69,8 @@ export type StuckCancelRetry =
 
 export interface StuckCancelDependencies {
   workspaces?: Pick<SlackWorkspaceBindings, "requireCompany">;
+  /** L2-2 PR 18d: the install's team; its own threads keep today's path in company mode. */
+  slackLegacyTeamId?: string;
   client: Client;
   tableName: string;
   /** Queues the cancel again (createCancelRetrier). Absent where the reconciler has no signing key (legacy). */
@@ -312,8 +316,10 @@ async function noteRelease(
       log({ event: "stuck_cancel.note_skipped", ...ids, reason: "thread-record-unreadable" });
       return;
     }
-    const scope = dependencies.workspaces === undefined ? undefined : slackRecordScope(workspace, parts[0]);
-    if (scope !== undefined && await dependencies.workspaces!.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
+    // L2-2 PR 18d: the install's own thread keeps today's path while company mode is on (slack-company-notices.ts).
+    const installs = dependencies.workspaces !== undefined && slackNoteIsInstalls(dependencies.slackLegacyTeamId, workspace, parts[0]);
+    const scope = dependencies.workspaces === undefined ? undefined : installs ? { companyId: IMPLICIT_COMPANY_ID, teamId: parts[0]! } : slackRecordScope(workspace, parts[0]);
+    if (scope !== undefined && !installs && await dependencies.workspaces!.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
     await dependencies.postNote!({ channelId: parts[1]!, threadTs: parts[2]!, ...(scope === undefined ? {} : { workspace: scope }) }, FAILED_CANCEL_RELEASED_MESSAGE);
   } catch (error) {
     // Logged, not counted: the release stands, and the task's status carries the same message.
@@ -410,14 +416,14 @@ export function createCancelRetrier(dependencies: { client: Client; tableName: s
 
 /**
  * The production retryCancel, where the reconciler holds the callback signing key the retried
- * cancel's callbacks are signed with. It holds it in named environments only (#173), so only there
- * is a stuck cancel on a live worker queued again; the legacy reconciler has none, and only logs and
- * counts it.
+ * cancel's callbacks are signed with (read from Secrets Manager by the reconciler before the sweep
+ * starts, so a failed read costs no retry). It holds it in named environments only (#173), so only
+ * there is a stuck cancel on a live worker queued again; the legacy reconciler has none, and only
+ * logs and counts it.
  */
 export function stuckCancelRetrier(
-  environment: Record<string, string | undefined>,
+  callbackSigningKey: string | undefined,
   state: { client: Client; tableName: string },
 ): StuckCancelDependencies["retryCancel"] {
-  const key = environment.CALLBACK_SIGNING_KEY;
-  return key === undefined || key.length === 0 ? undefined : createCancelRetrier({ ...state, callbackSigningKey: key });
+  return callbackSigningKey === undefined || callbackSigningKey.length === 0 ? undefined : createCancelRetrier({ ...state, callbackSigningKey });
 }

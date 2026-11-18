@@ -59,9 +59,10 @@ import { UNDERSTAND_SKIPS, afterUnderstand, restoredForPlanning, smallPlanRoute,
 import { isExplicitPath } from "../../rovara-code/explicit-path.js";
 import type { StepOutcome } from "./outcome.js";
 import { knowledgeCommitToStore } from "../meta-repo/prepare-meta.js";
-import { SETUP_AGENT_FEATURE } from "@agentx/contracts";
+import { SETUP_AGENT_FEATURE, WIKI_BUILD_FEATURE } from "@agentx/contracts";
 import { setupAgentWireOf } from "../setup-agent/agent.js";
 import { endSetupAgentTask } from "../setup-agent/end.js";
+import { endWikiBuildTask } from "../wiki-build/end.js";
 import { closeSetupCheck } from "../setup-agent/check.js";
 
 type ChangeOp = ReturnType<typeof change.set>;
@@ -448,12 +449,19 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
   const mode = pointer.pendingWorkflowMode === "PLAN" ? "PLAN" as const : undefined;
   // A setup run's first step carries the limits it started with and the commits the preparation reported (read again now: the task passed in was read before the preparation's report was kept).
   const setup = pointer.pendingWorkflowMode === "SETUP_AGENT" ? await readTask(deps, task.taskId) : undefined;
+  // A wiki build's first step carries the limits and pins it started with (the task record's, never a body's). A build task with no wire is not run as plain work.
+  const wiki = pointer.pendingWorkflowMode === "WIKI_BUILD" ? (await readTask(deps, task.taskId))?.wikiBuild : undefined;
+  if (pointer.pendingWorkflowMode === "WIKI_BUILD" && wiki === undefined) return "STALE";
   const accepted = await acceptStep(deps, {
     task, workspace, requestId: pointer.firstRequestId, prompt: pointer.pendingPrompt,
     ...(mode === undefined ? {} : { workflowMode: mode, requires: ["task.workflowMode"] }),
     ...(setup === undefined ? {} : {
       workflowMode: "SETUP_AGENT" as const, requires: ["task.workflowMode", SETUP_AGENT_FEATURE], extraActions: ["setup-agent"],
       payload: { setupAgent: JSON.parse(JSON.stringify(setupAgentWireOf(setup))) as JsonValue },
+    }),
+    ...(wiki === undefined ? {} : {
+      workflowMode: "WIKI_BUILD" as const, requires: ["task.workflowMode", WIKI_BUILD_FEATURE], extraActions: ["wiki-build"],
+      payload: { wikiBuild: JSON.parse(JSON.stringify(wiki)) as JsonValue },
     }),
     extra: [{ kind: "update", key: location.taskPointerKey(), ops: [change.remove("pendingPrompt"), change.remove("pendingWorkflowMode")], condition: when.exists("pendingPrompt") }],
   });
@@ -484,6 +492,12 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).
   if (task.purpose === "setup_agent" && ((operation.kind === "task" && operation.workflowMode === "SETUP_AGENT") || (operation.kind === "prepare" && !succeeded))) {
     await endSetupAgentTask(deps, task, operation, ended);
+    return;
+  }
+
+  // A wiki build's own operation, or its preparation failing, ends the run (idempotent: the first end word stands) and gives the workspace back.
+  if (task.purpose === "wiki_build" && ((operation.kind === "task" && operation.workflowMode === "WIKI_BUILD") || (operation.kind === "prepare" && !succeeded))) {
+    await endWikiBuildTask(deps, task);
     return;
   }
 

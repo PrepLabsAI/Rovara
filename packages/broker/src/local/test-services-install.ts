@@ -1,15 +1,18 @@
-// Test services at `rovara up`: what the install does at start-up when the owner turned them on (`ROVARA_TEST_SERVICES=1`). It fails CLOSED and says why.
+// Test services at `rovara up`: what the install does at start-up while they are switched on (DEC 254z-amend3: on unless `ROVARA_TEST_SERVICES=0`). It fails CLOSED and says why: `unavailableReason` is the host's marker
+// (test-services-switch.ts) that the runtime sets, so a task whose environment needs dependencies runs without them and says why in fixed words.
 //   - A build that compiles in a catalog signing key (Cloud's) uses the SIGNED catalog and nothing else: a registry the catalog images are served from, a catalog that verifies, and at least one image on this machine, or the
 //     worker is told nothing, offers no test services, and refuses any run that needs them. The owner's list is never read there, and a catalog that fails to verify never falls back to it.
 //   - A build with no signing key (Code) uses the OWNER'S list (`test-services-owner-list.ts`): the built-in starter images, the images the owner approved on the page and `ROVARA_TEST_SERVICE_IMAGES`, each pinned by digest.
+//     LAZY (DEC 254z-amend3): nothing is pulled at start-up (a tag in `ROVARA_TEST_SERVICE_IMAGES` is still pinned once, as the owner asked by naming it). An image is pulled by digest the first time a step needs it
+//     (`DockerWorkerMachines.deliver`, local/lazy-service-images.ts); the worker still refuses, in its fixed words, a dependency whose image is not on this computer when the run starts.
 import { networkInterfaces } from "node:os";
-import { OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, catalogSigningKeysCompiledIn, ownerCatalogOf, ownerListReferences, type VerifiedCatalog } from "@agentx/contracts";
+import { OWNER_LIST_CATALOG_ENV, OWNER_LIST_REGISTRY, catalogSigningKeysCompiledIn, ownerCatalogOf, ownerListReferences, resolveTestServicesLimits, testServicesLimitInvalidSentence, type TestServicesLimits, type VerifiedCatalog } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
 import { NO_IMAGES_SENTENCE, resolveOwnerImages, type OwnerImageService } from "./test-services-owner-list.js";
 import type { ServiceCatalogSource } from "../core/test-env/dependency-plan.js";
 import { loadLocalServiceCatalog, localTestServicesFrom, prepareTestServiceImages, type LocalTestServices } from "./test-services.js";
 import { releaseServiceCatalogSource, shippedCatalogDirectory } from "../core/test-env/shipped-catalog.js";
-import { testServicesEnabled } from "../core/test-env/test-services-switch.js";
+import { TEST_SERVICES_UNAVAILABLE_VARIABLE, testServicesSwitchedOn, type TestServicesUnavailableReason } from "../core/test-env/test-services-switch.js";
 
 /** Where the catalog's images are served from (`host[:port]`): the owner's own mirror. Code names none. */
 export const TEST_SERVICES_REGISTRY_VARIABLE = "ROVARA_TEST_SERVICES_REGISTRY";
@@ -35,6 +38,8 @@ export interface LocalTestServicesInstall {
   catalog: VerifiedCatalog | undefined;
   /** One plain sentence saying why services are not offered, or undefined when they are (or are off). */
   unavailable: string | undefined;
+  /** The host's marker for the same refusal (test-services-switch.ts): set exactly when `unavailable` is. */
+  unavailableReason?: TestServicesUnavailableReason | undefined;
   /** Where the broker reads the catalog a dependency is pinned from: the signed one, or the owner list's. Present exactly when `catalog` is. */
   catalogSource?: ServiceCatalogSource | undefined;
   /** `signed`: this build has a catalog signing key and uses only the signed catalog. `owner`: Code, from the owner's approved list. Undefined while test services are off. */
@@ -53,36 +58,56 @@ export async function prepareLocalTestServices(input: {
   loadCatalog?: typeof loadLocalServiceCatalog;
 }): Promise<LocalTestServicesInstall> {
   const off: LocalTestServicesInstall = { services: undefined, catalog: undefined, unavailable: undefined };
-  if (!testServicesEnabled(input.environment)) return off;
+  if (!testServicesSwitchedOn(input.environment)) return off;
   const log = input.log ?? (() => undefined);
   const signed = (input.signedKeysPresent ?? catalogSigningKeysCompiledIn)();
   const mode = signed ? "signed" as const : "owner" as const;
-  const refuse = (sentence: string, reason: string): LocalTestServicesInstall => { log({ component: "test-services", event: "test_services.unavailable", reason, message: sentence }); return { services: undefined, catalog: undefined, unavailable: sentence, mode, ...(signed || input.ownerImages === undefined ? {} : { ownerImages: input.ownerImages }) }; };
+  const refuse = (sentence: string, reason: string): LocalTestServicesInstall => {
+    log({ component: "test-services", event: "test_services.unavailable", reason, message: sentence });
+    return { services: undefined, catalog: undefined, unavailable: sentence, unavailableReason: reason === "range_in_use" ? "network" : reason === "invalid_limit" ? "other" : "images", mode, ...(signed || input.ownerImages === undefined ? {} : { ownerImages: input.ownerImages }) };
+  };
   if (hostUsesRunRange(input.interfaces)) return refuse(RANGE_IN_USE_SENTENCE, "range_in_use");
-  if (!signed) return prepareFromOwnerList(input, refuse, log);
+  // DEC 254zm 2: the owner's ceiling settings. One that is not a whole number in its range stops test services with a fixed sentence naming the setting (never a silent default, never a clamp).
+  const resolvedLimits = resolveTestServicesLimits(input.environment);
+  if (!resolvedLimits.ok) return refuse(testServicesLimitInvalidSentence(resolvedLimits.variable), "invalid_limit");
+  const limits = resolvedLimits.limits;
+  if (!signed) return prepareFromOwnerList(input, refuse, log, limits);
   const registry = input.environment[TEST_SERVICES_REGISTRY_VARIABLE]?.trim();
   if (registry === undefined || registry === "") return refuse(NO_REGISTRY_SENTENCE, "no_registry");
   const loaded = await (input.loadCatalog ?? loadLocalServiceCatalog)(shippedCatalogDirectory(input.environment));
   if (!loaded.ok) return refuse(loaded.sentence, loaded.reason);
   const catalogEnv = input.environment[TEST_SERVICES_CATALOG_ENV_VARIABLE]?.trim() || "local";
   const prepared = await prepareTestServiceImages({ docker: input.docker, catalog: loaded.catalog, registry, catalogEnv, stateDirectory: input.stateDirectory });
-  const services = localTestServicesFrom({ registry, catalogEnv, prepared });
-  if (services === undefined) return { services: undefined, catalog: loaded.catalog, unavailable: "Test services are not available: none of the catalog's images could be pulled to this computer.", catalogSource: releaseServiceCatalogSource(input.environment), mode };
+  const services = localTestServicesFrom({ registry, catalogEnv, prepared, limits });
+  if (services === undefined) return { services: undefined, catalog: loaded.catalog, unavailable: "Test services are not available: none of the catalog's images could be pulled to this computer.", unavailableReason: "images", catalogSource: releaseServiceCatalogSource(input.environment), mode };
   return { services, catalog: loaded.catalog, unavailable: undefined, catalogSource: releaseServiceCatalogSource(input.environment), mode };
 }
 
-/** Code: the owner's list. The starter images, the owner's approvals and the env list that are on this computer by digest are what the guard lets start and what the worker is told. */
+/**
+ * Code: the owner's list. The starter images, the owner's approvals and the env list are what the guard lets start and what the worker is told, each pinned by digest. LAZY: none is pulled here (`pull: "on-first-use"`), so
+ * every pinned entry is in effect from start-up and its image comes the first time a step needs it.
+ */
 async function prepareFromOwnerList(
   input: { environment: NodeJS.ProcessEnv; docker: DockerRunner; ownerImages?: OwnerImageService | undefined; now?: (() => number) | undefined },
   refuse: (sentence: string, reason: string) => LocalTestServicesInstall,
   log: (entry: Record<string, unknown>) => void,
+  limits: TestServicesLimits,
 ): Promise<LocalTestServicesInstall> {
   const service = input.ownerImages;
   if (service === undefined) return refuse(NO_IMAGES_SENTENCE, "no_owner_list");
-  const resolved = await resolveOwnerImages({ service, environment: input.environment, docker: input.docker, now: input.now ?? Date.now, log });
+  const resolved = await resolveOwnerImages({ service, environment: input.environment, docker: input.docker, now: input.now ?? Date.now, log, pull: "on-first-use" });
   service.setInEffect(resolved.entries.map((entry) => entry.reference), resolved.envRequested);
   const catalog = ownerCatalogOf(resolved.entries);
   if (catalog === undefined) return refuse(NO_IMAGES_SENTENCE, "no_owner_images");
-  const services: LocalTestServices = { registry: OWNER_LIST_REGISTRY, catalogEnv: OWNER_LIST_CATALOG_ENV, images: ownerListReferences(resolved.entries), ownerImages: resolved.entries };
+  const services: LocalTestServices = { registry: OWNER_LIST_REGISTRY, catalogEnv: OWNER_LIST_CATALOG_ENV, images: ownerListReferences(resolved.entries), ownerImages: resolved.entries, lazyPulls: true, limits };
   return { services, catalog, unavailable: undefined, catalogSource: async () => catalog, mode: "owner", ownerImages: service };
+}
+
+/**
+ * Puts the host's marker on the environment the install runs with: the reason when test services are switched on but cannot run here, and no marker otherwise (a marker left from an earlier start in the same process is
+ * removed). The owner's switch is never touched.
+ */
+export function applyTestServicesMarker(environment: NodeJS.ProcessEnv, reason: TestServicesUnavailableReason | undefined): void {
+  if (reason === undefined) delete environment[TEST_SERVICES_UNAVAILABLE_VARIABLE];
+  else environment[TEST_SERVICES_UNAVAILABLE_VARIABLE] = reason;
 }

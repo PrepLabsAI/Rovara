@@ -11,6 +11,7 @@ import { RISK_SENSITIVE_PATH_PATTERNS, assessRisk, isSensitivePath, type RiskInp
 import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-files.js";
 import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
+import { rewriteAttributionBody } from "../../packages/contracts/src/attribution.js";
 import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -253,8 +254,8 @@ describe("a changed public API or response shape", () => {
     ]);
     const read = parseChangedFiles(diff);
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, { changedFiles: read });
-    const risk = body.slice(body.indexOf("## Risk:"), body.indexOf(END));
-    expect(risk).toContain("## Risk: Medium");
+    const risk = aboveFold(body);
+    expect(risk).toContain("Medium risk");
     expect(risk).toMatch(/public API route or response shape/);
     expect(risk).toContain("inventory/app.py");
   });
@@ -276,11 +277,10 @@ describe("a file whose lines were not counted", () => {
 
   it("is shown as not counted, never as +0 -0, and the totals say at least", () => {
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files: [file("src/a.ts", 3, 1), entry("src/new-module.ts")], complete: true } }));
-    expect(body).toContain("- src/new-module.ts (lines not counted)");
-    expect(body).toContain("- src/a.ts (+3 -1)");
+    // The per-file list is GitHub's own; the count says the totals are a floor, and nothing says +0 -0.
     expect(body).not.toContain("+0 -0");
-    expect(body).toMatch(/2 files changed \(at least \+3 -1; 1 file not counted\)/);
-    expect(body).toContain("## Risk: Medium");
+    expect(body).toContain("**Changed** 2 files, at least +3 -1.");
+    expect(body).toContain("Medium risk");
   });
 
   it("a new test file that was not counted still counts as a test added", () => {
@@ -328,6 +328,13 @@ const context = (extra: Record<string, unknown> = {}) => ({
   changedFiles: { files: [file("src/retry.ts", 10, 2), file("src/retry.test.ts", 30, 0)], complete: true }, ...extra,
 });
 const planOf = "# Plan\n\n1. Add the retry flag.\n2. Add a regression test.\n";
+/** L4-C: the text of one drawer of the redesigned description, from its summary's first words to its closing tag; "" when there is none. */
+const drawer = (body: string, summaryStart: string): string => {
+  const at = body.indexOf(`<summary>${summaryStart}`);
+  return at === -1 ? "" : body.slice(at, body.indexOf("</details>", at));
+};
+/** The part of the description a reader sees without opening a drawer: from the start to the first drawer. */
+const aboveFold = (body: string): string => body.slice(0, body.indexOf("<details>"));
 
 describe("the version 2 pull request description", () => {
   it("names who asked and who approved the plan, outside the marked block, before the session link (I3)", () => {
@@ -342,6 +349,15 @@ describe("the version 2 pull request description", () => {
       expect(body.indexOf(line), line).toBeGreaterThan(body.indexOf(END));
       expect(body.indexOf(line), line).toBeLessThan(body.indexOf(`Rovara session: ${SESSION}`));
     }
+    // Each is a line of its own, so erasing one person rewrites exactly that person's line (the owner's ruling on erasure) and nothing else.
+    const named = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ attribution: { requester: { state: "named", name: "Maya Chen", ref: "0123456789abcdef" }, approver: { state: "named", name: "Priya Raman", ref: "fedcba9876543210" }, auditUrl: "https://rovara.example/v1/app/audit/view?x=1" } }));
+    const requesterErased = rewriteAttributionBody(named, "requester");
+    expect(requesterErased).not.toContain("Maya Chen");
+    expect(requesterErased).toContain("Plan approved by: Priya Raman\n");
+    expect(requesterErased).toContain("Audit record: https://rovara.example/v1/app/audit/view?x=1");
+    const approverErased = rewriteAttributionBody(named, "approver");
+    expect(approverErased).not.toContain("Priya Raman");
+    expect(approverErased).toContain("Requested by: Maya Chen\n");
     // Only the name: never the person's reference.
     expect(body).not.toContain("0123456789abcdef");
     expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
@@ -359,7 +375,7 @@ describe("the version 2 pull request description", () => {
   it("has its sections in order, the plan summary first, the session link and the closing line last, and never says AgentX", () => {
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
     const at = (text: string) => body.indexOf(text);
-    const order = ["Add the retry flag.", START, "## What changed", "## Tests", "## Reviews", "## Risk: Low", END, `Rovara session: ${SESSION}`, CLOSING];
+    const order = ["Add the retry flag.", START, "## Checks passed", "**Changed**", "**Proven**", "**Tested against**", "**Reviews**", "**Risk** Low.", "**Needs you**", "<summary>Checks: ", "<summary>Test setup: ", "<summary>Reviews: ", END, "<summary>Plan and record</summary>", `Rovara session: ${SESSION}`, CLOSING];
     for (const text of order) expect(at(text), text).toBeGreaterThanOrEqual(0);
     for (let index = 1; index < order.length; index += 1) expect(at(order[index]!), order[index]).toBeGreaterThan(at(order[index - 1]!));
     expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
@@ -369,23 +385,24 @@ describe("the version 2 pull request description", () => {
     expect(body.split(END)).toHaveLength(2);
   });
 
-  it("What changed lists the files with their line counts, and Tests lists what passed and the tests added", () => {
+  it("Changed says the counts (no list of files: GitHub's Files changed tab is that), and the Checks drawer lists what passed and the tests added", () => {
     const report = workflowWith();
     const body = workflowPullRequestBody(task, report, planOf, SESSION, context());
-    expect(body).toContain("src/retry.ts");
-    expect(body).toContain("+10");
-    expect(body).toContain("src/retry.test.ts");
-    const tests = body.slice(body.indexOf("## Tests"), body.indexOf("## Reviews"));
+    expect(body).toContain("**Changed** 2 files, +40 -2. 1 test added.");
+    expect(body).not.toContain("- src/retry.ts");
+    const tests = drawer(body, "Checks: ");
     expect(tests).toContain("Unit tests");
-    expect(tests).toContain("src/retry.test.ts");
-    expect(body.slice(body.indexOf("## Reviews"), body.indexOf("## Risk:"))).toContain("code review passed; security review passed");
+    expect(tests).toContain("- Tests added: src/retry.test.ts");
+    expect(drawer(body, "Reviews: ")).toContain("code review passed; security review passed");
   });
 
   it("says when the changed files couldn't be listed, and doesn't pretend that no test was added", () => {
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, {});
-    expect(body.slice(body.indexOf("## What changed"), body.indexOf("## Tests"))).toMatch(/couldn't list/i);
-    expect(body.slice(body.indexOf("## Tests"), body.indexOf("## Reviews"))).toMatch(/couldn't list|unknown/i);
-    expect(body).toContain("## Risk: Medium");
+    expect(aboveFold(body)).toContain("**Changed** The changed files have not been read yet.");
+    expect(aboveFold(body)).toContain("**The changed files have not been read yet.**");
+    expect(body).not.toContain("Tests added: none");
+    // The risk is not judged without the files: it counts as high, and says so, never "Low" and never a false alarm of its own.
+    expect(aboveFold(body)).toContain("Risk not judged yet (treated as high)");
   });
 
   it("names a failed check, a check that couldn't run and a review-only change in Tests", () => {
@@ -395,17 +412,25 @@ describe("the version 2 pull request description", () => {
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now,
         results: [{ checkId: "unit", status: "PASS" }, { checkId: "lint", status: "FAILED" }, { checkId: "types", status: "FAILED", programNotFound: true }] },
     });
-    const tests = (() => { const body = workflowPullRequestBody(task, failing, planOf, SESSION, context()); return body.slice(body.indexOf("## Tests"), body.indexOf("## Reviews")); })();
-    expect(tests).toMatch(/Failed:.*Lint/);
-    expect(tests).toMatch(/Not checked:.*Types/);
+    const failedBody = workflowPullRequestBody(task, failing, planOf, SESSION, context());
+    // A failed check and a check that could not run are above the fold, by name, and the heading says the result.
+    expect(aboveFold(failedBody)).toContain("A check failed.");
+    expect(aboveFold(failedBody)).toContain("A check was blocked.");
+    expect(failedBody.split("\n").find((line) => line.startsWith("## "))).toContain("Checks failed");
+    const tests = drawer(failedBody, "Checks: ");
+    expect(tests).toContain("| Lint | `npm test` | ❌ failed");
+    expect(tests).toContain("| Types | `npm test` | ⛔ blocked");
+    // The failed row is the first row of the table.
+    expect(tests.indexOf("| Lint ")).toBeLessThan(tests.indexOf("| Unit tests "));
     const reviewOnly = workflowWith({
       stage: "REVIEW", state: "WAITING", reviews: undefined,
       checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [], noneReason: "Documentation only" },
       verification: { candidateDigest: candidate("1").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [], reviewOnly: true },
     });
     const body = workflowPullRequestBody(task, reviewOnly, planOf, SESSION, context());
-    expect(body.slice(body.indexOf("## Tests"), body.indexOf("## Reviews"))).toContain("Documentation only");
-    expect(body).toContain("## Risk: Medium");
+    expect(aboveFold(body)).toContain("Not verified by automated checks (review only)");
+    expect(aboveFold(body)).toContain("Why: Documentation only");
+    expect(body.split("\n").find((line) => line.startsWith("## "))).not.toContain("Verified ·");
   });
 
   it("says it checked against every check on the branch only when the base has no required checks", () => {
@@ -414,10 +439,9 @@ describe("the version 2 pull request description", () => {
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks" }))).toContain(line("the base branch"));
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "required", baseBranch: "main" }))).not.toContain("Checked against every check");
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context())).not.toContain("Checked against every check");
-    // The line sits under Tests.
+    // The line sits in the Checks drawer.
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "main" }));
-    expect(body.indexOf(line("main"))).toBeGreaterThan(body.indexOf("## Tests"));
-    expect(body.indexOf(line("main"))).toBeLessThan(body.indexOf("## Reviews"));
+    expect(drawer(body, "Checks: ")).toContain(line("main"));
     // A branch name is untrusted text.
     const odd = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ ciBasis: "all_checks", baseBranch: "@everyone/ghp_abcdefghijklmnopqrstuvwxyz0123456789" }));
     expect(odd).not.toContain("@everyone");
@@ -426,15 +450,16 @@ describe("the version 2 pull request description", () => {
 
   it("shows the risk level with its reasons, from the files and the code reviewer's own level", () => {
     const sensitive = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files: [file("db/migrations/001.sql")], complete: true } }));
-    expect(sensitive).toContain("## Risk: High");
-    expect(sensitive.slice(sensitive.indexOf("## Risk:"), sensitive.indexOf(END))).toContain("db/migrations/001.sql");
+    expect(sensitive).toContain("High risk");
+    expect(aboveFold(sensitive)).toContain("db/migrations/001.sql");
+    expect(aboveFold(sensitive)).toContain("Merging needs a fresh sign-in (high risk)");
     const reviewed = workflowWith({ reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high" } : review) });
     const body = workflowPullRequestBody(task, reviewed, planOf, SESSION, context());
-    expect(body).toContain("## Risk: High");
-    expect(body.slice(body.indexOf("## Risk:"), body.indexOf(END))).toMatch(/code review/i);
+    expect(body).toContain("High risk");
+    expect(aboveFold(body)).toMatch(/code review/i);
     // A review of other code doesn't count (the snapshot is at its review step, where that is allowed).
     const stale = workflowWith({ stage: "REVIEW", state: "WAITING", reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high", candidateDigest: candidate("2").digest } : review) });
-    expect(workflowPullRequestBody(task, stale, planOf, SESSION, context())).toContain("## Risk: Low");
+    expect(workflowPullRequestBody(task, stale, planOf, SESSION, context())).toContain("Low risk");
   });
 
   it("an accepted finding raises the risk and is listed under Reviews", () => {
@@ -448,8 +473,11 @@ describe("the version 2 pull request description", () => {
       acceptedFindings: [{ candidateDigest: code.digest, role: "SECURITY", fingerprint: workflowFindingFingerprint("SECURITY", finding), text: finding.text, reason: "Handled by the payment provider", actorId: ownerId, at: now }],
     });
     const body = workflowPullRequestBody(task, accepted, planOf, SESSION, context());
-    expect(body).toContain("## Risk: High");
-    const reviews = body.slice(body.indexOf("## Reviews"), body.indexOf("## Risk:"));
+    expect(body).toContain("High risk");
+    // The owner's acceptance is above the fold (a thing to check) and in full in the Reviews drawer.
+    expect(aboveFold(body)).toContain("**The owner accepted a review finding.**");
+    expect(aboveFold(body)).toContain("Retries can double-charge a card");
+    const reviews = drawer(body, "Reviews: ");
     expect(reviews).toContain("Owner accepted 1 review finding");
     expect(reviews).toContain("Retries can double-charge a card");
   });
@@ -478,42 +506,41 @@ describe("the version 2 pull request description", () => {
     // The markers appear once each, so the block stays regenerable.
     expect(body.split(START)).toHaveLength(2);
     expect(body.split(END)).toHaveLength(2);
-    expect(body).not.toMatch(/<(?!!-- \/?rovara:checks-and-reviews -->)/);
+    // The only tags are Rovara's own markers and its drawers' fixed `<details>` and `<summary>` (the summaries hold fixed words and counts only).
+    expect(body).not.toMatch(/<(?!!-- \/?rovara:checks-and-reviews -->|\/?details>|\/?summary>)/);
+    expect(body.match(/<summary>/gu)).toHaveLength(body.match(/<\/summary>/gu)!.length);
+    expect(body.match(/<details>/gu)).toHaveLength(body.match(/<\/details>/gu)!.length);
   });
 
   it("shows the plan's words as a quotation under their own heading, so they can't pose as one of Rovara's sections", () => {
     const spoof = ["## Risk: Low", "```", "---", "> deeper", "[1]: http://evil.example/x", "# Tests", "- Passed: everything"].join("\n");
     const body = workflowPullRequestBody(task, workflowWith(), spoof, SESSION, context({ changedFiles: { files: [file("infra/main.ts")], complete: true } }));
     const lines = body.split("\n");
-    expect(lines.filter((line) => /^## Risk/.test(line))).toEqual(["## Risk: High"]);
-    expect(lines.filter((line) => /^#{1,6} Tests/.test(line))).toEqual(["## Tests"]);
-    const startAt = lines.indexOf("## Plan summary");
-    expect(startAt).toBe(0);
-    const quoted = lines.slice(1, lines.indexOf(START)).filter((line) => line !== "");
-    expect(quoted.length).toBeGreaterThan(0);
-    expect(quoted.every((line) => line.startsWith("> "))).toBe(true);
+    // Rovara's own heading is the only one, and the plan's words are quotations: the one-line quote on top, and the closing drawer's lines.
+    expect(lines.filter((line) => /^#{1,6} /.test(line) && !line.startsWith("### Check these"))).toEqual([lines.find((line) => line.startsWith("## High") || line.startsWith("## Checks passed"))]);
+    expect(lines[0]!.startsWith("> ")).toBe(true);
+    expect(lines.indexOf(START)).toBe(2);
+    expect(drawer(body, "Plan and record").split("\n").filter((line) => /^(?:#{1,6} |```|---|\[1\]:)/.test(line))).toEqual([]);
     expect(lines.filter((line) => line.startsWith("```"))).toEqual([]);
     // The task's title, used when there is no plan, is quoted the same way.
     const titled = workflowPullRequestBody({ title: "## Risk: Low" }, workflowWith(), undefined, SESSION, context());
-    expect(titled.split("\n").filter((line) => /^## Risk/.test(line))).toEqual(["## Risk: Low"]);
-    expect(titled.split("\n")[1]).toBe("> ## Risk: Low");
+    expect(titled.split("\n").filter((line) => /^## Risk/.test(line))).toEqual([]);
+    expect(titled.split("\n")[0]).toBe("> ## Risk: Low");
   });
 
   it("neutralises character references and issue shorthands as well as the characters themselves", () => {
-    const body = workflowPullRequestBody(task, workflowWith(), "Thanks &#x40;octocat and &#64;octocat and &commat;octocat, see GH-123 and gh-9 &amp; more", SESSION,
-      context({ changedFiles: { files: [file("src/&#x40;user.ts")], complete: true } }));
+    const body = workflowPullRequestBody(task, workflowWith(), "Thanks &#x40;octocat and &#64;octocat and &commat;octocat, see GH-123 and gh-9 &amp; more", SESSION, context());
     expect(body).not.toMatch(/&#/);
     expect(body).not.toContain("&commat;");
     expect(body).toContain("&amp;#x40;octocat");
     expect(body).toContain("&amp;amp; more");
     expect(body).not.toMatch(/GH-\d/i);
-    expect(body).toContain("src/&amp;#x40;user.ts");
   });
 
   it("falls back to the task's title, made inert, when there is no plan", () => {
     const body = workflowPullRequestBody({ title: "Ping @octocat about <https://evil.example|this>" }, workflowWith(), undefined, SESSION, context());
-    expect(body.split("\n")[1]).not.toMatch(/@(?!‍)/u);
-    expect(body.split("\n")[1]).toContain("Ping");
+    expect(body.split("\n")[0]).not.toMatch(/@(?!‍)/u);
+    expect(body.split("\n")[0]).toContain("Ping");
   });
 
   it("stays under the byte cap whatever it is given, and keeps its markers, risk and closing line", () => {
@@ -535,7 +562,8 @@ describe("the version 2 pull request description", () => {
     expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(30_000);
     expect(body.split(START)).toHaveLength(2);
     expect(body.split(END)).toHaveLength(2);
-    expect(body).toContain("## Risk:");
+    expect(body).toMatch(/\n## .* risk · /u);
+    expect(body).toContain("**Risk** ");
     expect(body).toContain(`Rovara session: ${SESSION}`);
     expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
     // A body that big can still be regenerated in place.
@@ -544,7 +572,7 @@ describe("the version 2 pull request description", () => {
 
   it("a pushed fix regenerates only the marked block: the person's words around it stay, and the risk is recomputed", () => {
     const first = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
-    expect(first).toContain("## Risk: Low");
+    expect(first).toContain("Low risk");
     const edited = `Heads up from Priya: please look at the retry cap first.\n\n${first}\n\nPS: merged after the standup.`;
     // A CI fix then touched infra/: another candidate, with its own diff.
     const fixed = workflowWith({ candidate: candidate("2"), reviews: workflowWith().reviews!.map((review) => ({ ...review, candidateDigest: candidate("2").digest })),
@@ -554,8 +582,8 @@ describe("the version 2 pull request description", () => {
     expect(next).toBeDefined();
     expect(next).toContain("Heads up from Priya: please look at the retry cap first.");
     expect(next).toContain("PS: merged after the standup.");
-    expect(next).toContain("## Risk: High");
-    expect(next).not.toContain("## Risk: Low");
+    expect(next).toContain("High risk");
+    expect(next).not.toContain("Low risk");
     expect(next).toContain("infra/queue.ts");
     expect(next).toContain(`Rovara session: ${SESSION}`);
     expect(next).toContain(CLOSING);
@@ -573,7 +601,8 @@ describe("the plan summary's file count", () => {
   /** The summary the description quotes; `changedFiles` is the diff's list, left out when `undefined` is passed. */
   const summaryOf = (plan: string, ...given: [unknown?]) => {
     const body = workflowPullRequestBody(task, workflowWith(), plan, SESSION, (given.length === 0 ? { changedFiles: fiveFiles } : given[0] === undefined ? {} : { changedFiles: given[0] }) as never);
-    return body.slice(body.indexOf("## Plan summary"), body.indexOf(START));
+    // The plan's lines are in the closing "Plan and record" drawer (the one-line quote above the block is its first line).
+    return drawer(body, "Plan and record");
   };
 
   it("is corrected to the diff's count, saying what the plan had said", () => {
@@ -581,7 +610,7 @@ describe("the plan summary's file count", () => {
     expect(summary).toContain("5 files change (the plan said four); no schema migration is needed.");
     expect(summary).not.toContain("Four files change");
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, { changedFiles: fiveFiles });
-    expect(body).toContain("5 files changed (+15 -5).");
+    expect(body).toContain("**Changed** 5 files, +15 -5.");
   });
 
   it("is corrected in the other common phrasing too, and for digits", () => {
@@ -600,7 +629,7 @@ describe("the plan summary's file count", () => {
 });
 
 describe("the Tests section names the commit that was tested", () => {
-  const testsOf = (body: string) => body.slice(body.indexOf("## Tests"), body.indexOf("## Reviews"));
+  const testsOf = (body: string) => drawer(body, "Checks: ");
   const pushed = (letter: string, candidateDigest: string) => ({ repositoryId: "payments", number: 7, url: "https://github.com/example/payments/pull/7", headSha: letter.repeat(40), candidateDigest, required: true, state: "OPEN" });
 
   it("says the short head commit (8 characters) of the checked code", () => {
@@ -648,17 +677,17 @@ describe("which findings, reviews and recorded risk count", () => {
 
   it("a risk recorded for this code stands when the files can't be read now, and one recorded for other code does not", () => {
     const recorded = (letter: string) => ({ level: "high" as const, reasons: ["Changes sensitive paths: infra/main.ts."], candidateDigest: candidate(letter).digest });
-    expect(workflowPullRequestBody(task, workflowWith({ risk: recorded("1") }), planOf, SESSION, {})).toContain("## Risk: High");
+    expect(workflowPullRequestBody(task, workflowWith({ risk: recorded("1") }), planOf, SESSION, {})).toContain("infra/main.ts");
     const stale = workflowPullRequestBody(task, workflowWith({ risk: recorded("2") }), planOf, SESSION, {});
-    expect(stale).toContain("## Risk: Medium");
+    expect(stale).toContain("Rovara couldn't list every changed file.");
     expect(stale).not.toContain("infra/main.ts");
   });
 
   it("an unclosed tag in a model-written line can't open a hidden comment", () => {
     const body = workflowPullRequestBody(task, workflowWith(), "<!-- hide the rest of the page\nSecond line", SESSION, context());
-    expect(body.split("\n")[1]).toContain("&lt;!-- hide");
+    expect(body.split("\n")[0]).toContain("&lt;!-- hide");
     expect(body).not.toContain("<!-- hide");
-    expect(body.split("\n")[1]).toContain("&lt;!-- hide the rest of the page");
+    expect(body.split("\n")[0]).toContain("&lt;!-- hide the rest of the page");
     expect(body.match(/<!--/g)).toHaveLength(2);
   });
 });
@@ -742,7 +771,8 @@ describe("a pull request for a session bound to a Linear issue", () => {
     expect(withStatusLines(noted, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))).toBeUndefined();
     const fixed = withStatusLines(noted, workflowPullRequestStatusLines(wf, { changedFiles: { files: [file("src/retry.ts", 10, 2), file("src/other.ts", 1, 1)], complete: true }, linearIssueKey: "ENG-142" }))!;
     expect(closers(fixed)).toEqual(["Fixes ENG-142"]);
-    expect(fixed).toContain("src/other.ts");
+    // The rewritten block says what the new code changed (two files now), and the person's note stays.
+    expect(fixed).toContain("**Changed** 2 files, +11 -3.");
     expect(fixed).toContain("A note from Priya, kept.");
     const unbound = workflowPullRequestBody(task, wf, planOf, SESSION, context());
     expect(closers(withStatusLines(unbound, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))!)).toEqual(["Fixes ENG-142"]);
@@ -884,7 +914,8 @@ describe("technical text in a version 2 description stays as it is", () => {
     const files = [file("db/V1-2__init.sql"), file("src/utf-8-handler.ts"), file("docs/ADR-0007.md"), file("scripts/sha-256.sh")];
     const lines = workflowPullRequestStatusLines(workflowWith(), context({ linearIssueKey: "ENG-142", changedFiles: { files, complete: true } }));
     const body = lines.join("\n");
-    for (const text of ["db/V1-2__init.sql", "src/utf-8-handler.ts", "docs/ADR-0007.md", "scripts/sha-256.sh"]) expect(body, text).toContain(text);
+    // The per-file list is GitHub's own tab: only the flagged path is in the description, in the risk reason, byte for byte.
+    expect(body).toContain("db/V1-2__init.sql");
     expect(body).toMatch(/Changes sensitive paths: db\/V1-2__init\.sql/u);
     expect(body).not.toContain("V1- 2");
     expect(body).not.toContain("\u200D");
@@ -959,14 +990,14 @@ describe("the open pull request's Fixes line follows the binding at once", () =>
 describe("the version 2 description carries the test proof", () => {
   const PROOF = "Test proof: 1 check fails on the original code and passes now";
 
-  it("lists the proof lines at the end of the Tests section, before the Reviews", () => {
+  it("lists the proof lines at the end of the Checks drawer, before the Test setup", () => {
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context(), [PROOF]);
-    const tests = body.indexOf("## Tests");
+    const tests = body.indexOf("<summary>Checks: ");
     const proof = body.indexOf(`- ${PROOF}`);
     expect(tests).toBeGreaterThanOrEqual(0);
     expect(proof).toBeGreaterThan(tests);
     expect(proof).toBeGreaterThan(body.indexOf("- Tests added:"));
-    expect(proof).toBeLessThan(body.indexOf("## Reviews"));
+    expect(proof).toBeLessThan(body.indexOf("<summary>Test setup: "));
     expect(body.split(PROOF)).toHaveLength(2);
   });
 
@@ -1007,9 +1038,12 @@ describe("the browser evidence lines of the description", () => {
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: [] }))).toBe(without);
     expect(workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: undefined }))).toBe(without);
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ browserEvidenceLines: lines }));
-    expect(body).toContain(["## Browser evidence", ...lines].join("\n"));
-    expect(body.indexOf("## Browser evidence")).toBeLessThan(body.indexOf("## Reviews"));
-    expect(body.replace(`${["## Browser evidence", ...lines, ""].join("\n")}\n`, "")).toBe(without);
+    // One drawer with the count in its summary and the lines as given; the page that did not run is a thing to check above the fold.
+    expect(body).toContain(["<summary>Screenshots: 1 page on the task page</summary>", "", ...lines].join("\n"));
+    expect(aboveFold(body)).toContain("**The browser evidence did not fully run.**");
+    expect(aboveFold(body)).toContain("`/settings`: Not run: the page did not load");
+    expect(without).not.toContain("Screenshots");
+    expect(without).not.toContain("Browser evidence");
   });
   it("version 1: the lines join the status block after the proof lines; with none, the block it always was", () => {
     const plain = workflowPullRequestStatusLines(workflowWith({}, "1.0.0"), context());
@@ -1024,6 +1058,7 @@ describe("the browser evidence lines of the description", () => {
     expect(body).toContain("ok line");
     expect(body).not.toContain("two\nlines");
     expect(body).not.toContain("ada@example.com");
+    expect(body).not.toContain("<summary>Screenshots: 2");
     expect(body).not.toMatch(/!\[|<img/u);
   });
 });

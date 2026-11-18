@@ -15,7 +15,7 @@ import type { CoreEntryCaller } from "../../packages/broker/src/aws/engine-bound
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
 import { ERASE_ON_A_PAGE, createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
-import { noLearningToErase } from "../../packages/broker/src/core/people/erase.js";
+import { noLearningToErase, noWikiToErase } from "../../packages/broker/src/core/people/erase.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { BrokerRequest, BrokerResponse } from "../../packages/broker/src/handler.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -60,11 +60,21 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/decisions", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/approve", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/reject", "decisions:decide"],
     ["POST", "/v1/app/decisions/plan/t1/request-changes", "decisions:decide"], ["POST", "/v1/app/decisions/plan/t1/evidence-opened", "decisions:decide"],
     ["GET", "/v1/app/projects/payments/how-we-work", "full"], ["GET", "/v1/app/projects/payments/playbook", "full"],
+    // DEC 254z-amend3: the project's test environment state, read only.
+    ["GET", "/v1/app/projects/payments/test-environment", "full"],
     ["GET", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens", "full"], ["POST", "/v1/app/script-tokens/tok_1/revoke", "full"],
     ["POST", "/v1/app/people/p1/erase", "full"],
     // Guided onboarding L2-3: the hosted setup run.
     ["GET", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent", "full"], ["POST", "/v1/app/projects/payments/setup-agent/stop", "full"],
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
+    // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
+    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    // Wiki W0: a project's free file map.
+    ["GET", "/v1/app/projects/payments/wiki-map", "full"], ["POST", "/v1/app/projects/payments/wiki-map", "full"],
+    // Lead 4 W2: the project wiki's reads.
+    ["GET", "/v1/app/projects/payments/wiki", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview", "full"], ["GET", "/v1/app/projects/payments/wiki/pages/overview/sources", "full"],
+    // L4-D: confirm, discard and decide a setup candidate.
+    ["POST", "/v1/app/projects/payments/setup-agent/confirm", "full"], ["POST", "/v1/app/projects/payments/setup-agent/discard", "full"], ["POST", "/v1/app/projects/payments/setup-agent/decide", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -75,11 +85,15 @@ describe("the /v1/app route table", () => {
     // The laptop's own routes, the asks (not built on AWS), a playbook edit (Cloud's editor), other methods, extra or empty segments and other prefixes.
     for (const [method, path] of [
       ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
-      ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
+      ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"],
+      ["POST", "/v1/app/projects/payments/test-environment/propose"], ["POST", "/v1/app/projects/payments/test-environment"], ["GET", "/v1/app/projects/payments/test-environment/service-images"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
-      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-agent/discard"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
+      ["POST", "/v1/app/projects/payments/setup-agent/command"], ["POST", "/v1/app/projects/payments/setup-agent/eval-confirm"], ["GET", "/v1/app/projects/payments/setup-agent/decide"], ["GET", "/v1/app/projects/payments/setup-agent/confirm"], ["POST", "/v1/app/projects/payments/setup-check"], ["GET", "/v1/app/projects/payments/setup-check"],
       ["POST", "/v1/app/projects/payments/setup-agent/journal"], ["GET", "/v1/app/projects/payments/setup-agent/stop"], ["PUT", "/v1/app/projects/payments/setup-agent"], ["DELETE", "/v1/app/projects/payments/setup-agent"],
+      ["PUT", "/v1/app/projects/payments/wiki-map"], ["DELETE", "/v1/app/projects/payments/wiki-map"], ["GET", "/v1/app/projects/payments/wiki-map/extra"], ["POST", "/v1/app/projects/payments/wiki-maps"],
+      // The wiki has no write route here (the build and corrections bring their own), nor other paths under it.
+      ["POST", "/v1/app/projects/payments/wiki"], ["PUT", "/v1/app/projects/payments/wiki/pages/overview"], ["DELETE", "/v1/app/projects/payments/wiki/pages/overview"], ["GET", "/v1/app/projects/payments/wiki/pages"], ["GET", "/v1/app/projects/payments/wiki/notes"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
@@ -294,7 +308,7 @@ async function coreOver(world: FakeWorld): Promise<{ entry: CoreAppEntry; log: A
   const registry = await app.registry();
   const personErase = createPersonEraseRoute({
     app, standing: personStandingFromDynamo(db, "signin"), companyOf: async (who) => await membershipOf(who.principal.personId),
-    eraseDeps: () => ({ store: registry.require("storage"), audit: registry.require("audit-sink"), objects: { deleteEveryVersion: async () => true }, eraseLearning: noLearningToErase, now: () => world.clock.now }),
+    eraseDeps: () => ({ store: registry.require("storage"), audit: registry.require("audit-sink"), objects: { deleteEveryVersion: async () => true }, eraseLearning: noLearningToErase, eraseWiki: noWikiToErase, now: () => world.clock.now }),
   });
   return { entry: coreAppEntryFrom({ routes, personErase, deployedCallerOf: deployedCallerFromMembership(membershipOf), log: (entry) => log.push(entry) }), log };
 }

@@ -77,8 +77,8 @@ export function registerSessionCommands(program: Command, context: SessionComman
   for (const action of ["stop", "retry"] as const) {
     session
       .command(action)
-      .description(action === "stop" ? "stop a session's work; the session stays open" : "retry a session that failed or was cancelled")
-      .argument("<session-id>", "the session's ID")
+      .description(action === "stop" ? "stop a session's work (or a task's, by its task ID); the session stays open" : "retry a session that failed or was cancelled")
+      .argument(action === "stop" ? "<session-or-task-id>" : "<session-id>", action === "stop" ? "the session's ID, or the task's ID when it has no session (a task on AWS)" : "the session's ID")
       .action(async (id: string, _options: unknown, command: Command) => printResult(command, await sessionControl(developerSession(), developerEnv(command), id, action)));
   }
   session

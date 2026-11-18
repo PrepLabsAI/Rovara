@@ -41,7 +41,11 @@ const strip = (item: unknown, key: { pk: string; sk: string }): unknown => {
 };
 
 export class CompanyInviteStore {
-  constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number; company: CompanySignInStore; newCompanyId?: () => string }) {}
+  /**
+   * `selfServeAllowed`: the CompanySelfServe stack switch (COMPANY_SELF_SERVE, DEC 254zg (a)), always given. False: every create is the uniform refusal, whatever the stored
+   * setting says, so self-serve stays closed while company sign-in is on until the operator enables it too.
+   */
+  constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number; company: CompanySignInStore; selfServeAllowed: boolean; newCompanyId?: () => string }) {}
   private iso() { return new Date(this.input.now()).toISOString(); }
   private seconds() { return Math.floor(this.input.now() / 1000); }
   private async get(key: { pk: string; sk: string }): Promise<unknown> {
@@ -114,8 +118,9 @@ export class CompanyInviteStore {
     const record = SelfServeRecord.parse({ entityType: "COMPANY_SELF_SERVE_SETTING", open, updatedAt: this.iso(), updatedBy: createdBy });
     await this.commit([{ Put: { TableName: this.input.tableName, Item: { ...SELF_SERVE_KEY, ...record } } }, this.audit("company-self-serve-set", { createdBy, open })]);
   }
-  /** Absent: open. Unreadable: closed (fail closed). */
+  /** The stack switch off: closed, with nothing read. Absent: open. Unreadable: closed (fail closed). */
   async selfServeOpen(): Promise<boolean> {
+    if (this.input.selfServeAllowed !== true) return false;
     const item = await this.get(SELF_SERVE_KEY);
     if (item === undefined) return true;
     const parsed = SelfServeRecord.safeParse(strip(item, SELF_SERVE_KEY));

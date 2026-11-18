@@ -222,7 +222,6 @@ describe("AWS control-plane handlers", () => {
       STATE_TABLE_NAME: "unused",
       ARTIFACT_BUCKET_NAME: "unused",
       OIDC_ISSUER: "https://identity.example.test",
-      CALLBACK_SIGNING_KEY: "c".repeat(64),
       GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
       GITHUB_APP_CREDENTIAL_REF: "github-app",
       GITHUB_APP_ACCOUNT: "example",

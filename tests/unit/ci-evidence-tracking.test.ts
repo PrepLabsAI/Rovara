@@ -114,7 +114,8 @@ describe("the marked check's own clock", () => {
 });
 
 describe("a result that lands", () => {
-  it("is told once on the pull request with the run and the commit, its facts read once, and its time learned", async () => {
+  // L4-C B5: a marked check that passed is not told in a comment (a comment is a notification; a pass updates the description and the Check). Its result is still read once, recorded as told, and its time learned.
+  it("passing is silent on the pull request, still read once, recorded as told, and its time learned", async () => {
     const runner: Runner = { facts: 0 };
     const { w, deps } = await world(settings(), runner);
     setChecks(w, [unit, e2e()]);
@@ -124,14 +125,14 @@ describe("a result that lands", () => {
     const stored = await item(w);
     expect(stored.ci).toBe("passing");
     expect(stored.ciMarked?.[0]).toMatchObject({ state: "passed", attempt: 2, runId: "77", announced: true });
-    expect(comments(w)).toEqual([`Real: reported by your pipeline: real model in our account (e2e-real) passed on run 2, commit ${w.prs[0]!.head.slice(0, 7)}, no per-test counts reported`]);
+    expect(comments(w)).toEqual([]);
     expect(runner.facts).toBe(1);
     // Something else changes on the pull request: the item is written again, and the result is still not told twice.
     setChecks(w, [unit, e2e(), { name: "lint", state: "pending", required: false, url: "", runId: "12" }]);
     w.now.value += 5 * MIN;
     await trackTask(deps, TASK_ID);
     expect((await item(w)).ci).toBe("pending");
-    expect(comments(w)).toHaveLength(1);
+    expect(comments(w)).toEqual([]);
     const times = await readCheckTimes(w.store, IMPLICIT_COMPANY_ID, "web", "app");
     expect(Object.values(times.durations)).toEqual([[40 * MIN]]);
   });
@@ -142,8 +143,10 @@ describe("a result that lands", () => {
     runner.main = { revision: "c".repeat(40), check: e2e({ conclusion: "failure" }) };
     runner.attempt = 1;
     await trackTask(deps, TASK_ID);
-    expect(comments(w)).toHaveLength(1);
+    // The failure is told with its run; the task stops (a person has to look: the environment is red on main too), which is the second and last comment.
+    expect(comments(w)).toHaveLength(2);
     expect(comments(w)[0]).toContain("failed on run 1");
+    expect(comments(w)[1]).toMatch(/^Rovara could not fix .* and has stopped\. It needs a person/u);
   });
   it("keeps a line within what the host takes, with no mention", () => {
     const line = landedLine({ name: "x", state: "passed", attempt: 3 }, { name: "@team ".repeat(40), calledAs: "@owner ".repeat(20), longOrPaid: false }, "a".repeat(40));
@@ -231,7 +234,7 @@ describe("review fixes (A3 review 1)", () => {
       expect((await w.task()).workflow.blockReason).toMatch(new RegExp(`^${CI_EVIDENCE_ASK_PREFIX}e2e-real did not run`, "u"));
     }
   });
-  it("tells a result once even when another pass committed first", async () => {
+  it("records a result as told once even when another pass committed first", async () => {
     const { w, deps } = await world(settings());
     // A first pass while the check runs (the item and its head index exist), then the result lands and two passes race.
     setChecks(w, [unit, e2e({ state: "pending", conclusion: undefined })]);
@@ -250,8 +253,9 @@ describe("review fixes (A3 review 1)", () => {
     } }) };
     await trackTask(racing, TASK_ID);
     expect(raced).toBe(true);
-    expect((await item(w)).ci).toBe("passing");
-    expect(comments(w)).toHaveLength(1);
+    // A pass is silent (L4-C B5), and is recorded as told once though two passes raced: no comment now, and none later.
+    expect(comments(w)).toEqual([]);
+    expect((await item(w)).ciMarked?.[0]).toMatchObject({ state: "passed", announced: true });
   });
   it("counts a long check's round past its cap, after a Retry, as the person's extra round", async () => {
     const { w, deps } = await world(settings({ shareLogs: true }), { facts: 0, main: { revision: "c".repeat(40), check: e2e() } });

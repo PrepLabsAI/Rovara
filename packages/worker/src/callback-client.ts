@@ -119,6 +119,8 @@ export function createWorkerCallbackSinks(input: {
   chatGptToken: () => Promise<unknown>;
   /** SH14: the setup run's one callback action (journal, host ask, poll, command done). The reply is the broker's, unparsed. */
   setupAgent: (body: unknown) => Promise<unknown>;
+  /** W3b: the wiki build run's one callback (`POST .../wiki-build`). */
+  wikiBuild: (body: unknown) => Promise<unknown>;
   /** NH-1: the nightly run's one callback action (its result and coverage map). The reply is the broker's, unparsed. */
   nightlyResult: (body: unknown) => Promise<unknown>;
   /** Test services (slice 3): a fresh read address of an approved fixture set the run's plan names (`{ digest }` in, the broker's answer out, unparsed). The address is a credential for 15 minutes: only fixture-delivery.ts handles the answer. */
@@ -297,6 +299,7 @@ export function createWorkerCallbackSinks(input: {
     eventSink: async (events) => post("events", { events }),
     chatGptToken: async () => postForResult("chatgpt-token", {}),
     setupAgent: async (body) => postForResult("setup-agent", body),
+    wikiBuild: async (body) => postForResult("wiki-build", body),
     nightlyResult: async (body) => postForResult("nightly-result", body),
     fixtureSet: async (body) => postForResult("fixture-set", body),
     authorizeModelFallback:async(raw)=>{

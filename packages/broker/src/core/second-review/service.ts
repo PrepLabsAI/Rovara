@@ -19,7 +19,7 @@ import { acknowledgeSecondReview, type AcknowledgeResult, type AcknowledgeTask }
 import { prepareSecondReview, type SecondReviewStart, type SecondReviewStartInput } from "./start.js";
 import { anyScopeOn, companyChoiceUpdate, companyContextUpdate, projectNarrowingUpdate, readSecondReviewSettings } from "./settings.js";
 import {
-  secondOpinionFromReviewResult, secondOpinionOfTask, secondReviewMergeWait, secondReviewPullRequestLines, secondReviewTaskView, type SecondOpinionFromResultInput, type StoredSecondOpinion,
+  secondOpinionFromReviewResult, secondOpinionOfTask, secondReviewMergeWait, secondReviewPrStatus, secondReviewPullRequestLines, secondReviewTaskView, type SecondOpinionFromResultInput, type StoredSecondOpinion,
 } from "./store.js";
 import { SECOND_REVIEW_TRACK_CONSUMER, indexSecondReviewTrack, readTrackRecord, type ChangedFilesPort } from "./track.js";
 import { defaultMayAdminister, isSecondReviewEnabled, secondReviewNow, type SecondReviewDeps } from "./seams.js";
@@ -100,6 +100,8 @@ export interface SecondReview {
   mergeWait(task: Parameters<typeof secondReviewMergeWait>[0]): string | undefined;
   /** The lines a pull request body carries. */
   prLines(task: { secondOpinion?: unknown }, candidateDigest: string | undefined, accepted?: readonly AcceptedFindingRef[]): string[];
+  /** The same second review as the pull request's verdict object reads it: `agreed`, `blocking`, `did_not_run`, or undefined (a shadow review, none, or the feature off). */
+  prStatus(task: { secondOpinion?: unknown }, candidateDigest: string | undefined, accepted?: readonly AcceptedFindingRef[]): ReturnType<typeof secondReviewPrStatus>;
   /** What the task page shows. */
   taskView(task: Parameters<typeof secondReviewTaskView>[0], candidateDigest: string | undefined): ReturnType<typeof secondReviewTaskView>;
   /** The state the settings page, the CLI and the MCP tool read. `builder`: the models that write the code (`provider:modelId`); absent: fit is only "its maker is known". */
@@ -151,6 +153,7 @@ export function createSecondReview(deps: SecondReviewDeps): SecondReview {
     opinionOf: (input) => (isSecondReviewEnabled(deps) ? secondOpinionFromReviewResult(input) : undefined),
     mergeWait: (task) => (isSecondReviewEnabled(deps) ? secondReviewMergeWait(task) : undefined),
     prLines: (task, digest, accepted) => (isSecondReviewEnabled(deps) ? secondReviewPullRequestLines(task, digest, accepted) : []),
+    prStatus: (task, digest, accepted) => (isSecondReviewEnabled(deps) ? secondReviewPrStatus(task, digest, accepted) : undefined),
     taskView: (task, digest) => (isSecondReviewEnabled(deps) ? secondReviewTaskView(task, digest) : undefined),
     acknowledgement(task) {
       if (!isSecondReviewEnabled(deps)) return undefined;

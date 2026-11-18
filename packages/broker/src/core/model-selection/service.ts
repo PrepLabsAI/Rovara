@@ -59,7 +59,7 @@ export interface ModelSelectionWords {
 
 /** The stage a workflow operation runs under, from the hosted product's mapping. CHECKS runs commands and has no model of its own: the install's model stands. */
 export const STAGE_OF_WORKFLOW_MODE: Readonly<Record<string, StageId | undefined>> = {
-  UNDERSTAND: "understand", SETUP_DRAFT: "plan", SETUP_AGENT: "plan", SPEC_WRITE: "plan", PLAN: "plan", PLAN_CRITIQUE: "plan_check", IMPLEMENT: "build", REVIEW: "code_review", FEEDBACK_REVIEW: "pull_request",
+  UNDERSTAND: "understand", SETUP_DRAFT: "plan", SETUP_AGENT: "plan", WIKI_BUILD: "plan", SPEC_WRITE: "plan", PLAN: "plan", PLAN_CRITIQUE: "plan_check", IMPLEMENT: "build", REVIEW: "code_review", FEEDBACK_REVIEW: "pull_request",
 };
 
 export interface StepModel {

@@ -244,15 +244,21 @@ describe("the description carries the flags at the top of Rovara's block", () =>
     reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-11-13T12:00:00.000Z" })),
   });
   const lines = (changed: ChangedFileEntry[], extra: Record<string, unknown> = {}) => rovaraStatusLines(workflow(), { changedFiles: { files: changed, complete: true }, ...extra }, () => ["- no findings"]);
-  it("shows the flags before 'What changed' when an instruction file and a snapshot changed", () => {
+  it("lists the flags above the first drawer when an instruction file and a snapshot changed", () => {
     const body = lines([{ repository: "app", path: "CLAUDE.md", added: 1, removed: 0 }, { repository: "app", path: "a/__snapshots__/x.snap", added: 1, removed: 1, snapshotChanged: true }]);
-    expect(body[0]).toBe(WEAKENING_HEADING);
-    expect(body.indexOf(WEAKENING_HEADING)).toBeLessThan(body.indexOf("## What changed"));
-    expect(body.join("\n")).toContain("- Rovara instruction files changed (a flag, not an approval): CLAUDE.md");
-    expect(body.join("\n")).toContain("- Snapshot files changed: a/__snapshots__/x.snap");
+    const text = body.join("\n");
+    for (const wanted of ["Rovara instruction files changed (a flag, not an approval): CLAUDE.md", "Snapshot files changed: a/__snapshots__/x.snap"]) {
+      expect(text).toContain(`- ${wanted}`);
+      // Once above the first drawer, and the layout's own words are the headings.
+      expect(text.indexOf(wanted)).toBeLessThan(text.indexOf("<details>"));
+    }
+    expect(text).toContain("**Tests may be weaker.**");
+    expect(text).toContain("**Instruction files or files CI runs changed.**");
+    expect(text).not.toContain(WEAKENING_HEADING);
   });
-  it("starts with 'What changed' exactly as before when nothing is flagged", () => {
-    expect(lines([{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }])[0]).toBe("## What changed");
+  it("has no flag item when nothing is flagged", () => {
+    expect(lines([{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }]).join("\n")).not.toContain("Tests may be weaker");
+    expect(lines([{ repository: "app", path: "src/a.ts", added: 1, removed: 0 }]).join("\n")).not.toContain("Instruction files");
   });
   it("shows the tests that ran before and not now from the pack, only when the pack is for this code", () => {
     const pack = packWith({ absentOnNew: ["t.py::gone"], absentOnNewCount: 1 });

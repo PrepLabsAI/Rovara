@@ -102,6 +102,25 @@ export function slackChannelSurface(route: ReturnType<typeof createSlackMentionR
   };
 }
 
+/**
+ * DEC 254y(3), L2-2 PR 18e: whether a channel item (a message, or a press) is the install's own: its actor's tenant, and its conversation's tenant where it has one (a message
+ * always does), are each exactly the install's team. Read at run time, whatever the types say: a missing, non-string or different value is not the install's.
+ */
+export function channelItemOnInstallTeam(item: unknown, legacyTeamId: string, conversationRequired: boolean): boolean {
+  if (item === null || typeof item !== "object") return false;
+  const tenant = (ref: unknown) => (ref !== null && typeof ref === "object" ? (ref as { tenant?: unknown }).tenant : undefined);
+  const { actor, conversation } = item as { actor?: unknown; conversation?: unknown };
+  if (tenant(actor) !== legacyTeamId) return false;
+  if (conversation === undefined) return !conversationRequired;
+  return tenant(conversation) === legacyTeamId;
+}
+
+/** Two surfaces for channel `slack`: the install's team keeps today's; any other tenant, or one that cannot be read, goes to the company surface. No company surface: today's, as it is. */
+export function splitChannelSurfaceByTenant(legacy: ChannelSurface, company: ChannelSurface | undefined, legacyTeamId: string): ChannelSurface {
+  if (company === undefined) return legacy;
+  return (message, context) => (channelItemOnInstallTeam(message, legacyTeamId, true) ? legacy : company)(message, context);
+}
+
 /** The AWS surface: the Slack adapter's commands, Slack's threads table, the broker, and the channel request queue. */
 export function createAwsSlackChannelRouter(company: SlackCompanyDependencies = {}): ChannelSurface {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };

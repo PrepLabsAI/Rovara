@@ -3,6 +3,7 @@
 //
 //   GET /v1/dev/client/projects/{project}/setup-status          any member of the project's company (full access)
 //   PUT /v1/dev/client/projects/{project}/setup-status/skips    a company owner or admin, or the project's administrator (full access)
+//   PUT /v1/dev/client/projects/{project}/setup-status/eval-none  the same people: "no evals" for the latest finished setup run, or take it back (full access; L2-5 c)
 //
 // "Progress is read from the real state, not a saved wizard position": every row below is derived on each request from records Code already keeps (the project's revision, the setup
 // run's pointer and task, the run's eval report, the company's and the project's settings, the project's channel bindings, the project's tasks). The only thing stored for the checklist is
@@ -22,6 +23,13 @@ export const SETUP_ROW_STATES = ["done", "needs_you", "running", "optional", "sk
 export type SetupRowState = (typeof SETUP_ROW_STATES)[number];
 const State = z.enum(SETUP_ROW_STATES);
 
+/**
+ * DEC 254zc(1): what GitHub's signed webhooks said about a repository since the project was set up. transferred: it moved to another owner (`repository` transferred). removed: it left the
+ * GitHub App's repository list (`installation_repositories` removed; a transfer out looks the same, so the word stays "removed" unless GitHub said "transferred"). Absent: GitHub said nothing.
+ */
+export const REPOSITORY_ACCESS_STATES = ["transferred", "removed"] as const;
+export type RepositoryAccessState = (typeof REPOSITORY_ACCESS_STATES)[number];
+
 const Channel = z.object({ channelId: z.string().min(1).max(64), name: z.string().min(1).max(200).optional(), isPrivate: z.boolean().optional() }).passthrough();
 
 /**
@@ -36,7 +44,7 @@ export const ProjectSetupChecklistSchema = z.object({
   progress: z.object({ done: z.number().int().min(0), total: z.number().int().min(1), percent: z.number().int().min(0).max(100), nextRequired: z.enum(SETUP_STATUS_ROWS).nullable() }).passthrough(),
   repos: z.object({
     state: State, count: z.number().int().min(0),
-    items: z.array(z.object({ name: z.string().min(1).max(128), fullName: z.string().min(1).max(256).optional(), defaultBranch: z.string().min(1).max(256) }).passthrough()).max(32),
+    items: z.array(z.object({ name: z.string().min(1).max(128), fullName: z.string().min(1).max(256).optional(), defaultBranch: z.string().min(1).max(256), access: z.enum(REPOSITORY_ACCESS_STATES).optional() }).passthrough()).max(32),
   }).passthrough(),
   setupRun: z.object({
     state: State,
@@ -59,12 +67,14 @@ export const ProjectSetupChecklistSchema = z.object({
   }).passthrough(),
   evalConfirm: z.object({
     state: State,
-    /** none: the latest run reported no eval; reported: waiting for a person; confirmed. */
-    report: z.enum(["none", "reported", "confirmed"]),
+    /** none: the latest run reported no eval; reported: waiting for a person; confirmed; no_evals: a person confirmed the project runs no evals, for the latest finished setup run (done). */
+    report: z.enum(["none", "reported", "confirmed", "no_evals"]),
     /** Set while the setup run is not done: the row cannot be acted on yet. */
     blockedBy: z.literal("setupRun").optional(),
     suites: z.array(z.object({ selection: z.string().max(512), questions: z.number().int().min(0) }).passthrough()).max(4).optional(),
     confirmedSelection: z.string().max(512).optional(),
+    /** Set with report `no_evals`: when the person confirmed it (who is in the company log). */
+    noEvals: z.object({ confirmedAt: z.string().max(40) }).passthrough().optional(),
   }).passthrough(),
   aiAndSpend: z.object({
     state: State,
@@ -90,3 +100,11 @@ export const ProjectSetupSkipResponseSchema = z.object({
   project: z.string().min(1).max(128), row: z.enum(SETUP_SKIPPABLE_ROWS), skipped: z.boolean(), skippedRows: z.array(z.enum(SETUP_SKIPPABLE_ROWS)).max(SETUP_SKIPPABLE_ROWS.length),
 }).passthrough();
 export type ProjectSetupSkipResponse = z.infer<typeof ProjectSetupSkipResponseSchema>;
+
+/** `PUT .../setup-status/eval-none` (L2-5 c): strict. `true` confirms that the project runs no evals for its latest finished setup run; `false` takes that back. `viewer.canSkip` says who may. */
+export const ProjectSetupEvalNoneBodySchema = z.object({ noEvals: z.boolean() }).strict();
+export type ProjectSetupEvalNoneBody = z.infer<typeof ProjectSetupEvalNoneBodySchema>;
+
+/** Its answer: the flag now and the setup run it is bound to (null when taken back). A repeat answers the same and writes nothing. */
+export const ProjectSetupEvalNoneResponseSchema = z.object({ project: z.string().min(1).max(128), noEvals: z.boolean(), taskId: z.string().min(1).max(160).nullable() }).passthrough();
+export type ProjectSetupEvalNoneResponse = z.infer<typeof ProjectSetupEvalNoneResponseSchema>;

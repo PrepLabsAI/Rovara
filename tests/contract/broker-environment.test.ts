@@ -1,4 +1,5 @@
-// ENV-ROOM (core switch-on blocker, 2026-11-15): a named environment's broker is given its names packed (AGENTX_NAMES), its constrained settings packed (AGENTX_SETTINGS) and
+// ENV-ROOM (core switch-on blocker, 2026-11-15): a named environment's broker is given its names packed (AGENTX_NAMES, since ENV-ROOM 2 in its SSM parameter, read by the
+// handler), its constrained settings packed (AGENTX_SETTINGS) and
 // nothing it can derive from the environment's name, and hydrateBrokerEnvironment puts every value back. This proves, on the synthesized named template, that what the broker
 // ends up with is exactly what CloudFormation would have put in each variable before:
 //  - each packed name's piece is followed back to its resource, and the variable is compared with that resource's Ref or attribute as CloudFormation gives it (the resolver's
@@ -9,11 +10,13 @@
 //  - the hydrated broker has every variable the legacy template's broker is given, so no reader goes without.
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
-import { describe, expect, it } from "vitest";
-import { BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, DERIVED_BROKER_VARIABLES, coreDispatchDeadLetterName, coreDispatchQueueName, type BrokerNameSpec } from "@agentx/contracts";
+import { beforeAll, describe, expect, it } from "vitest";
+import { BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, DERIVED_BROKER_VARIABLES, coreDispatchDeadLetterName, coreDispatchQueueName, type BrokerNameSpec } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { hydrateBrokerEnvironment, type MutableEnvironment } from "../../packages/broker/src/aws/broker-environment.js";
+import { loadBrokerNamesParameter } from "../../packages/broker/src/aws/broker-names-parameter.js";
+import { brokerNamesParameterOf } from "../support/broker-environment-template.js";
 import { DEPLOY_PARAMETER_VALUES, RESOLVER_ACCOUNT, RESOLVER_REGION, controlPlaneOf } from "../support/lambda-environment-size.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -75,8 +78,14 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
     const given: MutableEnvironment = Object.fromEntries(Object.entries(raw).map(([key, value]) => [key, resolver.text(value)]));
     const env0 = { ...given, AWS_REGION: RESOLVER_REGION };
     const hydrated: MutableEnvironment = { ...env0 };
-    hydrateBrokerEnvironment(hydrated);
-    const names = packedPieces(raw[BROKER_NAMES_VARIABLE]);
+    // ENV-ROOM 2: the names come from their SSM parameter, as the handler reads it (its value resolved the way CloudFormation writes it), then hydration runs as before.
+    const parameter = brokerNamesParameterOf(template, String(raw[BROKER_NAMES_PARAMETER_VARIABLE]));
+    const parameterValue = resolver.text((template.Resources[parameter.id]!.Properties as { Value: unknown }).Value);
+    beforeAll(async () => {
+      await loadBrokerNamesParameter(hydrated, async () => ({ type: "String", value: parameterValue }));
+      hydrateBrokerEnvironment(hydrated);
+    });
+    const names = packedPieces(parameter.names);
     const settings = packedPieces(raw[BROKER_SETTINGS_VARIABLE]);
     const naming = environmentNaming(env);
 
@@ -119,7 +128,7 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       expect(hydrated.HEALTH_DEAD_LETTER_QUEUES).toBe(JSON.stringify(Object.fromEntries(queues.map((spec) => [spec.label, resolver.ref(logicalIdOf(names.get(spec.code)))]))));
     });
 
-    for (const spec of Object.values(BROKER_SETTINGS)) {
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => !("switchFlag" in each))) {
       it(`${spec.variable} (${spec.code}) is its parameter's value`, () => {
         const parameter = (settings.get(spec.code) as { Ref?: string }).Ref;
         expect(parameter, "a setting is a parameter's value").toBeDefined();
@@ -127,6 +136,16 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
         // A host setting (the core's model gateway, core switch-on blocker 2026-11-17) reaches the broker as its https origin.
         const expected = "httpsOrigin" in spec && spec.httpsOrigin === true ? `https://${value}` : value;
         expect(hydrated[spec.variable]).toBe(expected);
+      });
+    }
+
+    // DEC 254zg (a), 254zk: a switch flag is its switch's condition as "1" or "0", and the broker reads it as "enabled" or "disabled" (the measure takes Fn::If's first branch).
+    for (const spec of Object.values(BROKER_SETTINGS).filter((each) => "switchFlag" in each)) {
+      it(`${spec.variable} (${spec.code}) is its switch's condition, packed as 1 or 0`, () => {
+        const packed = settings.get(spec.code) as { "Fn::If"?: [string, unknown, unknown] };
+        expect(packed["Fn::If"]?.slice(1)).toEqual(["1", "0"]);
+        expect((template as { Conditions?: Record<string, unknown> }).Conditions?.[packed["Fn::If"]![0]], "a real condition").toBeDefined();
+        expect(hydrated[spec.variable]).toBe("enabled");
       });
     }
 

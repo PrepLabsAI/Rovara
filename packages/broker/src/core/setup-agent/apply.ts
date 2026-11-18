@@ -1,7 +1,8 @@
 // "Use this setup": turning what a setup run found into the project's own setup and test commands, and nothing more. The hard rule: a setup run's proposal is applied only after
 //   (1) the broker re-read every citation from the code host (`verifiedView`, final), and
 //   (2) a passing check on a NEW workspace the broker prepares, never the agent's: the candidate check of this file, run on a stored revision that is not yet the project's latest, and
-//   (3) the owner's approval, proved by the owner's page through the Approvers seam and bound to exactly the commands the check ran (`createSetupProposalSubject`).
+//   (3) the approval, proved through the Approvers seam and bound to exactly the commands the check ran and the candidate revision (`createSetupProposalSubject`): on the laptop the owner's page;
+//       on hosted Code (L4-D, DEC 254z b) a person whose live standing fits the risk the candidate's diff carries (setup-risk.ts: low and medium a project maintainer, high a company admin).
 // Step 1 and the hand-over to step 2 are `confirmSetupAgent`: it saves no setting, starts no task and approves nothing. It stores the verified commands as a CANDIDATE revision of the project (the next revision number,
 // written but not made the project's latest, so no task can start on it), starts the check on it and keeps a proposal row. The approval, and only the approval, makes the candidate the project's latest revision, in one
 // transaction with the decision; a rejection removes it. Until then a project with a waiting proposal accepts no other new revision (`registerProject` says so).
@@ -21,6 +22,7 @@ import { readState, verifiedView, type SetupAgentDeps } from "./agent.js";
 import { buildSetupCheck, relayCheck, setupStateOfCheck, type SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
 import { refusedCommand } from "./refused-command.js";
+import { classifySetupChange, type SetupChangeRisk, type SetupRisk } from "./setup-risk.js";
 
 export const SETUP_APPLY_KIND = "setup-proposal";
 /** The longest a command may be, as the approval page shows it: whole. */
@@ -200,31 +202,64 @@ export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "co
 
 // ---- the approval
 
+/** The laptop's words when someone other than the install's owner answers. */
+export const SETUP_OWNER_ONLY = "Only the owner approves a project's setup.";
+
+/**
+ * Who decides a setup candidate, and at what risk. The laptop passes nothing: the risk is high and only the install's owner decides (`SETUP_OWNER_ONLY`). A host (L4-D, DEC 254z b: hosted Code) passes
+ * its own rule: the risk read from the candidate's diff against the project's approved revision (`classifySetupChange`), and the approver's LIVE standing checked against that risk.
+ */
+export interface SetupProposalApproval {
+  /** Reads the risk from the candidate's diff (setup-risk.ts). Absent: high. */
+  riskFromDiff?: boolean;
+  /** Whether this verified approver may give this answer at this risk, read now. A throw or anything but `true` is a refusal. */
+  mayDecide: (approver: Principal, input: { project: string; risk: SetupRisk; outcome: "approve" | "reject" }) => Promise<boolean>;
+  /** The fixed words of a refusal, by the risk the candidate is at and the answer. */
+  refusal: (risk: SetupRisk, outcome: "approve" | "reject") => string;
+}
+
+/** The candidate's risk and its changes, from its stored revision against the project's approved (base) revision. A row it cannot read is high. */
+export async function setupCandidateRisk(store: Pick<DocumentStore, "get">, orgId: OrgId, row: Pick<SetupApplyRow, "project" | "baseRevision" | "candidateRevision">): Promise<SetupChangeRisk> {
+  const [base, candidate] = await Promise.all([store.get(projectRevisionKey(orgId, row.project, row.baseRevision)), store.get(projectRevisionKey(orgId, row.project, row.candidateRevision))]);
+  return classifySetupChange((base as { definition?: unknown } | undefined)?.definition, (candidate as { definition?: unknown } | undefined)?.definition);
+}
+
 /**
  * The gate's subject for a setup proposal. It is waiting for a decision only once the candidate check PASSED on exactly the commands the digest names; before that, or after it failed, a decision is `not_waiting`.
  * Approving makes the candidate the project's latest revision (the catalog row moves from the base revision to it, and the project's own setup check mark is the check that passed) in the decision's transaction;
- * rejecting removes the candidate. The approver is the owner on the page's own session: a repository collaborator's comment is never one.
+ * rejecting removes the candidate. The approver is the owner on the page's own session (the laptop), or whoever the host's `approval` rule allows at the candidate's risk: a repository collaborator's comment is never one.
  */
-export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId"> }): DecisionSubject {
-  const { flow } = options;
+export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "store" | "now" | "companyId">; approval?: SetupProposalApproval }): DecisionSubject {
+  const { flow, approval } = options;
   return {
     kind: SETUP_APPLY_KIND,
     async load(companyId, project): Promise<LoadedSubject | undefined> {
       if (companyId !== flow.companyId) return undefined;
       const read = await readSetupApply({ flow: flow as TaskFlowDeps, store: flow.store, companyId, now: () => (flow.now?.() ?? new Date()).getTime() }, project);
       if (read === undefined) return undefined;
+      // The laptop: the candidate runs code the repository holds, so high, and only the owner's own page session decides it. A host's rule: the risk the candidate's diff carries (unknown = high).
+      const risk: SetupRisk = approval?.riskFromDiff === true ? (await setupCandidateRisk(flow.store, companyId, read)).risk : "high";
       return {
         key: setupApplyKey(companyId, project),
         guard: when.and(when.eq("state", "checking"), when.eq("digest", read.digest), when.eq("candidateRevision", read.candidateRevision)),
         waiting: read.state === "checking" && read.checkState.status === "ready",
-        // The candidate runs code the repository holds: high, so only the owner's own page session decides it.
-        request: { kind: "setup", subject: { type: "setup_proposal", id: project }, projectName: project, revision: read.candidateRevision, artifactDigest: read.digest, risk: "high" },
-        state: { row: read },
+        request: { kind: "setup", subject: { type: "setup_proposal", id: project }, projectName: project, revision: read.candidateRevision, artifactDigest: read.digest, risk },
+        state: { row: read, risk },
       };
     },
     async apply(loaded, attempt: DecisionAttempt, approvers: readonly Principal[], at: string): Promise<AppliedDecision> {
-      const { row } = loaded.state as { row: SetupApplyRow };
-      if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", "Only the owner approves a project's setup.");
+      const { row, risk } = loaded.state as { row: SetupApplyRow; risk: SetupRisk };
+      if (approval === undefined) {
+        if (!approvers.every((approver) => approver.roles.includes("owner"))) throw new SubjectRefusal("not_the_approver", SETUP_OWNER_ONLY);
+      } else {
+        if (attempt.outcome !== "approve" && attempt.outcome !== "reject") throw new SubjectRefusal("invalid_outcome", "A setup is approved or rejected.");
+        // Every approver, read live against the candidate's risk; a read that fails is a refusal.
+        for (const approver of approvers) {
+          let allowed: unknown;
+          try { allowed = await approval.mayDecide(approver, { project: row.project, risk, outcome: attempt.outcome }); } catch { allowed = false; }
+          if (allowed !== true) throw new SubjectRefusal("not_the_approver", approval.refusal(risk, attempt.outcome));
+        }
+      }
       const approver = approvers[0]!;
       const orgId = row.orgId;
       if (attempt.outcome === "approve") {

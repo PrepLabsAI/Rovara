@@ -37,7 +37,7 @@ import { recordRenewalSuccess } from "../packages/broker/src/aws/runtime-requali
 import { e2eModelCheckRunnerKey } from "../packages/broker/src/e2e/model-route-registry.js";
 import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentE2eFeatureRuntimeCatalogId, environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
-import { BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
+import { BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_VARIABLE } from "../packages/contracts/src/broker-environment.js";
 import {
   QUALIFICATION_INSTANCE_TYPE,
   QUALIFICATION_POLL_TIMEOUT_MS,
@@ -538,7 +538,8 @@ export function featureCatalogIdFromTemplate(body: unknown, env?: string): strin
     const value = resource.Properties?.Environment?.Variables?.["AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID"];
     return typeof value === "string" ? [value] : [];
   }));
-  const packed = functions.some((resource) => resource.Properties?.Environment?.Variables?.[BROKER_NAMES_VARIABLE] !== undefined);
+  // ENV-ROOM 2: a broker whose names are in their SSM parameter is packed too.
+  const packed = functions.some((resource) => resource.Properties?.Environment?.Variables?.[BROKER_NAMES_VARIABLE] !== undefined || resource.Properties?.Environment?.Variables?.[BROKER_NAMES_PARAMETER_VARIABLE] !== undefined);
   if (ids.size === 0 && packed && env !== undefined) return environmentE2eFeatureRuntimeCatalogId(env);
   const [only] = [...ids];
   if (ids.size !== 1 || only === undefined) throw new Error("the deployed Broker has no single literal AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID, so the registered generation cannot be read");

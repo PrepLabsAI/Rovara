@@ -9,7 +9,7 @@ import type { TestEnvDeps } from "./deps.js";
 import { proposalNeedsFreshSignIn, proposalSeedTrust, readApprovedBy, readApprovedTestEnvironment, readProposal, readTestEnvProveReport } from "./environment.js";
 import { shownLine } from "./shown-line.js";
 import { testEnvironmentEnabled } from "./switch.js";
-import { testServicesEnabled } from "./test-services-switch.js";
+import { TEST_SERVICES_UNAVAILABLE_WORDS, testServicesEnabled, testServicesUnavailable } from "./test-services-switch.js";
 
 export interface ApprovedEnvironmentView {
   revision: number;
@@ -42,6 +42,8 @@ export interface TestEnvironmentView {
   project: string;
   enabled: boolean;
   testServices: boolean;
+  /** DEC 254z-amend3: test services are switched on but the host cannot run them here, in fixed words ("Test services not available here: ..."). Absent when they run, and when they are switched off. */
+  testServicesUnavailable?: string;
   approved: ApprovedEnvironmentView | undefined;
   proposal: ProposalView | undefined;
 }
@@ -76,7 +78,8 @@ async function newestProposal(deps: TestEnvDeps, orgId: OrgId, project: string):
 export async function testEnvironmentView(deps: TestEnvDeps, orgId: OrgId, project: string): Promise<TestEnvironmentView> {
   const env = deps.env ?? process.env;
   const enabled = testEnvironmentEnabled(env);
-  const base: TestEnvironmentView = { project, enabled, testServices: testServicesEnabled(env), approved: undefined, proposal: undefined };
+  const unavailable = testServicesUnavailable(env);
+  const base: TestEnvironmentView = { project, enabled, testServices: testServicesEnabled(env), ...(unavailable === undefined ? {} : { testServicesUnavailable: TEST_SERVICES_UNAVAILABLE_WORDS[unavailable] }), approved: undefined, proposal: undefined };
   if (!enabled) return base;
   const approved = await readApprovedTestEnvironment(deps, orgId, project).catch(() => undefined);
   let approvedView: ApprovedEnvironmentView | undefined;
