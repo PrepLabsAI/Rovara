@@ -53,7 +53,8 @@ async function world() {
     await store.put({ item: { ...taskKey(w.task), ...base, taskId: w.task, developerId: w.runner } });
     await store.put({ item: { ...taskKey(w.source), ...base, taskId: w.source, developerId: w.author } });
     const lessons = new DocumentLessonStore(store, () => now);
-    const lesson = lessonRecord({ id: w.lesson, workspaceId: company, project: "payments", title: w.title, tier: 1, approvals: [{ approvalId: "approved", by: "person-1", at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], provenance: { ...lessonRecord().provenance, supportTasks: [w.source] } });
+    // Batch b18 (rule F): #998's one absolute fit floor loads a lesson for a step only when it fits the task ("Retry network calls") by its own words.
+    const lesson = lessonRecord({ id: w.lesson, workspaceId: company, project: "payments", title: w.title, tier: 1, description: "Retry network calls with the shared helper.", body: "Retry network calls with the shared helper, not a hand-written loop.", approvals: [{ approvalId: "approved", by: "person-1", at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], provenance: { ...lessonRecord().provenance, supportTasks: [w.source] } });
     expect((await lessons.commit({ workspaceId: company, project: "payments" }, 0, [lesson], now)).ok).toBe(true);
     // Sign-in table: the person running the task is a live member of their own company holding a developer grant on the project (State table). Every person who can see the running task must be able to
     // see each source task, so it is the RUNNING person's standing on the roster that is read, live, for a lesson learned from another person's task (the source author has no row here at all).

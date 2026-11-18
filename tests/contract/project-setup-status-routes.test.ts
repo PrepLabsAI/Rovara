@@ -850,7 +850,10 @@ describe("what did not change", () => {
 // those 2 rows still gives 8e72149c128813727deb3c8af95007454d20f7fb60e4762249e438a8b497ca80).
 // Batch 17 (rule D): with batch 16's table and the batch's 15 new /v1/dev rows (#992 lessons areas, learning-sources and its PUT; #1003's 9 graduation, Tidy, check-draft and rule rows; #995's POST lessons and
 // knowledge/areas; #994's GET company/egress-addresses). All added, none changed: removing exactly those 15 rows still gives eaf715d5... (the batch-16 pin above).
-const EXISTING_ROUTES_DIGEST = "d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711";
+// Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
+// PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack). All added, none changed, the order of every earlier row kept:
+// removing exactly those 10 rows gives back the batch 16+17 pin d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711.
+const EXISTING_ROUTES_DIGEST = "6270b12cb0f143383eb2a39cb5471288ca81d2ca24be98a4cce70cd364a6c079";
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
 // Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).

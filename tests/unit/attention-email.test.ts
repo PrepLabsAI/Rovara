@@ -106,7 +106,8 @@ describe("the switch", () => {
     expect(root).toContain("const attention = coreActive ? attentionEmailFromEnvironment({ env, lambda: () => new LambdaClient({ maxAttempts: 1 }),");
     expect(root).toContain("...(attention === undefined ? [] : [attentionEmailModule(attention.sender)])");
     // Batch 14: the same seams, now spread next to the upkeep and human-edit ones.
-    expect(root).toContain("...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } })");
+    // Batch b18 (#1030): the attention email's seams ride in one notification object beside the chat thread's.
+    expect(root).toContain("...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),");
     expect(root).toContain("...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey })");
     expect(root).not.toContain("client-sesv2");
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");

@@ -140,7 +140,8 @@ describe("what the deployed broker passes", () => {
   const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
   it("gives the core root the stored settings for how we work, and the company's own reader to its merge tracker", () => {
     expect(broker).toMatch(/codeSettings: codeSettingsReader\(\{ documentClient, tableName: requiredEnvironment\("STATE_TABLE_NAME"\) \}\)/u);
-    expect(broker).toMatch(/createBrokerCoreServices\(\{ companyId, flow, registry, ciMode: wiring\.ciMode!,\s*settings: companyCodeSettingsReader\(\{ documentClient, tableName: requiredEnvironment\("STATE_TABLE_NAME"\) \}, companyId\) \}\)/u);
+    // Batch b18: the hosted services (createHostedBrokerCoreServices) take more seams after `settings` (human edit, thread moments, notification).
+    expect(broker).toMatch(/createHostedBrokerCoreServices\(\{ companyId, flow, registry, ciMode: wiring\.ciMode!,\s*settings: companyCodeSettingsReader\(\{ documentClient, tableName: requiredEnvironment\("STATE_TABLE_NAME"\) \}, companyId\),/u);
   });
   it("leaves the laptop on its fixed settings", async () => {
     expect(await fixedCodeSettings().read(IMPLICIT_COMPANY_ID as OrgId, "any")).toMatchObject({ allowSelfApproval: true });

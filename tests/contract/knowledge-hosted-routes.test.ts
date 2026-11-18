@@ -134,4 +134,7 @@ describe("the knowledge routes at the developer router", () => {
 /** The digest of every DEV_ROUTES row except the two knowledge rows, as of the base this lane stacked on (code/next with #976): a changed, removed or loosened existing row changes it. */
 // Batch 17 (rule D): re-pinned on batch 16's table plus the batch's other 13 new /v1/dev rows (#992 lessons areas/learning-sources x3, #1003's 9 phase-4 rows, #994's company/egress-addresses). All added, none
 // changed: removing exactly those 13 rows gives 24c5e84b..., the digest of batch 16's whole DEV_ROUTES table.
-const OTHER_ROWS_DIGEST = "bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599";
+// Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
+// PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack). All added, none changed, the order of every earlier row kept:
+// removing exactly those 10 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
+const OTHER_ROWS_DIGEST = "1d5a6670f1bee3e941ed833a0c9428201b8453162afc919f2c451845a032ebfc";

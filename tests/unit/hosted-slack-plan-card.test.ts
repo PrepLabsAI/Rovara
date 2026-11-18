@@ -380,12 +380,13 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
   it("the hosted root registers the hosted thread handler, gives the notice service the thread's wiring, and links the admins' setup notice", () => {
     const root = read("packages/broker/src/aws/core-engine-root.ts");
     expect(root).toMatch(/lessons\.milestones\.register\(hostedThreadHandler\(\{\s+threads, registry, companyId, deps: flow\.deps/u);
-    expect(root).toContain("...(inputs.chatThreads === undefined ? {} : { notification: hostedThreadNotification({ threads: inputs.chatThreads");
+    // Batch b18: the thread notification shares one notification object with the attention email's seams (#1030 beside #994's email).
+    expect(root).toContain("...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads");
     expect(root).toContain("threadMoments: lessons !== undefined");
     expect(root).toContain("startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined })");
     expect(root).toContain("setupLink: (project) => projectPageUrl(originOf(), project)");
     const broker = read("packages/broker/src/aws/broker.ts");
-    expect(broker).toContain("notification: { ...wiring.notification,");
+    expect(broker).toContain("notification: { ...(wiring.notification ?? {}),");
     expect(broker).toContain("...(wiring.threadMoments === true ? { threadMoments: true } : {})");
   });
 

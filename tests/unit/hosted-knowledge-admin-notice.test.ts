@@ -142,7 +142,7 @@ describe("the broker hands the notice delivery the same re-check", () => {
   const rootSource = readFileSync(new URL("../../packages/broker/src/aws/core-engine-root.ts", import.meta.url), "utf8");
 
   it("passes the core root's adminNotice into the hosted job services' notification, next to the people port's other wiring", () => {
-    expect(body).toMatch(/createHostedBrokerCoreServices\(\{[^\n]*\n[^\n]*\n\s*notification: \{ \.\.\.\(wiring\.notification \?\? \{\}\)[^\n]*adminNotice: async \(orgId, developerId\) => \(await builtCoreRoot\?\.adminNotice\?\.\(orgId, developerId\)\) === true/u);
+    expect(body).toMatch(/createHostedBrokerCoreServices\(\{[^\n]*\n(?:[^\n]*\n){1,2}\s*notification: \{ \.\.\.\(wiring\.notification \?\? \{\}\)[^\n]*adminNotice: async \(orgId, developerId\) => \(await builtCoreRoot\?\.adminNotice\?\.\(orgId, developerId\)\) === true/u);
   });
 
   it("queues and delivers through one function: the knowledge API's adminsOf and the delivery check are the same list, asked company-wide", () => {

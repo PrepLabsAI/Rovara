@@ -29,6 +29,8 @@ import type { OfferedModelsReader } from "../../packages/broker/src/core-host/ga
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
+// Batch b18 (#1041 HW3c): the company-instructions point reads the gateway's rules service when the gateway signs tasks; this two-company run is not about company rules, so its install has no such service (the point stays empty, as before #1041).
+vi.mock("../../packages/broker/src/core-host/company-instructions-http.js", async (original) => ({ ...await original<object>(), companyInstructionsModules: () => [] }));
 const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb", C: OrgId = "org_cccccccccccccccccccc";
 const personA = "a".repeat(64), personB = "b".repeat(64), personC = "c".repeat(64);
 const SIGNING = "k".repeat(32);
