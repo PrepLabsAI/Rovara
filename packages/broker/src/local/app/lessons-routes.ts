@@ -22,7 +22,7 @@ import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { LESSON_PAGE_MAX, buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
 import type { LocalToolsCounter } from "../../lessons/local-tools.js";
-import { KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
+import { KNOWLEDGE_NO_SUCH_PROJECT, KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
 import { knowledgeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
 import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
@@ -35,6 +35,7 @@ const TASK_LESSONS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/lessons(?:\/([A-Za-z0-
 const LOCAL_LESSONS = /^\/v1\/dev\/projects\/([^/]+)\/lessons$/u;
 const KNOWLEDGE_AREAS = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/areas$/u;
 const KNOWLEDGE_PROPOSE = /^\/v1\/dev\/projects\/([^/]+)\/knowledge\/propose$/u;
+const LOCAL_REPLAY = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/replay$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export { LOCAL_LESSONS_PER_MINUTE };
 const UNAVAILABLE = KNOWLEDGE_UNAVAILABLE;
@@ -116,13 +117,24 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     const local = request.method === "POST" ? LOCAL_LESSONS.exec(path) : null;
     const areas = request.method === "POST" ? KNOWLEDGE_AREAS.exec(path) : null;
     const propose = request.method === "POST" ? KNOWLEDGE_PROPOSE.exec(path) : null;
-    if (project === null && task === null && local === null && areas === null && propose === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
+    const replay = LOCAL_REPLAY.exec(path);
+    if (project === null && task === null && local === null && areas === null && propose === null && replay === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
     try {
       if (caller.principal.companyId !== companyId) throw agentXError("FORBIDDEN", "this is not your install");
       const who = { orgId: companyId, developerId: caller.principal.personId };
       if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller, "lessons"));
       if (areas !== null) return json(200, await localRead(decodeURIComponent(areas[1]!), request, caller, "areas"));
       if (propose !== null) return json(200, await proposeFromTool(decodeURIComponent(propose[1]!), request, caller));
+      if (replay !== null) {
+        if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+        if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", "This route needs a full-access person token.");
+        const name = decodeURIComponent(replay[1]!);
+        if (await flow.projects.latest(name) === undefined) throw agentXError("NOT_FOUND", KNOWLEDGE_NO_SUCH_PROJECT);
+        const params = new URLSearchParams(request.path.split("?")[1] ?? "");
+        const values = params.getAll("tasks");
+        if (values.length > 1 || (values[0] !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(values[0]))) throw agentXError("CONFIG_INVALID", "tasks: must be an integer from 1 to 50");
+        return json(200, await lessons.replay(name, values[0] === undefined ? 30 : Number(values[0])));
+      }
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
         if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");

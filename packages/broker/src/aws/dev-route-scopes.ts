@@ -131,6 +131,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/measure", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/tuning", requires: "full" },
+  // L4-RPL: compare current lesson selection to this company's finished task manifests; read-only and roster checked.
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/replay", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },

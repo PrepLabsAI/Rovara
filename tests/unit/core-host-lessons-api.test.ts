@@ -126,6 +126,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }], ["GET", `${P}/lessons/measure`], ["GET", `${P}/lessons/tuning`],
   ["GET", `${P}/skills`], ["POST", `${P}/lessons/les_aaaa1111/skill`, {}], ["PUT", `${P}/skills/add-a-queue`, { expectedVersion: 1, description: "d", when: "w", steps: ["one"] }],
   ["POST", `${P}/skills/add-a-queue/approve`, { version: 1 }], ["POST", `${P}/skills/add-a-queue/retire`, {}],
+  ["GET", `${P}/lessons/replay`],
 ];
 
 describe("the paths", () => {
@@ -138,7 +139,7 @@ describe("the paths", () => {
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/skill", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
-      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure", "GET /v1/dev/projects/{project}/lessons/tuning",
+      "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure", "GET /v1/dev/projects/{project}/lessons/tuning", "GET /v1/dev/projects/{project}/lessons/replay",
       // Lead 4 L4-LP3W: by code area, and where Rovara learns from (their own tests: lessons-by-area/lessons-areas-api.test.ts).
       "GET /v1/dev/projects/{project}/lessons/areas", "GET /v1/dev/projects/{project}/lessons/learning-sources", "PUT /v1/dev/projects/{project}/lessons/learning-sources/{source}",
     ]].sort());
@@ -151,6 +152,66 @@ describe("the paths", () => {
     expect(skillRows.map((route) => `${route.method} ${route.path}`).sort()).toEqual(["GET /v1/dev/projects/{project}/skills", "POST /v1/dev/projects/{project}/skills/{skill}/approve", "POST /v1/dev/projects/{project}/skills/{skill}/retire", "PUT /v1/dev/projects/{project}/skills/{skill}"].sort());
     expect(skillRows.every((route) => route.requires === "full" && isLessonsApiPath(route.path.replace(/\{[A-Za-z]+\}/g, "x1")))).toBe(true);
     for (const path of [`${P}/skills`, `${P}/skills/a-b`, `${P}/skills/a-b/approve`, `${P}/skills/a-b/retire`, `${P}/skills/Bad`, `${P}/skills/a-b/x`, `${P}/skills/`, `${P}/skills/a-b/approve/c`, `${P}/lessons/x1/skill`, `${P}/lessons/x1/skill/y`]) expect(isLessonsApiPath(path), path).toBe(LESSONS_API_ROUTES.test(path));
+  });
+});
+
+describe("lessons replay route", () => {
+  const PATH = `${P}/lessons/replay`;
+
+  it("uses the default and bounded task counts, and refuses malformed counts or scoped tokens", async () => {
+    const w = await setUp();
+    const replay = vi.spyOn(w.lessons.get(A)!, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
+    const target = api(w).api;
+    expect((await call(target, "a-admin", "GET", PATH)).ok).toBe(true);
+    expect(replay).toHaveBeenLastCalledWith("payments", 30);
+    expect((await call(target, "a-maint", "GET", PATH, undefined, { tasks: "50" })).ok).toBe(true);
+    expect(replay).toHaveBeenLastCalledWith("payments", 50);
+    for (const value of ["0", "51", "1.5", "x", "01"]) expect((await call(target, "a-admin", "GET", PATH, undefined, { tasks: value })).ok).toBe(false);
+    expect((await call(target, "a-admin", "GET", PATH, undefined, undefined, { scriptToken: { tokenId: "sct_aaaaaaaaaaaaaaaaaaaa" } })).ok).toBe(false);
+    expect(await call(target, "a-contrib", "GET", PATH)).toMatchObject({ ok: false, code: "FORBIDDEN", status: 403, message: MEASURE_NEEDS_ADMIN });
+    expect((await call(target, "a-out", "GET", PATH)).ok).toBe(false);
+  });
+
+  it("keeps same-named projects in separate companies", async () => {
+    const w = await setUp();
+    for (const companyId of [A, B]) vi.spyOn(w.lessons.get(companyId)!, "replay").mockResolvedValue({
+      tasks: [{ taskId: companyId === A ? "task-a" : "task-b", stage: "PLAN", round: 1, actual: [], replayed: [], gained: [], lost: [], changed: false }],
+      totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 },
+    });
+    const target = api(w).api;
+    const a = await call(target, "a-admin", "GET", PATH);
+    const b = await call(target, "b-admin", "GET", PATH);
+    expect((a.ok && b.ok) ? [a.body.tasks, b.body.tasks] : []).toEqual([[expect.objectContaining({ taskId: "task-a" })], [expect.objectContaining({ taskId: "task-b" })]]);
+  });
+
+  it("allows a company admin to replay without project roster membership", async () => {
+    const w = await setUp();
+    vi.spyOn(w.people, "onProjectRoster").mockImplementation(async (companyId, project, personId) => personId !== "a-admin" && project === "payments" && (companyId === A || companyId === B));
+    vi.spyOn(w.lessons.get(A)!, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
+    expect((await call(api(w).api, "a-admin", "GET", PATH)).ok).toBe(true);
+  });
+
+  it("replays a similarity-eligible task from stored data without embeddings, model calls, or writes", async () => {
+    const w = await setUp();
+    const taskId = w.tasks.get(A)!;
+    const task = await w.world.store.get({ pk: `DEVTASK#${taskId}`, sk: "META" });
+    await w.world.store.put({ item: { ...task!, closedAt: new Date(w.world.clock.now).toISOString() } });
+    await w.lessons.get(A)!.runtime.store.putManifest({
+      taskId, workspaceId: A, project: "payments", stage: "PLAN", round: 1, setVersion: 0, memory: "live", at: w.world.clock.now,
+      lessons: [{ id: "les_aaaa1111", version: 1, score: 1, why: "similar", citation: "none" }], bytes: 0,
+    });
+    await put(w, A, lesson(A, "les_aaaa1111", { status: "active", approvals: [{ approvalId: "approved", by: "a-admin", at: w.world.clock.now, mode: "one" }], title: "Network retry helper", description: "Use withRetry for network calls", body: "Wrap network calls in withRetry from the retry helper." }));
+    const writes = [vi.spyOn(w.world.store, "put"), vi.spyOn(w.world.store, "update"), vi.spyOn(w.world.store, "delete"), vi.spyOn(w.world.store, "transact")];
+    const embed = vi.fn(async () => [1, 0]);
+    const embedder = { embed };
+    Object.assign(w.lessons.get(A)!.runtime.load, { embedder });
+    const gateway = vi.fn(async () => { throw new Error("replay must not call a model gateway"); });
+    Object.assign(w.lessons.get(A)!.runtime, { judgeModel: gateway });
+    const result = await w.lessons.get(A)!.replay("payments", 1);
+    expect(result.tasks).toEqual([expect.objectContaining({ taskId, stage: "PLAN", actual: ["les_aaaa1111"], replayed: ["les_aaaa1111"], gained: [], lost: [] })]);
+    for (const write of writes) expect(write).not.toHaveBeenCalled();
+    expect(embed).not.toHaveBeenCalled();
+    expect(gateway).not.toHaveBeenCalled();
   });
 });
 

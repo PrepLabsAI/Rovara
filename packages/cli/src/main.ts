@@ -52,6 +52,7 @@ import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from 
 import { resolveDeveloperEnvironment } from "./developer/config.js";
 import { chatGptConnect, chatGptConnectionText, chatGptDisconnect, chatGptDisconnectText, chatGptStatus } from "./developer/chatgpt.js";
 import { developerLogin } from "./developer/login.js";
+import { registerLessonsReplayCommand } from "./developer/lessons-replay.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { registerRecordCommands, type RecordCommandContext } from "./record/register.js";
@@ -500,6 +501,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   registerOpenCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerTestEnvCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerTokenCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerLessonsReplayCommand(program, { home, tokenStore: services.tokenStore, fetch: services.fetchImplementation, stdout: services.stdout });
   registerPlaybookCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerSecondReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerConnectionsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });

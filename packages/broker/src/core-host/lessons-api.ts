@@ -66,7 +66,7 @@ import type { SkillGraduation } from "../lessons/graduate.js";
 import { digestPilotOf, switchCovers, type CoreSwitch } from "./flags.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
-const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|tuning|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
+const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly-summary|retire-requests|decisions|measure|tuning|replay|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
 
 /** Whether a path is one of this API's (the dev router asks before it hands a request here). */
 export const isLessonsApiPath = (path: string): boolean => LESSONS_API.test(path) || LESSONS_GRADUATION_API.test(path);
@@ -150,7 +150,7 @@ export interface LessonsApiCaller {
 }
 
 /** What this API needs of one company's lessons (`createCoreLessons`). */
-export type LessonsApiCompany = Pick<CoreLessons, "companyId" | "runtime" | "readTask" | "projectExists">;
+export type LessonsApiCompany = Pick<CoreLessons, "companyId" | "runtime" | "readTask" | "projectExists" | "replay">;
 
 export interface LessonsApiOptions {
   /** The install's lessons switch (`readCoreLessonsSwitch`). */
@@ -271,7 +271,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
     const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);
     const route = graduation !== null ? "graduation" : skillsPath ? (rawSkill === undefined ? "skills" : skillAction === undefined ? "skill-edit" : `skill-${skillAction}`) : rawSource !== undefined ? "learning-source" : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
+    const allowed: Record<string, string> = { list: "GET", task: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", replay: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
     if (graduation === null && (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method)) throw notFound(ROUTE_NOT_FOUND);
 
     // The switch first: off reads nothing at all, not even who is asking.
@@ -302,6 +302,12 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     const who = { orgId: companyId, developerId: personId };
     const where = { workspaceId: companyId, project };
 
+    /** Who may inspect replay or change the project's lessons settings: company owner/admin or project maintainer. */
+    const mayChange = async (): Promise<boolean> => {
+      if (role === "owner" || role === "admin") return true;
+      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
+    };
+
     if (route === "task" || route === "not-helpful") {
       let taskId: string;
       try { taskId = decodeURIComponent(rawTask!); } catch { throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK); }
@@ -329,6 +335,19 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       }
       return { project, taskId, lessonId, marked: "not_helpful" };
     }
+    if (route === "replay") {
+      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+      const authorized = await mayChange();
+      if (!onRoster && role !== "owner" && role !== "admin") throw notFound(NO_SUCH_PROJECT);
+      if (!authorized) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
+      const params = Object.fromEntries(request.query?.entries() ?? []);
+      if (Object.keys(params).some((name) => name !== "tasks") || (request.query?.getAll("tasks").length ?? 0) > 1) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
+      const rawTasks = request.query?.get("tasks") ?? undefined;
+      if (rawTasks !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(rawTasks)) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
+      try { return { project, ...(await lessons.replay(project, rawTasks === undefined ? 30 : Number(rawTasks))) }; }
+      catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    }
+
     if (!onRoster) throw notFound(NO_SUCH_PROJECT);
 
     if (graduation !== null) return await answerGraduation(request, graduation, { companyId, project, personId, lessons, skills: options.skillsOf?.(companyId), now: options.now, log }, caller);
@@ -383,12 +402,6 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedInTasks: count.tasks, ...(count.more === true ? { usedInTasksMore: true as const } : {}) }; });
       return { ...page, lessons: lessonsShown, ...(used.incomplete ? { usedInIncomplete: true } : {}), ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
     }
-
-    /** Who may change the project's lessons settings (the mode, the weekly summary): a company owner or admin, or a project admin (maintainer), read live. */
-    const mayChange = async (): Promise<boolean> => {
-      if (role === "owner" || role === "admin") return true;
-      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
-    };
 
     if (route === "measure") {
       // Phase 0 (measure only, `lessons/measure.ts`): numbers about loads and merges, ids never shown. For the people who run the project's learning, never a script token.

@@ -173,6 +173,11 @@ describe("the /v1/app route table", () => {
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });
+
+  it("pins the lessons replay as a full-access company route, outside the core app table", () => {
+    expect(devRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toMatchObject({ method: "GET", requires: "full" });
+    expect(appRouteOf("GET", "/v1/dev/projects/payments/lessons/replay")).toBeUndefined();
+  });
 });
 
 // ---- Through the broker ----
