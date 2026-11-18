@@ -1,11 +1,16 @@
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { DesignReviewBindingSchema, systemOwnerIdOf, ROVARA_CODE_AGENT_ID, agentModelIdentity, consumeReviewerGrant, taskTokenClaimsFor, REVIEWER_GRANT_SECONDS, type RegistryView, type TaskTokenClaims, type JsonValue } from "@agentx/contracts";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { createHostedReviewers, SECOND_PROVIDER_UNAVAILABLE } from "../../packages/broker/src/core-host/hosted-reviewers.js";
+import { createReviewSessionOpener } from "../../packages/worker/src/design-review-sessions.js";
+import { createUsageBooking } from "../../packages/broker/src/core-host/usage-booking.js";
 import { createHostedDesignReview } from "../../packages/broker/src/core-host/hosted-design-review.js";
 import { createTaskTokenDescriber } from "../../packages/broker/src/core/model-gateway/describer.js";
 import { readTaskTokenRecords } from "../../packages/broker/src/core/model-gateway/records.js";
+import { modelAccessSource } from "../../packages/worker/src/model-access.js";
 import { mintTaskToken } from "../../packages/broker/src/core/model-gateway/token.js";
 import { createHostedAdmission, createHostedLedger, createHostedMetering } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { reviewerRoomUsd } from "../../packages/broker/src/core-host/reviewer-authority.js";
@@ -47,7 +52,7 @@ async function world() {
   const records = () => readTaskTokenRecords(h.deps, scope);
   const grant = async (slot = "second_review") => hosted.grants.describeReviewer!(scope, await records(), slot);
   const book = async (companyId: string, taskId: string, usd: number) => ledger.recordUsage({ companyId, taskId, entryId: randomUUID(), at: now().toISOString(), usage: { provider: "test", modelId: "test", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, reportedCost: { micros: usd * 1_000_000, currency: "USD" } });
-  return { h, scope, opKey, tk, registry, options, hosted, grant, records, offered, book };
+  return { h, scope, opKey, tk, registry, options, hosted, grant, records, offered, book, settings, metering, ledger, now };
 }
 
 async function setUpkeep(w: Awaited<ReturnType<typeof world>>, enabled: boolean) {
@@ -176,18 +181,20 @@ describe("hosted reviewer grants", () => {
     const opinion = secondOpinionFromReviewResult({ recorded: prepared.record, operationId: w.scope.operationId, terminalStatus: "SUCCEEDED", result: {}, currentCandidateDigest: digest, now: new Date(w.h.clock.now).toISOString() });
     expect(w.hosted.secondReview.prLines({ secondOpinion: opinion }, digest)).toContain(SPEND_STOP_REASON);
   });
-  it("(b) refuses at the company daily cap, including another task's spend", async () => {
-    const w = await world(); await w.book(A, "other-task", 10);
+  it("(b) refuses at the company monthly cap supplied by the gateway", async () => {
+    const w = await world();
+    w.offered.mockImplementation(async () => ({ ...access(), reviewerAccess: { ...access().reviewerAccess, companyLimitUsd: 0 } }));
     expect(await w.grant()).toBeUndefined();
     const prepared = await w.hosted.secondReview.prepare({ task: (await w.records()).task });
-    expect(prepared.field).toBeUndefined(); expect(prepared.firstEvent).toBe(SPEND_STOP_REASON);
+    expect(prepared.field).toBeUndefined();
   });
-  it("keeps a review ceiling inside the remaining company daily room", async () => {
+  it("keeps a review ceiling inside the gateway company monthly room", async () => {
     const w = await world(); await w.book(A, "another-task", 9.75);
+    w.offered.mockImplementation(async () => ({ ...access(), reviewerAccess: { ...access().reviewerAccess, companyLimitUsd: 0.25 } }));
     expect((await w.grant())?.reviewer?.ceilingUsd).toBe(0.25);
     const runtime = createHostedDesignReview({ ...w.options, env: {}, blobs: {} as never });
     expect(await runtime.ports.taskRoomUsd((await w.records()).task)).toBe(0.25);
-    await w.book(A, "another-task", 0.25);
+    w.offered.mockImplementation(async () => ({ ...access(), reviewerAccess: { ...access().reviewerAccess, companyLimitUsd: 0 } }));
     expect(await runtime.ports.taskRoomUsd((await w.records()).task)).toBe(0);
     expect(await w.grant()).toBeUndefined();
   });
@@ -202,7 +209,7 @@ describe("hosted reviewer grants", () => {
     w.offered.mockImplementation(async () => ({ ...access(), reviewerAccess: { ...access().reviewerAccess, companyId: B } }));
     expect(await w.grant()).toBeUndefined();
   });
-  it("(c) mints each slot once even with concurrent asks, using an explicit short TTL", async () => {
+  it("(c) claims each slot once even with concurrent first asks, then renews the same session", async () => {
     const w = await world(); const signer = signingWorld();
     const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
     const records = await w.records();
@@ -212,18 +219,128 @@ describe("hosted reviewer grants", () => {
     const claims = JSON.parse(Buffer.from(minted.value.token.split(".")[1]!, "base64url").toString()) as TaskTokenClaims;
     expect(signer.reference(minted.value.token, Math.floor(w.h.clock.now / 1000))).toBeDefined();
     expect(claims.exp - claims.iat).toBe(REVIEWER_GRANT_SECONDS); expect(REVIEWER_GRANT_SECONDS).toBe(120);
-    expect(await w.grant()).toBeUndefined();
+    expect((await w.grant())?.reviewer).toEqual(claims.reviewer);
   });
-  it("design grants use the main payer, allocated ceiling and one slot issuance", async () => {
+  it("design grants use the main payer, allocated ceiling and one session", async () => {
     const w = await world();
     await designSlot(w);
     const task = (await w.h.store.get(w.tk))!;
     const grant = await w.grant("r1-critic");
     expect(grant).toMatchObject({ payer: { kind: "member", developerId: "a".repeat(64) }, taskId: task["taskId"], step: "design_review", reviewer: { kind: "design_review", slot: "r1-critic", ceilingUsd: 2 } });
     expect(await createTaskTokenDescriber(w.h.deps, w.hosted.grants).describe(w.scope)).toBeUndefined();
-    await w.hosted.grants.reviewerMinted!(w.scope, grant!, "opaque-test-token", w.h.clock.now + 120_000);
-    expect(await w.grant("r1-critic")).toBeUndefined();
+    const signer = signingWorld();
+    await mintTaskToken({ signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) }, { ...w.scope, reviewerSlot: "r1-critic" }, await w.records());
+    expect((await w.grant("r1-critic"))?.reviewer).toEqual(grant?.reviewer);
     expect(await w.grant("second_review")).toBeUndefined();
+  });
+
+  it.each(["second_review", "design_review"] as const)("renews a four-turn %s over 120 seconds with one jti, ceiling and payer", async kind => {
+    const w = await world();
+    if (kind === "design_review") await designSlot(w);
+    const slot = kind === "design_review" ? "r1-critic" : "second_review";
+    const signer = signingWorld();
+    const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
+    const source = modelAccessSource({ controlPlaneUrl: "https://broker.example", capability: "fake", slot, now: () => w.h.clock.now,
+      fetch: async url => {
+        expect(new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).searchParams.get("slot")).toBe(slot);
+        const minted = await mintTaskToken(deps, { ...w.scope, reviewerSlot: slot }, await w.records());
+        return Response.json({ baseUrl: "https://gateway.example", apiKey: minted.token, expiresAt: minted.expiresAt });
+      } });
+    const turns: TaskTokenClaims[] = [];
+    let sessionJti: string | undefined;
+    for (let turn = 0; turn < 4; turn++) {
+      if (turn > 0) w.h.clock.now += 70_000;
+      const answer = await source();
+      const claims = signer.reference(answer.apiKey, Math.floor(w.h.clock.now / 1000))!;
+      expect(claims).toBeDefined();
+      turns.push(claims);
+      const expected = { cid: claims.cid, pid: claims.pid, tid: claims.tid, ws: claims.ws, op: claims.op, kind, slot, model: claims.mdl[0]! };
+      expect(await consumeReviewerGrant(claims, expected, Math.floor(w.h.clock.now / 1000), async jti => {
+        sessionJti ??= jti; return jti === sessionJti;
+      })).toBe(true);
+    }
+    expect(new Set(turns.map(claims => claims.jti)).size).toBe(1);
+    expect(turns.map(claims => claims.iat - turns[0]!.iat)).toEqual([0, 70, 140, 210]);
+    for (const claims of turns) {
+      expect({ ...claims, iat: 0, nbf: 0, exp: 0 }).toEqual({ ...turns[0]!, iat: 0, nbf: 0, exp: 0 });
+      expect(claims.exp - claims.iat).toBe(120);
+    }
+  });
+  it.each(["second_review", "design_review"] as const)("never renews %s past 600 seconds or after close", async kind => {
+    const w = await world();
+    if (kind === "design_review") await designSlot(w);
+    const slot = kind === "design_review" ? "r1-critic" : "second_review";
+    const signer = signingWorld();
+    const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
+    const mint = async () => mintTaskToken(deps, { ...w.scope, reviewerSlot: slot }, await w.records());
+    const first = await mint(); const start = w.h.clock.now;
+    w.h.clock.now = start + 480_000;
+    const last = await mint();
+    expect(last.expiresAt).toBe(first.expiresAt + 480_000);
+    w.h.clock.now = start + 481_000;
+    await expect(mint()).rejects.toThrow("invalid or expired model access");
+    w.h.clock.now = start + 600_000;
+    await expect(mint()).rejects.toThrow("invalid or expired model access");
+    w.h.clock.now = start + 70_000;
+    await w.h.store.put({ item: { ...(await w.h.store.get(w.tk))!, closedAt: new Date(w.h.clock.now).toISOString() } });
+    await expect(mint()).rejects.toThrow("this operation has no model access");
+  });
+  it("refuses renewal when task, kind, model or payer changes, including stale task records", async () => {
+    const w = await world(); const signer = signingWorld();
+    const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
+    const mint = async () => mintTaskToken(deps, { ...w.scope, reviewerSlot: "second_review" }, await w.records());
+    await mint(); w.h.clock.now += 70_000;
+    const records = await w.records();
+    expect(await w.hosted.grants.describeReviewer!(w.scope, { ...records, task: { ...records.task, taskId: "other-task" } }, "second_review")).toBeUndefined();
+    const op = (await w.h.store.get(w.opKey))!;
+    await w.h.store.put({ item: { ...op, requester: { personId: "b".repeat(64) } } });
+    await expect(mint()).rejects.toThrow("invalid or expired model access");
+    await w.h.store.put({ item: { ...op, dispatch: { kind: "task", payload: { workflowSecondReviewer: { candidates: [{ model: agentModelIdentity("another-model"), modelRoute: route("another-model"), keySlot: "second_review" }] } } }, secondReviewPlan: { candidateDigest: digest, caps: { "another-model": { capUsd: 3 } } } } });
+    await expect(mint()).rejects.toThrow("invalid or expired model access");
+    await w.h.store.put({ item: op });
+    await designSlot(w);
+    await expect(mint()).rejects.toThrow("invalid or expired model access");
+  });
+  it("renews only the already held ceiling even when monthly room is now zero", async () => {
+    const w = await world(); const signer = signingWorld();
+    const deps = { signer: signer.signer, issuer: claimVector().iss, now: () => w.h.clock.now, describer: createTaskTokenDescriber(w.h.deps, w.hosted.grants) };
+    const mint = async () => mintTaskToken(deps, { ...w.scope, reviewerSlot: "second_review" }, await w.records());
+    const first = await mint(); w.h.clock.now += 140_000;
+    w.offered.mockImplementation(async () => ({ version: 1, models }));
+    const renewed = await mint();
+    const claims = (token: string) => JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as TaskTokenClaims;
+    expect(claims(renewed.token).reviewer).toEqual(claims(first.token).reviewer);
+    expect(claims(renewed.token).jti).toBe(claims(first.token).jti);
+    // A different slot still needs new authority, so cannot turn this hold into a fresh grant.
+    expect(await w.grant("r1-critic")).toBeUndefined();
+  });
+  it("records design-review usage on the task cost record and refuses another task at the engine daily cap", async () => {
+    const w = await world(); w.settings.companyDayCapMicros = 5_000_000;
+    await w.book(A, "earlier-task", 3); await w.book(B, "other-company-task", 100);
+    const tempRoot = process.env.TMPDIR;
+    if (tempRoot === undefined) throw new Error("test temporary directory is missing");
+    const rootPath = await mkdtemp(join(tempRoot, "l4-hw6c-review-usage-"));
+    const payloads: unknown[] = [];
+    try {
+      const open = createReviewSessionOpener({ rootPath, localFileTools: true, onUsage: payload => { payloads.push(payload); }, runtimeFor: () => ({ model: { provider: "fixture", modelId: "review-model" }, piAdapter: { create: async input => {
+        const sessionFile = join(input.sessionDirectory, "review.jsonl"); await writeFile(sessionFile, "");
+        return { sessionFile, conversationId: "review", prompt: async () => undefined, abort: async () => undefined, getModel: () => ({ provider: "fixture", modelId: "review-model" }),
+          getSessionStats: () => ({ sessionFile, sessionId: "review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, total: 20 }, cost: 2 }),
+          subscribe: () => () => undefined, dispose: () => undefined };
+      } } }) });
+      const session = await open({ purpose: "reviewer", keySlot: "r1-critic", model: { provider: "fixture", modelId: "review-model" }, system: "Critic", tools: [] });
+      await session.prompt("Review"); session.dispose(); session.dispose();
+      expect(payloads).toHaveLength(1);
+      const booking = createUsageBooking({ store: w.h.store, metering: w.metering, now: w.now });
+      const events = payloads.map(payload => ({ type: "usage", timestamp: w.now().toISOString(), payload }));
+      const operation = (await w.records()).operation;
+      expect(await booking.bookOperationEvents(operation, events)).toEqual({ booked: 1, unreadable: 0 });
+      expect(await booking.bookOperationEvents(operation, events)).toEqual({ booked: 0, unreadable: 0 });
+      const task = (await w.records()).task;
+      expect(await w.h.store.get({ pk: `ORG#${A}#COST#${task.taskId}`, sk: "TOTAL" })).toMatchObject({ micros: 2_000_000 });
+      expect((await w.ledger.companyDayCost(A, w.now().toISOString().slice(0, 10))).usdMicros).toBe(5_000_000);
+      expect(await w.h.deps.admission.admit({ companyId: A, action: "task.start", idempotencyKey: "after-review", subject: { type: "task", id: "next-task" } })).toMatchObject({ allowed: false, code: "company_day_cap" });
+    } finally { await rm(rootPath, { recursive: true, force: true }); }
   });
   it("refuses general slots and never turns the second-review slot into a design grant", async () => {
     const w = await world();
@@ -255,19 +372,30 @@ describe("hosted reviewer grants", () => {
   });
 });
 
-it("(c) consumes a grant once and refuses replay, another task, another kind and expiry before spend", async () => {
+it("(c) continues the same bound session and refuses another task/kind, close and session expiry before spend", async () => {
   for (const kind of ["second_review", "design_review"] as const) {
     const claims = taskTokenClaimsFor({ ...claimVector(), stp: kind, mdl: [primary], reviewer: { kind, slot: kind, ceilingUsd: 1 } })!;
     const expected = { cid: claims.cid, pid: claims.pid, tid: claims.tid, ws: claims.ws, op: claims.op, kind, slot: kind, model: primary };
-    const used = new Set<string>();
-    const consume = vi.fn(async (jti: string) => { if (used.has(jti)) return false; used.add(jti); return true; });
+    let active = claims, now = claims.iat;
+    let session: { jti: string; bind: string; endsAt: number; closed: boolean } | undefined;
+    const consume = vi.fn(async (jti: string) => {
+      const bind = JSON.stringify({ ...active, iat: 0, nbf: 0, exp: 0 });
+      session ??= { jti, bind, endsAt: now + 600, closed: false };
+      return jti === session.jti && bind === session.bind && !session.closed && now < session.endsAt;
+    });
     for (const patch of [{ tid: "another-task" }, { kind: kind === "second_review" ? "design_review" as const : "second_review" as const }, { cid: B }, { model: second }]) {
       expect(await consumeReviewerGrant(claims, { ...expected, ...patch }, claims.iat, consume)).toBe(false);
     }
     expect(await consumeReviewerGrant(claims, expected, claims.exp, consume)).toBe(false);
     expect(consume).not.toHaveBeenCalled();
-    expect(await consumeReviewerGrant(claims, expected, claims.iat, async () => { throw new Error("replay store unavailable"); })).toBe(false);
-    expect(await Promise.all([1, 2].map(() => consumeReviewerGrant(claims, expected, claims.iat, consume)))).toEqual([true, false]);
-    expect(await consumeReviewerGrant(claims, expected, claims.iat, consume)).toBe(false);
+    expect(await consumeReviewerGrant(claims, expected, claims.iat, async () => { throw new Error("session store unavailable"); })).toBe(false);
+    expect(await Promise.all([1, 2].map(() => consumeReviewerGrant(claims, expected, now, consume)))).toEqual([true, true]);
+    active = taskTokenClaimsFor({ ...claims, iat: claims.iat + 140 })!; now = active.iat;
+    expect(await consumeReviewerGrant(active, expected, now, consume)).toBe(true);
+    session!.closed = true;
+    expect(await consumeReviewerGrant(active, expected, now, consume)).toBe(false);
+    session!.closed = false;
+    active = taskTokenClaimsFor({ ...claims, iat: claims.iat + 540 })!; now = claims.iat + 600;
+    expect(await consumeReviewerGrant(active, expected, now, consume)).toBe(false);
   }
 });
