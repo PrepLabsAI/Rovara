@@ -121,6 +121,10 @@ describe("the VPC stays IPv4 only and no worker has a public address", () => {
     const data = templates[0]![1].Properties.LaunchTemplateData as Record<string, unknown>;
     expect(data).not.toHaveProperty("NetworkInterfaces");
     expect(JSON.stringify(data)).not.toMatch(/AssociatePublicIpAddress|AssociateCarrierIpAddress|Ipv6/u);
+    // The workers' subnet pairs (the binding the broker launches into) name only the two private subnets, never a public one.
+    const pairs = JSON.stringify(foundation.Outputs?.Ec2WorkerSubnets);
+    expect([...pairs.matchAll(/"Ref":"([A-Za-z0-9]+)"/gu)].map((match) => match[1]).sort()).toEqual(["PrivateSubnet1", "PrivateSubnet2"]);
+    expect(pairs).not.toContain("PublicSubnet");
     // No instance, Elastic IP association or other address is allocated to a worker anywhere in the foundation.
     expect(ofType(foundation, "AWS::EC2::Instance")).toEqual([]);
     expect(ofType(foundation, "AWS::EC2::EIPAssociation")).toEqual([]);

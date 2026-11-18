@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { CompanyEgressAddressesViewSchema, EGRESS_ADDRESSES_ADMIN_ONLY, EGRESS_ADDRESSES_UNAVAILABLE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
+import { routeCompanyEgress } from "../../packages/broker/src/aws/company-egress-routes.js";
 import { APP_ROUTES, DEV_ROUTES, devRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
 
@@ -101,6 +102,24 @@ describe("GET /v1/dev/company/egress-addresses", () => {
     expect((await world({ wired: false }).call()).status).toBe(404);
     const w = world();
     for (const method of ["POST", "PUT", "DELETE", "PATCH"]) expect([method, (await w.call(method, PATH, {})).status]).toEqual([method, 404]);
+  });
+
+  it("the route's own membership check (defence in depth, behind the dispatcher's company lookup): a membership of another company, another person or a revoked one is signed out, whatever role it holds", async () => {
+    const w = world();
+    const send = async (item: Record<string, unknown> | undefined, asked: string = A) => {
+      if (item !== undefined) w.h.db.set({ ...membershipKey(PERSON_B), entityType: "COMPANY_MEMBERSHIP", joinedAt: TIME, ...item });
+      return routeCompanyEgress({ documentClient: w.h.db as never, signInTableName: "SignIn", wiring: { addresses: () => ADDRESSES } }, { developerId: PERSON_B } as never, asked, { method: "GET", headers: {}, path: PATH } as never);
+    };
+    // The control: an owner of A asking for A reads the list.
+    expect(await send({ personId: PERSON_B, companyId: A, role: "owner" })).toEqual({ addresses: ["44.235.136.195", "44.226.134.187"] });
+    // The caller's membership is company B's but the dispatcher said A: refused.
+    await expect(send({ personId: PERSON_B, companyId: B, role: "owner" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    // A membership row that names another person.
+    await expect(send({ personId: PERSON, companyId: A, role: "owner" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    // Revoked.
+    await expect(send({ personId: PERSON_B, companyId: A, role: "owner", revokedAt: TIME })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    // Not a company id.
+    await expect(send({ personId: PERSON_B, companyId: "not-a-company", role: "owner" }, "not-a-company")).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
   });
 
   it("the hosted broker wires the route to its ROVARA_EGRESS_ADDRESSES variable (the only place the value comes from)", () => {

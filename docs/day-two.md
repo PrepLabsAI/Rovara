@@ -303,4 +303,4 @@ admin turns export --since 7d` shows task IDs.
 
 ## Outbound addresses
 
-Companies that allow-list Rovara read its fixed outbound addresses in Company settings. You read them from the foundation stack output `NatEgressAddresses`. See [Rovara's outbound addresses](outbound-addresses.md). The Elastic IPs behind them are retained when a stack is deleted (billed until released by hand); never release one a customer may have allowed.
+Companies that allow-list Rovara read its fixed outbound addresses in Company settings. You read them from the foundation stack output `NatEgressAddresses`. See [Rovara's outbound addresses](outbound-addresses.md). The Elastic IPs behind them are retained when a stack is deleted (billed until released by hand); never release one a customer may have allowed. Building the environment again allocates NEW addresses unless you import the kept ones, so give companies the 30 days' notice before a rebuild.
