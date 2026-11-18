@@ -96,7 +96,8 @@ async function world(options: { onCore?: readonly string[] } = {}) {
       return m?.companyId === companyId && principal.companyId === companyId && row?.["companyId"] === companyId ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: "no" };
     } },
     // The flow's start as the hosted runtime runs it for a ticket: its session and ticket binding in the start's own transaction (`ticketSessionStartExtras`), once per request id.
-    flow: { start: (async (caller: { principal: Principal; ticket?: { system: string; id: string; url: string } }, request: { requestId: string; project: string; title?: string }) => {
+    // Batch 14: the company flow carries its deps (intakePortsOf reads them for a tracker parent); these starts never reach them.
+    flow: { deps: {} as never, start: (async (caller: { principal: Principal; ticket?: { system: string; id: string; url: string } }, request: { requestId: string; project: string; title?: string }) => {
       const known = startedByRequest.get(request.requestId);
       if (known !== undefined) return { task: { taskId: known } };
       const taskId = randomUUID();
@@ -234,7 +235,7 @@ describe("the hosted intake's own checks", () => {
       connections: { connection: async () => undefined }, fenceKey: intakeFenceKeyOf("k"), now: () => Date.parse(TIME), log: () => undefined,
       companyFor: async () => ({
         store, identity: { getPrincipal: async () => answer }, access: { checkStart: async () => ({ allowed: true }) },
-        flow: { start: (async () => { started.push("x"); return { task: { taskId: randomUUID() } }; }) as never }, audit: { record: async () => undefined },
+        flow: { deps: {} as never, start: (async () => { started.push("x"); return { task: { taskId: randomUUID() } }; }) as never }, audit: { record: async () => undefined },
       }),
     });
     // A real waiting ticket (an outsider's), so a refused dismiss is the presser check and not a missing item.
