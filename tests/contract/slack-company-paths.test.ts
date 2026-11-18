@@ -92,7 +92,7 @@ describe("broker execution checks", () => {
 });
 
 // The queue preserves only Slack coordinates. Execution must resolve today's person again.
-import { createDeveloperTaskBroker, grantProject } from "../support/developer-task-broker.js";
+import { bindSlackChannelInCompany, createDeveloperTaskBroker, grantProject } from "../support/developer-task-broker.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { createSlackChannelEventsHandler } from "../../packages/broker/src/aws/slack-adapter.js";
 
@@ -105,6 +105,8 @@ async function brokerWorld(installTeam = OTHER) {
   const taskId = String((JSON.parse(start.body) as { taskId: string }).taskId);
   const task = h.db.get(`DEVTASK#${taskId}`, "META")!;
   h.db.set({ ...task, companyId: A, developerId: person });
+  // DEC 254zzz80: company A is a NAMED company: its channel binding lives in its own partition.
+  bindSlackChannelInCompany(h.db, A);
   const w = world(); w.members.clear(); w.members.set(person, A);
   w.workspaces.requireCompany = async (team) => { if (team !== SLACK_TEAM) throw Error("private"); return A; };
   const actor = { channel: "slack", tenant: SLACK_TEAM, userId: USER };
@@ -338,6 +340,11 @@ it("queued stop rechecks membership before touching task state", async () => {
 });
 it("broker refuses a channel binding to a foreign project on read and write", async () => {
   const h = await brokerWorld(); h.workspaces.getProject = async () => ({ companyId: B });
+  // DEC 254zzz80 (R2-F1): company A is NAMED, so its binding is only its own row; the binding of this channel kept under company B's partition (and the legacy row naming a
+  // project whose revision is B's) is not A's: not bound. This replaces the legacy row's foreign-project check for a named company.
+  const own = h.db.get(`ORG#${A}#SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!;
+  h.db.delete(String(own.pk), String(own.sk));
+  h.db.set({ ...own, pk: `ORG#${B}#SLACK_BINDING#${SLACK_TEAM}` });
   const read = await call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal,
     thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
   expect(JSON.stringify(read.body)).toContain("Slack channel is not bound to a project");

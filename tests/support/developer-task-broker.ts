@@ -237,6 +237,16 @@ export async function registerRevision(handler: Handler, revision: number, devel
   if (response.status !== 201) throw new Error(`registration failed: ${JSON.stringify(response.body)}`);
 }
 
+/**
+ * DEC 254zzz80 (R2-F1): a NAMED company keeps its Slack channel bindings only in its own partition (`ORG#<company>#SLACK_BINDING#<team>` / `CHANNEL#<channel>`), the
+ * staging layout. This copies the registered (legacy) binding there, so a company-mode world whose workspace belongs to `company` finds its channel bound.
+ */
+export function bindSlackChannelInCompany(db: FakeDynamoDb, company: string, team = SLACK_TEAM, channel = SLACK_CHANNEL): void {
+  const legacy = db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
+  if (legacy === undefined) throw new Error("no registered Slack binding to copy");
+  db.set({ ...legacy, pk: `ORG#${company}#SLACK_BINDING#${team}` });
+}
+
 /** An admin grant (FR-013), so access does not depend on a bound channel. */
 export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "payments"): void {
   db.set({ pk: `MEMBER#${who.developerId}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey: who.developerId, projectName, role: "developer" });

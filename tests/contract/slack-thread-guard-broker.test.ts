@@ -8,7 +8,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -23,6 +23,8 @@ beforeAll(async () => { await loadSlackBroker(); });
 /** A company-mode broker (one Slack workspace of company A, one linked person) over a fake core entry that records each start it is asked for. */
 async function world() {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
+  // DEC 254zzz80: company A is a NAMED company: its channel binding lives in its own partition.
+  bindSlackChannelInCompany(h.db, A);
   const store = new MemoryDocumentStore();
   const members = new Map([[PERSON, A]]);
   const workspaces = { store, getProject: async () => ({ companyId: A }), linkUrl: (code: string) => `https://example.test/review/link/${code}`,

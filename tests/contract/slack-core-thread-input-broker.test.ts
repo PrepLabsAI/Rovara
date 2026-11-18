@@ -11,7 +11,7 @@ import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.j
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import type { CoreEntryCaller, CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../../packages/broker/src/core-host/chat-thread-input.js";
-import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -31,6 +31,8 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   const store = new MemoryDocumentStore();
   const company = options.company ?? A;
+  // DEC 254zzz80: a NAMED company's channel binding lives in its own partition.
+  bindSlackChannelInCompany(h.db, company);
   const workspaces = { store, getProject: async () => ({ companyId: company }), linkUrl: (code: string) => `https://example.test/review/link/${code}`,
     requireCompany: async (team: string): Promise<string> => { if (team !== SLACK_TEAM) throw Error("private"); return company; }, tokenForEvent: vi.fn(async () => ({ companyId: company, token: "x" })) };
   const code = await issueChannelLinkCode({ store, orgId: company, now: Date.now }, { channel: "slack", tenant: SLACK_TEAM, userId: USER });

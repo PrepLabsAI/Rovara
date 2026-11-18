@@ -2,7 +2,8 @@ import "./broker-environment-init.js"; import { companyMembershipFromDynamo, res
 import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackLinkCodes, createSlackPersonResolver, slackBindingCompany, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { namedCompanySlackBinding } from "./company-layout.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
@@ -598,6 +599,18 @@ interface AwsBrokerDependencies {
   slackCompanies?: CompanyMembershipReader;
   /** Install workspace for the additive operator backfill; independent of sign-in being enabled. */
   slackWorkspaceLegacyTeamId?: string;
+  /** L2-2 PR 18b: set only on the install team's legacy view (withoutSlackCompanyMode): another team's binding is "not bound" there. */
+  slackInstallTeamOnly?: string;
+  /**
+   * DEC 254zzz80 (R2-F1): set only on the install team's legacy view while Slack company mode is on. The install team's company (its operator binding) picks where its channel
+   * bindings are read (slack-person.ts slackBindingCompany): a NAMED company's own partition, else the legacy keys.
+   */
+  installTeamCompany?: (teamId: string) => Promise<string>;
+  /**
+   * DEC 254zzz80 (R2-F1): with `installTeamCompany`, the company path's own dependencies. A Slack start in the install team whose company is NAMED is that company's start
+   * (startSlackWorkflow: the linked person, the company's binding and the core), never the single-workspace start, whose unscoped keys that company has none of.
+   */
+  installTeamCompanyMode?: { workspaces: SlackWorkspaceAccess; companies?: CompanyMembershipReader };
   /** Guided onboarding PR 4: Add to Slack's wiring (named environments with the company layer); absent, a Slack removal event is refused. */
   slackInstall?: SlackInstallWiring;
   /** Guided onboarding PR 5: channel links and /rovara (named environments with the company layer); absent, /rovara answers "not set up". */
@@ -1033,7 +1046,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // naming no team get a handler built without `workspaces` (today's legacy path); every other team gets the company path.
   const company = dependencies.workspaces === undefined ? undefined
     : brokerEventHandler(core, { ...dependencies, ...(dependencies.companies === undefined && dependencies.slackCompanies !== undefined ? { companies: dependencies.slackCompanies } : {}) });
-  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? "")), company, dependencies.slackWorkspaceLegacyTeamId);
+  return splitBySlackTeam(brokerEventHandler(core, company === undefined ? dependencies : installTeamView(dependencies)), company, dependencies.slackWorkspaceLegacyTeamId);
+}
+
+/**
+ * The install team's legacy view (withoutSlackCompanyMode), which also knows the install team's company (DEC 254zzz80, R2-F1): its channel bindings are read in a NAMED company's
+ * own partition, and its Slack start becomes that company's start (installTeamCompanyMode). The built-in company keeps today's legacy view exactly.
+ */
+function installTeamView(dependencies: AwsBrokerDependencies): AwsBrokerDependencies {
+  const workspaces = dependencies.workspaces!;
+  const companies = dependencies.companies ?? dependencies.slackCompanies;
+  return { ...withoutSlackCompanyMode(dependencies, dependencies.slackWorkspaceLegacyTeamId ?? ""), installTeamCompany: (team: string) => workspaces.requireCompany(team),
+    installTeamCompanyMode: { workspaces, ...(companies === undefined ? {} : { companies }) } };
 }
 
 function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBrokerDependencies) {
@@ -3259,13 +3283,27 @@ async function deleteSlackBinding(
   return { deleted: true, binding };
 }
 
-async function getSlackBinding(
+async function getLegacySlackBinding(
   dependencies: AwsBrokerDependencies,
   teamId: string,
   channelId: string,
 ): Promise<SlackChannelBinding | undefined> {
   const binding = await getChannelBinding(dependencies, { channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
   return binding === undefined || !await slackCompanyProject(dependencies, teamId, binding.projectName) ? undefined : slackBindingOf(binding);
+}
+
+/**
+ * DEC 254zzz80 (R2-F1): a Slack channel's binding for the team's company. A NAMED company's bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`), read
+ * by key under the team's company as resolved now; the built-in company and no company layer keep the legacy read above, unchanged.
+ */
+async function getSlackBinding(
+  dependencies: AwsBrokerDependencies,
+  teamId: string,
+  channelId: string,
+): Promise<SlackChannelBinding | undefined> {
+  const named = await slackBindingCompany(dependencies, teamId);
+  if (named === undefined) return getLegacySlackBinding(dependencies, teamId, channelId);
+  return namedCompanySlackBinding(dependencies.documentClient, dependencies.tableName, named, teamId, channelId);
 }
 
 /** Spec 062 FR-010: one space's binding on any channel. Rows written before channels followed the latest revision also carry projectRevision; it is ignored. */
@@ -6294,9 +6332,12 @@ export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflo
     && typeof value.requestId === "string" && (value.workflowPath === "QUICK" || value.workflowPath === "FULL");
 }
 
-async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
-  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+async function startSlackWorkflow(view: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
+  if (view.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
+  // DEC 254zzz80 (R2-F1): the install team of a NAMED company starts as that company (its linked person, its own binding, the core); the built-in company as before.
+  const dependencies = await namedInstallTeamStart(view, thread.teamId);
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
   const caller = await companySlackCaller(dependencies, thread, userId);
   const requestId = randomUUIDSchema.parse(event.requestId);
@@ -6323,6 +6364,20 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
     body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
   };
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
+}
+
+/**
+ * DEC 254zzz80 (R2-F1): the dependencies a Slack start runs with. In the install team's legacy view, when the team's operator binding names a NAMED company, the start is that
+ * company's: the company path's own `workspaces` and membership reader (installTeamCompanyMode), so the caller is the linked Rovara person, the binding is the company's own row
+ * and the task starts on the core for that company. Every other case (the company handler, another team, the built-in company, company mode off) is returned unchanged.
+ */
+async function namedInstallTeamStart(dependencies: AwsBrokerDependencies, teamId: string): Promise<AwsBrokerDependencies> {
+  const mode = dependencies.installTeamCompanyMode;
+  if (dependencies.workspaces !== undefined || mode === undefined || dependencies.slackInstallTeamOnly === undefined || teamId !== dependencies.slackInstallTeamOnly) return dependencies;
+  if (await slackBindingCompany(dependencies, teamId) === undefined) return dependencies;
+  const { slackInstallTeamOnly: _only, installTeamCompany: _company, installTeamCompanyMode: _mode, ...rest } = dependencies;
+  void _only; void _company; void _mode;
+  return { ...rest, workspaces: mode.workspaces, ...(mode.companies === undefined ? {} : { companies: mode.companies }) };
 }
 
 /** How many times Stop decides again after another write moved the task under it. */

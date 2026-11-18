@@ -96,6 +96,24 @@ describe("Slack company mode's switch (18a)", () => {
     }
   });
 
+  it("gives the Slack Lambda (only) a NAMED company's own channel-binding rows, by key, with the exact company-id shape and the Null guard (DEC 254zzz80, owner-approved)", () => {
+    const resource = policy(named, "SlackIngressCompanyBindings");
+    expect(roleOf(resource)).toEqual([roleOfFunction(named, "SlackIngress")]);
+    expect(resource.Condition).toBe(on);
+    expect(resource.Properties.PolicyName).toBe("slack-company-workspaces-slackingresscompanybindings");
+    expect(statementsOf(resource)).toStrictEqual([reads("ReadCompanySlackChannelBindings", tableArn(named, "State"), ["ORG#org_????????????????????#SLACK_BINDING#*"])]);
+    // What the pattern lets in, as DynamoDB's LeadingKeys StringLike matches it (? one character, * any run): the staging company's binding partition and no other family.
+    const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
+    const allowed = (key: string) => glob("ORG#org_????????????????????#SLACK_BINDING#*").test(key);
+    expect(allowed("ORG#org_jckf8av6ri11rszcdjsa#SLACK_BINDING#T0BSHLLUGBD")).toBe(true);
+    for (const key of ["SLACK_BINDING#T0BSHLLUGBD", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#MEMBER#e46d", "ORG#org_short#SLACK_BINDING#T0BSHLLUGBD",
+      "ORG#org_jckf8av6ri11rszcdjsa#CHANNEL_LINK#slack/T0BSHLLUGBD", "ORG#org_jckf8av6ri11rszcdjsaX#SLACK_BINDING#T0BSHLLUGBD", "SLACK_TEAM#T0BSHLLUGBD"]) expect(allowed(key), key).toBe(false);
+    // No other consumer gets it, and the legacy deployment has none of it.
+    const others = Object.entries(named.Resources).filter(([id, r]) => r.Type === "AWS::IAM::Policy" && !id.startsWith("SlackCompanyModeSlackIngressCompanyBindings") && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
+    expect(others.map(([id]) => id)).toEqual([]);
+    expect(JSON.stringify(legacy)).not.toContain("#SLACK_BINDING#");
+  });
+
   it("never lets the Slack Lambda write the State table, switch on or off (#126)", () => {
     const role = roleOfFunction(named, "SlackIngress");
     const stateId = byPrefix(named, "State", "AWS::DynamoDB::Table")[0];
