@@ -10,7 +10,7 @@
 //   3. the project exists in THIS company and is not archived; for a nightly check its upkeep switch is ON now;
 //   4. one place of the project's monthly count of automatic runs is taken (`claimAutomaticRun`: at the cap nothing starts, the pause is recorded once);
 //   5. a check of this project already running is "busy" (the place goes back, nothing is written);
-//   6. THE AUDIT RECORD IS WRITTEN FIRST, with the project's system owner as actor and the reason; a record that cannot be written gives the place back and starts nothing;
+//   6. THE AUDIT RECORD (`system_run.requested`) IS WRITTEN FIRST, with the project's system owner as actor and the reason (a start that then does not happen adds `system_run.not_started`); a record that cannot be written gives the place back and starts nothing;
 //   7. the check is started as the system owner (`startProjectSetupCheck`: no person is the starter; a repeat of the request id answers the first);
 //   8. the run's machine time is attributed to the company and project (`recordSystemRunUsage`).
 // It starts a PREPARE-ONLY workspace: no task, no model, no key, no branch, no pull request, no approval. The system owner never signs in and never holds a person's rights.
@@ -93,7 +93,7 @@ export function createSystemStarter(deps: SystemStarterDeps): { start(input: Sys
       const owner = systemOwnerIdOf(orgId, project);
       try {
         await flow.audit.record({
-          eventId: eventIdOf("system-run-started", orgId, project, input.requestId), companyId: orgId, at: new Date(nowMs()).toISOString(), actor: { type: "system", id: owner }, action: SYSTEM_RUN_AUDIT.started,
+          eventId: eventIdOf("system-run-started", orgId, project, input.requestId), companyId: orgId, at: new Date(nowMs()).toISOString(), actor: { type: "system", id: owner }, action: SYSTEM_RUN_AUDIT.requested,
           subject: { type: "project", id: project }, details: { kind, reason: reason.data.code, ...(reason.data.fact === undefined ? {} : { fact: reason.data.fact }), requestId: input.requestId },
         });
       } catch {
@@ -103,9 +103,14 @@ export function createSystemStarter(deps: SystemStarterDeps): { start(input: Sys
       // 7. The check, as the system owner. A check that started between step 4 and now is "busy" (the place goes back).
       let started: { workspaceId: string; duplicate: boolean };
       try {
-        started = await startProjectSetupCheck(flow, { project, requestId: input.requestId, startedBy: owner });
+        started = await startProjectSetupCheck(flow, { project, requestId: input.requestId, startedBy: owner, system: true });
       } catch (error) {
         await giveBack();
+        // The record said "requested": say that it did not start (best effort; the refusal stands whether or not this can be written).
+        await flow.audit.record({
+          eventId: eventIdOf("system-run-not-started", orgId, project, input.requestId), companyId: orgId, at: new Date(nowMs()).toISOString(), actor: { type: "system", id: owner }, action: SYSTEM_RUN_AUDIT.notStarted,
+          subject: { type: "project", id: project }, details: { kind, requestId: input.requestId, code: String((error as { code?: unknown } | null)?.code ?? "FAULT").slice(0, 40) },
+        }).catch(() => undefined);
         if ((error as { code?: unknown } | null)?.code === "WORKSPACE_BUSY") return { outcome: "skipped", reason: "busy" };
         throw error;
       }

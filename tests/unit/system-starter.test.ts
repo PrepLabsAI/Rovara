@@ -7,7 +7,7 @@ import {
   type OrgId, type ProjectDefinition,
 } from "@agentx/contracts";
 import { readAutomaticRunsUse, setAutomaticRunsCap } from "../../packages/broker/src/core/automatic-runs/cap.js";
-import { setupStateOf, type SetupCheckMark } from "../../packages/broker/src/core/setup-agent/check.js";
+import { setupStateOf, startProjectSetupCheck, type SetupCheckMark } from "../../packages/broker/src/core/setup-agent/check.js";
 import { createSystemStarter, systemRunRequestId, type SystemStartInput, type SystemStartResult } from "../../packages/broker/src/core/system-runs/starter.js";
 import { readSystemRunUsage, recordSystemRunUsage, systemRunUsagePartition } from "../../packages/broker/src/core/system-runs/usage.js";
 import { setUpkeepEnabled, upkeepIsOn } from "../../packages/broker/src/core/upkeep/settings.js";
@@ -39,7 +39,7 @@ async function world(options: { company?: OrgId; projects?: string[]; shared?: {
   // What the world looked like when the audit sink was asked to record the start: the audit record must come BEFORE the check exists.
   const record = h.deps.audit.record.bind(h.deps.audit);
   h.deps.audit.record = async (event) => {
-    if (event.action === "system_run.started") {
+    if (event.action === "system_run.requested") {
       const mark = (await h.store.get(projectMetaKey(company, String(event.subject?.id))))?.["setupCheck"];
       order.push(`mark-at-audit:${mark === undefined ? "absent" : "present"}`);
       if (options.auditFails === true) throw new Error("the ledger is down");
@@ -56,7 +56,7 @@ const turnOnUpkeep = async (w: World, project = "payments"): Promise<void> => {
 };
 const ask = (w: World, input: Partial<SystemStartInput> = {}): Promise<SystemStartResult> => w.starter.start({ project: "payments", kind: "setup_check", reason: { code: "task_start" }, requestId: newRequestId(), ...input });
 const used = async (w: World, project = "payments"): Promise<number> => (await readAutomaticRunsUse({ store: w.h.store, now: () => w.h.clock.now }, w.company, project)).used;
-const systemAudit = (w: World) => w.h.audit.filter((event) => event.action === "system_run.started");
+const systemAudit = (w: World) => w.h.audit.filter((event) => event.action === "system_run.requested");
 const markOf = async (w: World, project = "payments"): Promise<SetupCheckMark | undefined> => (await w.h.store.get(projectMetaKey(w.company, project)))?.["setupCheck"] as SetupCheckMark | undefined;
 const queued = async (w: World): Promise<number> => {
   const queue = await w.h.queues.queue("task-dispatch");
@@ -162,7 +162,7 @@ describe("a start", () => {
     expect(await markOf(w)).toBeDefined();
     const [event] = systemAudit(w);
     expect(systemAudit(w)).toHaveLength(1);
-    expect(event).toMatchObject({ actor: { type: "system", id: systemOwnerIdOf(w.company, "payments") }, action: "system_run.started", subject: { type: "project", id: "payments" }, details: { kind: "setup_check", reason: "task_start", fact: "package-lock.json" } });
+    expect(event).toMatchObject({ actor: { type: "system", id: systemOwnerIdOf(w.company, "payments") }, action: "system_run.requested", subject: { type: "project", id: "payments" }, details: { kind: "setup_check", reason: "task_start", fact: "package-lock.json" } });
   });
 
   it("starts nothing, and gives its place of the month back, when the audit record cannot be written", async () => {
@@ -311,5 +311,46 @@ describe("request ids", () => {
     expect(base).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
     expect(systemRunRequestId("org_a", "payments", "nightly_check", "2026-11-18")).toBe(base);
     for (const other of [["org_b", "payments", "nightly_check", "2026-11-18"], ["org_a", "billing", "nightly_check", "2026-11-18"], ["org_a", "payments", "setup_check", "2026-11-18"], ["org_a", "payments", "nightly_check", "2026-11-19"]] as const) expect(systemRunRequestId(...other)).not.toBe(base);
+  });
+});
+
+describe("review fixes (Opus REVIEW-1)", () => {
+  it("L1: a person's request id never blocks the night: system starts keep their ids in a namespace of their own", async () => {
+    const w = await world();
+    await turnOnUpkeep(w);
+    const night = systemRunRequestId(w.company, "payments", "nightly_check", "2026-11-18");
+    // A manager posts tomorrow's (public, deterministic) id first, as a person.
+    await startProjectSetupCheck(w.h.deps, { project: "payments", requestId: night, startedBy: PERSON });
+    w.h.clock.advance(60 * 60);
+    await w.h.store.update({ key: projectMetaKey(w.company, "payments"), ops: [change.remove("setupCheck")] });
+    const answer = await ask(w, { kind: "nightly_check", reason: { code: "nightly" }, requestId: night });
+    expect(answer).toMatchObject({ outcome: "started" });
+    expect((await markOf(w))!.startedBy).toBe(systemOwnerIdOf(w.company, "payments"));
+  });
+
+  it("L2: a start that then does not happen leaves a not_started record after the requested one", async () => {
+    const w = await world();
+    // Another check starts between the busy read and the start: simulated by a start that conflicts.
+    const real = w.h.store.transact.bind(w.h.store);
+    let conflicts = 1;
+    w.h.store.transact = async (items) => {
+      const marksCheck = items.some((item) => item.kind === "update" && "ops" in item && JSON.stringify(item.ops).includes("setupCheck"));
+      if (marksCheck && conflicts-- > 0) return { applied: false, reason: "condition_failed", failed: [0] };
+      return real(items);
+    };
+    expect(await ask(w)).toEqual({ outcome: "skipped", reason: "busy" });
+    expect(w.h.audit.map((event) => event.action)).toEqual(["system_run.requested", "system_run.not_started"]);
+    expect(await used(w)).toBe(0);
+  });
+
+  it("gives the place back when the start throws something other than busy, and says so", async () => {
+    const w = await world();
+    const real = w.h.store.transact.bind(w.h.store);
+    let fail = true;
+    w.h.store.transact = async (items) => { if (fail && items.some((item) => item.kind === "update" && "ops" in item && JSON.stringify(item.ops).includes("setupCheck"))) { fail = false; throw new Error("store down"); } return real(items); };
+    await expect(ask(w)).rejects.toThrow("store down");
+    expect(await used(w)).toBe(0);
+    expect(w.h.audit.map((event) => event.action)).toEqual(["system_run.requested", "system_run.not_started"]);
+    expect((await ask(w, { requestId: newRequestId() })).outcome).toBe("started");
   });
 });

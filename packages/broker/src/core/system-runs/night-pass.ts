@@ -8,14 +8,13 @@
 //   4. at most `MAX_STARTS_PER_PASS` projects are started per pass; the rest wait for the next hour (a company with many projects never starts many machines at once);
 //   5. the night itself is the injected `night` (core/upkeep/night.ts `runUpkeepNight`): it reads the switch again, and starts the nightly check through the system starter only when something merged.
 // A missed hour (a deploy, an outage): the next pass starts any project whose hour has passed today and has no claim. A missed day is skipped, not doubled.
-import { INDEX_EXPIRY_ATTRIBUTE, UPKEEP_NIGHT_WINDOW, upkeepNightDue, type DocumentStore, type OrgId } from "@agentx/contracts";
-import { upkeepPartition } from "../upkeep/keys.js";
+import { AGENTX_NAME_PATTERN, UPKEEP_NIGHT_WINDOW, upkeepNightDue, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { upkeepExpiryOf, upkeepPartition } from "../upkeep/keys.js";
 import { readUpkeepSetting } from "../upkeep/settings.js";
 import type { UpkeepNightResult } from "../upkeep/night.js";
 
 /** The most projects one pass starts. */
 export const MAX_STARTS_PER_PASS = 5;
-const CLAIM_KEEP_SECONDS = 3 * 86_400;
 
 export interface UpkeepPassDeps {
   store: DocumentStore;
@@ -53,7 +52,8 @@ export async function runUpkeepNightPass(deps: UpkeepPassDeps, options: { budget
   const hour = new Date(startedAt).getUTCHours();
   if (hour < UPKEEP_NIGHT_WINDOW.startHourUtc || hour >= UPKEEP_NIGHT_WINDOW.endHourUtc) return { ...report, skipped: "outside_window" };
   const day = dayOf(startedAt);
-  const names = [...await deps.projects()].sort();
+  // A catalog name that is not a project name cannot have a night (its hour is a hash of the name): it is left out, and never stops the others.
+  const names = [...await deps.projects()].filter((name) => AGENTX_NAME_PATTERN.test(name)).sort();
   // The order rotates with the day and the hour, so a company over the per-pass limit does not always leave the same projects for later.
   const rotation = names.length === 0 ? 0 : (Math.floor(startedAt / 3_600_000) % names.length);
   for (const project of [...names.slice(rotation), ...names.slice(0, rotation)]) {
@@ -65,12 +65,14 @@ export async function runUpkeepNightPass(deps: UpkeepPassDeps, options: { budget
     if (report.started >= MAX_STARTS_PER_PASS) { report.deferred += 1; continue; }
     const key = upkeepClaimKey(deps.companyId, project, day);
     const claimed = await deps.store.put({
-      item: { ...key, entityType: "UPKEEP_PASS_CLAIM", orgId: deps.companyId, project, day, at: new Date(deps.now()).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(deps.now() / 1000) + CLAIM_KEEP_SECONDS },
+      item: { ...key, entityType: "UPKEEP_PASS_CLAIM", orgId: deps.companyId, project, day, at: new Date(deps.now()).toISOString(), ...upkeepExpiryOf(deps.now()) },
       condition: { op: "notExists", path: ["pk"] },
     });
     if (!claimed.applied) { report.claimedAlready += 1; continue; }
     try {
-      await deps.night(project);
+      const night = await deps.night(project);
+      // The night's free step swallows a fault of the starter and says "failed": that is a night that did not start, so its claim goes back too (a refusal that cannot change within the hour is tried at most four times).
+      if (night.setupCheck === "failed") throw new Error("setup_check_failed");
       report.started += 1;
     } catch (error) {
       // A fault (not a refusal): the claim goes back so the next hour tries this project again inside the window.

@@ -5,16 +5,17 @@
 //   - ONE ROW per system run, written when the run starts, naming the company, the project, the kind and the run's own workspace: partition `ORG#<company>#SYSTEM_RUN_USAGE#<month>`, sort key `<project>#<request hash>`.
 //     A company's month is one partition read; a project's is one range of it. No row is shared by two companies, and a project's name is part of every key.
 //   - MINUTES ARE MEASURED, never stated by a caller: `readSystemRunUsage` reads each row's workspace and counts from its creation to its close (or to now, for one still open, and never past `AUTOMATIC_RUN_MAX_MS`).
+// The rows are kept 62 days (`upkeepExpiryOf`, the same keep as the upkeep rows): this month's report and the last one's.
 // What limit enforcement still needs (not built here): a machine-minute cap kind in the company's and project's spend limits (Cloud) and in `Admission`, checked before `machine.start` against `readSystemRunUsage`, and a
 // unit price if the minutes are to be shown as dollars. Until then these minutes are COUNTED and ATTRIBUTED, and what bounds them is the project's monthly count of automatic runs (default 100) and one-at-a-time.
 import { createHash } from "node:crypto";
 import {
-  AUTOMATIC_RUN_MAX_MS, AGENTX_NAME_PATTERN, INDEX_EXPIRY_ATTRIBUTE, OrgIdSchema, SystemRunKindSchema, companyScoped, queryAll, when, type DocumentKey, type OrgId, type SystemRunKind,
+  AUTOMATIC_RUN_MAX_MS, AGENTX_NAME_PATTERN, OrgIdSchema, SystemRunKindSchema, companyScoped, queryAll, when, type DocumentKey, type OrgId, type SystemRunKind,
 } from "@agentx/contracts";
+import { upkeepExpiryOf } from "../upkeep/keys.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 
-const KEEP_SECONDS = 400 * 86_400;
 const monthOf = (ms: number): string => new Date(ms).toISOString().slice(0, 7);
 const MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/u;
 
@@ -39,7 +40,7 @@ export async function recordSystemRunUsage(deps: UsageDeps, input: { project: st
   await deps.store.put({
     item: {
       ...systemRunUsageKey(deps.companyId, month, input.project, input.requestId), entityType: "SYSTEM_RUN_USAGE", orgId: deps.companyId, project: input.project, kind, workspaceId: input.workspaceId,
-      requestId: input.requestId, month, startedAt: new Date(at).toISOString(), [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(at / 1000) + KEEP_SECONDS,
+      requestId: input.requestId, month, startedAt: new Date(at).toISOString(), ...upkeepExpiryOf(at),
     },
     condition: when.absent(),
   });

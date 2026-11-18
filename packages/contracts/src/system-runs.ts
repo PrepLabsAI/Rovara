@@ -53,8 +53,8 @@ export const SYSTEM_RUN_REASON_WORDS: Readonly<Record<SystemRunReasonCode, strin
 export const SystemRunReasonSchema = z.object({ code: SystemRunReasonCodeSchema, fact: z.string().regex(/^[A-Za-z0-9._/@+-]{1,100}$/u).optional() }).strict();
 export type SystemRunReason = z.infer<typeof SystemRunReasonSchema>;
 
-/** The audit actions of a system start. The actor is the project's system owner. */
-export const SYSTEM_RUN_AUDIT = { started: "system_run.started" } as const;
+/** The audit actions of a system start. The actor is the project's system owner. `requested` is written BEFORE the start; `notStarted` follows it when the start then did not happen (a check already running, a conflict). */
+export const SYSTEM_RUN_AUDIT = { requested: "system_run.requested", notStarted: "system_run.not_started" } as const;
 
 /** Why a start did not happen (fixed words; nothing from a repository or a request is echoed). */
 export const SYSTEM_RUN_REFUSALS = ["kind_not_allowed", "system_runs_off", "upkeep_off", "project_unavailable", "invalid_request", "audit_unavailable"] as const;

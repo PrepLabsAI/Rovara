@@ -188,6 +188,26 @@ describe("the pass", () => {
     expect((await runUpkeepNightPass(w.deps, { budgetMs: 10_000 })).started).toBe(1);
   });
 
+  it("L3: a catalog name that is not a project name is left out and never stops the others", async () => {
+    const [good] = namesByHour(A, 1)[7]!;
+    const w = await world({ projects: [good!], upkeepOn: [good!] });
+    const deps: UpkeepPassDeps = { ...w.deps, projects: async () => ["../escape", "has space", "", "x".repeat(300), good!] };
+    expect(await runUpkeepNightPass(deps, { budgetMs: 10_000 })).toMatchObject({ started: 1, failed: 0 });
+    expect(w.nights).toEqual([good]);
+  });
+
+  it("L5: a night whose free step failed (the starter faulted) gives the claim back, so the next hour tries again", async () => {
+    const [project] = namesByHour(A, 1)[7]!;
+    const w = await world({ projects: [project!] });
+    let calls = 0;
+    const deps: UpkeepPassDeps = { ...w.deps, night: async () => { calls += 1; return { outcome: "ran", setupCheck: calls === 1 ? "failed" : "done", mockChecks: "unavailable", wiki: "no_cost_cap" }; } };
+    expect(await runUpkeepNightPass(deps, { budgetMs: 10_000 })).toMatchObject({ started: 0, failed: 1 });
+    expect(await w.store.get(upkeepClaimKey(A, project!, DAY))).toBeUndefined();
+    w.clock.ms = at(DAY, 8, 5);
+    expect(await runUpkeepNightPass(deps, { budgetMs: 10_000 })).toMatchObject({ started: 1 });
+    expect(await w.store.get(upkeepClaimKey(A, project!, DAY))).toBeDefined();
+  });
+
   it("starts at most five projects per pass; the rest wait for the next pass", async () => {
     const names = namesByHour(A, 7)[7]!;
     const w = await world({ projects: names });
@@ -292,8 +312,8 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
     expect(report).toMatchObject({ started: 1, due: 1 });
     const mark = (await w.h.store.get(projectMetaKey(w.company, w.name)))?.["setupCheck"] as { startedBy: string };
     expect(mark.startedBy).toBe(systemOwnerIdOf(w.company, w.name));
-    expect(w.h.audit.filter((event) => event.action === "system_run.started")).toHaveLength(1);
-    expect(w.h.audit.find((event) => event.action === "system_run.started")).toMatchObject({ actor: { type: "system", id: systemOwnerIdOf(w.company, w.name) }, details: { kind: "nightly_check", reason: "nightly" } });
+    expect(w.h.audit.filter((event) => event.action === "system_run.requested")).toHaveLength(1);
+    expect(w.h.audit.find((event) => event.action === "system_run.requested")).toMatchObject({ actor: { type: "system", id: systemOwnerIdOf(w.company, w.name) }, details: { kind: "nightly_check", reason: "nightly" } });
     expect((await readSystemRunUsage(w.h.deps, { project: w.name })).byKind).toMatchObject({ nightly_check: { runs: 1 } });
     expect(w.modelRoute).not.toHaveBeenCalled();
     // The wiki refresh (AI) is not started in P1: the night says there is no enforced cap.
@@ -303,7 +323,7 @@ describe("the hosted wiring, end to end on the task flow's fakes", () => {
 
   it("a second pass the same day, and a day with nothing merged, start no second check; a day with a new commit starts one", async () => {
     const w = await hosted({ mode: "on" });
-    const started = (): number => w.h.audit.filter((event) => event.action === "system_run.started").length;
+    const started = (): number => w.h.audit.filter((event) => event.action === "system_run.requested").length;
     await w.runs!.service.pass({ budgetMs: 10_000 });
     expect(started()).toBe(1);
     expect(await w.runs!.service.pass({ budgetMs: 10_000 })).toMatchObject({ started: 0, claimedAlready: 1 });
