@@ -76,9 +76,10 @@ describe("access stack", () => {
     expect(Object.keys(template.toJSON().Outputs as object).sort()).toEqual(["ArtifactBucketName", "CloudFormationRoleArn", "EffectiveBoundaryArn", "OperatorRoleArn", "PullThroughPrefix"]);
   });
 
-  it("declares both parameters with their exact allowed patterns", () => {
+  it("declares its parameters with their exact allowed patterns (the operator principal is one role or user, never a whole account: L4-HARD)", () => {
     template.hasParameter("PermissionsBoundaryArn", { Type: "String", Default: "", AllowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$" });
-    template.hasParameter("OperatorPrincipalArn", { Type: "String", Default: "", AllowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$" });
+    template.hasParameter("OperatorPrincipalArn", { Type: "String", Default: "", AllowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$" });
+    template.hasParameter("OperatorExternalId", { Type: "String", Default: "", AllowedPattern: "^$|^[\\w+=,.@:/-]{2,1224}$" });
   });
 
   const boundaryPolicies = Object.entries(template.findResources("AWS::IAM::ManagedPolicy") as Record<string, Resource>);
@@ -173,10 +174,15 @@ describe("access stack", () => {
     template.hasResourceProperties("AWS::IAM::Role", {
       RoleName: "agentx-staging-operator",
       AssumeRolePolicyDocument: { Version: "2012-10-17", Statement: [{
-        Effect: "Allow", Action: "sts:AssumeRole",
+        Sid: "OperatorOfThisAccount", Effect: "Allow", Action: "sts:AssumeRole",
         Principal: { AWS: { "Fn::If": ["HasOperatorPrincipal", { Ref: "OperatorPrincipalArn" },
           { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":root"]] }] } },
-      }] },
+        Condition: { StringEquals: { "aws:PrincipalAccount": { Ref: "AWS::AccountId" } } },
+      }, { "Fn::If": ["HasOperatorExternalId", {
+        Sid: "NamedOperatorWithExternalId", Effect: "Allow", Action: "sts:AssumeRole",
+        Principal: { AWS: { Ref: "OperatorPrincipalArn" } },
+        Condition: { StringEquals: { "sts:ExternalId": { Ref: "OperatorExternalId" } } },
+      }, { Ref: "AWS::NoValue" }] }] },
     });
   });
 

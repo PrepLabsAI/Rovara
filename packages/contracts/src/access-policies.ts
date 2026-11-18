@@ -201,6 +201,38 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
   ];
 }
 
+// ---- Who may assume the operator role (L4-HARD, owner 2026-11-18)
+/**
+ * The operator-role principal the access stack accepts (`OperatorPrincipalArn`): empty (this account's own principals) or ONE IAM role or user. A whole
+ * account (`...:root`) is not accepted, whichever account it is: it would trust every principal of that account. The pattern is a source string because
+ * CloudFormation takes it as the parameter's AllowedPattern; OPERATOR_PRINCIPAL_PATTERN is the same pattern without the empty case.
+ */
+export const OPERATOR_PRINCIPAL_PATTERN_SOURCE = "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$";
+export const OPERATOR_PRINCIPAL_PATTERN = /^arn:aws[a-z-]*:iam::([0-9]{12}):(?:role|user)\/.+$/u;
+/** STS's external id alphabet and length (2 to 1,224 of [\w+=,.@:/-]); empty means none. */
+export const OPERATOR_EXTERNAL_ID_PATTERN_SOURCE = "^$|^[\\w+=,.@:/-]{2,1224}$";
+export const OPERATOR_EXTERNAL_ID_PATTERN = /^[\w+=,.@:/-]{2,1224}$/u;
+
+/**
+ * The refusal, in words, for an operator principal / external id pair that must not reach the access stack, or undefined when it is fine. `account` is the
+ * account the access stack is deployed to. A principal of another account is allowed only with an external id (the trust policy then lets it in only when it
+ * presents that id: access.ts); a whole-account principal is never allowed; an id with no principal is a mistake. The same rules the template's parameter
+ * patterns and Rule enforce, so a person hears it before a deploy instead of from CloudFormation.
+ */
+export function operatorTrustProblem(input: { principal?: string | undefined; externalId?: string | undefined; account: string }): string | undefined {
+  const principal = input.principal ?? "";
+  const externalId = input.externalId ?? "";
+  if (externalId !== "" && !OPERATOR_EXTERNAL_ID_PATTERN.test(externalId)) return "the operator external id must be 2 to 1224 characters of letters, digits and + = , . @ : / _ -";
+  if (principal === "") return externalId === "" ? undefined : "an operator external id is only used with an operator principal: name the role or user that will present it, or drop the external id";
+  if (/^arn:aws[a-z-]*:iam::[0-9]{12}:root$/u.test(principal)) return "the operator principal can't be a whole account (:root): name one IAM role or user, or leave it empty for this account's own principals";
+  const match = OPERATOR_PRINCIPAL_PATTERN.exec(principal);
+  if (match === null) return "the operator principal must be the ARN of one IAM role or user (arn:aws:iam::<12-digit account>:role/<name> or :user/<name>)";
+  if (match[1] !== input.account && externalId === "") {
+    return `the operator principal belongs to another AWS account (${match[1]}): a principal of another account needs an external id (--operator-external-id), which it must present to assume the operator role`;
+  }
+  return undefined;
+}
+
 /**
  * The default permission boundary: the most any AgentX role (the service and operator roles
  * included) can ever do, whatever its own policy says. It allows the services AgentX uses, role
