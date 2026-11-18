@@ -477,6 +477,7 @@ export * from "./payer.js";
 export * from "./ports/company-log.js";
 export * from "./service-contract.js";
 export * from "./service-contract-mock.js";
+export * from "./standin-writer.js";
 export * from "./general-fakes.js";
 export * from "./plan-setup-changes.js";
 export * from "./general-fakes-set.js";

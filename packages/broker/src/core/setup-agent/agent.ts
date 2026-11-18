@@ -18,8 +18,8 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, when,
-  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StoredDocument, type TransactItem,
+  BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
+  type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StandInWriterCard, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import type { TaskRecord } from "../task-flow/records.js";
@@ -124,6 +124,8 @@ export interface SetupAgentView {
   verified?: boolean;
   /** Who pressed Stop and when, on a run a person stopped. The proposal such a run keeps is partial, unproven and never applied. */
   stoppedBy?: { name: string; at: string };
+  /** L4-E7: the sample-data writer's part of the run, before it starts: what it does, the most it can cost (inside the run's own limit, never on top), or that an AI must be connected first. */
+  standInWriter?: StandInWriterCard;
 }
 
 /** What a run may take at the longest: its wall clock, the longest wait on the owner, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
@@ -360,6 +362,11 @@ function derivedRequestId(requestId: string, purpose: string): string {
  * the repository, not against its workspace). The verdicts are kept on the task once final. A view with no proposal is returned as it is; with no reader, every item is `unchecked`.
  */
 export async function verifiedView(deps: SetupAgentDeps, definition: SetupDefinition, view: SetupAgentView): Promise<SetupAgentView> {
+  // L4-E7: the sample-data writer's cost, shown with the run's own limit before the run (the writer is paid from that limit, never on top of it). No model proxy: the card says an AI must be connected first.
+  return { ...(await verifiedViewOf(deps, definition, view)), standInWriter: standInWriterCard({ connected: deps.modelAccessConfigured === true, capCents: view.limits.budgetCents }) };
+}
+
+async function verifiedViewOf(deps: SetupAgentDeps, definition: SetupDefinition, view: SetupAgentView): Promise<SetupAgentView> {
   if (view.proposal === undefined || view.taskId === undefined) return view;
   const task = await deps.store.get(taskKey(view.taskId));
   const kept = task?.["setupAgentVerification"] as { items?: Record<string, SetupVerification> } | undefined;
