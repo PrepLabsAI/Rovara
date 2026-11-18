@@ -147,12 +147,8 @@ export interface DeployedCaller {
   stepUp?: { at: string; method: string } | undefined;
   /**
    * Set only by the broker's sign-in, from the verified client's registration, for the Rovara web app's own sign-in client (DEC 236h; never the CLI's token, a tool's or another client's). Everything else that reads the wiki
-   * is a tool outside Rovara and is held to the company's "Knowledge stays in Rovara" switch (`wiki-routes.ts`).
-   */
-  webApp?: true | undefined;
-  /**
-   * DEC 236h / DEC 254zzz39 (6): set by the broker's sign-in ONLY for the Rovara web app's own sign-in client (registered with full access AND marked `webApp` by the operator), from its registration; never
-   * from a header, a query or a body. Only the web page's own routes read it (accepting a security finding).
+   * is a tool outside Rovara and is held to the company's "Knowledge stays in Rovara" switch (`wiki-routes.ts`). DEC 254zzz39 (6): the client must be registered with full access AND marked `webApp`
+   * by the operator; never from a header, a query or a body. The web page's own routes also read it (accepting a security finding).
    */
   webApp?: true | undefined;
 }

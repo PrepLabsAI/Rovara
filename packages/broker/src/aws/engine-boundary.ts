@@ -206,9 +206,7 @@ export interface CoreEntryCaller {
   name: string;
   stepUp?: { at: string; method: string } | undefined;
   clientId?: string | undefined;
-  /** Set only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`, DEC 236h); everything else that reads the wiki is a tool outside Rovara. */
-  webApp?: true | undefined;
-  /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. */
+  /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. Everything else that reads the wiki is a tool outside Rovara (L4-WKS). */
   webApp?: true | undefined;
 }
 
