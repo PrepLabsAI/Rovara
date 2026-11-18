@@ -200,7 +200,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       for (const proposal of proposals.slice(0, 10)) {
         await proposeKnowledge({ process: runtime.process, limits }, { companyId, project: task.project, proposer: { kind: "agent", taskId: task.taskId }, proposal });
       }
-    } catch (e) { /* information only: a lost suggestion costs nothing */ }
+    } catch { /* information only: a lost suggestion costs nothing */ }
   }
 
   async function onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void> {

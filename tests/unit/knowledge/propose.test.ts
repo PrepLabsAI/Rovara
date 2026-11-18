@@ -44,18 +44,18 @@ async function world(): Promise<World> {
     audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
     approvers: createLocalOwnerApprovers({ owner, verifySession: () => false }), identity: createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [{ provider: "github", tenant: "", accountId: "owner-gh" }] }),
     // A model call of any kind would reach this fetch: none must.
-    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => { state.calls += 1; return new Response("{}", { status: 500 }); }) as typeof fetch },
+    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => { state.calls += 1; return new Response("{}", { status: 500 }); }) },
     enabled: () => true, now: () => h.clock.now, log: () => undefined,
   });
   const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
   return { h, lessons, taskId: task.taskId, workspaceId: task.workspaceId, get providerCalls() { return state.calls; } };
 }
 
-type Caller = Harness["owner"] & { scriptToken?: { tokenId: string; name: string; permissions: ReadonlyArray<"read" | "start" | "lessons">; projects: readonly string[] } };
+type Caller = Parameters<ReturnType<typeof createLessonRoutes>>[1];
 const route = (w: World) => createLessonRoutes({ lessons: w.lessons, flow: w.h.deps, notices: { queueAdmin: vi.fn(async () => 1) } });
-async function post(w: World, path: string, body: unknown, caller: Caller = w.h.owner): Promise<{ status: number | undefined; body: Record<string, any> }> {
+async function post(w: World, path: string, body: unknown, caller: Caller = w.h.owner): Promise<{ status: number | undefined; body: Record<string, unknown> }> {
   const answer = await route(w)({ method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, caller);
-  return { status: answer?.statusCode, body: answer === undefined ? {} : JSON.parse(answer.body) };
+  return { status: answer?.statusCode, body: answer === undefined ? {} : (JSON.parse(answer.body) as Record<string, unknown>) };
 }
 const propose = (w: World, body: unknown, project = "payments", caller?: Caller) => post(w, `/v1/dev/projects/${project}/knowledge/propose`, body, caller);
 const person = (w: World, personId: string): Caller => ({ ...w.h.owner, principal: { ...w.h.owner.principal, personId } });

@@ -256,7 +256,7 @@ describe("team_propose: a suggestion, the only write, never applied by itself", 
   it("posts to the project's propose route once, with the suggestion and nothing else; the broker's 'No such project.' is 'not found'", async () => {
     const CELL = "https://abc123.execute-api.us-west-2.amazonaws.com";
     const calls: Array<{ url: string; body: string; method: string | undefined }> = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => { calls.push({ url: String(url), body: String(init?.body), method: init?.method }); return new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "No such project." } }), { status: 404, headers: { "content-type": "application/json" } }); });
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => { calls.push({ url: typeof url === "string" ? url : url instanceof URL ? url.href : url.url, body: typeof init?.body === "string" ? init.body : "", method: init?.method }); return new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "No such project." } }), { status: 404, headers: { "content-type": "application/json" } }); });
     const api = httpControlPlaneClient({ session: async () => ({ baseUrl: CELL, accessToken: "access-token-for-the-test", signInCommand: "x" }), fetch: fetchImpl, sleep: async () => undefined });
     expect(await api.knowledgePropose("pay ments", { advice: "Wrap network calls in withRetry" })).toEqual({ kind: "not_found" });
     expect(calls).toEqual([{ url: `${CELL}/v1/dev/projects/pay%20ments/knowledge/propose`, body: JSON.stringify({ advice: "Wrap network calls in withRetry" }), method: "POST" }]);

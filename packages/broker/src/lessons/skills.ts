@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import {
   ROVARA_SKILL_APPROVERS_REQUIRED, ROVARA_SKILL_DESCRIPTION_MAX, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_NAME, ROVARA_SKILL_PROVEN, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX,
-  ROVARA_SKILLS_PER_STEP_MAX, change, cleanLessonText, companyScoped, queryAll, when, type DocumentStore, type JsonValue, type OrgId, type RovaraSkillFile, type StoredDocument, type TransactItem,
+  ROVARA_SKILLS_PER_STEP_MAX, change, cleanLessonText, companyScoped, queryAll, when, type DocumentStore, type JsonValue, type RovaraSkillFile, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { retireLesson } from "./curate.js";
 import { hasStaleCitation } from "./load.js";
@@ -39,9 +39,9 @@ export interface SkillDeps {
 
 // ---- keys and rows
 
-const headKey = (companyId: string, project: string, name: string) => ({ pk: companyScoped(companyId as OrgId, `SKILL#${project}`), sk: `head#${name}` });
-const versionKey = (companyId: string, project: string, name: string, version: number) => ({ pk: companyScoped(companyId as OrgId, `SKILL#${project}`), sk: `v#${name}#${String(version).padStart(6, "0")}` });
-const setKey = (companyId: string, project: string) => ({ pk: companyScoped(companyId as OrgId, `SKILL#${project}`), sk: "set" });
+const headKey = (companyId: string, project: string, name: string) => ({ pk: companyScoped(companyId, `SKILL#${project}`), sk: `head#${name}` });
+const versionKey = (companyId: string, project: string, name: string, version: number) => ({ pk: companyScoped(companyId, `SKILL#${project}`), sk: `v#${name}#${String(version).padStart(6, "0")}` });
+const setKey = (companyId: string, project: string) => ({ pk: companyScoped(companyId, `SKILL#${project}`), sk: "set" });
 
 export interface SkillHead { name: string; currentVersion: number; activeVersion?: number; retired: boolean; fromLessons: string[]; createdBy: string; createdAt: number; updatedAt: number }
 export interface SkillVersion { name: string; version: number; description: string; content: string; digest: string; bytes: number; approvals: Array<{ by: string; at: number }>; createdBy: string; createdAt: number; activatedAt?: number }
@@ -180,10 +180,10 @@ export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" 
   const max = options.max ?? 20;
   const active = (await deps.lessons.list(key, { statuses: ["active"] })).filter((lesson) => lesson.type === "procedure" && lesson.trial === undefined && lesson.expiresAt > deps.now());
   if (active.length === 0) return [];
-  const used = new Set((await queryAll(deps.documents, { pk: companyScoped(key.workspaceId as OrgId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } })).flatMap((row) => headOf(row)?.fromLessons ?? []));
+  const used = new Set((await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } })).flatMap((row) => headOf(row)?.fromLessons ?? []));
   const open = active.filter((lesson) => !used.has(lesson.id)).slice(0, 50);
   if (open.length === 0) return [];
-  const counts = await countLessonUses(deps.documents, { companyId: key.workspaceId as OrgId, project: key.project, lessonIds: open.map((lesson) => lesson.id), now: deps.now() });
+  const counts = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: open.map((lesson) => lesson.id), now: deps.now() });
   return open.flatMap((lesson) => {
     const count = counts.counts.get(lesson.id);
     return provenProcedure({ lesson, tasks: count?.tasks, now: deps.now() }) ? [{ lessonId: lesson.id, title: lesson.title, tasks: count!.tasks, days: Math.floor((deps.now() - lesson.createdAt) / DAY_MS) }] : [];
@@ -217,7 +217,7 @@ export async function draftSkillFromLesson(deps: SkillDeps, key: ScopeKey, input
   try {
     lesson = await deps.lessons.get(key, input.lessonId);
     if (lesson === undefined) return { ok: false, code: "not_found" };
-    const counted = await countLessonUses(deps.documents, { companyId: key.workspaceId as OrgId, project: key.project, lessonIds: [lesson.id], now: deps.now() });
+    const counted = await countLessonUses(deps.documents, { companyId: key.workspaceId, project: key.project, lessonIds: [lesson.id], now: deps.now() });
     tasks = counted.counts.get(lesson.id)?.tasks;
     // The lesson is read as for NOBODY in particular (what the whole project may read): a lesson from a private place or a task kept private does not become a project's skill.
     const visible = await readVisible({ access: deps.access, key, viewer: undefined, lessons: [lesson], where: "skills", ...(deps.log === undefined ? {} : { log: deps.log }) });
@@ -225,9 +225,9 @@ export async function draftSkillFromLesson(deps: SkillDeps, key: ScopeKey, input
   } catch { return { ok: false, code: "unreadable" }; }
   if (!provenProcedure({ lesson, tasks, now: deps.now() })) return { ok: false, code: "not_proven" };
   let existing: StoredDocument[];
-  try { existing = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId as OrgId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } }); } catch { return { ok: false, code: "unreadable" }; }
+  try { existing = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } }); } catch { return { ok: false, code: "unreadable" }; }
   const heads = existing.flatMap((row) => { const head = headOf(row); return head === undefined ? [] : [head]; });
-  if (heads.some((head) => head.fromLessons.includes(lesson!.id) && !head.retired)) return { ok: false, code: "already_a_skill" };
+  if (heads.some((head) => head.fromLessons.includes(lesson.id) && !head.retired)) return { ok: false, code: "already_a_skill" };
   const taken = new Set(heads.map((head) => head.name));
   const wanted = input.name === undefined ? slugOf(lesson.title) : input.name;
   if (!ROVARA_SKILL_NAME.test(wanted)) return { ok: false, code: "bad_name" };
@@ -323,7 +323,7 @@ export async function approveSkill(deps: SkillDeps, key: ScopeKey, input: { name
   if (live && !await requireAudit(deps.audit, { action: "lesson.skill_activated", workspaceId: key.workspaceId, project: key.project, actor: input.by, facts: { skill: input.name, version: input.version, approvals: approvals.length } })) return { ok: false, code: "audit_unavailable" };
   const now = deps.now();
   const headStillNewest = when.and(when.eq("currentVersion", input.version), when.notExists("retired"));
-  const approvalStep: TransactItem = { kind: "update", key: versionKey(key.workspaceId, key.project, input.name, input.version), ops: [change.set("approvals", approvals as unknown as JsonValue), ...(live ? [change.set("activatedAt", now)] : [])], condition: when.eq("approvals", version.approvals as unknown as JsonValue) };
+  const approvalStep: TransactItem = { kind: "update", key: versionKey(key.workspaceId, key.project, input.name, input.version), ops: [change.set("approvals", approvals), ...(live ? [change.set("activatedAt", now)] : [])], condition: when.eq("approvals", version.approvals) };
   try {
     // Not live yet: the approval is written only while the version is still the newest. Live: the same transaction moves the skill's live pointer and the `set` row (created first if it is not there; a lost race on that
     // create still leaves the row there).
@@ -372,7 +372,7 @@ export async function retireSkill(deps: SkillDeps, key: ScopeKey, input: { name:
 export interface SkillSummary { name: string; description: string; currentVersion: number; activeVersion?: number; approvals: number; approvers: string[]; retired: boolean; bytes: number; note?: typeof ROVARA_SKILL_LONG_NOTE }
 /** The project's skills for a person who decides: the newest version of each, how many have approved it and who (ids), and the long-skill note. Never another project's or company's. */
 export async function listSkills(deps: Pick<SkillDeps, "documents">, key: ScopeKey): Promise<SkillSummary[]> {
-  const rows = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId as OrgId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } });
+  const rows = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } });
   const out: SkillSummary[] = [];
   for (const row of rows) {
     const head = headOf(row);

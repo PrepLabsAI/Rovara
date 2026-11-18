@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { KNOWLEDGE_PROPOSALS_FIELD, KNOWLEDGE_PROPOSALS_PER_TASK_MAX, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, knowledgeProposalsOfProgress } from "../../packages/contracts/src/index.js";
+import { KNOWLEDGE_PROPOSALS_PER_TASK_MAX, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, knowledgeProposalsOfProgress } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "../../packages/worker/src/implemented-features.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";

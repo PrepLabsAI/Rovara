@@ -43,7 +43,7 @@ async function world(): Promise<World> {
     flow: h.deps, registry, companyId: COMPANY, owner, blobs: { get: async () => undefined } as never, milestones: { register: () => () => undefined },
     audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
     approvers: createLocalOwnerApprovers({ owner, verifySession: () => false }), identity: createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [{ provider: "github", tenant: "", accountId: "owner-gh" }] }),
-    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) as typeof fetch },
+    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) },
     enabled: () => enabled, now: () => h.clock.now, log: () => undefined,
   });
   const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
@@ -67,7 +67,7 @@ async function put(w: World, ...list: Lesson[]): Promise<void> {
   }
 }
 async function used(w: World, lessonId: string, tasks: number, company = COMPANY): Promise<void> {
-  for (let n = 0; n < tasks; n += 1) await w.h.store.put({ item: { pk: lessonUsePk(company as never, "payments", lessonId), sk: `task-${String(n)}`, entityType: "LESSON_USE", taskId: `task-${String(n)}`, at: w.h.clock.now } });
+  for (let n = 0; n < tasks; n += 1) await w.h.store.put({ item: { pk: lessonUsePk(company, "payments", lessonId), sk: `task-${String(n)}`, entityType: "LESSON_USE", taskId: `task-${String(n)}`, at: w.h.clock.now } });
 }
 async function proven(w: World): Promise<Lesson> { const lesson = procedure(w); await put(w, lesson); await used(w, lesson.id, 10); return lesson; }
 async function goLive(w: World, name: string, version: number): Promise<void> {
@@ -114,8 +114,8 @@ describe("the draft is made by code from the lesson's own words", () => {
     const [summary] = await listSkills(w.deps, KEY);
     expect(summary).toMatchObject({ name: "add-a-queue-handler", currentVersion: 1, approvals: 0, retired: false });
     expect(summary!.activeVersion).toBeUndefined();
-    const row = await w.h.store.get({ pk: companyScoped(COMPANY as never, "SKILL#payments"), sk: "v#add-a-queue-handler#000001" });
-    const content = String(row!["content"]);
+    const row = await w.h.store.get({ pk: companyScoped(COMPANY, "SKILL#payments"), sk: "v#add-a-queue-handler#000001" });
+    const content = row!["content"] as string;
     expect(content).toContain("name: add-a-queue-handler");
     expect(content).toContain("1. Create the queue and its dead-letter queue.");
     expect(content).toContain("2. Register the handler in the worker.");
@@ -189,7 +189,7 @@ describe("two different people approve a version before it is used", () => {
     const live = await liveSkillsForStep(w.h.store, KEY);
     expect(live.left).toBe(0);
     expect(live.skills).toHaveLength(1);
-    expect(live.skills[0]).toMatchObject({ name: "add-a-queue-handler", version: 1, description: expect.stringContaining("Add a queue handler") });
+    expect(live.skills[0]).toMatchObject({ name: "add-a-queue-handler", version: 1, description: expect.stringContaining("Add a queue handler") as string });
     expect(live.skills[0]!.digest).toBe(sha(live.skills[0]!.content));
     expect(await approveSkill(w.deps, KEY, { name: "add-a-queue-handler", version: 1, by: "cy" })).toEqual({ ok: false, code: "already_live" });
     // "A graduated lesson is not loaded again": the lesson became the skill.
@@ -270,7 +270,7 @@ describe("two different people approve a version before it is used", () => {
     const w = await world();
     await draftSkillFromLesson(w.deps, KEY, { lessonId: (await proven(w)).id, by: "ann" });
     await goLive(w, "add-a-queue-handler", 1);
-    const pk = companyScoped(COMPANY as never, "SKILL#payments");
+    const pk = companyScoped(COMPANY, "SKILL#payments");
     // A retire that read the skill before it went live: the head it saw has no live version. The member is removed anyway.
     const realGet = w.h.store.get.bind(w.h.store);
     w.h.store.get = async (key) => { const row = await realGet(key); return row !== undefined && key.sk === "head#add-a-queue-handler" ? Object.fromEntries(Object.entries(row).filter(([k]) => k !== "activeVersion")) as typeof row : row; };
@@ -311,7 +311,7 @@ describe("size: at most 32 KB, a gentle note above 8 KB", () => {
     // Three steps of about 3.9 KB are about 12 KB: kept, with the note.
     const medium = await editSkill(w.deps, KEY, { name: "add-a-queue-handler", by: "ann", expectedVersion: 1, form: form([step(1), step(2), step(3)]) });
     expect(medium).toEqual({ ok: true, version: 2, note: ROVARA_SKILL_LONG_NOTE });
-    const row = await w.h.store.get({ pk: companyScoped(COMPANY as never, "SKILL#payments"), sk: "v#add-a-queue-handler#000002" });
+    const row = await w.h.store.get({ pk: companyScoped(COMPANY, "SKILL#payments"), sk: "v#add-a-queue-handler#000002" });
     expect(Number(row!["bytes"])).toBeGreaterThan(ROVARA_SKILL_LONG_NOTE_BYTES);
     expect(Number(row!["bytes"])).toBeLessThanOrEqual(ROVARA_SKILL_TEXT_MAX_BYTES);
     expect((await listSkills(w.deps, KEY))[0]!.note).toBe(ROVARA_SKILL_LONG_NOTE);
@@ -373,7 +373,7 @@ describe("company and project scope", () => {
 describe("what a step is sent", () => {
   const liveRow = async (w: World, name: string, bytes: number, over: { digest?: string; approvals?: number } = {}): Promise<void> => {
     const content = `---\nname: ${name}\ndescription: skill ${name}\n---\n\n## Steps\n1. ${"x".repeat(Math.max(1, bytes - 80))}\n`;
-    const pk = companyScoped(COMPANY as never, "SKILL#payments");
+    const pk = companyScoped(COMPANY, "SKILL#payments");
     await w.h.store.put({ item: { pk, sk: `v#${name}#000001`, entityType: "SKILL_VERSION", name, version: 1, description: `skill ${name}`, content, digest: over.digest ?? sha(content), bytes: Buffer.byteLength(content, "utf8"), approvals: Array.from({ length: over.approvals ?? 2 }, (_, n) => ({ by: `p${String(n)}`, at: 1 })), createdBy: "ann", createdAt: 1, activatedAt: 2 } });
     await w.h.store.put({ item: { pk, sk: `head#${name}`, entityType: "SKILL_HEAD", name, currentVersion: 1, activeVersion: 1, fromLessons: [], createdBy: "ann", createdAt: 1, updatedAt: 2 } });
     const set = await w.h.store.get({ pk, sk: "set" });
@@ -460,11 +460,11 @@ describe('the "Make this a skill?" card', () => {
     await used(w, "les_proc0009", 3);
     const offers = await skillOffers(w.deps, KEY);
     expect(offers).toEqual([{ lessonId: lesson.id, title: "Add a queue handler", tasks: 10, days: 40 }]);
-    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY as never, developerId: w.lessons.owner.id }, "payments");
+    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: w.lessons.owner.id }, "payments");
     expect(view.skillOffers).toEqual(offers);
     await draftSkillFromLesson(w.deps, KEY, { lessonId: lesson.id, by: "ann" });
     expect(await skillOffers(w.deps, KEY)).toEqual([]);
-    const after = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY as never, developerId: w.lessons.owner.id }, "payments");
+    const after = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: w.lessons.owner.id }, "payments");
     expect(after.skillOffers).toBeUndefined();
   });
   it("is not offered for another company's lesson", async () => {
