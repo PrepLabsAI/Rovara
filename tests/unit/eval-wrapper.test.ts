@@ -451,6 +451,16 @@ describe("detecting the file on the DEFAULT branch (no 'run setup again')", () =
     expect((await cards(w, two))[0]!.fileStatus).toBeUndefined();
   });
 
+  it("the file found when a person asks for the pull request is checked against the other evals too: A is never approvable through B's text", async () => {
+    const w = world();
+    const two = reportOf(suiteOf(ROWS), suiteOf({ ...ROWS, idField: "name" }, { selection: "evals/zz" }));
+    w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: evalWrapperFor({ command, report: reportPath, output: { ...ROWS, idField: "name" } })!.content });
+    expect(await openEvalWrapperPullRequest(w.deps(), PROJECT, { report: two, selection: "evals/agent", taskId: "t", by: "person-1" })).toMatchObject({ failure: "file_exists" });
+    const files = await listEvalWrapperFiles(w.deps(), PROJECT);
+    expect(wrapperFileFor(files, { repository: "api", selection: "evals/agent", firstOfFile: true }, "python")).toBeUndefined();
+    expect(files.find((row) => row.selection === "evals/agent")).toMatchObject({ match: "other" });
+  });
+
   it("an edited file that changes again starts its test over (review L4), and Check now has a floor", async () => {
     const w = world();
     w.model.commit("main", { [EVAL_WRAPPER_PYTHON_PATH]: `${expected().content}# one\n` });

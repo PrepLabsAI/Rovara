@@ -273,10 +273,10 @@ export async function openEvalWrapperPullRequest(deps: EvalWrapperDeps, project:
   const needs = needsOf(input.report);
   const need = needs.find((entry) => entry.selection === input.selection);
   if (need === undefined) return { selection: input.selection, state: "failed", failure: "not_needed" };
-  try { return await openOne(deps, project, input, need); } catch { return { selection: need.selection, state: "failed", failure: "refused" }; }
+  try { return await openOne(deps, project, input, need, needs); } catch { return { selection: need.selection, state: "failed", failure: "refused" }; }
 }
 
-async function openOne(deps: EvalWrapperDeps, project: string, input: { taskId: string; by: string }, need: Need): Promise<EvalWrapperOutcome> {
+async function openOne(deps: EvalWrapperDeps, project: string, input: { taskId: string; by: string }, need: Need, siblings: readonly Need[]): Promise<EvalWrapperOutcome> {
   // The AI-written file and a file nothing checked are never opened for a person; a second eval for one file is copy-only.
   if (need.kind === "custom") return { selection: need.selection, state: "failed", failure: "copy_only" };
   if (!need.offered) return { selection: need.selection, state: "failed", failure: "not_offered" };
@@ -310,7 +310,7 @@ async function openOne(deps: EvalWrapperDeps, project: string, input: { taskId: 
   let kind: Awaited<ReturnType<NonNullable<typeof host.pathKind>>>;
   try { kind = await target.host.pathKind!(target.repository, need.file.path, baseHead, target.scope); } catch { return { selection: need.selection, state: "failed", failure: "unreachable" }; }
   if (kind !== "none") {
-    await detectOne(deps, project, need, raw).catch(() => undefined);
+    await detectOne(deps, project, need, raw, siblings).catch(() => undefined);
     return { selection: need.selection, state: "failed", failure: "file_exists" };
   }
   const branch = await freshBranch(deps, target);
@@ -401,7 +401,8 @@ async function detectOne(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "no
  */
 export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "companyId" | "now" | "targets">, project: string, report: SetupEvalDiscoveryReport, options: { force?: boolean; floorMs?: number } = {}): Promise<void> {
   try {
-    const needs = needsOf(report).slice(0, 4);
+    const all = needsOf(report);
+    const needs = all.slice(0, 4);
     if (needs.length === 0) return;
     const files = await listEvalWrapperFiles(deps, project);
     const targets = await deps.targets(project);
@@ -413,7 +414,7 @@ export async function detectEvalWrappers(deps: Pick<EvalWrapperDeps, "store" | "
         const age = known === undefined ? Infinity : deps.now() - Date.parse(known.checkedAt);
         // A plain read leaves a young check alone; "Check now" looks again, but not more than once in `floorMs` (a person cannot drain the code host's quota).
         if (age < (options.force === true ? (options.floorMs ?? 0) : DETECT_FRESH_MS)) continue;
-        await detectOne(deps, project, need, raw, needs);
+        await detectOne(deps, project, need, raw, all);
       } catch { /* tried again at the next read */ }
     }
   } catch { /* the card reads the rows as they are */ }
