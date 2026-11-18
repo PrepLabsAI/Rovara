@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect as tlsConnect } from "node:tls";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, PluginConfigSchema, builtinModelCatalog, type CheckEntry } from "@agentx/contracts";
+import { GOOGLE_VERTEX_AI_ALLOW_GROUP, IMPLICIT_COMPANY_ID, MODEL_HOSTS_ALLOWED_BY_SETTING_SENTENCE, PluginConfigSchema, builtinModelCatalog, type CheckEntry } from "@agentx/contracts";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/broker/src/local/isolation/egress-gateway-source.js";
 import { gatewayConfig, type GatewayInput } from "../../packages/broker/src/local/isolation/stack.js";
 import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
@@ -207,6 +207,39 @@ describe("the sandbox network cannot reach a model host: DNS", () => {
     const gateway = await load({ allowed: [...SHARED_LIST, "api.openai.com", "*.openai.azure.com"], sandboxDenied: DENY });
     expect(gateway.hostAllowed("api.openai.com", "sandbox")).toBe(false);
     expect(gateway.hostAllowed("x.openai.azure.com", "sandbox")).toBe(false);
+  });
+});
+
+describe("the default list's Google Vertex AI group at the egress gateway (owner 2026-11-17)", () => {
+  const DEFAULT_ONLY = { allowed: [...LOCAL_DEFAULT_ALLOW_DOMAINS], sandboxDenied: DENY };
+  const VERTEX_HOSTS = ["aiplatform.googleapis.com", "us-central1-aiplatform.googleapis.com", "europe-west4-aiplatform.googleapis.com", "generativelanguage.googleapis.com"];
+  const TOKEN_HOSTS = ["oauth2.googleapis.com", "sts.googleapis.com", "iamcredentials.googleapis.com"];
+  const GOOGLE_EXITS = ["storage.googleapis.com", "bucket.storage.googleapis.com", "bigquery.googleapis.com", "www.googleapis.com", "firebasestorage.googleapis.com", "x.aiplatform.googleapis.com", "aiplatform.googleapis.com.evil.dev"];
+  it("the worker's network answers the Vertex AI, Gemini and token hosts from the default list alone, and NXDOMAIN for storage and every other Google API", async () => {
+    const gateway = await load(DEFAULT_ONLY);
+    for (const host of [...VERTEX_HOSTS, ...TOKEN_HOSTS]) expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "worker")), `${host} worker`).toBe(0);
+    for (const host of GOOGLE_EXITS) {
+      expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "worker")), `${host} worker`).toBe(3);
+      expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "sandbox")), `${host} sandbox`).toBe(3);
+    }
+  });
+  it("every host of the group except the three token hosts is on the laptop's sandbox deny list", () => {
+    for (const { host } of GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts) if (!SANDBOX_DENY_LEAVES_OUT.includes(host)) expect(laptopSandboxDenyList(), host).toContain(host);
+    expect(GOOGLE_VERTEX_AI_ALLOW_GROUP.hosts.filter(({ host }) => SANDBOX_DENY_LEAVES_OUT.includes(host)).map(({ host }) => host).sort()).toEqual([...SANDBOX_DENY_LEAVES_OUT]);
+  });
+  it("the sandbox still cannot reach the model hosts (the sandbox deny wins) while the token hosts stay reachable, as before", async () => {
+    const gateway = await load(DEFAULT_ONLY);
+    for (const host of VERTEX_HOSTS) expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "sandbox")), `${host} sandbox`).toBe(3);
+    for (const host of TOKEN_HOSTS) expect(rcode(gateway.answerFor(query(host), "172.20.0.2", "sandbox")), `${host} sandbox`).toBe(0);
+  });
+  it("the worker's forwarder goes on to resolve a Vertex host and refuses storage.googleapis.com by name", async () => {
+    const names = spyOnResolution();
+    const worker = await forwarders(DEFAULT_ONLY, "worker");
+    for (const host of ["us-central1-aiplatform.googleapis.com", "sts.googleapis.com", "storage.googleapis.com"]) await sendHello(worker.tlsPort, host);
+    await settle();
+    expect(names).toContain("us-central1-aiplatform.googleapis.com");
+    expect(names).toContain("sts.googleapis.com");
+    expect(names).not.toContain("storage.googleapis.com");
   });
 });
 

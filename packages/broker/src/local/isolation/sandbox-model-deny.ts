@@ -6,7 +6,7 @@
 //
 // ON by default. The owner's own config can switch it off for one project (`projectSettings.<project>.sandboxModelHosts: "allow"`), for a customer whose tests really call a model with the repository's own key; the evidence then says so.
 //
-// Not here, on purpose: Google's token hosts (oauth2, sts, iamcredentials.googleapis.com). Whether they stay on any list is a separate owner decision.
+// Not here, on purpose: Google's token hosts (oauth2, sts, iamcredentials.googleapis.com). They are shared by other Google APIs, and since 2026-11-17 they are in the default list's named group "Google Vertex AI" (contracts/default-allow-domains.ts).
 import { builtinModelCatalog, type CompanyGatewayRow, type ModelCatalogRow, type PluginConfig } from "@agentx/contracts";
 
 /** The five hosts the default allow list gives the sandboxes today. Pinned here, so the deny never shrinks if the catalog changes. */
@@ -18,7 +18,7 @@ export const SANDBOX_PINNED_MODEL_HOSTS: readonly string[] = ["api.anthropic.com
  */
 export const SANDBOX_PINNED_MODEL_PARENTS: readonly string[] = ["*.openai.com", "*.anthropic.com", "*.openrouter.ai", "*.chatgpt.com"];
 
-/** Google's token hosts: left out of this deny list (a pending owner decision removes them everywhere). */
+/** Google's token hosts: left out of this deny list on purpose (they serve every Google API; owner decision 2026-11-17 put them in the default list's "Google Vertex AI" group). */
 export const SANDBOX_DENY_LEAVES_OUT: readonly string[] = ["iamcredentials.googleapis.com", "oauth2.googleapis.com", "sts.googleapis.com"];
 
 type DenyRow = Pick<ModelCatalogRow, "hosts" | "hostSuffixes"> & { readonly authHosts?: readonly string[] | undefined };

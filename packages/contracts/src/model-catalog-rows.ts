@@ -4,20 +4,10 @@
 //
 // The rows are data, not code per provider: a new OpenAI-compatible provider is one more row. They are not signed yet (see `model-catalog-digest.ts`).
 import { ModelCatalogSchema, type ModelCatalog } from "./model-catalog.js";
+import { VERTEX_LOCATIONS } from "./vertex-locations.js";
 
 const errorIds = (family: string) => ({ rateLimit: `${family}.rate_limit`, tokenLimit: `${family}.token_limit`, refusal: `${family}.refusal`, badToolJson: `${family}.bad_tool_json`, cutOffStream: `${family}.cut_off_stream` });
 
-/** Exact names only (never *.googleapis.com). Compared 2026-11-13 with
- * https://docs.cloud.google.com/vertex-ai/docs/general/locations and
- * https://docs.cloud.google.com/docs/security/compliance/restrict-endpoint-usage (also verifies us-west8/mTLS).
- * Retain the existing northamerica-south1 entries; that location is not verified by these lists.
- */
-const VERTEX_LOCATIONS = [
-  "us", "eu", "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1", "us-west2", "us-west3", "us-west4", "northamerica-northeast1", "northamerica-northeast2", "southamerica-east1",
-  "southamerica-west1", "europe-central2", "europe-north1", "europe-southwest1", "europe-west1", "europe-west2", "europe-west3", "europe-west4", "europe-west6", "europe-west8", "europe-west9", "europe-west12",
-  "asia-east1", "asia-east2", "asia-northeast1", "asia-northeast2", "asia-northeast3", "asia-south1", "asia-southeast1", "asia-southeast2", "australia-southeast1", "australia-southeast2", "me-central1",
-  "me-central2", "me-west1", "africa-south1", "europe-west10", "asia-south2", "northamerica-south1", "europe-north2", "us-west8",
-] as const;
 
 /** Exact REP locations verified 2026-11-13: https://docs.cloud.google.com/docs/security/compliance/restrict-endpoint-usage */
 const VERTEX_REP_LOCATIONS = [
