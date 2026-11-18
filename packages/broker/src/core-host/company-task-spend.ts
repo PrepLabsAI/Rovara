@@ -27,7 +27,7 @@ export interface CompanyTaskSpendOptions {
   store: DocumentStore;
   companyId: OrgId;
   /** Told, best effort, why a read refused. Fixed words only; a fault in it never reaches the caller. */
-  refused?: (reason: TaskSpendRefusal) => void;
+  refused?: (reason: TaskSpendRefusal) => void | Promise<void>;
 }
 
 /** A task id as the engine mints it (a UUID); never a '#', a space or an empty string, which the partition key could not hold apart. */

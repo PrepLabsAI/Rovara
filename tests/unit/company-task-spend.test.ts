@@ -33,7 +33,7 @@ const HEALTHY: Run[] = [{ id: "op-1", workflowMode: "IMPLEMENT", status: "SUCCEE
  */
 async function rowStore(rows: StoredDocument[], options: { runs?: Run[]; company?: OrgId; noTask?: boolean; taskCompany?: OrgId; workspaceFor?: OrgId[] } = {}) {
   const memory = new MemoryDocumentStore();
-  const held = new Map(rows.map((row) => [`${row["pk"] as string}|${row["sk"] as string}`, row]));
+  const held = new Map(rows.map((row) => [`${row["pk"]}|${row["sk"]}`, row]));
   const company = options.company ?? A;
   if (options.noTask !== true) await memory.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, companyId: options.taskCompany ?? company, workspaceId: WS } });
   let at = 0;
@@ -55,12 +55,12 @@ async function rowStore(rows: StoredDocument[], options: { runs?: Run[]; company
   });
   return {
     store,
-    put: (row: StoredDocument) => { held.set(`${row["pk"] as string}|${row["sk"] as string}`, row); },
+    put: (row: StoredDocument) => { held.set(`${row["pk"]}|${row["sk"]}`, row); },
     remove: (key: { pk: string; sk: string }) => { held.delete(`${key.pk}|${key.sk}`); },
   };
 }
 
-async function world(rows: StoredDocument[], refused?: (reason: TaskSpendRefusal) => void, options: Parameters<typeof rowStore>[1] = {}) {
+async function world(rows: StoredDocument[], refused?: (reason: TaskSpendRefusal) => void | Promise<void>, options: Parameters<typeof rowStore>[1] = {}) {
   const held = await rowStore(rows, options);
   return { store: held, spend: createCompanyTaskSpend({ store: held.store, companyId: A, ...(refused === undefined ? {} : { refused }) }) };
 }
@@ -143,7 +143,7 @@ describe("the hosted task spend reader (L4-TSU)", () => {
 
   it("a company id the key scheme cannot hold refuses instead of reading", async () => {
     const get = vi.fn(async () => total(A, TASK));
-    const spend = createCompanyTaskSpend({ store: { get } as never, companyId: "org_a#b" as OrgId });
+    const spend = createCompanyTaskSpend({ store: { get } as never, companyId: "org_a#b" });
     await expect(spend(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     expect(get).not.toHaveBeenCalled();
   });
@@ -170,7 +170,7 @@ describe("the hosted task spend reader (L4-TSU)", () => {
   it("a failing log never changes the answer (it throws, or answers a failing promise), and the log carries fixed words only", async () => {
     const { spend } = await world([], () => { throw new Error("log is down"); });
     await expect(spend(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
-    const later = await world([], (() => Promise.reject(new Error("log is down"))) as never);
+    const later = await world([], (() => Promise.reject(new Error("log is down"))));
     await expect(later.spend(TASK)).rejects.toThrow(TASK_SPEND_UNKNOWN);
     const seen: string[] = [];
     const quiet = await world([total(A, TASK, { unpricedEntries: 2 })], (reason) => seen.push(reason));
