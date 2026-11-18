@@ -45,7 +45,7 @@ describe("tables: the repository's own SQL, names and kinds only", () => {
   it("reads only TRACKED .sql files, not through a link, and not node_modules", async () => {
     const r = await repo({ "db/schema.sql": "CREATE TABLE creators (id int primary key, name text);", "node_modules/x/dump.sql": "CREATE TABLE hidden (id int);" });
     await symlink("/etc/hosts", join(r.directory, "db", "link.sql"));
-    const tracked = new Map([["web", new Set(["db/schema.sql", "db/link.sql", "node_modules/x/dump.sql", "db/untracked.sql"])]]);
+    const tracked = new Map([["web", new Set(["db/schema.sql", "db/link.sql", "node_modules/x/dump.sql"])]]);
     await writeFile(join(r.directory, "db", "untracked.sql"), "CREATE TABLE untracked (id int);");
     const seams = await readTableSeams([r.repository], tracked);
     expect(seams.map((table) => table.name)).toEqual(["creators"]);
