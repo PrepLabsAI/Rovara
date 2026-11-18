@@ -29,6 +29,7 @@ import type { LocalLessons } from "./lessons.js";
 const PROJECT_LESSONS = /^\/v1\/app\/projects\/([^/]+)\/lessons(?:\/([A-Za-z0-9_-]{1,64})(?:\/(approve|reject|merge|retire|history))?)?$/u;
 const TASK_LESSONS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/lessons(?:\/([A-Za-z0-9_-]{4,64})\/feedback)?$/u;
 const LOCAL_LESSONS = /^\/v1\/dev\/projects\/([^/]+)\/lessons$/u;
+const LOCAL_REPLAY = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/replay$/u;
 const COMPANY_LOCAL_TOOLS = "/v1/app/org/lessons/local-tools";
 export const LOCAL_LESSONS_PER_MINUTE = 60;
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -122,11 +123,22 @@ export function createLessonRoutes(options: { lessons: LocalLessons; flow: TaskF
     const project = PROJECT_LESSONS.exec(path);
     const task = TASK_LESSONS.exec(path);
     const local = request.method === "POST" ? LOCAL_LESSONS.exec(path) : null;
-    if (project === null && task === null && local === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
+    const replay = LOCAL_REPLAY.exec(path);
+    if (project === null && task === null && local === null && replay === null && path !== COMPANY_LOCAL_TOOLS) return undefined;
     try {
       if (caller.principal.companyId !== companyId) throw agentXError("FORBIDDEN", "this is not your install");
       const who = { orgId: companyId, developerId: caller.principal.personId };
       if (local !== null) return json(200, await localRead(decodeURIComponent(local[1]!), request, caller));
+      if (replay !== null) {
+        if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+        if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", "This route needs a full-access person token.");
+        const name = decodeURIComponent(replay[1]!);
+        if (await flow.projects.latest(name) === undefined) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
+        const params = new URLSearchParams(request.path.split("?")[1] ?? "");
+        const values = params.getAll("tasks");
+        if (values.length > 1 || (values[0] !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(values[0]))) throw agentXError("CONFIG_INVALID", "tasks: must be an integer from 1 to 50");
+        try { return json(200, { project: name, ...(await lessons.replay(name, values[0] === undefined ? 30 : Number(values[0]))) }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+      }
       if (path === COMPANY_LOCAL_TOOLS) {
         if (request.method === "POST") throw agentXError("FORBIDDEN", CHANGE_ON_THE_PAGE);
         if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");

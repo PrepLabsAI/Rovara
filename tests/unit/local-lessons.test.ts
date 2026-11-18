@@ -503,6 +503,20 @@ describe("the owner's routes", () => {
     expect(await call(w, "GET", "/v1/dev/projects")).toEqual({ status: undefined, body: undefined });
   });
 
+  it("replays lessons only for a full-access person on a registered project", async () => {
+    const w = await world();
+    const replay = vi.spyOn(w.lessons, "replay").mockResolvedValue({ tasks: [], totals: { changedTasks: 0, lessonsGained: 0, lessonsLost: 0 } });
+    const routes = createLessonRoutes({ lessons: w.lessons, flow: w.h.deps });
+    const route = (path: string, caller = w.h.owner) => routes({ method: "GET", path, headers: {} }, caller);
+    expect((await route("/v1/dev/projects/payments/lessons/replay?tasks=7"))?.statusCode).toBe(200);
+    expect(replay).toHaveBeenCalledWith("payments", 7);
+    expect((await route("/v1/dev/projects/missing/lessons/replay"))?.statusCode).toBe(404);
+    expect((await route("/v1/dev/projects/payments/lessons/replay?tasks=51"))?.statusCode).toBe(400);
+    expect((await route("/v1/dev/projects/payments/lessons/replay", { ...w.h.owner, scriptToken: { tokenId: "stk_x", name: "tool", permissions: ["lessons"], projects: ["payments"] } }))?.statusCode).toBe(403);
+    const member = { ...w.h.owner, principal: { ...w.h.owner.principal, companyId: "org_other0000000000000000" } };
+    expect((await route("/v1/dev/projects/payments/lessons/replay", member))?.statusCode).toBe(403);
+  });
+
   it("only reads: the API token cannot retire a lesson, mark one, switch the lessons file, or approve, reject or merge one: those are the page's", async () => {
     const w = await world();
     await put(w, pending());

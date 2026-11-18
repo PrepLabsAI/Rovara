@@ -52,7 +52,7 @@ export const REFLECT_PER_PASS = 2;
 const LOAD_RECORD_KEEP_SECONDS = 30 * 86_400;
 /** The use rows ("used in N tasks", `use-count.ts`) are kept as long as that module counts them. */
 const USE_RECORD_KEEP_SECONDS = LESSON_USE_KEEP_SECONDS;
-const INTENT_REQUEST_CHARS = 600;
+export const INTENT_REQUEST_CHARS = 600;
 
 /** The workflow modes that carry lessons, and the lesson stage each is. Every other mode (the checks, a publication) carries none. */
 const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "PLAN_CRITIQUE" | "REVIEW">> = { UNDERSTAND: "UNDERSTAND", PLAN: "PLAN", IMPLEMENT: "IMPLEMENT", PLAN_CRITIQUE: "PLAN_CRITIQUE", REVIEW: "REVIEW" };
@@ -111,6 +111,17 @@ export interface LessonsHost {
   ownTask(taskId: string): Promise<TaskRecord | undefined>;
 }
 
+/** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names. Stored data only (the plan artifact); the replay check (`replay-project.ts`) uses the same reading. */
+export async function taskPlanLoadFacts(readText: ReturnType<typeof textReaderOf>, task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> {
+  const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
+  if (artifact === undefined) return undefined;
+  const loaded = await loadWorkflowDocument(readText, artifact, {});
+  if (loaded === undefined) return undefined;
+  if (loaded.format === "structured") return planLoadFacts(loaded.plan);
+  // A Markdown plan: its first words are the summary, and the files it names in words are the files.
+  return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
+}
+
 export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   const { flow, runtime, companyId, now, log, enabled } = input;
   const readText = textReaderOf(input.blobs);
@@ -123,16 +134,8 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
 
   // ---- loading
 
-  /** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names. */
-  async function planFactsOf(task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> {
-    const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
-    if (artifact === undefined) return undefined;
-    const loaded = await loadWorkflowDocument(readText, artifact, {});
-    if (loaded === undefined) return undefined;
-    if (loaded.format === "structured") return planLoadFacts(loaded.plan);
-    // A Markdown plan: its first words are the summary, and the files it names in words are the files.
-    return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
-  }
+  /** What the loader is told about a task besides its title (`taskPlanLoadFacts`). */
+  const planFactsOf = (task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> => taskPlanLoadFacts(readText, task);
 
   /** An answer or "undefined" when the time passes: the extras never hold up the lessons. */
   const within = async <T>(work: Promise<T>, ms: number): Promise<T | undefined> => {
