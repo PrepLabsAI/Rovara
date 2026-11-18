@@ -382,10 +382,10 @@ describe("L4-EGR: Rovara's outbound addresses reach the control plane's NatEgres
   const withAddresses = (value: string | undefined) => ({ ...outputs, foundation: { ...outputs.foundation, ...(value === undefined ? {} : { NatEgressAddresses: value }) } });
 
   it("passes the foundation's output as is, to a parameter the control plane template declares, and nowhere else", () => {
-    const given = stackParameters("control-plane", answers(), withAddresses("44.235.136.195,44.226.134.187"), { packages: true });
-    expect(given.NatEgressAddresses).toBe("44.235.136.195,44.226.134.187");
+    const given = stackParameters("control-plane", answers(), withAddresses("203.0.113.195,198.51.100.187"), { packages: true });
+    expect(given.NatEgressAddresses).toBe("203.0.113.195,198.51.100.187");
     expect(Object.keys(given).filter((name) => !(name in templates.get("control-plane")!.Parameters!))).toEqual([]);
-    for (const part of ["access", "foundation", "identity", "runtime", "slack"] as DeployPart[]) expect(stackParameters(part, answers(), withAddresses("44.235.136.195,44.226.134.187"), { packages: true })).not.toHaveProperty("NatEgressAddresses");
+    for (const part of ["access", "foundation", "identity", "runtime", "slack"] as DeployPart[]) expect(stackParameters(part, answers(), withAddresses("203.0.113.195,198.51.100.187"), { packages: true })).not.toHaveProperty("NatEgressAddresses");
   });
 
   it("passes nothing when the foundation does not output it yet (the parameter keeps its empty default), and an operator parameter is not involved", () => {
@@ -396,7 +396,7 @@ describe("L4-EGR: Rovara's outbound addresses reach the control plane's NatEgres
   });
 
   it("passes nothing for a value the template's pattern would refuse (the deploy never stops on it)", () => {
-    for (const bad of ["not-an-address", "44.235.136.195, 44.226.134.187", "44.235.136.195,", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "2001:db8::1"]) {
+    for (const bad of ["not-an-address", "203.0.113.195, 198.51.100.187", "203.0.113.195,", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "2001:db8::1"]) {
       expect(stackParameters("control-plane", answers(), withAddresses(bad), { packages: true }), bad).not.toHaveProperty("NatEgressAddresses");
     }
   });

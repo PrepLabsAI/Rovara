@@ -213,7 +213,7 @@ async function setUp(mode: "linking" | "developer") {
     coreIntake: { intakeFor: async () => undefined, waiting: async () => ({ items: [], sources: [] }), start: async () => ({ outcome: "not_found" }), seedTicketUpdates: async () => "no_intake", dismiss: async () => false },
     // Guided onboarding PR 14: the company engine model route needs its wiring to exist; this gateway offers nothing readable, so only the route table's answer is tested here.
     companyEngineModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
-    companyEgress: { addresses: () => "44.235.136.195,44.226.134.187" },
+    companyEgress: { addresses: () => "203.0.113.195,198.51.100.187" },
     issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
