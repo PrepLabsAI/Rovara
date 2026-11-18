@@ -67,6 +67,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/setup-agent/journal", "full"],
     // Web task channel C7: the in-app inbox (core/notify/inbox.ts over core-host/inbox-routes.ts).
     ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
+    // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
+    ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -76,7 +78,7 @@ describe("the /v1/app route table", () => {
     expect(APP_ROUTES).toHaveLength(SERVED.length);
     // The laptop's own routes, the asks (not built on AWS), a playbook edit (Cloud's editor), other methods, extra or empty segments and other prefixes.
     for (const [method, path] of [
-      ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
+      ["POST", "/v1/app/sessions/s1/log"], ["PUT", "/v1/app/sessions/s1/log"], ["DELETE", "/v1/app/sessions/s1/log"], ["GET", "/v1/app/sessions/s1/logs"], ["GET", "/v1/app/sessions/s1/log/x"], ["POST", "/v1/app/sessions/s1/ask"], ["GET", "/v1/app/sessions/s1/asks/ask_00000000000000000000"], ["GET", "/v1/app/triggers"], ["POST", "/v1/app/chains"], ["GET", "/v1/local/sessions"],
       ["PUT", "/v1/app/projects/payments/playbook"], ["POST", "/v1/app/projects/payments/playbook"], ["GET", "/v1/app/people/p1/erase"], ["POST", "/v1/app/people/p1"],
       ["POST", "/v1/app/decisions/plan/t1/x/approve"], ["POST", "/v1/app/decisions/approve"], ["GET", "/v1/app/sessions/"], ["GET", "/v1/app/sessions//stop"], ["GET", "/v1/app/"],
       // The laptop page's own setup acts (a typed command, eval confirm, the setup check) are not served on AWS, nor other methods on the setup run.
