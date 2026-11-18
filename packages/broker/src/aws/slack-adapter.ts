@@ -204,7 +204,7 @@ export function createSlackChannelEventsHandler(deps: SlackChannelEventsDependen
         await text(event.data.text);
         return "posted";
       case "pr":
-        await text(`<${event.data.url}|${event.data.title.replace(/[<>|]/g, "")}>${event.data.verdict === undefined ? "" : `\n${event.data.verdict}`}`);
+        await text(`<${event.data.url}|${event.data.title.replace(/[<>|]/g, "")}>`);
         return "posted";
       case "done":
         if (event.data.text === undefined) return "ignored";
