@@ -69,6 +69,21 @@ describe("wiki store: Delete wiki with answer threads (batch 14, from #932)", ()
 });
 
 describe("wiki store: two companies and two projects never meet", () => {
+  it("acknowledges changed notes only in their company and project, recording actor and time", async () => {
+    const w = world();
+    await w.a.writePage("alpha", page("A-alpha"));
+    await w.a.writePage("beta", page("A-beta"));
+    await w.b.writePage("alpha", page("B-alpha"));
+    const own = await w.a.addNote("alpha", { pageId: "overview", text: "check source", authorId: "person-1" });
+    const beta = await w.a.addNote("beta", { pageId: "overview", text: "beta", authorId: "person-2" });
+    const other = await w.b.addNote("alpha", { pageId: "overview", text: "other company", authorId: "person-3" });
+    w.clock.now += 5000;
+    expect(await w.a.acknowledgeNote("alpha", "overview", own.noteId, "person-1")).toMatchObject({ changedAcknowledgement: { by: "person-1", at: new Date(w.clock.now).toISOString() } });
+    expect(await w.a.acknowledgeNote("alpha", "overview", beta.noteId, "person-1")).toBeUndefined();
+    expect(await w.a.acknowledgeNote("alpha", "overview", other.noteId, "person-1")).toBeUndefined();
+    expect((await w.a.readPage("beta", "overview", "person"))?.notes[0]?.changedAcknowledgement).toBeUndefined();
+    expect((await w.b.readPage("alpha", "overview", "person"))?.notes[0]?.changedAcknowledgement).toBeUndefined();
+  });
   it("every read of company A, project alpha sees only its own rows (index, page, notes, flags, builds, answers)", async () => {
     const w = world();
     // The same project name, page id and repo in both companies; and a second project in company A.
@@ -396,6 +411,11 @@ describe("wiki store: person erase and answer expiry", () => {
       await w.a.writePage(project, page(project));
       await w.a.addNote(project, { pageId: "overview", text: `erase me ${project}`, authorId: "person-1" });
       await w.a.addNote(project, { pageId: "overview", text: `keep me ${project}`, authorId: "person-2" });
+      const acknowledged = await w.a.addNote(project, { pageId: "overview", text: `ack by erased ${project}`, authorId: "person-2" });
+      await w.a.acknowledgeNote(project, "overview", acknowledged.noteId, "person-1");
+      const approved = await w.a.addNote(project, { pageId: "overview", text: `approved by erased ${project}`, authorId: "person-2" });
+      await w.a.approveNote(project, "overview", approved.noteId, "person-1");
+      await w.a.acknowledgeNote(project, "overview", approved.noteId, "person-2");
       await w.a.addFlag(project, { pageId: "overview", claimId: "c0001", by: { kind: "person", personId: "person-1" }, reason: `my reason ${project}` });
       await w.a.addFlag(project, { pageId: "overview", claimId: "c0002", by: { kind: "person", personId: "person-2" }, reason: `their reason ${project}` });
       await w.a.writeAnswer(project, { answerId: "answer-0001", askedBy: "person-1", channel: "slack", question: `my question ${project}`, answer: "a", outcome: "answered", sources: [], pagesRead: [] });
@@ -408,6 +428,10 @@ describe("wiki store: person erase and answer expiry", () => {
     const raw = JSON.stringify(await everything(w.store));
     expect(raw).not.toMatch(/erase me|my reason|my question/u);
     expect(raw).toMatch(/keep me alpha/u);
+    expect(raw).toMatch(/ack by erased alpha/u);
+    expect(raw).toContain('"text":"approved by erased alpha"');
+    expect(raw).toContain('"changedAcknowledgement":{"by":"person-2"');
+    expect(raw).not.toContain('"changedAcknowledgement":{"by":"person-1"');
     expect(raw).toMatch(/their reason beta/u);
     expect(raw).toMatch(/their question alpha/u);
     expect(raw).toContain("b note");

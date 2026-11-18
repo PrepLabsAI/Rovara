@@ -18,7 +18,7 @@ import {
   WIKI_ACTION_FAILED, WIKI_BAD_REQUEST, WIKI_DISPUTED_MAX, WIKI_LESSONS_OFF, WIKI_LESSON_REFUSED, WIKI_NEEDS_MAINTAINER, WIKI_NEEDS_WORKING_ROLE, WIKI_NOT_A_RULE, WIKI_NOTE_NOT_FOUND, WIKI_NOTE_NOT_YOURS,
   WIKI_NO_SUCH_CLAIM, WIKI_PAGE_NOT_FOUND, WIKI_PROJECT_NOT_FOUND, WIKI_TOO_MANY, WIKI_UNAVAILABLE,
   WikiAddNoteRequestSchema, WikiCorrectionsResponseSchema, WikiDisputedResponseSchema, WikiIdSchema, WikiMarkWrongRequestSchema, WikiMarkedResponseSchema, WikiNoBodySchema, WikiNoteAddedResponseSchema,
-  AnswerGapsResponseSchema, WikiNoteApprovedResponseSchema, WikiNoteDeletedResponseSchema, WikiPageIdSchema, WikiProjectSchema, WikiResolvedResponseSchema, WikiSuggestedResponseSchema, wikiNoteLooksLikeRule,
+  AnswerGapsResponseSchema, WikiNoteApprovedResponseSchema, WikiNoteDeletedResponseSchema, WikiNoteAcknowledgedResponseSchema, WikiPageIdSchema, WikiProjectSchema, WikiResolvedResponseSchema, WikiSuggestedResponseSchema, wikiNoteLooksLikeRule,
   AgentXError, agentXError, redactText, type DocumentStore, type OrgId, type ProjectRole, type WikiNote, type WikiPageRead, type WikiStore, type WikiYouCan,
 } from "@agentx/contracts";
 import type { z } from "zod";
@@ -64,6 +64,7 @@ const ROUTES: ReadonlyArray<{ method: "GET" | "POST"; action: Action; pattern: R
   { method: "POST", action: "add_note", pattern: new RegExp(`${BASE}pages/([^/]+)/notes$`, "u") },
   { method: "POST", action: "approve_note", pattern: new RegExp(`${BASE}pages/([^/]+)/notes/([^/]+)/approve$`, "u") },
   { method: "POST", action: "delete_note", pattern: new RegExp(`${BASE}pages/([^/]+)/notes/([^/]+)/delete$`, "u") },
+  { method: "POST", action: "acknowledge_note", pattern: new RegExp(`${BASE}pages/([^/]+)/notes/([^/]+)/acknowledge$`, "u") },
   { method: "POST", action: "suggest_lesson", pattern: new RegExp(`${BASE}pages/([^/]+)/notes/([^/]+)/suggest-lesson$`, "u") },
   { method: "POST", action: "mark_wrong", pattern: new RegExp(`${BASE}pages/([^/]+)/flags$`, "u") },
   { method: "POST", action: "resolve_marks", pattern: new RegExp(`${BASE}pages/([^/]+)/flags/resolve$`, "u") },
@@ -71,7 +72,7 @@ const ROUTES: ReadonlyArray<{ method: "GET" | "POST"; action: Action; pattern: R
   // J5: "Questions the wiki could not answer", read from the answer records (maintainers only, like the disputed list).
   { method: "GET", action: "gaps", pattern: new RegExp(`${BASE}gaps$`, "u") },
 ];
-type Action = "gaps" | "corrections" | "add_note" | "approve_note" | "delete_note" | "suggest_lesson" | "mark_wrong" | "resolve_marks" | "disputed";
+type Action = "gaps" | "corrections" | "add_note" | "approve_note" | "delete_note" | "acknowledge_note" | "suggest_lesson" | "mark_wrong" | "resolve_marks" | "disputed";
 
 /** Whether this method and path is one of the correction routes. */
 export function isWikiCorrectionPath(path: string, method: string): boolean {
@@ -128,7 +129,7 @@ export async function routeHostedWikiCorrections(input: HostedWikiCorrectionsInp
     try { repositories = await input.wiring.projectRepositories(input.companyId, project); } catch { throw unavailable(); }
     if (!Array.isArray(repositories)) throw projectNotFound();
     // What the role may not do is refused before anything else is looked at (a body, a page, a note).
-    if ((route.action === "add_note" || route.action === "mark_wrong" || route.action === "delete_note" || route.action === "suggest_lesson") && !isWorking(role)) throw forbidden(WIKI_NEEDS_WORKING_ROLE);
+    if ((route.action === "add_note" || route.action === "mark_wrong" || route.action === "delete_note" || route.action === "suggest_lesson" || route.action === "acknowledge_note") && !isWorking(role)) throw forbidden(WIKI_NEEDS_WORKING_ROLE);
     if ((route.action === "approve_note" || route.action === "resolve_marks" || route.action === "disputed" || route.action === "gaps") && !isMaintainer(role)) throw forbidden(WIKI_NEEDS_MAINTAINER);
     const store = createWikiStore({ store: input.store, companyId: input.companyId, now: input.now });
     const ctx: Ctx = { input, store, project, role, repositories };
@@ -148,6 +149,7 @@ export async function routeHostedWikiCorrections(input: HostedWikiCorrectionsInp
       case "add_note": return json(200, await addNote(ctx, pageId));
       case "approve_note": return json(200, await approveNote(ctx, pageId, noteId!));
       case "delete_note": return json(200, await deleteNote(ctx, pageId, noteId!));
+      case "acknowledge_note": return json(200, await acknowledgeNote(ctx, pageId, noteId!));
       case "suggest_lesson": return json(200, await suggestLesson(ctx, pageId, noteId!));
       case "mark_wrong": return json(200, await markWrong(ctx, pageId));
       case "resolve_marks": return json(200, await resolveMarks(ctx, pageId));
@@ -193,8 +195,8 @@ function mayHandleNote(ctx: Ctx, note: WikiNote): boolean {
 }
 
 /** The file a note is tied to has changed: a claim of this page that cites it is `changed` or `not_found`. */
-function fileChanged(read: WikiPageRead, file: { repo: string; path: string }): boolean {
-  return read.page.claims.some((claim) => claim.source !== "found" && claim.citations.some((citation) => citation.repo === file.repo && citation.path === file.path));
+function fileChanged(read: WikiPageRead, file: { repo: string; path: string }, acknowledgedAt?: string): boolean {
+  return read.page.claims.some((claim) => claim.source !== "found" && (acknowledgedAt === undefined || claim.checkedAt > acknowledgedAt) && claim.citations.some((citation) => citation.repo === file.repo && citation.path === file.path));
 }
 
 async function correctionsAnswer(ctx: Ctx, pageId: string) {
@@ -209,7 +211,7 @@ async function correctionsAnswer(ctx: Ctx, pageId: string) {
       canApprove: isMaintainer(ctx.role) && note.approval.state === "pending",
       canSuggestLesson: lessonsOffered && mayHandleNote(ctx, note) && wikiNoteLooksLikeRule(note.text) && note.authorId !== WIKI_FORMER_MEMBER,
       // Only the note's author and the maintainers are asked to check a note whose file changed.
-      mayBeOutOfDate: (mine || isMaintainer(ctx.role)) && note.file !== undefined && fileChanged(read, note.file),
+      mayBeOutOfDate: (mine || isMaintainer(ctx.role)) && note.file !== undefined && fileChanged(read, note.file, note.changedAcknowledgement?.at),
     };
   }).sort((a, b) => a.noteId.localeCompare(b.noteId));
   return WikiCorrectionsResponseSchema.parse({ project: ctx.project, pageId, you: wikiYouCan(ctx.role), notes });
@@ -244,6 +246,15 @@ async function deleteNote(ctx: Ctx, pageId: string, noteId: string) {
   const gone = await guarded(async () => await ctx.store.deleteNote(ctx.project, pageId, noteId));
   if (!gone) throw noteNotFound();
   return WikiNoteDeletedResponseSchema.parse({ deleted: true });
+}
+
+async function acknowledgeNote(ctx: Ctx, pageId: string, noteId: string) {
+  bodyOf(ctx.input.request, WikiNoBodySchema);
+  const note = noteOf(await readPerson(ctx, pageId), noteId);
+  if (!mayHandleNote(ctx, note)) throw forbidden(WIKI_NOTE_NOT_YOURS);
+  const acknowledged = await guarded(async () => await ctx.store.acknowledgeNote(ctx.project, pageId, noteId, ctx.input.personId));
+  if (acknowledged === undefined) throw noteNotFound();
+  return WikiNoteAcknowledgedResponseSchema.parse({ noteId: acknowledged.noteId, acknowledged: true });
 }
 
 async function suggestLesson(ctx: Ctx, pageId: string, noteId: string) {

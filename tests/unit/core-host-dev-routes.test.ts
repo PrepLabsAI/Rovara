@@ -262,7 +262,7 @@ describe("the project wiki's reads on the deployed API", () => {
 describe("the project wiki's corrections on the deployed API", () => {
   const WIKI = "/v1/app/projects/payments/wiki";
   const PAGE = `${WIKI}/pages/overview`;
-  const paths = [["GET", `${PAGE}/corrections`], ["POST", `${PAGE}/notes`], ["POST", `${PAGE}/notes/note0001/approve`], ["POST", `${PAGE}/notes/note0001/delete`], ["POST", `${PAGE}/notes/note0001/suggest-lesson`],
+  const paths = [["GET", `${PAGE}/corrections`], ["POST", `${PAGE}/notes`], ["POST", `${PAGE}/notes/note0001/approve`], ["POST", `${PAGE}/notes/note0001/delete`], ["POST", `${PAGE}/notes/note0001/suggest-lesson`], ["POST", `${PAGE}/notes/note0001/acknowledge`],
     ["POST", `${PAGE}/flags`], ["POST", `${PAGE}/flags/resolve`], ["GET", `${WIKI}/disputed`]] as const;
   const request = (method: string, path: string) => (method === "GET" ? get(path) : post(path, { text: "hello" }));
 

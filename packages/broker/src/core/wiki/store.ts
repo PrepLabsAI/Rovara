@@ -298,6 +298,17 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     return written.applied ? note : undefined;
   }
 
+  async function acknowledgeNote(project: string, pageId: string, noteId: string, by: string): Promise<WikiNote | undefined> {
+    const name = projectOf(project);
+    const key = wikiNoteKey(companyId, name, pageIdOf(pageId), idOf(noteId));
+    const acknowledgedBy = parsed(WikiPersonIdSchema, by);
+    const row = readRow(NoteRow, await store.get(key), name);
+    if (row === undefined) return undefined;
+    const note: WikiNote = { ...row.note, changedAcknowledgement: { by: acknowledgedBy, at: iso() } };
+    const written = await store.put({ item: { ...key, entityType: WIKI_NOTE_ENTITY, ...rowBase(name), note } as unknown as StoredDocument, condition: when.present() });
+    return written.applied ? note : undefined;
+  }
+
   async function deleteNote(project: string, pageId: string, noteId: string): Promise<boolean> {
     const name = projectOf(project);
     const gone = await store.delete({ key: wikiNoteKey(companyId, name, pageIdOf(pageId), idOf(noteId)), return: "old" });
@@ -437,7 +448,13 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
           done.notes += 1;
         } else if (row.note.approval.state === "approved" && row.note.approval.by === person) {
           // Someone else's note they approved stays approved, but no longer names them.
-          await store.put({ item: { ...item, note: { ...row.note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
+          const note = { ...row.note };
+          if (note.changedAcknowledgement?.by === person) delete note.changedAcknowledgement;
+          await store.put({ item: { ...item, note: { ...note, approval: { ...row.note.approval, by: WIKI_FORMER_MEMBER } } } as unknown as StoredDocument, condition: when.present() });
+        } else if (row.note.changedAcknowledgement?.by === person) {
+          const note = { ...row.note };
+          delete note.changedAcknowledgement;
+          await store.put({ item: { ...item, note } as unknown as StoredDocument, condition: when.present() });
         }
       }
       for (const item of await family(name, WIKI_SK.build)) {
@@ -479,5 +496,5 @@ export function createWikiStore(options: WikiStoreOptions): WikiStore {
     };
   }
 
-  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
+  return { companyId, pageSink, readIndex, readPageBody, readPage, writePage, markClaims, deletePage, deleteRepository, pruneRepositories, deleteWiki, addNote, approveNote, acknowledgeNote, deleteNote, addFlag, resolveFlags, writeBuild, readBuild, lastBuild, writeAnswer, readAnswer, expireAnswers, erasePerson, listAnswers, markAnswerNotRight };
 }

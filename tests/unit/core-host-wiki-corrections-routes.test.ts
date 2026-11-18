@@ -67,10 +67,10 @@ async function seeded(options: Parameters<typeof world>[1] = {}) {
 const note = (text: string, extra: Record<string, unknown> = {}) => ({ text, ...extra });
 
 describe("wiki correction routes: paths", () => {
-  it("serves exactly the eight routes with the method each takes", () => {
+  it("serves exactly the nine routes with the method each takes", () => {
     for (const [method, path] of [
       ["GET", `${PAGE}/corrections`], ["POST", `${PAGE}/notes`], ["POST", `${PAGE}/notes/note0001/approve`], ["POST", `${PAGE}/notes/note0001/delete`], ["POST", `${PAGE}/notes/note0001/suggest-lesson`],
-      ["POST", `${PAGE}/flags`], ["POST", `${PAGE}/flags/resolve`], ["GET", "/v1/app/projects/alpha/wiki/disputed"],
+      ["POST", `${PAGE}/notes/note0001/acknowledge`], ["POST", `${PAGE}/flags`], ["POST", `${PAGE}/flags/resolve`], ["GET", "/v1/app/projects/alpha/wiki/disputed"],
     ] as const) expect(isWikiCorrectionPath(path, method), `${method} ${path}`).toBe(true);
     for (const [method, path] of [
       ["POST", `${PAGE}/corrections`], ["GET", `${PAGE}/notes`], ["DELETE", `${PAGE}/notes/note0001`], ["PUT", `${PAGE}/notes`], ["GET", `${PAGE}/notes/note0001/approve`], ["GET", `${PAGE}/flags`], ["POST", "/v1/app/projects/alpha/wiki/disputed"],
@@ -489,6 +489,29 @@ describe("what each role is offered (no dead buttons)", () => {
     await w.a.markClaims("alpha", "overview", [{ claimId: "c0001", source: "found" }, { claimId: "c0002", source: "not_found" }]);
     expect(await states("ada")).toEqual({ [tied.noteId]: false, [untied.noteId]: true });
   });
+  it("lets only the note author or a maintainer acknowledge its changed file", async () => {
+    const w = await seeded();
+    const tied = await w.a.addNote("alpha", { pageId: "overview", text: "About a.ts", authorId: "ada", file: { repo: "web", path: "src/a.ts" } });
+    await w.a.markClaims("alpha", "overview", [{ claimId: "c0001", source: "changed" }]);
+    const path = `${PAGE}/notes/${tied.noteId}/acknowledge`;
+    expect((await w.call(A, "bob", "POST", path, {})).status).toBe(403);
+    expect((await w.call(A, "vera", "POST", path, {})).status).toBe(403);
+    expect((await w.call(A, "mallory", "POST", path, {})).status).toBe(404);
+    const viewerAuthored = await w.a.addNote("alpha", { pageId: "overview", text: "Viewer note", authorId: "vera" });
+    expect((await w.call(A, "vera", "POST", `${PAGE}/notes/${viewerAuthored.noteId}/acknowledge`, {})).body["error"]).toMatchObject({ message: WIKI_NEEDS_WORKING_ROLE });
+    await w.a.deleteNote("alpha", "overview", viewerAuthored.noteId);
+    expect((await w.call(A, "maya", "POST", path, {}, { projectRole: async () => "viewer" })).body["error"]).toMatchObject({ message: WIKI_NEEDS_WORKING_ROLE });
+    expect((await w.call(A, "ada", "POST", `${PAGE}/notes/${tied.noteId}/acknowledge`, {})).body).toEqual({ noteId: tied.noteId, acknowledged: true });
+    expect((await w.call(A, "maya", "POST", `${PAGE}/notes/${tied.noteId}/acknowledge`, {})).body).toEqual({ noteId: tied.noteId, acknowledged: true });
+    const beta = await w.a.addNote("beta", { pageId: "overview", text: "Beta note", authorId: "ada" });
+    const foreign = await w.b.addNote("alpha", { pageId: "overview", text: "Other company", authorId: "ada" });
+    expect((await w.call(A, "ada", "POST", `${PAGE}/notes/${beta.noteId}/acknowledge`, {})).status).toBe(404);
+    expect((await w.call(A, "ada", "POST", `${PAGE}/notes/${foreign.noteId}/acknowledge`, {})).status).toBe(404);
+    expect((await w.call(A, "maya", "GET", `${PAGE}/corrections`)).body["notes"]).toMatchObject([{ noteId: tied.noteId, mayBeOutOfDate: false }]);
+    w.clock.t += 1000;
+    await w.a.markClaims("alpha", "overview", [{ claimId: "c0001", source: "not_found" }]);
+    expect((await w.call(A, "ada", "GET", `${PAGE}/corrections`)).body["notes"]).toMatchObject([{ noteId: tied.noteId, mayBeOutOfDate: true }]);
+  });
 });
 
 describe("the role is read live, from membership, on every request", () => {
@@ -521,6 +544,14 @@ describe("the role is read live, from membership, on every request", () => {
     roles[`${A}/alpha/ada`] = "viewer";
     expect((await w.call(A, "ada", "POST", `${PAGE}/notes`, note("third"))).status).toBe(403);
     expect((await w.a.readPage("alpha", "overview", "person"))?.notes.map((n) => n.text)).toEqual(["first"]);
+  });
+  it("a maintainer demoted to viewer cannot acknowledge on the next request", async () => {
+    const roles: Roles = { ...ROLES };
+    const w = world(roles);
+    await w.a.writePage("alpha", page("A-alpha"));
+    const tied = await w.a.addNote("alpha", { pageId: "overview", text: "About a.ts", authorId: "ada", file: { repo: "web", path: "src/a.ts" } });
+    roles[`${A}/alpha/maya`] = "viewer";
+    expect((await w.call(A, "maya", "POST", `${PAGE}/notes/${tied.noteId}/acknowledge`, {})).body["error"]).toMatchObject({ message: WIKI_NEEDS_WORKING_ROLE });
   });
   it("a repository no longer in the project has its pages removed before anything is written", async () => {
     const projects = { [A]: { alpha: ["api"] } };

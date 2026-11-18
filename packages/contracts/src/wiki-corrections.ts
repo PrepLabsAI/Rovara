@@ -4,6 +4,7 @@
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/notes                                { text, file? }       Add a note (contributor and up). Pending: people see it at once, agents only after approval
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/approve               {}                    maintainer (or company owner or admin) only: from then agents get the note
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/delete                {}                    the note's author, or a maintainer
+//   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/acknowledge          {}                    the note's author, or a maintainer: clear the changed-file reminder
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/notes/{noteId}/suggest-lesson        {}                    the note's author, or a maintainer: a PENDING lesson an admin approves; never auto-approved
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/flags                                { claimId?, reason? } Mark wrong (contributor and up): hides the claim, or the page, from agents at once
 //   POST   /v1/app/projects/{project}/wiki/pages/{pageId}/flags/resolve                        {}                    maintainer only: closes every open mark on the page
@@ -76,6 +77,7 @@ export const WikiNoteAddedResponseSchema = z.object({ note: WikiShownNoteSchema 
 export type WikiNoteAddedResponse = z.infer<typeof WikiNoteAddedResponseSchema>;
 export const WikiNoteApprovedResponseSchema = z.object({ noteId: WikiIdSchema, approval: z.literal("approved") }).strict();
 export const WikiNoteDeletedResponseSchema = z.object({ deleted: z.literal(true) }).strict();
+export const WikiNoteAcknowledgedResponseSchema = z.object({ noteId: WikiIdSchema, acknowledged: z.literal(true) }).strict();
 export const WikiMarkedResponseSchema = z.object({ flagId: WikiIdSchema, pageId: WikiPageIdSchema, claimId: WikiIdSchema.optional() }).strict();
 export type WikiMarkedResponse = z.infer<typeof WikiMarkedResponseSchema>;
 export const WikiResolvedResponseSchema = z.object({ resolved: z.number().int().min(0) }).strict();
