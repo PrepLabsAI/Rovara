@@ -1,4 +1,4 @@
-460 record kinds: 92 company-scoped, 22 install-wide, 346 needs-company. 235 routes: 60 company-scoped, 9 install-wide, 166 needs-company.
+460 record kinds: 92 company-scoped, 22 install-wide, 346 needs-company. 236 routes: 60 company-scoped, 9 install-wide, 167 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -529,6 +529,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | route | /v1/dev/tasks/ | needs-company | State table | no | prefix | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId} | company-scoped | State table | yes | GET | R4 optional membership reader; absent preserves legacy bytes. Other methods on this path remain T2. |
 | route | /v1/dev/tasks/{taskId}/answers | needs-company | State table | no | POST | T2 on the AWS dispatch, as its siblings. S3: a core-owned task is answered by the core host (company and owner from live membership and the company's owner rule; two-company tests in tests/unit/core-host-dev-answers.test.ts); a workflow task answers not waiting after the legacy read check and writes nothing. |
+| route | /v1/dev/tasks/{taskId}/evidence | needs-company | State table | no | GET | T2 on the AWS dispatch, as its siblings. Cloud's Proof tab: a core-owned task is read by the core host (loadOwnedTask: company from live membership, then the company's access rule; then the evidence pack for the current candidate under the task's own key); a workflow task after loadReadableTask plus rowInCompany, from its workflow record only. Two-company and non-reader tests: tests/unit/core-host-proof-index.test.ts, tests/contract/task-proof-index.test.ts, tests/contract/aws-engine-boundary.test.ts. |
 | route | /v1/dev/tasks/{taskId}/cancel | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/canvas-closeout/retry | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
 | route | /v1/dev/tasks/{taskId}/close | needs-company | State table | no | POST | T2: not membership-checked in R4; remaining dispatch methods require a company check. |
@@ -917,8 +918,8 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/aws/developer-routes.ts:673:118:pk | pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | SESSION / DEVELOPER sign-in constructors in developer/store.ts |
 | forwarding | packages/broker/src/aws/developer-routes.ts:710:49:pk | z.literal(key.pk) | Company-scoped runtime validation of the live membership-selected issuer partition. | companyIssuerKey |
 | forwarding | packages/broker/src/aws/install-company.ts:30:132:sk | PersonId.parse(personId) | DEC 254: the install's ban list sort key is the person id itself, validated as 64 hex; the partition is ORG#<company>#BAN from the caller's resolved company. Read only. | pk:ORG |
-| forwarding | packages/broker/src/aws/developer-tasks.ts:1706:67:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
-| forwarding | packages/broker/src/aws/developer-tasks.ts:1740:92:sk | after | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
+| forwarding | packages/broker/src/aws/developer-tasks.ts:1708:67:sk | sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
+| forwarding | packages/broker/src/aws/developer-tasks.ts:1742:92:sk | after | Runtime sort component forwarded within the feeding partition; not an independent record family. | taskIndexKey and taskKey in developer/task-records.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:411:39:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:411:54:sk | marker.sk | Runtime sort component forwarded within the feeding partition; not an independent record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
 | forwarding | packages/broker/src/aws/developer-task-notifier.ts:474:43:pk | marker.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | notificationMarker / DEVTASK notification constructors in developer-task-notifier.ts |
