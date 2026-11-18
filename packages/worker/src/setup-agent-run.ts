@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type UpkeepPauseReason, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -59,6 +59,8 @@ export interface SetupRunPorts {
   now?: () => number;
   /** How often the run talks to the broker. Default 3 s. */
   tickMs?: number;
+  /** How often the run says it is alive between the end of its talk and its result. Default 30 s. */
+  aliveMs?: number;
   /** How often a parked run (waiting for an administrator) talks to the broker. Default 15 s. */
   parkTickMs?: number;
 }
@@ -171,7 +173,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   // P1: the manifest is held to the commits the broker recorded (from the heads it pinned) before anything starts.
   assertCommitsMatch(input.repositories, input.commits);
   const repositories = setupRepositoriesOf(input.rootPath, input.repositories);
-  if (input.price === undefined || !Number.isFinite(input.price.inputPerMTok) || !Number.isFinite(input.price.outputPerMTok)) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX does not know this model's price, so it did not start the setup run");
+  if (input.price === undefined || !Number.isFinite(input.price.inputPerMTok) || !Number.isFinite(input.price.outputPerMTok)) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelPrice);
   const price = input.price;
   const checkFiles = ports.checkFiles ?? ((list) => checkTrackedFiles(list));
   // What the project says, taken BEFORE the sandbox starts (the working tree is as the clone left it) and what the commit holds: an install script that writes a project file or a rule later changes neither.
@@ -197,12 +199,16 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   let cancelled = false;
   /** Why the gateway paused nightly upkeep under this run, when its fixed sentence was what refused a call (L4-SR2). */
   let upkeepPause: UpkeepPauseReason | undefined;
+  /** L4-T5: set when a company admin turned setup runs off under this run, so the end says what to do and not "Try again". */
+  let cannot: "company_off" | undefined;
   /** The command place of each journal entry a person's command wrote (so a website it hit is asked for with the command's place, from which the broker finds who typed it). */
   const seqOfEntry = new Map<number, number>();
 
   const network = await ports.startNetwork();
   let sandbox: TaskSandbox | undefined;
   let tick: ReturnType<typeof setInterval> | undefined;
+  /** L4-T5: the bare "alive" beat after the talk stops (see below). */
+  let alive: ReturnType<typeof setInterval> | undefined;
   let unregister: (() => void) | undefined;
   let unsubscribe: (() => void) | undefined;
   try {
@@ -299,7 +305,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       try {
         const polled = await ports.callback({ kind: "poll" }) as { command?: { seq: number; command: string }; hosts?: Array<{ host: string; state: string }>; companyOff?: boolean };
         // L12: a company admin turned setup runs off: the run ends at once, runs nothing more and asks for nothing more, and reports what it had.
-        if (polled.companyOff === true) { governor.stop("infrastructure"); return; }
+        if (polled.companyOff === true) { governor.stop("infrastructure"); if (governor.ended() === "infrastructure") cannot = "company_off"; return; }
         for (const answer of polled.hosts ?? []) {
           if (answer.state === "open" || answer.state === "approved" || answer.state === "refused") askStates.set(answer.host, answer.state);
           // While the run is parked nothing is streaming; the answer goes into the follow-up prompt instead of a steer message.
@@ -366,6 +372,10 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     }
     if (tick !== undefined) clearInterval(tick);
     tick = undefined;
+    // L4-T5: from here to the end nothing polls, yet a person's command may still run for up to an hour and the end has work to do. A bare "alive" tells the broker the worker is still here (it takes no
+    // command, as a poll does), so a run that is going never reads as stopped. Cleared with the rest in `finally`.
+    alive = setInterval(() => { void ports.callback({ kind: "alive" }).catch(() => undefined); }, ports.aliveMs ?? 30_000);
+    alive.unref?.();
     await runner.settled();
     if (failed && governor.ended() === undefined) governor.stop("infrastructure");
 
@@ -407,7 +417,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     const ended = cancelled ? await withinMs(finishRun(), input.stopFinishMs ?? SETUP_STOP_FINISH_MS) : await finishRun();
     const proposal = ended?.proposal;
     const endedSummary = ended?.summary ?? governor.summary();
-    const summary = upkeepPause === undefined ? endedSummary : { ...endedSummary, pause: upkeepPause };
+    const summary = { ...endedSummary, ...(upkeepPause === undefined ? {} : { pause: upkeepPause }), ...(cannot === undefined ? {} : { cannot }) };
     // What is left unsent goes now, once; the broker keeps the first entry for a position.
     await flushLast(ports, pendingEntries);
     // The eval report goes once through the run's own setup callback. A refusal leaves the run's proposal as it is: the setup page then shows no eval to confirm.
@@ -415,6 +425,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     return { workflowMode: "SETUP_AGENT", ...(proposal === undefined ? {} : { setupProposal: proposal }), setupRunSummary: summary };
   } finally {
     if (tick !== undefined) clearInterval(tick);
+    if (alive !== undefined) clearInterval(alive);
     unsubscribe?.();
     unregister?.();
     session?.dispose();

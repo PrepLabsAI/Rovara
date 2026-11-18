@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, orgProjectCatalogKey, type AdapterRegistry, type Approvers, type WorkerInvocation } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, SETUP_RUN_REFUSED_MESSAGES, WORKER_INVOCATION_FEATURES, agentXError, orgProjectCatalogKey, type AdapterRegistry, type Approvers, type WorkerInvocation } from "@agentx/contracts";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { SETUP_APPLY_KIND } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, HOST_ASK_REVISION } from "../../packages/broker/src/core/setup-agent/host-ask.js";
@@ -309,6 +309,69 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     expect((await h.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "Rovara ran the setup but couldn't read its answer. Try again." });
   });
 
+  // L4-T5: "Try again" only where trying again can help. A worker that refuses to start for a cause the person has to fix says what to fix, in one fixed sentence per cause; any other fault stays "Try again".
+  it("L4-T5: a worker that refused to start says what to fix, per cause, and a fault with another text still says to try again", async () => {
+    const causes: Array<[string, string]> = [
+      [SETUP_RUN_REFUSED_MESSAGES.noModelPrice, "Rovara can't run the setup with this model yet: it has no price on file. Pick another model in AI and spending, then run the setup again."],
+      [SETUP_RUN_REFUSED_MESSAGES.noSandboxImage, "This Rovara install has no sandbox to run the setup in. Ask whoever runs this Rovara install to set it up, then run the setup again."],
+      [SETUP_RUN_REFUSED_MESSAGES.noModelProxy, "This Rovara install can't count the AI spending of a setup run. Ask whoever runs this Rovara install to connect it, then run the setup again."],
+      [SETUP_RUN_REFUSED_MESSAGES.isolationUnavailable, "This Rovara install's machines can't run a setup safely yet. Ask whoever runs this Rovara install, then run the setup again."],
+    ];
+    // What the worker reports is the error's own text: the code, then the fixed sentence.
+    const reported = (text: string) => agentXError("RUNTIME_UNAVAILABLE", text).message;
+    for (const [error, sentence] of causes) {
+      const h = await launch();
+      const run = await startRun(h);
+      await h.callback(run.job, "result", { status: "FAILED", error: reported(error) });
+      expect((await h.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: sentence });
+      expect(sentence).not.toContain("Try again");
+    }
+    // Not an exact match (a longer text, or the same text with a command's output after it): never read as a refusal.
+    for (const error of [`${reported(SETUP_RUN_REFUSED_MESSAGES.noModelPrice)}: more`, reported(SETUP_RUN_REFUSED_MESSAGES.noModelPrice).slice(0, -1), SETUP_RUN_REFUSED_MESSAGES.noModelPrice, "the sandbox failed"]) {
+      const h = await launch();
+      const run = await startRun(h);
+      await h.callback(run.job, "result", { status: "FAILED", error });
+      expect((await h.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again." });
+    }
+  });
+
+  it("L4-T5: a run a company admin turned off says so and what to do; the same stop without that cause says to try again, and the cause on any other stop changes nothing", async () => {
+    const off = await launch();
+    const offRun = await startRun(off);
+    await off.callback(offRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true, cannot: "company_off" } } });
+    expect((await off.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "A company admin turned setup runs off, so this one was stopped. Ask a company admin to turn them back on, then run the setup again." });
+    const plain = await launch();
+    const plainRun = await startRun(plain);
+    await plain.callback(plainRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true } } });
+    expect((await plain.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again." });
+    const other = await launch();
+    const otherRun = await startRun(other);
+    await other.callback(otherRun.job, "result", { status: "SUCCEEDED", result: { setupProposal: proposal(), setupRunSummary: { ...SUMMARY, cannot: "company_off" } } });
+    expect((await other.api(ROUTE)).body).toMatchObject({ status: "ready", stop: "proposed" });
+  });
+
+  it("L4-T5: the setup has no test command: the sentence says what to do", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    const noTests = { ...proposal(), tests: [] };
+    await h.callback(run.job, "result", { status: "SUCCEEDED", result: { setupProposal: noTests, setupRunSummary: SUMMARY } });
+    const answer = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
+    expect(answer.status).toBe(400);
+    expect((answer.body["error"] as { message: string }).message).toBe("The setup has no test command to prove, so there is nothing to use yet. Add a test command to the project's setup, or run the setup again.");
+  });
+
+  it("L4-T5: every poll of a live worker is noted on the run's task, at most once a minute", async () => {
+    const h = await launch();
+    const run = await startRun(h);
+    const task = () => h.store.get({ pk: `DEVTASK#${run.taskId}`, sk: "META" });
+    expect((await task())!["setupAgentSeenAt"]).toBeUndefined();
+    expect((await h.callback(run.job, "setup-agent", { kind: "poll" })).status).toBe(200);
+    const first = (await task())!["setupAgentSeenAt"];
+    expect(typeof first).toBe("string");
+    expect((await h.callback(run.job, "setup-agent", { kind: "poll" })).status).toBe(200);
+    expect((await task())!["setupAgentSeenAt"]).toBe(first);
+  });
+
   it("keeps what a run learned when it stopped at a limit, and never offers it for use when it needs a code change", async () => {
     const h = await launch();
     const run = await startRun(h);
@@ -468,6 +531,33 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     await h.callback(checkJob, "result", { status: "FAILED", error: "setup step 0 (npm ci) failed: exit 1" });
     expect(await decideProposal(h, link, offer)).toMatchObject({ status: "refused", reason: "not_waiting" });
     expect(((await h.api("/v1/dev/projects")).body["projects"] as Array<{ latestRevision: number }>)[0]!.latestRevision).toBe(1);
+  });
+
+  // L4-T5: the sentence for "another setup is waiting" offers only what the person can do with THAT setup, by where its check stands (it used to say "Decide it" while a failed check could only be discarded).
+  it("L4-T5: a second use of the setup says what can be done with the waiting one: wait while it is checked, approve or reject once it passed, only discard once it failed", async () => {
+    const h = await launch();
+    const { checkJob } = await toCandidate(h);
+    const again = () => h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
+    const refused = async () => { const answer = await again(); expect(answer.status).toBe(409); return String((answer.body["error"] as { message: string }).message); };
+    expect(await refused()).toBe("Another setup is still being checked on a fresh machine. Wait for the check to finish, or discard it, first.");
+    await h.callback(checkJob, "result", { status: "SUCCEEDED", result: {} });
+    const ready = await refused();
+    expect(ready).toBe("Another setup is waiting for your approval. Approve or reject it, or discard it, first.");
+    expect(ready).not.toContain("Decide it");
+  });
+
+  it("L4-T5: a waiting setup whose check failed says it can only be discarded, in the confirm and in a new project revision", async () => {
+    const h = await launch();
+    const { checkJob } = await toCandidate(h);
+    await h.callback(checkJob, "result", { status: "FAILED", error: "setup step 0 (npm ci) failed: exit 1" });
+    const answer = await h.api(`${ROUTE}/confirm`, { method: "POST", body: { requestId: randomUUID(), expectedRevision: 1 } });
+    expect(answer.status).toBe(409);
+    expect((answer.body["error"] as { message: string }).message).toBe("Another setup can't be approved: its check on a fresh machine did not pass. Discard it, then use this one.");
+    // A new revision of the project is refused with the neutral sentence (this path has no check to read), which is also true of every state.
+    const revision = await h.api("/v1/admin/projects", { method: "POST", body: { ...PROJECT, orchestratorInstructions: "Changed." } });
+    expect(revision.status).toBe(409);
+    expect(JSON.stringify(revision.body)).toContain("approve or reject it; otherwise discard it. Then try again.");
+    expect(JSON.stringify(revision.body)).not.toContain("Decide it");
   });
 
   it("is decided by a strong method only: a code host comment (or any weak method) cannot approve a setup or a website, and a person who is not the owner cannot either", async () => {

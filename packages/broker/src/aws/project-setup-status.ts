@@ -8,7 +8,7 @@
 // "Progress is read from the real state, not a saved wizard position": every row is derived on each request, from records Code already keeps:
 //   repos        the project's latest revision (the same row `GET /v1/dev/client/projects/{project}` reads)
 //   setupRun     the setup run's pointer and task (`readState`, the laptop Setup screen's own reader), the run's journal for a failed run's command and last lines
-//   evalConfirm  the latest run's eval report row (`readEvalDiscovery`): reported, or confirmed by a person (DEC 253n/253q)
+//   evalConfirm  the latest run's eval report row (`readEvalDiscovery`): reported, or confirmed by a person (DEC 253n/253q); done by itself when the finished run left no report at all (L4-T5, owner D9)
 //   aiAndSpend   the project's settings row (its own per-task model budget) and the company's model choice row; neither saved means the install's defaults apply (prefilled: done)
 //   slackChannel the project's Slack channel bindings (the existing binding rows, injected by the route)
 //   linear       the SEAM for PR #838's team pick (`SetupStatusReaders.linearTeam`); absent on code/next, so optional or skipped
@@ -425,6 +425,16 @@ async function setupRunRow(input: SetupStatusInput, client: Client, companyId: O
   return { state: "failed", ...base, ...facts, testOutcome, ...(failure === undefined ? {} : { failure }), ...(failedCommand === undefined ? {} : { failedCommand }) };
 }
 
+/**
+ * Whether the latest setup run left NO eval report at all. `readEvalDiscovery` answers "nothing" for a report that is absent AND for one that does not read back (or a store that did not answer), and only
+ * the first is "found none": a report row that is there but unreadable keeps the row waiting for a person, and a read that fails fails the whole status read (the fixed unreadable error).
+ */
+async function noEvalRowOfLatestRun(input: SetupStatusInput, client: Client, companyId: OrgId): Promise<boolean> {
+  const taskId = (await readOnlyStore(client, input.tableName).get(setupAgentKey(companyId, input.project)))?.["taskId"];
+  if (typeof taskId !== "string" || taskId === "") return false;
+  return (await client.send(new GetCommand({ TableName: input.tableName, Key: evalDiscoveryKey(companyId, input.project, taskId), ConsistentRead: true })) as { Item?: unknown }).Item === undefined;
+}
+
 async function evalConfirmRow(input: SetupStatusInput, client: Client, companyId: OrgId, setupProposed: boolean): Promise<ProjectSetupChecklist["evalConfirm"]> {
   const discovery = await readEvalDiscovery({ store: readOnlyStore(client, input.tableName), companyId }, input.project);
   const blocked = setupProposed ? {} : { blockedBy: "setupRun" as const };
@@ -436,7 +446,8 @@ async function evalConfirmRow(input: SetupStatusInput, client: Client, companyId
     const run = await finishedSetupRun(client, input.tableName, companyId, input.project, input.definition.revision, input.now);
     if (run !== undefined && run === none.taskId) return { state: "done", report: "no_evals", ...(suites === undefined ? {} : { suites }), noEvals: { confirmedAt: none.confirmedAt } };
   }
-  if (discovery === undefined) return { state: "needs_you", report: "none", ...blocked };
+  // L4-T5 (owner D9): a finished setup run that found no evals leaves nothing for anyone to confirm, so the row is Done by itself. It is required only when evals were found.
+  if (discovery === undefined) return setupProposed && (await noEvalRowOfLatestRun(input, client, companyId)) ? { state: "done", report: "none" } : { state: "needs_you", report: "none", ...blocked };
   return { state: "needs_you", report: "reported", suites: suites!, ...blocked };
 }
 

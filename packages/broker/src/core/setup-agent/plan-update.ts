@@ -20,7 +20,7 @@ import {
 } from "@agentx/contracts";
 import { approvedCodingPlan } from "../build-step/plan-input.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
-import { waitingSetupApply, storeSetupCandidate, type SetupApplyDeps } from "./apply.js";
+import { waitingSetupApply, waitingSetupWords, storeSetupCandidate, type SetupApplyDeps } from "./apply.js";
 import { setupPartition } from "./keys.js";
 import { refusedCommand } from "./refused-command.js";
 
@@ -34,7 +34,6 @@ export const SETUP_UPDATE_WORDS = {
   gone: "That setup update is no longer offered.",
   changed: "That setup update changed since the plan was approved, so it was not used.",
   nothing: "None of the changes can be added to the project's setup: each is already there, is not a setup or test command or mock Rovara carries, or is a command it does not carry into a project.",
-  waiting: "Another setup is waiting for approval. Decide it, or discard it, first.",
 } as const;
 
 export interface SetupUpdateOffer {
@@ -167,7 +166,7 @@ export async function prepareSetupUpdate(deps: SetupApplyDeps, project: string, 
   const orgId = deps.companyId;
   const offer = offerOf(await deps.store.get(setupUpdateKey(orgId, project, act.taskId)), orgId, project);
   if (offer === undefined || offer.state !== "offered") throw agentXError("CHANGE_STALE", SETUP_UPDATE_WORDS.gone);
-  if ((await waitingSetupApply(deps.store, orgId, project)) !== undefined) throw agentXError("WORKSPACE_BUSY", SETUP_UPDATE_WORDS.waiting);
+  if ((await waitingSetupApply(deps.store, orgId, project)) !== undefined) throw agentXError("WORKSPACE_BUSY", await waitingSetupWords(deps, project));
   const latest = await deps.flow.projects.latest(project);
   if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
   const built = candidateFromPlanItems(latest.definition, offer.items);

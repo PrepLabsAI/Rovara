@@ -101,7 +101,7 @@ describe("a new candidate keeps the setup a person approved earlier", () => {
     await propose(h, 1);
     await approve(h, 2, "2026-11-09T10:30:00.000Z");
     await propose(h, 2);
-    await expect(propose(h, 2)).rejects.toThrow(/waiting for your approval/u);
+    await expect(propose(h, 2)).rejects.toThrow(/still being checked on a fresh machine/u);
     expect(((await rowOf(h)) as unknown as SetupApplyRow).earlierApproval).toEqual({ revision: 2, at: "2026-11-09T10:30:00.000Z" });
   });
 
