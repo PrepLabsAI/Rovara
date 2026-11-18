@@ -11,7 +11,7 @@
 //  - Refusals are fixed words; nothing a caller sent is echoed, and a fault is a fixed 503.
 import { ANSWER_WORDS, AgentXError, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { createAnswerService } from "../core/answers/service.js";
+import { createAnswerService, type AnswerServiceDeps } from "../core/answers/service.js";
 import { createAnswerCodeSource, type AnswerRepositoryHandle } from "../core/answers/code-source.js";
 import type { AnswerModel } from "../core/answers/ports.js";
 import { createWikiStore } from "../core/wiki/store.js";
@@ -27,6 +27,8 @@ export interface HostedAnswersWiring {
   repositories(companyId: OrgId, project: string): Promise<{ handles: readonly AnswerRepositoryHandle[]; names: readonly string[] } | undefined>;
   /** The company's answers model through the gateway. Absent (L4-E not wired, or the company has none): answers are not set up here. */
   model?: ((companyId: OrgId) => AnswerModel | undefined) | undefined;
+  /** Lead 4 L4-AK2b: the team knowledge briefing of THIS company's answers (its own lessons host; never another company's). Absent: answers are made without one. */
+  briefing?: ((companyId: OrgId) => AnswerServiceDeps["briefing"]) | undefined;
 }
 
 export interface HostedAnswersInput {
@@ -74,6 +76,7 @@ export async function routeHostedAnswers(input: HostedAnswersInput): Promise<Bro
         return found === undefined ? undefined : createAnswerCodeSource(found.handles, found.names);
       },
       model: input.wiring.model?.(input.companyId),
+      briefing: input.wiring.briefing?.(input.companyId),
     });
     return json(200, await service.ask({ personId: input.personId, project, body }));
   } catch (error) {

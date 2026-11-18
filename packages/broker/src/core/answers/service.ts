@@ -41,7 +41,18 @@ export interface AnswerServiceDeps {
   /** For tests: the limits and the per-person count can be lowered, never raised past the contract's. */
   ceilingCents?: number | undefined;
   perPersonPerHour?: number | undefined;
+  /**
+   * Lead 4 L4-AK2b: the team's knowledge for this question (the same lessons read path, measured facts and "more" line a coding step is briefed with), as one text block, or undefined. The deployment binds it to THIS
+   * company (`LessonsHost.answerBriefing`); it is asked with the project the person was just checked against. It is shown to the model as framed data and is a hint of where to look: a sentence still needs code the
+   * model read. Absent, or a failure or a slow answer: no briefing, and the answer is made as before (the transcript is byte for byte what it was).
+   */
+  briefing?: ((input: { project: string; question: string; repos: readonly string[] }) => Promise<string | undefined>) | undefined;
 }
+
+/** The most the answer waits for the briefing, whatever the seam does. */
+export const ANSWER_BRIEFING_WAIT_MS = 1_200;
+/** The most of the briefing the model reads (bytes). */
+const BRIEFING_FRAME_BYTES = 3_500;
 
 export interface AskInput {
   personId: string;
@@ -60,10 +71,11 @@ const fromRecordOutcome = (outcome: WikiAnswerRecord["outcome"]): AnswerOutcome 
 interface Exchange { call: string; result: string }
 
 /** What the model reads this turn: the question, the door's context, the thread so far and each lookup's result, every one of them framed as data. */
-function transcriptOf(input: { question: string; context: string | undefined; thread: readonly ThreadTurn[]; exchanges: readonly Exchange[]; exhausted: boolean }): string {
+function transcriptOf(input: { question: string; context: string | undefined; briefing?: string | undefined; thread: readonly ThreadTurn[]; exchanges: readonly Exchange[]; exhausted: boolean }): string {
   const parts: string[] = [];
   parts.push(frameUntrusted({ from: "the person who asked", item: "question", text: input.question, maxBytes: 4_096 }));
   if (input.context !== undefined) parts.push(frameUntrusted({ from: "the message the question came with", item: "context", text: input.context, maxBytes: 6_000 }));
+  if (input.briefing !== undefined) parts.push(frameUntrusted({ from: "the team's notes on this project", item: "team-knowledge", text: input.briefing, maxBytes: BRIEFING_FRAME_BYTES }));
   for (const turn of input.thread) {
     parts.push(frameUntrusted({ from: "an earlier question in this conversation", item: "earlier-question", text: turn.record.question, maxBytes: 2_048 }));
     parts.push(frameUntrusted({ from: "an earlier answer in this conversation", item: "earlier-answer", text: turn.record.answer, maxBytes: 3_000 }));
@@ -110,6 +122,16 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       log({ event: "answer.flag_failed", error: error instanceof Error ? error.name : "unknown" });
     }
     return flagged;
+  }
+
+  /** The briefing text, or undefined: the seam never throws into the answer and never holds it longer than `ANSWER_BRIEFING_WAIT_MS`. Only a non-empty string counts. */
+  async function briefingFor(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined> {
+    if (deps.briefing === undefined) return undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const text = await Promise.race([Promise.resolve().then(() => deps.briefing!(input)), new Promise<undefined>((resolve) => { timer = setTimeout(() => { resolve(undefined); }, ANSWER_BRIEFING_WAIT_MS); timer.unref?.(); })]);
+      return typeof text === "string" && text.trim() !== "" ? text : undefined;
+    } catch { return undefined; } finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
   async function ask(input: AskInput): Promise<AnswerResponse> {
@@ -169,6 +191,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
         throw unavailable();
       }
 
+      const briefing = await briefingFor({ project, question: request.question, repos: code.projectRepositories });
       const exchanges: Exchange[] = [];
       const deadline = startedAt + ANSWER_LIMITS.wallClockMs;
       const signal = AbortSignal.timeout(ANSWER_LIMITS.wallClockMs);
@@ -177,7 +200,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       let bad = 0;
       for (let turn = 0; ; turn += 1) {
         if (turn >= ANSWER_LIMITS.modelTurns || deps.now() >= deadline || tokens >= ANSWER_LIMITS.tokenCeiling) { ranOut = true; break; }
-        const transcript = transcriptOf({ question: request.question, context: request.context, thread, exchanges, exhausted: toolbox.exhausted });
+        const transcript = transcriptOf({ question: request.question, context: request.context, briefing, thread, exchanges, exhausted: toolbox.exhausted });
         let reply;
         try {
           reply = await session.complete({ system: ANSWER_SYSTEM_RULES, transcript, maxOutputTokens: ANSWER_LIMITS.outputTokens, signal, remainingCents: ceilingCents - (spentCents ?? 0) });
