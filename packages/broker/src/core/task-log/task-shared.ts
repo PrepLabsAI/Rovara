@@ -29,7 +29,7 @@ export function taskSharedOf(deps: TaskSharedDependencies): (orgId: OrgId, taskI
     if (people === "unreadable") return false;
     if (people !== undefined) {
       let owners = 0;
-      for (const role of people.values()) {
+      for (const { role } of people.values()) {
         if (role === "commenter" || role === "viewer") return true;
         if (role === "owner") owners += 1;
       }
