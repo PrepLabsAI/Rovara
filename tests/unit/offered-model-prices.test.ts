@@ -7,6 +7,7 @@ import { createAgentModelChoice, type OfferedModelsReader } from "../../packages
 import { dispatcherStoredAgentModelChoice } from "../../packages/broker/src/core-host/stored-agent-model-choice.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createHarness } from "../support/task-flow-harness.js";
+import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
 
 const PRICED = { version: 1, models: [
   { model: "claude-sonnet-5-5", price: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 } },
@@ -44,5 +45,9 @@ describe("the engine with a priced list", () => {
     const dispatcher = dispatcherStoredAgentModelChoice({ store: w.h.store, companyId: w.company, now: () => w.h.clock.now, defaultRoute: async () => ({ alias: "claude-sonnet-5-5", api: "anthropic-messages", catalog: "claude-sonnet-5-5" }), log: () => undefined });
     expect(await dispatcher.choose({ stage: "build" })).toMatchObject({ ok: true, step: { route: { alias: "zai.glm-5" } } });
     expect(await dispatcher.choose({ stage: "plan" })).toMatchObject({ ok: true, step: { route: { alias: "claude-sonnet-5-5" } } });
+    // The stored validation keeps the names only: never a price (an older dispatcher reads it during a rolling upgrade; a rollback never meets a priced row).
+    const row = (await w.h.store.get(modelSelectionPolicyKey(w.company)))!;
+    expect(JSON.stringify(row["agentModelValidation"])).not.toContain("price");
+    expect((row["agentModelValidation"] as { offered: { models: unknown[] } }).offered.models).toEqual(PRICED.models.map(({ model }) => ({ model })));
   });
 });
