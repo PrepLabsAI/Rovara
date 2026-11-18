@@ -29,7 +29,7 @@ import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.j
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -1446,7 +1446,20 @@ export function brokerCoreDispatchQueue(env: NodeJS.ProcessEnv): CodeModuleDeps[
   if (!queueUrl(url) || !queueUrl(deadLetterUrl) || url.endsWith(".fifo") !== deadLetterUrl.endsWith(".fifo")) {
     throw Object.assign(new Error("the broker needs valid core dispatch queue URLs"), { name: "BrokerCoreQueueNotConfigured" });
   }
-  return { settings: { ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }), queues: { [CORE_DISPATCH_QUEUE]: { url, deadLetterUrl } } } };
+  // L4-SQS (journey audit B3c): the lessons reflection queue, declared wherever the install gives its URLs (a named environment derives both from AGENTX_ENV; the legacy install gives neither, and
+  // the queue stays undeclared as before). One without the other, or a URL that is not a queue of the same kind, is a refusal by the same words.
+  const reflectUrl = env[CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE];
+  const reflectDeadLetterUrl = env[CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE];
+  const reflectGiven = reflectUrl !== undefined || reflectDeadLetterUrl !== undefined;
+  if (reflectGiven && (!queueUrl(reflectUrl) || !queueUrl(reflectDeadLetterUrl) || reflectUrl.endsWith(".fifo") !== reflectDeadLetterUrl.endsWith(".fifo"))) {
+    throw Object.assign(new Error("the broker needs valid core dispatch queue URLs"), { name: "BrokerCoreQueueNotConfigured" });
+  }
+  return {
+    settings: {
+      ...(env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION }),
+      queues: { [CORE_DISPATCH_QUEUE]: { url, deadLetterUrl }, ...(reflectGiven ? { [LESSONS_REFLECT_QUEUE]: { url: reflectUrl as string, deadLetterUrl: reflectDeadLetterUrl as string } } : {}) },
+    },
+  };
 }
 
 export { taskTokensFromEnvironment };

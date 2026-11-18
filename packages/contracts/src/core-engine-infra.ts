@@ -141,6 +141,16 @@ export const coreDispatchQueueName = (env: string): string => `agentx-${env}-cor
 export const coreDispatchDeadLetterName = (env: string): string => `agentx-${env}-core-dispatch-dead`;
 
 /**
+ * L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, by fixed per-environment names (named environments only), so the broker builds both URLs from AGENTX_ENV and its
+ * 4 KB grows by nothing (DERIVED_BROKER_VARIABLES). The queue's visibility timeout and redrive limit are the core's own constants (LESSONS_REFLECT_VISIBILITY_SECONDS, LESSONS_REFLECT_MAX_RECEIVES).
+ */
+export const coreLessonsReflectQueueName = (env: string): string => `agentx-${env}-lessons-reflect`;
+export const coreLessonsReflectDeadLetterName = (env: string): string => `agentx-${env}-lessons-reflect-dead`;
+/** The variables the broker reads the reflection queue's URLs as (derived; the dispatcher is given neither: it neither sends to nor reads this queue). */
+export const CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE = "CORE_LESSONS_REFLECT_QUEUE_URL";
+export const CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE = "CORE_LESSONS_REFLECT_DEAD_LETTER_URL";
+
+/**
  * Web task channel C8 (option b, DEC 254zm(3)): the attention email's own small sender function, by a fixed per-environment name, so the broker builds it from AGENTX_ENV and its 4 KB grows by nothing.
  * The function exists only while the `CoreAttentionEmail` stack parameter is `on` (infra/lib/attention-email.ts); the broker invokes it by its function policy, never by a grant on the broker's role.
  */

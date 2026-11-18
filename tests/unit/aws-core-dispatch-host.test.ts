@@ -30,7 +30,7 @@ import { createTaskFlow, TASK_FLOW_INDEXES, type TaskFlow } from "../../packages
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { LambdaBatchQueue, coreDispatchMessage, createCoreDispatchHost, type CoreDispatchHostDependencies } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import {
-  DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, evalGatewayOf, hostedDispatcherFlow, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
+  dispatcherFlowDeps, DISPATCHER_CORE_NOT_CONFIGURED, DISPATCHER_FLOW_DECLARATIONS, DISPATCHER_FLOW_NOT_DECLARED, NO_CODE_HOST_HERE, NO_PEOPLE_HERE, createDispatcherCoreHost, dispatcherStopInstance, evalGatewayOf, hostedDispatcherFlow, refusingCodeHost, refusingTaskAccess, repositoryGrantKeyOf, withCoreDispatch,
 } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 import { CoreRegistryError } from "../../packages/broker/src/core-host/registry.js";
@@ -40,6 +40,10 @@ import { createFakeOfferedModels } from "../support/offered-models-fake.js";
 import { COMPANY_ENGINE_MODEL_UNREADABLE, companyEngineModelKey } from "../../packages/broker/src/core-host/company-engine-model.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
+import { SqsIamFence } from "../support/ports/sqs-iam-fence.js";
+import { createSqsQueueServiceFromSettings } from "../../packages/aws-adapters/src/index.js";
+import { ChangeMessageVisibilityCommand } from "@aws-sdk/client-sqs";
+import { CORE_DISPATCHER_QUEUE_ACTIONS } from "../../infra/lib/core-engine.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
 
 const CORE_QUEUE_ARN = "arn:aws:sqs:us-west-2:111122223333:agentx-staging-core-dispatch";
@@ -52,7 +56,7 @@ const definition: ProjectDefinition = {
 interface SqsRecord { messageId: string; receiptHandle: string; body: string; eventSource: string; eventSourceARN: string; attributes: { ApproximateReceiveCount: string } }
 
 /** The core's task flow for two companies on one store and one queue, and the EC2 machines of each through one fleet. */
-async function createWorld(options: { enabled?: boolean } = {}) {
+async function createWorld(options: { enabled?: boolean; /** L4-SQS: the deps of one batch as the dispatcher builds them (default: the flow's own). */ wrapDeps?: (deps: TaskFlowDeps) => TaskFlowDeps; /** L4-SQS: what the host's SQS ChangeMessageVisibility does (default: nothing). */ changeVisibilityTo?: CoreDispatchHostDependencies["changeVisibility"] } = {}) {
   const machinesWorld = createSessionMachinesWorld();
   const store = new MemoryDocumentStore({ indexes: TASK_FLOW_INDEXES });
   const queues = new MemoryQueueService();
@@ -74,8 +78,8 @@ async function createWorld(options: { enabled?: boolean } = {}) {
     await store.put({ item: { ...orgProjectCatalogKey(company, definition.name), entityType: "PROJECT_CATALOG", latestRevision: definition.revision } });
     flows.set(company, createTaskFlow(depsOf(company)));
   }
-  const changeVisibility = vi.fn<CoreDispatchHostDependencies["changeVisibility"]>(async () => undefined);
-  const depsFor = vi.fn((companyId: OrgId, dispatchQueues: Parameters<CoreDispatchHostDependencies["depsFor"]>[1]) => depsOf(companyId, dispatchQueues));
+  const changeVisibility = vi.fn<CoreDispatchHostDependencies["changeVisibility"]>(options.changeVisibilityTo ?? (async () => undefined));
+  const depsFor = vi.fn((companyId: OrgId, dispatchQueues: Parameters<CoreDispatchHostDependencies["depsFor"]>[1]) => (options.wrapDeps ?? ((deps: TaskFlowDeps) => deps))(depsOf(companyId, dispatchQueues)));
   const host = createCoreDispatchHost({ enabled: () => options.enabled ?? true, companyOfWorkspace, depsFor, changeVisibility, log: () => undefined });
   const deliverEc2 = vi.fn(async () => "DELIVERED" as const);
   const markDispatching = vi.fn(async () => true);
@@ -687,4 +691,42 @@ it.each(["missing", "foreign"])("dispatcher refuses and logs a %s scoped workspa
     expect(w.depsFor).not.toHaveBeenCalled();
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
   } finally { integrity.mockRestore(); }
+});
+
+// L4-SQS (journey audit B18): a whole core dispatch passes under the dispatcher's REAL SQS grants (the infrastructure's own constants: receive, delete, change visibility and attributes on the core dispatch
+// queue; never a send, never the dead letters). The dispatch consumer is served by the Lambda batch, so the only SQS call is the visibility change of a record that comes back; the flow's outbox is the
+// dispatcher's (it never relays), so the registry's SQS service, which the role could not open, is never asked.
+describe("a core dispatch under the dispatcher's own SQS grants (B18)", () => {
+  const BASE = "https://sqs.us-west-2.amazonaws.com/111122223333";
+  const CORE_URL = `${BASE}/agentx-staging-core-dispatch`;
+  const DEAD_URL = `${BASE}/agentx-staging-core-dispatch-dead`;
+  const grants = { "agentx-staging-core-dispatch": CORE_DISPATCHER_QUEUE_ACTIONS };
+
+  it("hands each operation to its company's machine, with no denied SQS call, and the flow's outbox on the dispatcher never relays", async () => {
+    const fake = new FakeSqs();
+    fake.createQueue(DEAD_URL);
+    fake.createQueue(CORE_URL, { visibilityTimeout: 120, maxReceiveCount: 21, deadLetterUrl: DEAD_URL });
+    const registryFence = new SqsIamFence(grants, fake);
+    const visibilityFence = new SqsIamFence(grants);
+    const registryQueues = createSqsQueueServiceFromSettings({ region: "us-west-2", queues: { "task-dispatch": { url: CORE_URL, deadLetterUrl: DEAD_URL } } }, registryFence.sender);
+    const w = await createWorld({
+      wrapDeps: (deps) => dispatcherFlowDeps({ ...deps, outbox: createTransactionalOutbox({ store: deps.store, queues: registryQueues }) }, deps.queues),
+      changeVisibilityTo: async (receiptHandle, seconds) => { await visibilityFence.sender.send(new ChangeMessageVisibilityCommand({ QueueUrl: CORE_URL, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
+    });
+    await w.start(COMPANY_A);
+    await w.start(COMPANY_B);
+    let batch = await w.staged();
+    expect(failures(await w.handler({ Records: batch }))).toEqual(batch.map((record) => record.messageId));
+    await w.machinesWorld.settle();
+    batch = batch.map(w.again);
+    expect(failures(await w.handler({ Records: batch }))).toEqual([]);
+    expect(w.machinesWorld.posts.filter((post) => post.status === 200)).toHaveLength(2);
+    // Each company's deps carry the dispatcher's outbox: a relay does nothing, and the SQS service of the registry (which the role cannot open) was never asked.
+    for (const result of w.depsFor.mock.results) expect(await (result.value as TaskFlowDeps).outbox.relay({ companyId: COMPANY_A })).toEqual({ delivered: 0, failed: 0, dead: 0 });
+    expect(registryFence.allowed).toEqual([]);
+    expect(registryFence.denied).toEqual([]);
+    // The one SQS call a dispatch makes: ChangeMessageVisibility of a record that comes back (two records, one retry each), on the core queue, granted.
+    expect(visibilityFence.denied).toEqual([]);
+    expect(visibilityFence.allowed).toEqual([{ action: "sqs:ChangeMessageVisibility", queue: "agentx-staging-core-dispatch" }, { action: "sqs:ChangeMessageVisibility", queue: "agentx-staging-core-dispatch" }]);
+  });
 });

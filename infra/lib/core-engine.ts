@@ -12,6 +12,7 @@
 //     switch-off: a switch-on change set shows that one IAM policy Add, the dispatcher's environment Modify and the mapping's Enabled flag. Its grant may take a few seconds to apply
 //     after the mapping is enabled; a first core batch that meets AccessDenied on the deleter comes back and is retried.)
 //   - an alarm on the dead-letter queue;
+//   - (L4-SQS, journey audit B3c) the lessons reflection queue and its dead letters, fixed names, SQS-managed encryption, TLS only; the broker alone may use the first (send, receive, delete, change visibility, attributes) and read the second's attributes;
 //   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
 //     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
 //   - the `CoreAgentModelChoice` parameter (DEC 254n(1), default off; broker only, packed `mx`, ROVARA_CORE_AGENT_MODEL_CHOICE, the per-company model picker)
@@ -30,7 +31,7 @@ import { Construct } from "constructs";
 import {
   CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, SAVED_ENVIRONMENTS_PARAMETER, SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, SAVED_ENVIRONMENTS_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
-  coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
+  coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_VISIBILITY_SECONDS, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
@@ -49,6 +50,16 @@ export const CORE_BROKER_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage
 
 /** The dispatcher's actions on the core dispatch queue: the event source mapping's reads, and the core's own visibility change of a message it will try again. Not send, and not the dead letters. */
 export const CORE_DISPATCHER_QUEUE_ACTIONS = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
+
+/**
+ * L4-SQS (journey audit B3c): the broker's actions on the lessons reflection queue, exactly the ones the code calls (packages/aws-adapters/src/sqs/sqs-queue.ts through lessons/reflect-queue.ts and
+ * lessons/host-glue.ts): the producers' SendMessage (a task's end, a send-back, a revert, a person's edit), the pass's ReceiveMessage / DeleteMessage / ChangeMessageVisibility, and the adapter's
+ * GetQueueAttributes when it first opens the queue.
+ */
+export const CORE_BROKER_REFLECT_QUEUE_ACTIONS = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"] as const;
+
+/** The broker's only action on the reflection queue's dead letters: the adapter reads the dead-letter queue's ARN and kind when it opens the queue. SQS itself moves a message there; no code sends to or reads it. */
+export const CORE_BROKER_REFLECT_DEAD_LETTER_ACTIONS = ["sqs:GetQueueAttributes"] as const;
 
 /** The queue's visibility timeout, as the DispatchQueue's; the core extends it per message while a step starts. */
 export const CORE_DISPATCH_VISIBILITY_TIMEOUT = Duration.minutes(2);
@@ -84,6 +95,9 @@ export class CoreEngine extends Construct {
   private readonly learningModel: CfnParameter;
   readonly queue: sqs.Queue;
   readonly deadLetters: sqs.Queue;
+  /** L4-SQS: the lessons reflection queue and its dead letters (the broker sends to and reads from the first; it reads the second's attributes only). */
+  readonly reflectQueue: sqs.Queue;
+  readonly reflectDeadLetters: sqs.Queue;
   readonly scheduleGroup: scheduler.CfnScheduleGroup;
   readonly invokeRole: iam.Role;
   readonly schedules: scheduler.CfnSchedule[] = [];
@@ -189,6 +203,25 @@ export class CoreEngine extends Construct {
     for (const queue of [this.queue, this.deadLetters]) {
       queue.addToResourcePolicy(new iam.PolicyStatement({ sid: "BrokerUsesCoreDispatchQueue", principals: [new iam.ArnPrincipal(broker.role!.roleArn)], actions: [...CORE_BROKER_QUEUE_ACTIONS], resources: [queue.queueArn] }));
     }
+    // L4-SQS (journey audit B3c): the lessons reflection queue (lessons/reflect-queue.ts declares it with the same visibility timeout and redrive limit, and the queue adapter refuses a queue that differs),
+    // its dead letters (RedriveAllowPolicy: only this queue), encrypted like the dispatch queues, every request over TLS. Fixed names, so the broker derives both URLs (DERIVED_BROKER_VARIABLES).
+    // Granted on each queue's own resource policy like the dispatch queues (the broker role's inline policy is at IAM's size limit; same account, so the queue policy alone grants it, and the permissions boundary,
+    // which allows sqs, still bounds the role). Only the broker: it is the one producer and the one consumer (lessons run on the broker); the dispatcher gets nothing here.
+    const reflectQueueArn = stack.formatArn({ service: "sqs", resource: coreLessonsReflectQueueName(env) });
+    this.reflectDeadLetters = new sqs.Queue(this, "LessonsReflectDeadLetterQueue", {
+      queueName: coreLessonsReflectDeadLetterName(env), encryption: sqs.QueueEncryption.SQS_MANAGED, retentionPeriod: Duration.days(14),
+      redriveAllowPolicy: { redrivePermission: sqs.RedrivePermission.BY_QUEUE, sourceQueues: [sqs.Queue.fromQueueArn(this, "LessonsReflectQueueSource", reflectQueueArn)] },
+      enforceSSL: true,
+    });
+    this.reflectQueue = new sqs.Queue(this, "LessonsReflectQueue", {
+      queueName: coreLessonsReflectQueueName(env),
+      deadLetterQueue: { queue: this.reflectDeadLetters, maxReceiveCount: LESSONS_REFLECT_MAX_RECEIVES },
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      visibilityTimeout: Duration.seconds(LESSONS_REFLECT_VISIBILITY_SECONDS),
+      enforceSSL: true,
+    });
+    this.reflectQueue.addToResourcePolicy(new iam.PolicyStatement({ sid: "BrokerUsesLessonsReflectQueue", principals: [new iam.ArnPrincipal(broker.role!.roleArn)], actions: [...CORE_BROKER_REFLECT_QUEUE_ACTIONS], resources: [this.reflectQueue.queueArn] }));
+    this.reflectDeadLetters.addToResourcePolicy(new iam.PolicyStatement({ sid: "BrokerReadsLessonsReflectDeadLetterAttributes", principals: [new iam.ArnPrincipal(broker.role!.roleArn)], actions: [...CORE_BROKER_REFLECT_DEAD_LETTER_ACTIONS], resources: [this.reflectDeadLetters.queueArn] }));
     new cloudwatch.Alarm(this, "DeadLettersAlarm", {
       alarmName: props.naming.alarmName(CORE_DISPATCH_DEAD_LETTERS_ALARM),
       alarmDescription: "A core engine dispatch message exhausted its receives and is in the core dispatch dead-letter queue, so its task may hold its workspace. Check the broker logs for the operation ID, then redrive or purge the queue.",
