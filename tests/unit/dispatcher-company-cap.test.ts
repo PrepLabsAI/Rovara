@@ -3,7 +3,7 @@
 // then apply (the bounded overshoot of about one model call). Every check here has a mutant: see the PR body.
 import { createPublicKey, randomUUID, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GetPublicKeyCommand, SignCommand } from "@aws-sdk/client-kms";
 import { companyScoped, policyHookKeyThumbprint, type MeterEntry, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -86,6 +86,9 @@ function world(locks: Record<string, number | Error>, options: { env?: NodeJS.Pr
     admission.admit({ companyId, idempotencyKey: `${RUN_START_ACTION}:${randomUUID()}`, action: RUN_START_ACTION, subject: { type: "task", id: taskId } });
   return { task, book, projectLimit, runStart, kms, asked: service.asked };
 }
+// Every rules-service call goes through the injected fetch: the global one throws, so no case (or mutant) can reach the network.
+beforeEach(() => { vi.stubGlobal("fetch", async () => { throw new Error("no network in this test"); }); });
+afterEach(() => { vi.unstubAllGlobals(); });
 const refused = (code: string, message: string) => ({ allowed: false, code, message });
 
 describe("the dispatcher's run.start gate applies the company's limit (the rules service)", () => {
