@@ -1,0 +1,9 @@
+{
+  "id": "shipping-time",
+  "category": "ordinary",
+  "question": "How long does standard shipping take?",
+  "must_contain": [
+    "5 business days"
+  ],
+  "must_not_contain": []
+}

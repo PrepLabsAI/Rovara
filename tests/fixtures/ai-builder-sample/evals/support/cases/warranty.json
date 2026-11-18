@@ -1,0 +1,9 @@
+{
+  "id": "warranty",
+  "category": "ordinary",
+  "question": "Is there a warranty on defects?",
+  "must_contain": [
+    "1 year"
+  ],
+  "must_not_contain": []
+}
