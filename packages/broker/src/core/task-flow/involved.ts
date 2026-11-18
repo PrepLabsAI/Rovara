@@ -76,11 +76,11 @@ export async function deleteInvolvedRow(deps: { store: Pick<DocumentStore, "dele
 /**
  * A person erase: every involved row of this person in this company (the partition is theirs alone: ids and timestamps only, but still leftover personal data). Answers how many rows went.
  * Company-scoped: only `<company>#INVOLVED#<person>` is read, so the same person's rows in another company stay. A company or person id that can never name a partition has no rows, so nothing is read.
- * Each row is deleted by a key rebuilt from the row's own fields (never forwarded), so only a row this code wrote is deleted; a damaged row that cannot name a key is skipped, not guessed.
+ * Each row is deleted by a key rebuilt from the caller's company and person plus the row's own sort-key parts (never forwarded); a damaged row whose sort key does not parse is skipped, not guessed.
  */
 export async function eraseInvolvedRows(store: Pick<DocumentStore, "query" | "delete">, companyId: string, personId: string): Promise<number> {
-  let pk: string;
-  try { pk = involvedPartition(companyId, personId); } catch { return 0; }
+  try { involvedPartition(companyId, personId); } catch { return 0; }
+  const pk = involvedPartition(companyId, personId);
   let removed = 0;
   let cursor: string | undefined;
   do {

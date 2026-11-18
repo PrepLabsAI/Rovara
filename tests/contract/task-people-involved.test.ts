@@ -237,7 +237,7 @@ describe("an owner the system demotes (they left the company or lost the project
     expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
   });
 
-  it("leaves other people's rows alone: only the demoted owner's row goes, a still-present owner keeps theirs", async () => {
+  it("leaves an unrelated person's involved row alone: only the demoted owner's row goes", async () => {
     const h = harness({ wrenRegistered: true, people: { revision: 3, orphaned: false, people: [GALE("owner"), WREN("owner")] } });
     const ivyRow = { ...h.rowKeyOf(COMPANY_A, IVY_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: IVY_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED };
     h.db.set({ ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
@@ -271,29 +271,59 @@ describe("an owner the system demotes (they left the company or lost the project
     const h = harness();
     await seedOwners(h);
     h.loseGrant(WREN_ID);
-    // Another writer moves the revision between the read and the write: the transaction's condition fails, so the row must stay.
+    // Another writer moves the revision between the read and the write: the transaction's condition fails, so the row must STAY at that moment.
     const send = h.deps.documentClient.send.bind(h.deps.documentClient);
     let raced = false;
+    let rowAfterFailedWrite: unknown = "not-checked";
     h.deps.documentClient = { send: async (command: unknown) => {
       if (!raced && (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
         raced = true;
         h.db.set({ pk: `DEVTASK#${TASK_A}`, sk: "PEOPLE", schemaVersion: 1, revision: 9, orphaned: false, people: [GALE("owner"), WREN("owner")] });
+        try { return await send(command); } finally { rowAfterFailedWrite = h.rowIn(COMPANY_A, WREN_ID); }
       }
       return send(command);
     } };
     await reconcileNow(h);
-    // The first attempt fails whole (no delete) and the retry reads revision 9 and demotes with its own delete.
     expect(raced).toBe(true);
+    expect(rowAfterFailedWrite).toBeDefined();
+    // The retry reads revision 9 and demotes with its own delete.
     expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ revision: 10 });
     expect(h.rowIn(COMPANY_A, WREN_ID)).toBeUndefined();
   });
 
-  it("never makes a row for the task's own person when they are the one demoted (the other owner's row stays)", async () => {
+  it("demotes a large crowd in passes that fit one transaction (never a failed read), each demoted owner's row deleted with its own pass", async () => {
+    const crowd = Array.from({ length: 120 }, (_unused, n) => ({ developerId: ownerKeyForSubject(CLOUD, `crowd-${n}`), name: `Crowd ${String.fromCharCode(97 + Math.floor(n / 26))}${String.fromCharCode(97 + (n % 26))}`, role: "owner", method: "cloud" }));
+    const h = harness({ people: { revision: 3, orphaned: false, people: [GALE("owner"), ...crowd] } });
+    for (const person of crowd) {
+      const key = h.rowKeyOf(COMPANY_A, person.developerId);
+      h.db.set({ ...key, entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: person.developerId, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
+    }
+    const inner = h.deps.checkTaskPerson!;
+    h.deps.checkTaskPerson = async (task, developerId, admission) => (developerId === GALE_ID
+      ? inner(task, developerId, admission)
+      : { subject: { developerId }, identity: { developerId, name: "Crowd", method: "cloud", issuer: CLOUD, subject: "crowd" }, eligible: false, channelMember: false } as never);
+    const owners = () => (h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")!.people as Array<{ role: string }>).filter((person) => person.role === "owner").length;
+    await expect(reconcileNow(h)).resolves.toBeDefined();
+    // The first pass demotes at most 99 (one slot is the People update); the rest are still owners with their rows.
+    expect(owners()).toBe(1 + 120 - 99);
+    expect(h.involvedItems()).toHaveLength(120 - 99);
+    await reconcileNow(h);
+    expect(owners()).toBe(1);
+    expect(h.involvedItems()).toEqual([]);
+  });
+
+  it("never makes a row for the task's own person when they are the one demoted (the other owner's row stays, and no involved item for the creator is in the transaction)", async () => {
     const h = harness({ wrenRegistered: true, people: { revision: 3, orphaned: false, people: [GALE("owner"), WREN("owner")] } });
     h.db.set({ ...h.rowKeyOf(COMPANY_A, WREN_ID), entityType: INVOLVED_ENTITY, companyId: COMPANY_A, personId: WREN_ID, taskId: TASK_A, createdAt: CREATED, addedAt: CREATED });
+    const send = h.deps.documentClient.send.bind(h.deps.documentClient);
+    const sent: Array<Record<string, { Key?: { pk: string }; Item?: { pk: string } }>> = [];
+    h.deps.documentClient = { send: async (command: unknown) => { sent.push(...((command as { input?: { TransactItems?: Array<Record<string, never>> } }).input?.TransactItems ?? [])); return send(command); } };
     h.leave(GALE_ID);
     await reconcileNow(h, WREN_ID);
     expect(h.db.get(`DEVTASK#${TASK_A}`, "PEOPLE")).toMatchObject({ people: [GALE("denied"), WREN("owner")] });
+    expect(sent.length).toBeGreaterThan(0);
+    const partitions = sent.flatMap((item) => Object.values(item).map((op) => op.Key?.pk ?? op.Item?.pk ?? ""));
+    expect(partitions.some((pk) => pk.includes("INVOLVED#"))).toBe(false);
     expect(h.rowIn(COMPANY_A, GALE_ID)).toBeUndefined();
     expect(h.rowIn(COMPANY_A, WREN_ID)).toBeDefined();
   });

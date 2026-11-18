@@ -439,6 +439,15 @@ describe("task person runtime: the web proof", () => {
     expect(injected.projectAuthorityReader.memberships.mock.calls).toHaveLength(0);
   });
 
+  it("ignores an `orgId` on a revision row: with no `companyId` it is unstamped, so another company's `orgId` never makes it that company's", async () => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const injected = webPorts({ revisionCompany: "unstamped" });
+    injected.projectAuthorityReader.latestRevision.mockImplementation(async (_project, _admission, signal) => ({
+      revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, orgId: companyA, definition: {} } as never, complete: !signal.aborted,
+    }));
+    await expect(runtime(admission, injected).checkTaskPerson(webTask(), webDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
   it("passes a revision of the task's own company, and an unstamped revision on a task of the implicit company", async () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     await expect(runtime(admission, webPorts({ revisionCompany: companyA })).checkTaskPerson(webTask(), webDeveloperId)).resolves.toMatchObject({ eligible: true, channelMember: true });
@@ -446,12 +455,12 @@ describe("task person runtime: the web proof", () => {
     const implicit = webPorts({ revisionCompany: "unstamped", membership: {
       pk: `COMPANY_MEMBER#${webDeveloperId}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: webDeveloperId, companyId: IMPLICIT_COMPANY_ID, role: "member", joinedAt: createdAt,
     } });
-    implicit.readTaskRecord.mockImplementation((async ({ sortKey }: { sortKey: string }) => sortKey === "META"
+    implicit.readTaskRecord.mockImplementation(async ({ sortKey }: { sortKey: string }) => sortKey === "META"
       ? implicitTask as unknown as Record<string, unknown>
       : [
         { pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${webDeveloperId}`, schemaVersion: 1, personId, developerId: webDeveloperId, createdAt },
         { pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: webDeveloperId, name: "Gale", method: "github", issuer: ghIssuer, subject: "gh-77", createdAt },
-      ].find((record) => record.sk === sortKey)) as never);
+      ].find((record) => record.sk === sortKey));
     await expect(runtime(createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 }), implicit).checkTaskPerson(implicitTask, webDeveloperId))
       .resolves.toMatchObject({ eligible: true, channelMember: true });
   });

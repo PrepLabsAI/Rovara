@@ -289,8 +289,10 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
       const proof = await checked(deps, task, person.developerId, admission);
       if (proof.eligible && taskPersonPresent(proof)) { nextEntries.push(person); continue; }
       const role: StoredTaskRole = proof.eligible ? "commenter" : "denied";
-      nextEntries.push({ ...person, role });
       const row = involvedStep(deps, task, person.developerId, role);
+      // One transaction holds the People update and at most TRANSACTION_LIMIT - 1 deletes: a pass that would exceed it leaves the rest as owners, and the next read demotes them (never a failed read).
+      if (row !== undefined && demotedRows.length >= TRANSACTION_LIMIT - 1) { nextEntries.push(person); continue; }
+      nextEntries.push({ ...person, role });
       if (row !== undefined) demotedRows.push(row);
     }
     const orphaned = !nextEntries.some((person) => person.role === "owner");
