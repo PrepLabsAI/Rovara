@@ -35,8 +35,8 @@ export const STANDIN_LIMITS = {
   outputTokens: 10_000,
 } as const;
 
-/** One token is at least this many bytes of the JSON the writer reads and writes; two is below what real tokenizers do for JSON, so a bound made with it is never too low. */
-const BYTES_PER_TOKEN = 2;
+/** One token is at least this many bytes of the JSON the writer reads and writes; one is below what any real tokenizer does (even for non-Latin text, a character is at most a few tokens), so a bound made with it is never too low. */
+const BYTES_PER_TOKEN = 1;
 /** The words the writer is told, in bytes (a fixed text): part of the input side of the ceiling. */
 export const STANDIN_PROMPT_FIXED_BYTES = 3_072;
 /** A cache write costs 1.25 times the input price (the setup run counts it so): the ceiling prices the input at that. */
@@ -406,6 +406,8 @@ export const STANDIN_WRITER_WORDS = {
   /** On the card when no AI is connected. */
   noAi: "Rovara writes sample data for your tests with your own AI, and none is connected for this project. Connect your AI first; Rovara never pays for it. Nothing was written and nothing was spent.",
   noRoom: "Rovara did not write sample data: this run's spending limit has no room left for it. Nothing more was spent.",
+  /** On the card before the run: the limit is too low for the writer, so it will not run. */
+  cardNoRoom: "This run's spending limit is too low for Rovara to also write sample data for your tests, so it will not. Raise the limit to include it.",
   nothingToWrite: "Rovara did not write sample data: it found no table or outside service to write it for.",
   unusable: "Rovara did not use the sample data the AI wrote: it did not fit the tables and answers Rovara asked for. Nothing was stored.",
   failed: "Rovara could not write sample data this time. Nothing was stored.",
@@ -436,6 +438,6 @@ export function standInWriterCard(input: { connected: boolean; capCents: number;
   const exact = input.price !== undefined;
   const ceilingCents = standInWriterCeilingCents(input.price ?? standInReferencePrice());
   // The writer is paid from the run's cap, never on top of it: a ceiling that does not fit in the cap means it will not run, and the card says so instead of promising it.
-  if (!Number.isFinite(ceilingCents) || ceilingCents > input.capCents) return { connected: true, words: STANDIN_WRITER_WORDS.noRoom };
+  if (!Number.isFinite(ceilingCents) || ceilingCents > input.capCents) return { connected: true, words: STANDIN_WRITER_WORDS.cardNoRoom };
   return { connected: true, ceilingCents, words: STANDIN_WRITER_WORDS.card(ceilingCents, input.capCents, exact) };
 }

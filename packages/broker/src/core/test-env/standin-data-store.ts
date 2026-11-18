@@ -26,6 +26,8 @@ export type StandInStoreRefusal = "bad_org" | "bad_project" | "bad_run" | "inval
 export type StandInReadRefusal = "bad_org" | "bad_project" | "none" | "digest_mismatch" | "data_guard" | "unavailable";
 
 export interface StandInVersion { digest: string; version: number }
+/** The project pointer: the current version, the highest number ever given (a new version is the next one: a number is never reused after a move back) and a counter that moves with every change (the compare-and-set). */
+interface Pointer extends StandInVersion { maxVersion: number; seq: number }
 
 export interface StandInDataStoreDependencies {
   objects: FixtureObjectPort;
@@ -55,13 +57,13 @@ export function createStandInDataStore(deps: StandInDataStoreDependencies): Stan
   const versionSk = (project: string, digest: string): string => `V#${project}#${digest}`;
   const runSk = (project: string, taskId: string): string => `R#${project}#${taskId}`;
 
-  const pointerOf = async (orgId: string, project: string): Promise<StandInVersion | undefined | "unreadable"> => {
+  const pointerOf = async (orgId: string, project: string): Promise<Pointer | undefined | "unreadable"> => {
     const pk = companyScoped(orgId, PARTITION);
     const found = await deps.documents.get({ pk, sk: pointerSk(project) });
     if (found === undefined) return undefined;
-    const digest = found["digest"]; const version = found["version"];
-    if (found.pk !== pk || found.sk !== pointerSk(project) || found["kind"] !== "standin_current" || found["company"] !== orgId || found["project"] !== project || typeof digest !== "string" || !DIGEST.test(digest) || typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) return "unreadable";
-    return { digest, version };
+    const digest = found["digest"]; const version = found["version"]; const maxVersion = found["maxVersion"]; const seq = found["seq"];
+    if (found.pk !== pk || found.sk !== pointerSk(project) || found["kind"] !== "standin_current" || found["company"] !== orgId || found["project"] !== project || typeof digest !== "string" || !DIGEST.test(digest) || typeof version !== "number" || !Number.isSafeInteger(version) || version < 1 || typeof maxVersion !== "number" || !Number.isSafeInteger(maxVersion) || maxVersion < version || typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1) return "unreadable";
+    return { digest, version, maxVersion, seq };
   };
 
   /** The stored set at a digest, parsed and held against it. Undefined: nothing stored; "mismatch": the object is not the set the digest names. */
@@ -108,13 +110,13 @@ export function createStandInDataStore(deps: StandInDataStoreDependencies): Stan
           if (pointer !== undefined && pointer.digest === digest) return { ok: true, digest, version: pointer.version, created: false };
           const known = await deps.documents.get({ pk, sk: versionSk(project, digest) });
           const knownVersion = known?.["kind"] === "standin_version" && known["digest"] === digest && known["project"] === project && known["company"] === orgId && typeof known["version"] === "number" ? known["version"] : undefined;
-          const version = knownVersion ?? (pointer?.version ?? 0) + 1;
-          const next = { pk, sk: pointerSk(project), kind: "standin_current", company: orgId, project, digest, version, at };
+          const version = knownVersion ?? (pointer?.maxVersion ?? 0) + 1;
+          const next = { pk, sk: pointerSk(project), kind: "standin_current", company: orgId, project, digest, version, maxVersion: Math.max(version, pointer?.maxVersion ?? 0), seq: (pointer?.seq ?? 0) + 1, at };
           const moved = knownVersion !== undefined
-            ? await deps.documents.put({ item: next, condition: pointer === undefined ? when.absent() : when.eq("version", pointer.version) })
+            ? await deps.documents.put({ item: next, condition: pointer === undefined ? when.absent() : when.eq("seq", pointer.seq) })
             : await deps.documents.transact([
               { kind: "put", item: { pk, sk: versionSk(project, digest), kind: "standin_version", company: orgId, project, digest, version, bytes: bytes.length, writtenBy: run.actor.slice(0, 120), at }, condition: when.absent() },
-              { kind: "put", item: next, condition: pointer === undefined ? when.absent() : when.eq("version", pointer.version) },
+              { kind: "put", item: next, condition: pointer === undefined ? when.absent() : when.eq("seq", pointer.seq) },
             ]);
           if (moved.applied) return { ok: true, digest, version, created: true };
         }
@@ -144,7 +146,7 @@ export function createStandInDataStore(deps: StandInDataStoreDependencies): Stan
       if (gate(orgId, project) !== undefined) return undefined;
       try {
         const pointer = await pointerOf(orgId, project);
-        return pointer === undefined || pointer === "unreadable" ? undefined : pointer;
+        return pointer === undefined || pointer === "unreadable" ? undefined : { digest: pointer.digest, version: pointer.version };
       } catch { return undefined; }
     },
   };

@@ -48,6 +48,8 @@ export interface StandInWriterRun {
   openSession: (() => Promise<PiSessionHandle>) | undefined;
   /** Lets the caller end the writer's model call from outside (a person's Stop). Called with the way to abort it; returns the way to take that back. */
   register?: ((abort: () => Promise<void>) => () => void) | undefined;
+  /** True once a person has stopped the setup run: the writer then does not start, or ends its call at once. */
+  cancelled?: (() => boolean) | undefined;
   /** The longest the model call may take. Past it the call is aborted and counted as failed (its spend is still counted). Default `STANDIN_WRITER_TIMEOUT_MS`. */
   timeoutMs?: number | undefined;
 }
@@ -87,10 +89,15 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
   } catch (error) {
     return skipped(isModelNotAllowed(error) ? "no_ai" : "failed");
   }
+  // A Stop that came while the session was opening: nothing was asked, nothing is spent.
+  if (run.cancelled?.() === true) { session.dispose(); return skipped("failed"); }
   let finalText = "";
   let ownUsd = 0;
   let turns = 0;
   let verdict: StandInSkipReason | undefined;
+  /** The call was cut off (a Stop, the time limit, a failed or second reply) or ended with no readable usage: the provider may have billed output nobody counted, so the whole ceiling is counted. */
+  let uncertain = false;
+  const cutOff = (): Promise<void> => { uncertain = true; return session.abort().catch(() => undefined); };
   const unsubscribe = session.subscribe((event) => {
     const message = (event as { type?: unknown; message?: { role?: unknown; content?: unknown; usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number } } }).message;
     if ((event as { type?: unknown }).type !== "message_end" || message?.role !== "assistant") return;
@@ -106,16 +113,18 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
     if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined) verdict ??= "no_room";
     else if (isModelNotAllowed(failure)) verdict ??= "no_ai";
     else if (failure !== undefined) verdict ??= "failed";
+    // A failed turn ends the call now: the session's own retries (up to two) must not make more billed calls against a one-call reservation.
+    if (failure !== undefined && budgetExhaustedFromMarker(outcome?.errorMessage) === undefined && !isModelNotAllowed(failure)) void cutOff();
     // No tool is offered, so a second reply is not expected: it is cut off.
-    if (turns > 1) { verdict ??= "failed"; void session?.abort().catch(() => undefined); }
+    if (turns > 1) { verdict ??= "failed"; void cutOff(); }
   });
-  const unregister = run.register?.(() => session.abort());
+  const unregister = run.register?.(() => cutOff());
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const limit = new Promise<"timeout">((resolve) => { timer = setTimeout(() => { resolve("timeout"); }, run.timeoutMs ?? STANDIN_WRITER_TIMEOUT_MS); timer.unref?.(); });
     const done = session.prompt(standInWriterPrompt(input)).then(() => "done" as const);
     // A call that takes too long is aborted; its late result or failure is ignored.
-    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await session.abort().catch(() => undefined); }
+    if ((await Promise.race([done, limit])) === "timeout") { verdict ??= "failed"; void done.catch(() => undefined); await cutOff(); }
   } catch (error) {
     verdict ??= isModelNotAllowed(error) ? "no_ai" : "failed";
   } finally {
@@ -126,7 +135,10 @@ export async function runStandInWriter(run: StandInWriterRun): Promise<StandInWr
   // What it cost: the larger of the session's own figure and the run's count; an unreadable figure counts as the whole ceiling (never as nothing).
   const reported = centsFromDollars(session.getSessionStats().cost);
   const own = centsFromDollars(ownUsd);
-  const counted = turns === 0 && reported === undefined ? 0 : reported === undefined || own === undefined ? ceilingCents : Math.max(reported, own);
+  const read0 = reported === undefined || own === undefined ? ceilingCents : Math.max(reported, own);
+  // Nothing seen after the prompt went out (and no refusal that came before any generation) is as unreadable as a cut-off call: the ceiling.
+  const unseen = turns === 0 && verdict !== "no_ai" && verdict !== "no_room";
+  const counted = uncertain || unseen ? Math.max(read0, ceilingCents) : read0;
   session.dispose();
   const spendCents = Math.min(counted, 1_000_000);
   if (verdict !== undefined) return skipped(verdict, spendCents);

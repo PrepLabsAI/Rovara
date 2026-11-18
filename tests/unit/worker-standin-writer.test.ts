@@ -29,7 +29,7 @@ const REQUEST: StandInWriterInput = StandInWriterInputSchema.parse({
 });
 const REPLY = { tables: { creators: [{ bio: "Weekend baker sharing quick recipes.", followers: 12044 }, { bio: "Slow travel around West Africa.", followers: 880 }] }, answers: { "tiktok-user": [{ data: { user: { display_name: "Mara Okafor" } } }] } };
 
-interface WriterScript { text?: string; usage?: { input?: number; output?: number; cacheWrite?: number }; cost?: number; stopReason?: string; errorMessage?: string; throws?: Error; hang?: boolean; twoReplies?: boolean }
+interface WriterScript { text?: string; usage?: { input?: number; output?: number; cacheWrite?: number }; cost?: number; stopReason?: string; errorMessage?: string; throws?: Error; hang?: boolean; twoReplies?: boolean; failThenReply?: boolean }
 function writerSession(script: WriterScript = {}) {
   const prompts: string[] = []; const listeners: Array<(event: unknown) => void> = []; let aborted = 0; let disposed = 0; let release: (() => void) | undefined;
   const reply = (text: string) => { for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: script.stopReason ?? "stop", ...(script.errorMessage === undefined ? {} : { errorMessage: script.errorMessage }), content: [{ type: "text", text }], usage: script.usage ?? { input: 2_000, output: 600 } } }); };
@@ -39,6 +39,12 @@ function writerSession(script: WriterScript = {}) {
       prompts.push(String(text));
       if (script.throws !== undefined) throw script.throws;
       if (script.hang === true) { await new Promise<void>((resolve) => { release = resolve; }); return; }
+      if (script.failThenReply === true) {
+        for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "overloaded", content: [], usage: { input: 100, output: 5 } } });
+        // The session's own retry would make a second, billed call: a writer that cuts the call at the first failure has aborted before it.
+        if (aborted === 0) reply(script.text ?? JSON.stringify(REPLY));
+        return;
+      }
       reply(script.text ?? JSON.stringify(REPLY));
       if (script.twoReplies === true) reply("{}");
     },
@@ -134,11 +140,29 @@ describe("the writer is paid inside the run's cap", () => {
     await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => one.session });
     expect(one.disposed()).toBe(1);
   });
+  it("a failed first turn ends the call at once (the session's own retries make no second billed call) and counts the ceiling", async () => {
+    const failing = writerSession({ failThenReply: true });
+    const outcome = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => failing.session });
+    expect(outcome).toMatchObject({ status: "skipped", reason: "failed", spendCents: standInWriterCeilingCents(PRICE) });
+    expect(failing.aborted()).toBeGreaterThanOrEqual(1);
+  });
+  it("a Stop that came before the writer opened starts nothing; one that comes while it opens asks nothing and spends nothing", async () => {
+    let opened = 0;
+    let stopped = false;
+    const session = writerSession();
+    const outcome = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => { opened += 1; stopped = true; return session.session; }, cancelled: () => stopped });
+    expect(outcome).toMatchObject({ status: "skipped", spendCents: 0 });
+    expect(session.prompts).toHaveLength(0);
+    expect(session.disposed()).toBe(1);
+    expect(opened).toBe(1);
+  });
   it("a call that hangs is aborted at its time limit, and a person's Stop reaches it", async () => {
     const hung = writerSession({ hang: true });
     const outcome = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => hung.session, timeoutMs: 20 });
     expect(outcome).toMatchObject({ status: "skipped", reason: "failed" });
     expect(hung.aborted()).toBe(1);
+    // A call that was cut off may have been billed for output nobody counted: the whole ceiling is counted, never about 0.
+    expect(outcome.spendCents).toBe(standInWriterCeilingCents(PRICE));
     expect(STANDIN_WRITER_TIMEOUT_MS).toBeGreaterThan(60_000);
     const stopped = writerSession({ hang: true });
     let abort: (() => Promise<void>) | undefined;
@@ -147,7 +171,7 @@ describe("the writer is paid inside the run's cap", () => {
     expect(abort).toBeDefined();
     await abort!();
     expect(stopped.aborted()).toBeGreaterThanOrEqual(1);
-    await running.catch(() => undefined);
+    expect(await running).toMatchObject({ spendCents: standInWriterCeilingCents(PRICE) });
   });
   it("is deterministic per version: the same reply, in any key order, is the same set and digest", async () => {
     const a = await runStandInWriter({ input: REQUEST, price: PRICE, remainingCents: 400, openSession: async () => writerSession().session });
@@ -281,7 +305,7 @@ describe("the writer inside a setup run", () => {
     threw.input.ports.standIn!.input = async () => { throw new Error("reader broke at /secret"); };
     expect((await runSetupAgent(threw.input)).setupRunSummary.stop).toBe("proposed");
     const callbackDown = await world();
-    const original = (body: unknown) => callbackDown.input.ports.callback(body);
+    const original = callbackDown.input.ports.callback.bind(callbackDown.input.ports);
     callbackDown.input.ports.callback = async (body) => { if ((body as { kind: string }).kind === "stand_in_data") throw new Error("broker down"); return original(body); };
     const down = await runSetupAgent(callbackDown.input);
     expect(down.setupRunSummary.stop).toBe("proposed");
@@ -316,6 +340,18 @@ describe("the writer inside a setup run", () => {
     expect(stood(t)).toHaveLength(0);
     expect(result.setupRunSummary).toBeDefined();
   }, 15_000);
+  it("a Stop during the eval step (before the writer reads or opens anything) stops it: no request read, no session, no spend", async () => {
+    // The eval draft is refused right before the writer step, and its words go to the live view: the person presses Stop at that moment.
+    const t = await world({ final: block({ ...ANSWER, eval: { nonsense: true } }) });
+    let read = 0;
+    t.input.ports.standIn!.input = async () => { read += 1; return REQUEST; };
+    t.input.ports.progress = async (message) => { t.w.progress.push(message); if (message.startsWith("Rovara did not use the eval")) await t.w.control!.abort(); };
+    const result = await runSetupAgent(t.input);
+    expect(read).toBe(0);
+    expect(t.w.writerOpened).toBe(0);
+    expect(stood(t)).toHaveLength(0);
+    expect(result.setupRunSummary.spendCents).toBe(5);
+  });
   it("the ceiling is below the whole default cap, so a default run has room for it", () => {
     expect(standInWriterCeilingCents(PRICE)).toBeLessThan(SETUP_AGENT_LIMITS_DEFAULT.budgetCents / 4);
     expect(STANDIN_LIMITS.outputTokens).toBeLessThanOrEqual(10_000);

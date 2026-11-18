@@ -391,12 +391,14 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
     let evalReport: SetupEvalDiscoveryReport | undefined;
     const writeStandIns = async (standIn: NonNullable<SetupRunPorts["standIn"]>): Promise<void> => {
       let request: unknown;
+      // A Stop during the eval step (or any earlier step) stops the writer before it reads anything or opens a session.
+      if (cancelled) return;
       try { request = await standIn.input(repositories, tracked); } catch { request = null; }
       // Nothing found to write for (no table, no outside service): the run says nothing about it and spends nothing.
       if (request === undefined) return;
       const spent = runSpendCents();
       const outcome = await runStandInWriter({
-        input: request, price, remainingCents: spent === undefined ? 0 : limits.budgetCents - spent, openSession: () => standIn.openSession(),
+        input: request, price, remainingCents: spent === undefined ? 0 : limits.budgetCents - spent, openSession: () => standIn.openSession(), cancelled: () => cancelled,
         register: (abort) => { abortWriter = abort; return () => { abortWriter = undefined; }; },
       });
       writerSpendCents += outcome.spendCents;

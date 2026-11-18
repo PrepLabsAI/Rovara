@@ -26,7 +26,7 @@ describe("the broker's setup view carries the writer's cost before the run", () 
     const view = await verifiedView(deps(), { repositories: [] }, { ...none, limits: { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 150 } });
     expect(view.standInWriter!.words).toContain("inside this run's $1.50 limit");
     const tiny = await verifiedView(deps(), { repositories: [] }, { ...none, limits: { ...SETUP_AGENT_LIMITS_DEFAULT, budgetCents: 5 } });
-    expect(tiny.standInWriter).toEqual({ connected: true, words: STANDIN_WRITER_WORDS.noRoom });
+    expect(tiny.standInWriter).toEqual({ connected: true, words: STANDIN_WRITER_WORDS.cardNoRoom });
   });
   it("with no AI connected, says to connect one first, promises no cost, and never says Rovara pays", async () => {
     const view = await getSetupAgent(deps({ modelAccessConfigured: undefined }), "demo");

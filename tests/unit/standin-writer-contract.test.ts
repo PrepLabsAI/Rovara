@@ -231,6 +231,6 @@ describe("the cost is known before the run, and the writer is paid from the run'
     expect(standInWriterCard({ connected: false, capCents: 400 })).toEqual({ connected: false, words: STANDIN_WRITER_WORDS.noAi });
     expect(STANDIN_WRITER_WORDS.noAi).toContain("Connect your AI first");
     expect(STANDIN_WRITER_WORDS.noAi).toContain("never pays");
-    expect(standInWriterCard({ connected: true, capCents: 5, price })).toEqual({ connected: true, words: STANDIN_WRITER_WORDS.noRoom });
+    expect(standInWriterCard({ connected: true, capCents: 5, price })).toEqual({ connected: true, words: STANDIN_WRITER_WORDS.cardNoRoom });
   });
 });

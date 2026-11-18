@@ -75,6 +75,10 @@ describe("the store keeps one versioned set per project, written once per run", 
     // Going back to the first set is a pointer move to the version it already had, not a new number.
     expect(await w.store.put(A, "demo", RUN(4), first)).toMatchObject({ version: 1, created: true });
     expect(await w.store.versionOf(A, "demo")).toEqual({ digest: standInSetDigest(first), version: 1 });
+    // A number is never reused: after A, B and back to A, a new set C is version 3, not 2.
+    const third = setOf({ bio: "A third bio, written in a later setup run." });
+    expect(await w.store.put(A, "demo", RUN(5), third)).toMatchObject({ version: 3, created: true });
+    expect(await w.store.put(A, "demo", RUN(6), second)).toMatchObject({ version: 2 });
   });
   it("accepts ONE set per setup run: a second from the same run is refused and changes nothing", async () => {
     const w = world();
