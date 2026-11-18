@@ -120,6 +120,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   // Lane LM8: the lessons API of one project of the caller's company (core-host/lessons-api.ts). Full access only, like the other company-admin routes; live membership and the project's roster still apply.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/measure", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },

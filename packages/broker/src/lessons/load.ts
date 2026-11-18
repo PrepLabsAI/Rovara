@@ -14,6 +14,7 @@ import type { AccessCheckPort } from "./access-port.js";
 import { createLessonLiveReader, lessonTaskRefs, type LessonLiveReader } from "./live-visibility.js";
 import { readVisible, readVisibleRanked } from "./read-visible.js";
 import { memberView, type MemberOf, type MemberResolver } from "./members.js";
+import { MEASURE_LEFT_OUT, type FitSample, type MeasureSink } from "./measure.js";
 import { normId, type IdentitySet, type Lesson } from "./types.js";
 
 export const LOAD_MAX_LESSONS = LEARNED_CONTEXT_MAX_LESSONS;
@@ -58,6 +59,11 @@ export interface LoadDeps extends LessonDeps {
    * ids are counted as they are. A lookup that fails loads nothing (fail closed).
    */
   resolveMember?: MemberResolver;
+  /**
+   * Phase 0 (measure only): where a load's fit numbers are written (`measure.ts`). Absent: nothing is recorded. It changes nothing about what loads: the record is written after the manifest, never throws and is
+   * not waited on past its own short limit.
+   */
+  measure?: MeasureSink | undefined;
   log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
@@ -196,7 +202,9 @@ export interface SelectInput {
 }
 export type SelectOutcome =
   | { ok: false; skipped: "members_unavailable" | "access_unavailable" }
-  | { ok: true; chosen: LearnedLesson[]; picked: Lesson[]; entries: LoadManifestEntry[]; bytes: number; complete: boolean; viewer: IdentitySet | undefined; live: LessonLiveReader; log: (event: string, fields: Record<string, unknown>) => void };
+  | { ok: true; chosen: LearnedLesson[]; picked: Lesson[]; entries: LoadManifestEntry[]; bytes: number; complete: boolean; viewer: IdentitySet | undefined; live: LessonLiveReader; log: (event: string, fields: Record<string, unknown>) => void;
+      /** Phase 0 (measure only): the fit and rank score of every lesson that was ranked, in rank order, read by nothing that decides a load. */
+      ranking: ReadonlyArray<{ id: string; fit: number; score: number; words: number; cos: number | undefined }> };
 
 /**
  * The one ranking and budget of lessons, shared by the dispatch loader (`loadLessonsForStage`, reader = the running task) and the local-tools read (reader = the whole project): the approval rule now, the stage and scope, the fused
@@ -232,18 +240,22 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
   let eligible = active.filter((lesson) => stageAllows(lesson, stage, member) && scopeMatch(lesson, scope).matches);
   if (input.prefilter !== undefined) eligible = [...await input.prefilter(eligible)];
   let similarity = new Map<string, number>();
+  // Phase 0 (measure only): the two absolute companions of the fused fit (which is a rank-based score: 1 is first in every list the query has), kept for the record and read by nothing that decides a load.
+  const absolute = new Map<string, { words: number; cos: number | undefined }>();
   try {
     const task = docOfText(cleanLessonText(`${intent}\n${input.planSummary ?? ""}`, 2000), input.files);
-    similarity = new Map((await rankLessons({ embedder: deps.embedder, vectors: deps.vectors, log: deps.log, metrics: deps.metrics }, key, eligible, task, { queryKind: "query", timeoutMs: EMBED_TIMEOUT_MS.load, warmMs: EMBED_WARM_MS.load })).ranked.map((r) => [r.id, Math.max(0, Math.min(1, r.fused))]));
+    const ranked = (await rankLessons({ embedder: deps.embedder, vectors: deps.vectors, log: deps.log, metrics: deps.metrics }, key, eligible, task, { queryKind: "query", timeoutMs: EMBED_TIMEOUT_MS.load, warmMs: EMBED_WARM_MS.load })).ranked;
+    similarity = new Map(ranked.map((r) => [r.id, Math.max(0, Math.min(1, r.fused))]));
+    for (const r of ranked) absolute.set(r.id, { words: r.containment, cos: r.cosine });
   } catch { deps.metrics?.count("learning_load_similarity_failed"); }
 
-  const scored: Array<{ lesson: Lesson; score: number; why: LoadManifestEntry["why"] }> = [];
+  const scored: Array<{ lesson: Lesson; score: number; fit: number; why: LoadManifestEntry["why"] }> = [];
   for (const lesson of eligible) {
     const match = scopeMatch(lesson, scope);
     const sim = similarity.get(lesson.id) ?? 0;
     const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / (90 * DAY));
     const score = 0.6 * sim + 0.3 * wilsonLower(lesson.counters.helpful, lesson.counters.loaded) + 0.1 * recency;
-    scored.push({ lesson, score, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
+    scored.push({ lesson, score, fit: sim, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
   }
   scored.sort((a, b) => b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
   const rank = new Map(scored.map((entry) => [entry.lesson.id, entry] as const));
@@ -288,7 +300,7 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
     deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
     return { ok: false, skipped: "access_unavailable" };
   }
-  return { ok: true, chosen, picked, entries, bytes, complete, viewer, live, log };
+  return { ok: true, chosen, picked, entries, bytes, complete, viewer, live, log, ranking: scored.map((entry) => ({ id: entry.lesson.id, fit: entry.fit, score: entry.score, words: absolute.get(entry.lesson.id)?.words ?? 0, cos: absolute.get(entry.lesson.id)?.cos })) };
 }
 
 export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest): Promise<LoadResult> {
@@ -350,6 +362,18 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
   const manifest: LoadManifest = { taskId: request.taskId, workspaceId: key.workspaceId, project: key.project, stage, round: request.round, setVersion, memory: snapshot === undefined ? "live" : "snapshot", ...(snapshot === undefined ? {} : { snapshotId: snapshot.snapshotId }), at: now, lessons: entries, bytes };
   if (request.wanted !== undefined && !request.wanted()) return { manifest, skipped: "abandoned" };
   await deps.store.putManifest(manifest);
+  // Phase 0 (measure only): the fit numbers of this load. Live loads only (an eval's snapshot or memory-off load is not the project's own), after the manifest, and nothing below reads what it did.
+  if (snapshot === undefined && deps.measure !== undefined && active.length > 0) {
+    try {
+      const sample = (id: string): FitSample => { const ranked = selected.ranking.find((entry) => entry.id === id)!; return { id, fit: ranked.fit, score: ranked.score, words: ranked.words, cos: ranked.cos ?? null }; };
+      const picked = new Set(entries.map((entry) => entry.id));
+      await deps.measure.load({
+        workspaceId: key.workspaceId, project: key.project, taskId: request.taskId, stage, round: request.round, at: now, budgetLessons: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }).lessons,
+        activeCount: active.length, eligibleCount: selected.ranking.length,
+        loaded: entries.map((entry) => sample(entry.id)), leftOut: selected.ranking.filter((entry) => !picked.has(entry.id)).slice(0, MEASURE_LEFT_OUT).map((entry) => sample(entry.id)),
+      });
+    } catch { deps.metrics?.count("learning_measure_failed"); }
+  }
   // `loaded` is counted when the worker reports the lesson reached the prompt (applyLoadReport), not here: a lesson the worker dropped was never loaded.
   if (chosen.length === 0 && priorLoaded === undefined) return { manifest, skipped: "no_lessons" };
   return { manifest, context: { v: 1, setVersion, stage, lessons: chosen, ...(priorLoaded === undefined ? {} : { priorLoaded }) } };
