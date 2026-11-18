@@ -145,5 +145,6 @@ describe("the knowledge routes at the developer router", () => {
 // removed one back after DELETE /v1/dev/company/members/{personId}/sign-ins/{method} gives the previous pin 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0.
 // L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
 // removing exactly those 4 rows gives back the pin below.
-const OTHER_ROWS_DIGEST_BEFORE_JA7 = "def66b837d965162d878b558394161c74f0d3c9499b3b3eb8dc127970f7cdddd";
-const OTHER_ROWS_DIGEST = "def66b837d965162d878b558394161c74f0d3c9499b3b3eb8dc127970f7cdddd";
+const OTHER_ROWS_DIGEST_BEFORE_JA7 = "92a6f4a931aee9473b4c31f499fed7dcb27001e364222587d19996e0d61f2333";
+// Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives def66b83.
+const OTHER_ROWS_DIGEST = "5d5d7ca658cc0ec8f58dd8eee5d0525bec4fcfb3a713b7330e0350567e713d85";
