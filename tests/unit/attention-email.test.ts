@@ -41,7 +41,7 @@ const PERSON_HASH = developerIdOf({ provider: HOSTED_IDENTITY_PROVIDER, personId
 
 const message = (extra: Record<string, unknown> = {}) => ({ companyId: ORG, purpose: "attention", to: "dana@example.test", subject: "Rovara: 1 task needs your attention", text: "A task needs your attention in Rovara:\n\n- Add retry: Needs your review", ...extra });
 /** A real email of the core's own words, with the person's links on the placeholder origin (as the broker writes them). */
-const coreMail = (links = attentionEmailLinks({ origin: PLACEHOLDER, key: KEY, now: () => NOW })(ORG, DANA_ID), title = "Add retry") => attentionEmail([{ title, status: "Needs your review", kind: "needs_you" } as never], 0, "attention", links);
+const coreMail = (links = attentionEmailLinks({ origin: PLACEHOLDER, key: KEY, now: () => NOW })(ORG, DANA_ID), title = "Add retry") => attentionEmail([{ title, status: "Needs your review", kind: "needs_you" }], 0, "attention", links);
 const request = (extra: Record<string, unknown> = {}) => { const mail = coreMail(); return { v: 1, to: "dana@example.test", subject: mail.subject, text: mail.text, ...extra }; };
 
 function fakeLambda(answer: unknown = { ok: true }, options: { functionError?: string; fail?: Error } = {}) {
