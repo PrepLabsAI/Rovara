@@ -102,6 +102,13 @@ export const REPORT_STATES = ["open", "merged", "closed", "failed"] as const;
 export const ReportStateSchema = z.enum(REPORT_STATES);
 export type ReportState = z.infer<typeof ReportStateSchema>;
 
+/**
+ * Code's own task page for one task: `/review/<taskId>/task`. A REFERENCE to follow, not access: the page asks the reader to sign in and checks their access to the task itself, so a row's reference
+ * never lets anyone see a task they could not already open. Always the path of the row's own task (no host, query or other page), so a reader can follow it as it stands.
+ */
+export const TASK_PAGE_PATH_PATTERN = /^\/review\/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\/task$/u;
+export const taskPagePath = (taskId: string): string => `/review/${taskId}/task`;
+
 const CountSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
 export const ReportTaskRowSchema = z.object({
@@ -112,6 +119,8 @@ export const ReportTaskRowSchema = z.object({
   origin: ReportOriginSchema,
   path: ReportPathSchema.optional(),
   state: ReportStateSchema,
+  /** Where to open this task: Code's own task page path for THIS row's task (`taskPagePath`), to follow as it stands. Absent from an older Code: draw the title as plain text. The page checks the reader's own access. */
+  taskPage: z.string().regex(TASK_PAGE_PATH_PATTERN).optional(),
   /** Absent: "No feature". */
   feature: z.object({ id: FeatureIdSchema, source: FeatureSourceSchema }).strict().optional(),
   startedAt: InstantSchema,
@@ -136,6 +145,7 @@ export const ReportTaskRowSchema = z.object({
   sendBacksPeople: CountSchema.optional(),
   timesComplete: z.boolean().optional(),
 }).strict().superRefine((row, context) => {
+  if (row.taskPage !== undefined && row.taskPage.toLowerCase() !== taskPagePath(row.taskId).toLowerCase()) context.addIssue({ code: "custom", path: ["taskPage"], message: "the page of another task" });
   if (row.prsMerged > row.prsOpened) context.addIssue({ code: "custom", path: ["prsMerged"], message: "merged pull requests cannot exceed opened ones" });
   if (row.prLinks.some((link) => { try { const url = new URL(link); return url.protocol !== "https:" || url.username !== "" || url.password !== ""; } catch { return true; } })) context.addIssue({ code: "custom", path: ["prLinks"], message: "plain https addresses only" });
 });
