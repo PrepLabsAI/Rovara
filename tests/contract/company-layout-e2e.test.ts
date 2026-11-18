@@ -130,7 +130,7 @@ function world() {
   const projectGrant = async (personId: string, name: string) => mayUseProject(await projectGrantRole(personId, name));
   const principal = (companyId: string, personId: string): Principal => ({ companyId, personId, displayName: "p", roles: [], provider: "cloud" });
   const start = (companyId: string, personId: string, name: string) =>
-    hostedTaskAccess({ companyId: companyId as never, membershipOf, projectGrant }).checkStart(principal(companyId, personId), name, undefined as never, undefined as never);
+    hostedTaskAccess({ companyId, membershipOf, projectGrant }).checkStart(principal(companyId, personId), name, undefined, undefined);
   const setupStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const wikiRole = wikiProjectRoleFrom({ membershipOf, projectGrantRole });
 

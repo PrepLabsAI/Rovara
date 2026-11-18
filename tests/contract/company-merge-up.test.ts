@@ -279,7 +279,7 @@ describe("merge-up 2 named T-lane known gaps (not isolation claims)", () => {
     h.db.set({ pk: grantPk(COMPANY_B.orgId, id), sk: "PROJECT#shared-project", projectName: "shared-project", role: "developer" });
     expect((await h.call(`/v1/dev/tasks/${TASK}/readers/${id}`, method, { requestId: TASK, role: "viewer" })).statusCode).toBe(200);
     // The gap: the writer still never reads the CALLER's membership (only the reader's company, to find where the reader's grant lives).
-    expect(h.companyOf.mock.calls.every(([person]) => person === id)).toBe(true);
+    expect(h.companyOf.mock.calls.every((call) => (call as unknown[])[0] === id)).toBe(true);
   });
   it("T2/T3 linking workspace catalog is still bound to person rather than company", async () => {
     const h = harness(COMPANY_B.orgId);

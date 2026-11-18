@@ -34,7 +34,7 @@ function ports(input: { task?: DeveloperTaskRecord; memberOf?: string[]; develop
     return input.developerRecord as never;
   });
   const projectAuthorityReader = {
-    latestRevision: vi.fn(async (_project: string, _admission: unknown, signal: AbortSignal, _company?: string) => ({
+    latestRevision: vi.fn(async (_project: string, _admission: unknown, signal: AbortSignal, company?: string) => (void company, {
       revision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, definition: {} }, complete: !signal.aborted,
     })),
     memberships: vi.fn(async (_developerId: string, _admission: unknown, signal: AbortSignal) => ({ items: [], complete: !signal.aborted })),
