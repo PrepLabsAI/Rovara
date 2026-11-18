@@ -10,13 +10,13 @@
 //   - Who: the directory's live list of the people who decide the project's lessons, read now (an incomplete answer is nobody, retried on a later pass). Each person's digest is built with THEIR identity, so a
 //     lesson from a source they cannot see is never named to them (`readVisible`, as the Lessons tab).
 //   - Where: only the chat places the person chose, on an adapter that may message first, whose tenant is this company's (`tenantIsCompanys`). Muted people and quiet hours hold it (quiet hours: until a later pass).
-//   - At most once per person, project and week: a company-scoped row is claimed before the send; a lost send is not repeated (as an attention email). The event id is stable for the person, project, week and
+//   - At most once per person, project and week: a company-scoped row is claimed before the send; a send that timed out may have arrived and is not repeated, but a summary that was NOT delivered (no adapter served, or every send failed) is given back and tried again an hour later, at most 4 times a week (L4-JA56 B6: never marked done unless delivered). The event id is stable for the person, project, week and
 //     place, so an adapter drops a repeat. An empty week (nothing waiting, live, retired, expiring or fading) sends nothing.
 //   - What: counts, lesson titles (as the Lessons tab shows them) and fixed words. No lesson body, no person's name, no source.
 //   - Bounded: `DIGEST_PROJECTS_PER_PASS` projects, `DIGEST_PEOPLE_MAX` people per project, `DIGEST_TITLES_MAX` titles per list, one deadline for the pass; whatever is not reached waits for the next pass.
 //   - The rows are company-scoped (`LESSON_DIGEST#<project>`): the setting, the week a project was finished, and one `SENT#<person>` row per person (removed by the person erase), each kept a few weeks.
 import { createHash } from "node:crypto";
-import { companyScoped, defaultNotifyChannel, effectiveNotify, type ChannelAdapter, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView } from "@agentx/contracts";
+import { companyScoped, defaultNotifyChannel, effectiveNotify, type ChannelAdapter, type Condition, type ChannelEvent, type DocumentStore, type OrgId, type RegistryView } from "@agentx/contracts";
 import { tenantIsCompanys, type ChannelCompanyOf } from "../core/channel/company.js";
 import { notifyTargetKey, readNotifyPrefs, type NotifyTarget } from "../core/notify/prefs.js";
 import { holdOf } from "../core/notify/schedule.js";
@@ -40,6 +40,11 @@ export const DIGEST_PEOPLE_MAX = 50;
 export const DIGEST_PEOPLE_SCAN_MAX = 500;
 export const DIGEST_TITLES_MAX = 5;
 export const DIGEST_SEND_TIMEOUT_MS = 2_500;
+/** An undelivered summary (no adapter, or every send failed) is tried again no sooner than this, and at most this many times in a week (then it is let go for the week: a stuck person never starves the others). */
+export const DIGEST_RETRY_AFTER_MS = 3_600_000;
+export const DIGEST_RETRY_MAX = 4;
+/** A claim this young may belong to a pass still sending: the project stays open one more pass instead of closing the week. */
+const CLAIM_IN_FLIGHT_MS = 60_000;
 /** How long the week rows are kept (the setting has no expiry). */
 const ROW_KEEP_SECONDS = 5 * 7 * 86_400;
 const TITLE_CHARS = 80;
@@ -179,7 +184,20 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
         try {
         const sentKey = { pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: `SENT#${personId}` };
         const sent = await documents.get(sentKey);
-        if (typeof sent?.["week"] === "number" && sent["week"] >= week) continue;
+        if (typeof sent?.["week"] === "number" && sent["week"] >= week) {
+          // Told (or claimed by a pass that may still be sending, and may yet give the claim back): the project stays open for one more pass in that case.
+          if (typeof sent["at"] === "number" && now - sent["at"] < CLAIM_IN_FLIGHT_MS) pending = true;
+          continue;
+        }
+        // A person this week's earlier passes could not reach: not before the retry time, and not after the last try (let go for the week, never starving the rest).
+        const failedThisWeek = sent?.["failWeek"] === week;
+        const priorTries = failedThisWeek && typeof sent?.["tries"] === "number" ? sent["tries"] : 0;
+        if (failedThisWeek && priorTries >= DIGEST_RETRY_MAX) continue;
+        if (failedThisWeek && typeof sent?.["retryAt"] === "number" && sent["retryAt"] > now) { pending = true; continue; }
+        // Not told: back to due, but not before the retry time. `week - 1` keeps the row below this week, so the claim below can take it again.
+        const holdForRetry = async (condition?: Condition): Promise<void> => {
+          await documents.put({ item: { ...sentKey, entityType: "LESSON_DIGEST", week: week - 1, failWeek: week, tries: priorTries + 1, retryAt: now + DIGEST_RETRY_AFTER_MS, at: now, ...ttl(now) }, ...(condition === undefined ? {} : { condition }) }).catch(() => { log("hold_failed"); });
+        };
         // Only people still to be told count toward the cap: the next pass goes on from where this one stopped.
         if (built >= DIGEST_PEOPLE_MAX) { pending = true; break; }
         built += 1;
@@ -188,12 +206,17 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
         // The chats only when the person's own choice sends them there (as the attention notices: "email" alone means no chat; an email choice they unsubscribed from falls back to the chats).
         const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(prefs.targets.length > 0), slackLinked: prefs.targets.length > 0, emailAvailable: true, emailUnsubscribed: prefs.emailUnsubscribed });
         const places: Array<{ target: NotifyTarget; adapter: ChannelAdapter }> = [];
+        // A chat place the person chose whose adapter this install does not serve (the hosted root before B6 asked a registry with no `channel` point): the summary was NOT delivered, so it is neither claimed nor closed.
+        let adapterMissing = false;
         for (const target of prefs.muted || !goes.slack ? [] : prefs.targets) {
           const adapter = deps.registry.get("channel", target.channel);
-          if (adapter === undefined || !adapter.capabilities.proactive) continue;
+          if (adapter === undefined) { adapterMissing = true; log("no_adapter", { channel: target.channel }); continue; }
+          if (!adapter.capabilities.proactive) continue;
           if (!(await tenantIsCompanys(deps.companyOf, companyId, target.channel, target.conversation.tenant))) { log("other_company"); continue; }
           places.push({ target, adapter });
         }
+        // Nowhere to send because no adapter answered: due again on the next pass, never marked done.
+        if (places.length === 0 && adapterMissing) { pending = true; outcome.failed += 1; log("undelivered", { reason: "no_adapter" }); await holdForRetry(); continue; }
         let text: string | undefined;
         if (places.length > 0) {
           const viewer = await deps.directory.identity(companyId, personId);
@@ -210,7 +233,10 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
           item: { ...sentKey, entityType: "LESSON_DIGEST", week, at: now, ...ttl(now) },
           condition: { op: "or", conditions: [{ op: "notExists", path: ["pk"] }, { op: "lt", path: ["week"], value: week }] },
         });
-        if (!claimed.applied || text === undefined) continue;
+        // A lost claim is another pass's: it may still give it back, so the project stays open one more pass.
+        if (!claimed.applied) { pending = true; continue; }
+        if (text === undefined) continue;
+        let delivered = 0;
         for (const { target, adapter } of places) {
           if (!timeLeft()) { outcome.failed += 1; log("send_late"); continue; }
           const event = { version: 1, id: eventId(companyId, project, week, personId, notifyTargetKey(target)), type: "progress", channel: target.channel, conversation: target.conversation, createdAt: new Date(now).toISOString(), data: { text } } as ChannelEvent;
@@ -218,12 +244,21 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
           try {
             await Promise.race([adapter.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), DIGEST_SEND_TIMEOUT_MS); timer.unref?.(); })]);
             outcome.sent += 1;
+            delivered += 1;
           } catch (error) {
             outcome.failed += 1;
+            // A send that timed out may still arrive: it counts as sent (at most once), never as a failure to repeat.
+            if (error instanceof Error && error.message === "timeout") { delivered += 1; log("send_timeout", { channel: target.channel }); continue; }
             log("send_failed", { channel: target.channel, error: error instanceof Error ? error.name : "unknown" });
           } finally {
             if (timer !== undefined) clearTimeout(timer);
           }
+        }
+        // Done for the week only when it was delivered somewhere: a person none of whose sends got through goes back to due (the claim is given back with a retry time and a try count), and the project stays open for the next pass.
+        if (delivered === 0) {
+          pending = true;
+          log("undelivered", { reason: "send_failed" });
+          await holdForRetry({ op: "eq", path: ["at"], value: now });
         }
         } catch (error) {
           pending = true;
