@@ -25,13 +25,14 @@ const REPO: RepositoryRef = { url: "https://github.com/acme/payments" };
 const sha = (n: number): string => n.toString(16).padStart(40, "c");
 
 /** A Rovara task with one pull request in the company, its link, and the merge commit's index row. */
-async function rovaraPullRequest(store: MemoryDocumentStore, options: { taskId?: string; orgId?: OrgId; number?: number; mergeCommit?: string; repo?: string; createdAt?: string } = {}) {
+async function rovaraPullRequest(store: MemoryDocumentStore, options: { taskId?: string; orgId?: OrgId; number?: number; mergeCommit?: string; repo?: string; createdAt?: string; legacyRecord?: boolean } = {}) {
   const taskId = options.taskId ?? TASK;
   const number = options.number ?? 7;
   const repo = options.repo ?? "acme/payments";
   const url = `https://github.com/${repo}/pull/${String(number)}`;
   const orgId = options.orgId ?? ORG;
-  await store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, orgId, project: "payments", workflow: { pullRequests: [{ repositoryId: "payments", number, url, headSha: "a".repeat(40) }] } } });
+  // The CORE's task record names its company `companyId` and has no `orgId` (core/task-flow/start.ts); the older record has `orgId`. Tests use the core's shape unless they ask for the older one.
+  await store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, ...(options.legacyRecord === true ? { orgId } : { companyId: orgId }), project: "payments", workflow: { pullRequests: [{ repositoryId: "payments", number, url, headSha: "a".repeat(40) }] } } });
   await store.put({ item: { pk: `GITHUB_PR#${repo}`, sk: `PR#${String(number).padStart(10, "0")}`, entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: repo, number, repositoryId: "payments", taskId, workspaceId: "ws-1", candidateDigest: "c".repeat(64), url } });
   await store.transact([mergeCommitIndexStep({ orgId, repositoryFullName: repo, repositoryId: "payments", number, url, taskId, mergeCommit: options.mergeCommit ?? MERGE, now: options.createdAt ?? NOW })!]);
   return { taskId, number, url };
@@ -140,6 +141,22 @@ describe("a merged revert pull request", () => {
     const rows = await revertRows(w.store);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ entityType: "TASK_REVERT", orgId: ORG, taskId: TASK, reverter: "maya", ...revertRecordKey(TASK, "acme/payments", 7) });
+  });
+
+  it("finds a task of the CORE's record shape (company named `companyId`, no `orgId`) and of the older shape (`orgId`), and not one that names no company or two that disagree", async () => {
+    for (const legacyRecord of [false, true]) {
+      const w = watch({ commits: [squashRevert(20)], writers: { maya: "write" }, changeRequests: { 20: { title: 'Revert "Add retry"', body: "Reverts #7", mergedBy: "maya" } } });
+      await rovaraPullRequest(w.store, { legacyRecord });
+      await pass(w);
+      expect(w.told, String(legacyRecord)).toHaveLength(1);
+    }
+    for (const record of [{ project: "payments" }, { companyId: OTHER_ORG, orgId: ORG, project: "payments" }, { companyId: ORG, orgId: OTHER_ORG, project: "payments" }]) {
+      const w = watch({ commits: [squashRevert(20)], writers: { maya: "write" }, changeRequests: { 20: { title: 'Revert "Add retry"', body: "Reverts #7", mergedBy: "maya" } } });
+      await rovaraPullRequest(w.store);
+      await w.store.put({ item: { ...taskKey(TASK), entityType: "DEVELOPER_TASK", taskId: TASK, ...record, workflow: { pullRequests: [{ repositoryId: "payments", number: 7, url: "https://github.com/acme/payments/pull/7", headSha: "a".repeat(40) }] } } });
+      await pass(w);
+      expect(w.told, JSON.stringify(record)).toEqual([]);
+    }
   });
 
   it("a merge commit style (Merge pull request #20 ... whose first body line is the revert title) is detected the same way", async () => {
