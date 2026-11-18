@@ -263,7 +263,7 @@ describe("the permissions boundary and the deploy role allow the grants (simulat
     }
   });
 
-  describe("the queue policies, evaluated as SQS evaluates a same-account role principal (the resource policy grants it by the role's ARN; the boundary does not narrow a grant that names the role)", () => {
+  describe("the queue policies, evaluated as SQS evaluates a same-account role principal", () => {
     const { queue, dead } = ids(named);
     const brokerRole = roleIdOf(brokerOf(named));
     const dispatcherRole = roleIdOf(dispatcherOf(named));
