@@ -1,6 +1,7 @@
 // ID-STEPUP-FOLLOWUPS (a) and (b): the factor email and passkeys, managed through DeveloperIdentity (the broker may not write the sign-in table).
 //
 //   - list-passkeys: the caller's own passkeys. A live session is enough.
+//   - list-sign-in-factors: the caller's own passkeys AND their confirmation email, masked here (the broker never holds the full address). A live session is enough. Nothing names a second person.
 //   - remove-passkey: removes one of the caller's own passkeys. Needs a FRESH STEP-UP.
 //   - remove-person-passkeys: a company admin removes all of another person's passkeys. Needs the admin's own fresh step-up; the person is told at their factor email. A notice that cannot
 //     be sent does not stop the removal (removing only takes access away), and the answer says it was not sent.
@@ -17,8 +18,8 @@
 //   - Ending a person's sessions does not remove their passkeys (they are the person's own factor); an admin's removal does.
 //   - Answers and logs carry fixed words, ids and counts only: never an email address in full, a credential's key, or a caught error's message.
 import {
-  DEVELOPER_STEP_UP_METHODS, DEVELOPER_STEP_UP_WINDOW_SECONDS, ListPasskeysRequestSchema, RemovePasskeyRequestSchema, RemovePersonPasskeysRequestSchema, SetFactorEmailRequestSchema,
-  type DeveloperFactorRefusal, type ListPasskeysResponse, type RemovePasskeyResponse, type RemovePersonPasskeysResponse, type SetFactorEmailResponse,
+  DEVELOPER_STEP_UP_METHODS, DEVELOPER_STEP_UP_WINDOW_SECONDS, ListPasskeysRequestSchema, ListSignInFactorsRequestSchema, MaskedFactorEmailSchema, RemovePasskeyRequestSchema, RemovePersonPasskeysRequestSchema, SetFactorEmailRequestSchema,
+  type DeveloperFactorRefusal, type ListPasskeysResponse, type ListSignInFactorsResponse, type RemovePasskeyResponse, type RemovePersonPasskeysResponse, type SetFactorEmailResponse,
 } from "@agentx/contracts";
 import { maskedEmail, type StepUpEmailSender } from "./step-up.js";
 import { endedByAdmin, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
@@ -141,6 +142,22 @@ export function createFactorAdmin(options: FactorAdminOptions) {
       return { ok: true, passkeys: keys.map((key) => ({ credentialId: key.credentialId, createdAt: key.createdAt, ...(key.lastUsedAt === undefined ? {} : { lastUsedAt: key.lastUsedAt }) })) };
     },
 
+    async listSignInFactors(event: unknown): Promise<ListSignInFactorsResponse> {
+      const parsed = ListSignInFactorsRequestSchema.safeParse(event);
+      if (!parsed.success) return refusal("invalid_request", FACTOR_ADMIN_TEXT.invalid);
+      const live = await liveSession(parsed.data.developerId, parsed.data.sessionId);
+      if ("ok" in live) return live;
+      const keys = await options.store.listPasskeys(parsed.data.developerId);
+      // The caller's OWN record (read for their live session), masked here; an address that cannot be masked into the fixed shape is left out, never sent as it is.
+      const stored = live.developer.factorEmail;
+      const masked = stored === undefined ? undefined : MaskedFactorEmailSchema.safeParse(maskedEmail(stored));
+      if (stored !== undefined && masked?.success !== true) options.log({ event: "signin.factor_email_unmaskable", developerId: parsed.data.developerId });
+      return {
+        ok: true, ...(masked?.success === true ? { factorEmail: masked.data } : {}),
+        passkeys: keys.map((key) => ({ credentialId: key.credentialId, createdAt: key.createdAt, ...(key.lastUsedAt === undefined ? {} : { lastUsedAt: key.lastUsedAt }) })),
+      };
+    },
+
     async removePasskey(event: unknown): Promise<RemovePasskeyResponse> {
       const parsed = RemovePasskeyRequestSchema.safeParse(event);
       if (!parsed.success) return refusal("invalid_request", FACTOR_ADMIN_TEXT.invalid);
@@ -219,6 +236,7 @@ export function createFactorAdmin(options: FactorAdminOptions) {
   };
   return {
     listPasskeys: (event: unknown): Promise<ListPasskeysResponse> => guarded("list-passkeys", () => operations.listPasskeys(event)),
+    listSignInFactors: (event: unknown): Promise<ListSignInFactorsResponse> => guarded("list-sign-in-factors", () => operations.listSignInFactors(event)),
     removePasskey: (event: unknown): Promise<RemovePasskeyResponse> => guarded("remove-passkey", () => operations.removePasskey(event)),
     removePersonPasskeys: (event: unknown): Promise<RemovePersonPasskeysResponse> => guarded("remove-person-passkeys", () => operations.removePersonPasskeys(event)),
     setFactorEmail: (event: unknown): Promise<SetFactorEmailResponse> => guarded("set-factor-email", () => operations.setFactorEmail(event)),

@@ -822,4 +822,5 @@ describe("what did not change", () => {
 // The batch's other new rows are APP_ROUTES rows (test environment, wiki map, wiki reads, setup confirm/discard/decide), which this DEV_ROUTES digest does not cover.
 // Batch 14 (rule D): and for 4 new rows: GET/POST /v1/dev/projects/{project}/machine-size (tasks:read / full; #882/#901) and GET /v1/dev/tasks/{taskId}/people/candidates,
 // POST /v1/dev/tasks/{taskId}/people/add (tasks:act; #888). All added, none changed: removing exactly those 4 rows still gives 8e72149c....
+// L4-MF4 (rule D): re-pinned for the one new row GET /v1/dev/me/sign-in-factors (full; added, none changed; removing exactly that row still gives 8e72149c...).
 const EXISTING_ROUTES_DIGEST = "425c010b2558662945d0268e09c368e9072f263dc0a75c28a2c7f2b4a35e82ba";

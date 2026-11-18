@@ -43,6 +43,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "DELETE", path: "/v1/dev/me/sign-ins/{method}", requires: "full" },
   { method: "GET", path: "/v1/dev/company/members/{personId}/sign-ins", requires: "full" },
   { method: "DELETE", path: "/v1/dev/company/members/{personId}/sign-ins/{method}", requires: "full" },
+  // L4-MF4: the caller's OWN confirmation email (masked) and passkeys, for the web account page. Full access only; no path or parameter names a person.
+  { method: "GET", path: "/v1/dev/me/sign-in-factors", requires: "full" },
   // Spec 065b: a project from a repository the GitHub App can reach.
   { method: "POST", path: "/v1/dev/client/projects", requires: "projects:create" },
   { method: "GET", path: "/v1/dev/client/repositories", requires: "projects:create" },
