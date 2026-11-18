@@ -12,13 +12,14 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
-import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
+import { SetupEvalDiscoveryReportSchema, agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import { SETUP_AGENT_WORKFLOW_MODE } from "./agent.js";
 import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./command.js";
 import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
 import { SETUP_JOURNAL_BATCH_MAX, appendSetupJournal } from "./journal.js";
 import { recordEvalDiscovery, type EvalDiscoveryLogEvent } from "./eval-discovery.js";
+import { proposeEvalWrappers, type EvalWrapperDeps } from "./eval-wrapper.js";
 
 export interface SetupAgentCallbackDeps {
   store: DocumentStore;
@@ -32,6 +33,11 @@ export interface SetupAgentCallbackDeps {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
+  /**
+   * L4-EVW2 (DEC 254zzz20 D2): the code host seam that lets the setup run's eval report open a wrapper pull request (`eval-wrapper.ts`) when the eval's output is one Rovara cannot read. Absent: no proposal is made
+   * (the card then says the eval's results cannot be read yet).
+   */
+  evalWrapper?: EvalWrapperDeps | undefined;
   /** Fixed-word log lines (the eval discovery's); never the body. */
   log?: ((entry: { event: EvalDiscoveryLogEvent; reason?: string }) => void) | undefined;
 }
@@ -99,7 +105,14 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
     }
     case "command_done":
       return { finished: await finishSetupCommand(table, run, { seq: body.seq, journalN: body.journalN }) };
-    case "eval_discovery":
-      return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
+    case "eval_discovery": {
+      const recorded = await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
+      // The proposal is a best-effort step of the setup run: its failure never fails the report (the card shows why, and "Try again" repeats it).
+      if (deps.evalWrapper !== undefined) {
+        const report = SetupEvalDiscoveryReportSchema.safeParse(body.report);
+        if (report.success) await proposeEvalWrappers(deps.evalWrapper, run.project, { report: report.data, taskId: run.taskId, by: `setup-run:${run.taskId}` }).catch(() => undefined);
+      }
+      return recorded;
+    }
   }
 }

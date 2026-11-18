@@ -202,3 +202,67 @@ describe("deleteBranchOn", () => {
     expect(await failure(() => deleteBranchOn(failing, BRANCH))).toContain("HTTP 404");
   });
 });
+
+// L4-EVW2 (DEC 254zzz20 D2): the second family of Rovara-owned branches, for the proposed eval wrapper. Its own name pattern and its own two paths; only new files on a new branch; never the other family's paths.
+describe("commitFilesOn: eval wrapper branches", () => {
+  const WRAPPER_BRANCH = "rovara/eval-wrapper-0123456789ab";
+  const wrapper = (over: Partial<Parameters<typeof commitFilesOn>[1]> = {}) => ({ branch: WRAPPER_BRANCH, baseBranch: "main", message: "Wrapper", fromBase: true, files: [{ path: "rovara/eval-wrapper.py", content: "print(1)\n" }], ...over });
+
+  it("writes only the two wrapper paths as a new file on a new branch, and leaves the base branch where it was", async () => {
+    const host = new FakeGitHub();
+    const base = host.seed("main", { "README.md": "x" });
+    const done = await commitFilesOn(host.context(), wrapper({ baseRevision: base, previous: [{ path: "rovara/eval-wrapper.py", content: null }] }));
+    expect(done.changed).toBe(true);
+    expect(host.branches.get("main")).toBe(base);
+    expect(host.commits.get(done.revision)!.tree.get("rovara/eval-wrapper.py")).toEqual({ type: "file", text: "print(1)\n" });
+    const node = new FakeGitHub();
+    node.seed("main", { "README.md": "x" });
+    expect((await commitFilesOn(node.context(), wrapper({ files: [{ path: "rovara/eval-wrapper.mjs", content: "export {};\n" }] }))).changed).toBe(true);
+  });
+
+  it("keeps the two families apart: a wrapper branch never carries a lessons path, and a lessons branch never carries a wrapper path", async () => {
+    const host = new FakeGitHub();
+    host.seed("main", { "README.md": "x" });
+    for (const path of [".rovara/lessons.md", "AGENTS.md", "rovara/other.py", "src/a.ts", "rovara/eval-wrapper.py/../x"]) {
+      expect(await failure(() => commitFilesOn(host.context(), wrapper({ files: [{ path, content: "x" }] }))), path).toMatch(/file path/);
+    }
+    for (const path of ["rovara/eval-wrapper.py", "rovara/eval-wrapper.mjs"]) {
+      expect(await failure(() => commitFilesOn(host.context(), request({ files: [{ path, content: "x" }] }))), path).toMatch(/file path/);
+    }
+    expect(host.requests).toEqual([]);
+  });
+
+  it("refuses a name outside the family, the default branch, an update of a wrapper branch and a branch that exists", async () => {
+    const host = new FakeGitHub();
+    host.seed("main", { "README.md": "x" });
+    for (const branch of ["main", "rovara/eval-wrapper-0123456789abc", "rovara/eval-wrapper-0123456789AB", "rovara/eval-wrapper-", "rovara/eval-wrapperX0123456789ab", "agentx/eval-wrapper-0123456789ab"]) {
+      expect(await failure(() => commitFilesOn(host.context(), wrapper({ branch }))), branch).toContain("branch name is invalid");
+    }
+    expect(await failure(() => commitFilesOn(host.context(), wrapper({ fromBase: false })))).toContain("new branch only");
+    expect(host.requests).toEqual([]);
+    host.branches.set(WRAPPER_BRANCH, host.branches.get("main")!);
+    expect(await failure(() => commitFilesOn(host.context(), wrapper()))).toContain(COMMIT_CONFLICT_MESSAGE);
+    expect(host.commits.size).toBe(1);
+  });
+
+  it("never replaces a file that is already at a wrapper path, not even with the same text, nor a link or a folder", async () => {
+    for (const existing of ["their own wrapper\n", "print(1)\n", { type: "symlink" as const }, { type: "dir" as const }]) {
+      const host = new FakeGitHub();
+      host.seed("main", { "README.md": "x", "rovara/eval-wrapper.py": existing });
+      const before = host.commits.size;
+      expect(await failure(() => commitFilesOn(host.context(), wrapper())), JSON.stringify(existing)).not.toBe("did not fail");
+      expect(host.commits.size).toBe(before);
+      expect(host.branches.get("main")).toBe([...host.commits.keys()][0]);
+    }
+  });
+
+  it("deletes a wrapper branch Rovara made, and still only a name of either family", async () => {
+    const host = new FakeGitHub();
+    host.seed("main", { "README.md": "x" });
+    host.branches.set(WRAPPER_BRANCH, host.branches.get("main")!);
+    expect(await deleteBranchOn(host.context(), WRAPPER_BRANCH)).toBe("deleted");
+    expect(await deleteBranchOn(host.context(), WRAPPER_BRANCH)).toBe("gone");
+    for (const branch of ["main", "rovara/eval-wrapper-x", "rovara/eval-wrapper-0123456789abc"]) expect(await failure(() => deleteBranchOn(host.context(), branch)), branch).toContain("branch name is invalid");
+    expect(host.branches.has("main")).toBe(true);
+  });
+});

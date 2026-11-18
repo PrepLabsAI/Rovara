@@ -2,7 +2,7 @@ import { createHash, createSign } from "node:crypto";
 import { userControlledInstallations, UserAuthorizationRefused, type ControlledInstallation } from "./user-authorization.js";
 import { commitFilesOn, deleteBranchOn, type CommitFilesRequest } from "./commit-files.js";
 import { DEPLOYMENT_STATES_OF_GITHUB } from "./events.js";
-import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, LESSON_FILE_BRANCH_PATTERN, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { DeploymentEnvironmentSchema, GitBranchNameSchema, HostRateLimitError, ownedBranchKind, RECENT_COMMITS_MAX, RECENT_COMMIT_MESSAGE_MAX, ROVARA_CHECK_NAME, ROVARA_CHECK_TEXT_MAX, ROVARA_CHECK_TITLE_MAX, type RovaraCheckPayload, OrgIdSchema, PULL_REQUEST_BODY_MAX_CHARS, agentXError, GITHUB_DISCONNECTED_MESSAGE, createCandidateManifest, githubNotConnectedMessage, isSafeE2ESourcePath, redactText, type AgentXError, type DeploymentState, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "../../../repository-access.js";
 import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // L7a: the port's read allowance, not an aws/ module (same shape)
 import { isAllowedLogAddress, logTail, readLogEnd } from "../../../github-job-log.js";
@@ -1967,7 +1967,7 @@ export class GitHubAppCredentialProvider {
 
   /** Lessons in the repo: the pull request (any state) made from one of Rovara's own `rovara/lessons-` branches, or undefined. No other branch name is looked up. */
   async findLessonsPullRequest(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined> {
-    if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (ownedBranchKind(branch) === undefined) throw agentXError("CONFIG_INVALID", "branch name is invalid");
     const repository = await this.installed(parseGitHubRepository(repositoryUrl), scope);
     const token = await this.createInstallationToken(repository, { pull_requests: "read" }, scope);
     const query = new URLSearchParams({ state: "all", head: `${repository.owner}:${branch}`, per_page: "1" });

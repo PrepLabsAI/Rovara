@@ -408,6 +408,26 @@ export const LESSON_FILE_BRANCH_PATTERN = /^rovara\/lessons-[0-9a-f]{12}$/u;
 export const LESSON_FILE_PATH = ".rovara/lessons.md";
 export const LESSON_FILE_POINTER_PATHS = ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"] as const;
 export const LESSON_FILE_WRITE_PATHS: readonly string[] = [LESSON_FILE_PATH, ...LESSON_FILE_POINTER_PATHS];
+
+/**
+ * L4-EVW2 (DEC 254zzz20 D2): the second thing Rovara may put in a customer's repository, and only as a pull request a person merges: a small wrapper file that turns the output of the customer's own eval into one
+ * Rovara can read. It has its own branch family (`rovara/eval-wrapper-<12 hex>`) and its own two fixed paths, apart from the lessons file: a lessons branch can never carry a wrapper path and a wrapper branch can never carry
+ * a lessons path. Every adapter holds a wrapper write to ALL of these: a new branch only (`fromBase`), exactly these paths, and never over a file that already exists.
+ */
+export const EVAL_WRAPPER_BRANCH_PREFIX = "rovara/eval-wrapper-";
+export const EVAL_WRAPPER_BRANCH_PATTERN = /^rovara\/eval-wrapper-[0-9a-f]{12}$/u;
+export const EVAL_WRAPPER_PYTHON_PATH = "rovara/eval-wrapper.py";
+export const EVAL_WRAPPER_NODE_PATH = "rovara/eval-wrapper.mjs";
+export const EVAL_WRAPPER_WRITE_PATHS: readonly string[] = [EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_NODE_PATH];
+/** Which family of Rovara-owned branch a name belongs to (and so which paths it may carry), or undefined for any other name. */
+export type OwnedBranchKind = "lessons" | "eval-wrapper";
+export function ownedBranchKind(branch: string): OwnedBranchKind | undefined {
+  if (LESSON_FILE_BRANCH_PATTERN.test(branch)) return "lessons";
+  if (EVAL_WRAPPER_BRANCH_PATTERN.test(branch)) return "eval-wrapper";
+  return undefined;
+}
+/** The paths a branch of this family may carry. */
+export const ownedWritePaths = (kind: OwnedBranchKind): readonly string[] => (kind === "lessons" ? LESSON_FILE_WRITE_PATHS : EVAL_WRAPPER_WRITE_PATHS);
 /** The fixed sentences an adapter's `commitFiles` refuses with, so a caller can tell a lost race from a refused write without reading the host's words. */
 export const COMMIT_CONFLICT_MESSAGE = "the repository changed since Rovara read it";
 export const COMMIT_SYMLINK_MESSAGE = "the file is a symbolic link, which Rovara does not write to";

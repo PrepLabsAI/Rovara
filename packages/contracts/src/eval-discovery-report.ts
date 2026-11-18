@@ -11,6 +11,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
+import { EvalOutputShapeSchema } from "./eval-wrapper.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 import { modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
 
@@ -72,6 +73,8 @@ export const EvalDiscoverySuiteSchema = z.object({
   questions: z.array(EvalDiscoveryQuestionSchema).min(1).max(EVAL_QUESTION_LIMIT),
   command: EvalCommandSchema,
   report: EvalReportPathSchema,
+  /** L4-EVW2 (DEC 254zzz20 D2): what the command writes at `report`, when it is not a file Rovara already reads (a `rows` file or a `custom` shape needs a wrapper the setup agent proposes as a pull request). Absent: readable as before. */
+  output: EvalOutputShapeSchema.optional(),
   /** The run's own fingerprint of `command` and `report`: refused unless it is the broker's `evalCommandFingerprintOf`. */
   commandFingerprint: hash,
   judge: EvalJudgeSchema,

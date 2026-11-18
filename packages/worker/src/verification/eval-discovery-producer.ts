@@ -13,7 +13,7 @@
 // Nothing here runs a command, reads a file's content or logs repository text; refusals are fixed words.
 import {
   EVAL_DISCOVERY_CALLS_PER_QUESTION_MAX, EVAL_DISCOVERY_COST_PER_QUESTION_MAX_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_DISCOVERY_SUITES_MAX, EVAL_PINNED_IMAGE, EVAL_PRODUCT_ROUTE, EVAL_PRODUCT_ROW, EVAL_QUESTION_LIMIT,
-  EvalCommandSchema, EvalDiscoveryQuestionSchema, EvalJudgeSchema, EvalReportPathSchema, SetupEvalDiscoveryReportSchema, canonicalJson, evalCommandFingerprintOf, type SetupEvalDiscoveryReport,
+  EvalCommandSchema, EvalDiscoveryQuestionSchema, EvalJudgeSchema, EvalOutputShapeSchema, EvalReportPathSchema, SetupEvalDiscoveryReportSchema, canonicalJson, evalCommandFingerprintOf, type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { discoverEvals, type EvalDiscovery } from "./eval-discovery.js";
@@ -26,6 +26,8 @@ const DraftSuiteSchema = z.object({
   questions: z.array(EvalDiscoveryQuestionSchema).min(1).max(EVAL_QUESTION_LIMIT),
   command: EvalCommandSchema,
   report: EvalReportPathSchema,
+  /** L4-EVW2: what the command writes at `report`, when it is not a file Rovara already reads. The broker decides what to do with it (a wrapper proposal); nothing here runs or writes it. */
+  output: EvalOutputShapeSchema.optional(),
   model: name,
   modelVersion: name,
   judge: EvalJudgeSchema,
@@ -97,7 +99,7 @@ export async function produceEvalDiscoveryReport(input: EvalDiscoveryProducerInp
     suites.push({
       selection: draft.selection, ...(draft.repository === undefined ? {} : { repository: draft.repository }),
       questions: [...draft.questions].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-      command: draft.command, report: draft.report, commandFingerprint, judge: draft.judge, subsetSupported: draft.subsetSupported,
+      command: draft.command, report: draft.report, ...(draft.output === undefined ? {} : { output: draft.output }), commandFingerprint, judge: draft.judge, subsetSupported: draft.subsetSupported,
       catalogRowId: EVAL_PRODUCT_ROW, model: draft.model, modelVersion: draft.modelVersion, image, route: EVAL_PRODUCT_ROUTE,
       maxCallsPerQuestion: draft.maxCallsPerQuestion, maxCostMicrosPerQuestion: draft.maxCostMicrosPerQuestion,
     });

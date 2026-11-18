@@ -5,7 +5,7 @@
 // A bare git repository on disk is not modelled here: the worker-side fake git server belongs to P10 (the end-to-end task), which needs a real clone.
 import { createHash } from "node:crypto";
 import {
-  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
+  agentXError, COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, ownedBranchKind, ownedWritePaths, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type CommitFilesInput, type CommitFilesResult, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
 } from "@agentx/contracts";
 
 export interface FakeAccount { login: string; permission: HostPermission; accountType: HostAccountKind; hostUserId: string }
@@ -250,8 +250,11 @@ export class FakeHostModel {
    * conflict and is left as it is); an update needs the branch still at the head it was read at and each file as it was read; a symbolic link at a target path is refused; a file that already holds the text changes nothing.
    */
   commitLessonFiles(input: CommitFilesInput): CommitFilesResult {
-    if (!LESSON_FILE_BRANCH_PATTERN.test(input.branch) || input.branch === input.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
-    if (input.files.some((file) => !LESSON_FILE_WRITE_PATHS.includes(file.path))) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes lessons to");
+    const kind = ownedBranchKind(input.branch);
+    if (kind === undefined || input.branch === input.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (input.files.some((file) => !ownedWritePaths(kind).includes(file.path))) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes to on this branch");
+    // L4-EVW2: an eval wrapper is a NEW file on a NEW branch only (never an update, never over a file that exists).
+    if (kind === "eval-wrapper" && !input.fromBase) throw agentXError("CONFIG_INVALID", "an eval wrapper goes on a new branch only");
     const baseHead = this.headOf(input.baseBranch);
     const existing = this.branches.get(input.branch);
     if (input.fromBase && existing !== undefined) throw agentXError("CONFIG_INVALID", COMMIT_CONFLICT_MESSAGE);
@@ -265,6 +268,7 @@ export class FakeHostModel {
       const current = at.files.get(file.path);
       const expected = input.previous?.find((entry) => entry.path === file.path);
       if (expected !== undefined && (current ?? null) !== expected.content) throw agentXError("CONFIG_INVALID", COMMIT_CONFLICT_MESSAGE);
+      if (kind === "eval-wrapper" && current !== undefined) throw agentXError("CONFIG_INVALID", COMMIT_CONFLICT_MESSAGE);
       if (current !== file.content) changes[file.path] = file.content;
     }
     // A new branch exists from here on, even if no file differs (the host creates the reference before it reads the files).
@@ -275,13 +279,13 @@ export class FakeHostModel {
 
   /** The change request (any state) made from a lessons branch; any other branch name is refused. */
   changeRequestForLessonBranch(branch: string): FakeChangeRequest | undefined {
-    if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (ownedBranchKind(branch) === undefined) throw agentXError("CONFIG_INVALID", "branch name is invalid");
     return [...this.changeRequests].reverse().find((entry) => entry.sourceBranch === branch);
   }
 
   /** Deletes a lessons branch; the open change request made from it is closed, as a real host does. Any other branch name is refused. */
   deleteLessonBranch(branch: string): "deleted" | "gone" {
-    if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (ownedBranchKind(branch) === undefined) throw agentXError("CONFIG_INVALID", "branch name is invalid");
     return this.removeBranch(branch) ? "deleted" : "gone";
   }
 

@@ -11,9 +11,7 @@
 //  - a symbolic link at a target path is refused (M2): writing to it would replace the link with a file and break a team's single-source setup; a directory, a submodule or a file too big to read at the path is a refused write, never "absent";
 //  - each file is read on the branch first and written only when its text differs, so the same call twice changes nothing (the second answers `changed: false`);
 //  - every path is a plain repository path (no empty, dot or dot-dot segment, no backslash, no control character), and every request is bounded in time and follows no redirect.
-import { COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, GitBranchNameSchema, LESSON_FILE_BRANCH_PATTERN, LESSON_FILE_WRITE_PATHS, agentXError } from "@agentx/contracts";
-
-const ALLOWED_PATHS: ReadonlySet<string> = new Set(LESSON_FILE_WRITE_PATHS);
+import { COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, GitBranchNameSchema, agentXError, ownedBranchKind, ownedWritePaths } from "@agentx/contracts";
 const TIMEOUT_MS = 10_000;
 
 export interface GithubWriteContext {
@@ -112,10 +110,15 @@ async function post(context: GithubWriteContext, tail: string, body: unknown, wh
  * (fix round 4, G4). Returns the branch's head after the write, and whether anything changed.
  */
 export async function commitFilesOn(context: GithubWriteContext, request: CommitFilesRequest): Promise<{ revision: string; changed: boolean }> {
-  if (!LESSON_FILE_BRANCH_PATTERN.test(request.branch) || !GitBranchNameSchema.safeParse(request.branch).success || request.branch === request.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+  const kind = ownedBranchKind(request.branch);
+  if (kind === undefined || !GitBranchNameSchema.safeParse(request.branch).success || request.branch === request.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
   if (!GitBranchNameSchema.safeParse(request.baseBranch).success) throw agentXError("CONFIG_INVALID", "branch name is invalid");
   const files = request.files.map((file) => ({ path: checkedRepositoryPath(file.path), content: file.content }));
-  if (files.some((file) => !ALLOWED_PATHS.has(file.path))) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes lessons to");
+  // The branch's family decides the paths: a lessons branch carries only the lessons paths and an eval wrapper branch only the wrapper paths (L4-EVW2), never the other's.
+  const allowed = new Set(ownedWritePaths(kind));
+  if (files.some((file) => !allowed.has(file.path))) throw agentXError("CONFIG_INVALID", kind === "lessons" ? "file path is not one Rovara writes lessons to" : "file path is not one Rovara writes an eval wrapper to");
+  // L4-EVW2: a wrapper is only ever a NEW file on a NEW branch: never an update of a branch that exists, never a replaced file.
+  if (kind === "eval-wrapper" && !request.fromBase) throw agentXError("CONFIG_INVALID", "an eval wrapper goes on a new branch only");
   for (const sha of [request.baseRevision, request.expectedHead]) if (sha !== undefined && !SHA.test(sha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
   const baseHead = await headOf(context, request.baseBranch);
   if (baseHead === undefined) throw agentXError("CONFIG_INVALID", "the base branch does not exist");
@@ -143,6 +146,8 @@ export async function commitFilesOn(context: GithubWriteContext, request: Commit
     const current = await fileOn(context, file.path, head);
     const expected = request.previous?.find((entry) => entry.path === file.path);
     if (expected !== undefined && (current?.text ?? null) !== expected.content) throw agentXError("CONFIG_INVALID", CONFLICT_MESSAGE);
+    // A file that exists at an eval wrapper's path is the customer's own: refused, even when the text would be the same (the branch Rovara just made is deleted by the caller).
+    if (kind === "eval-wrapper" && current !== undefined) throw agentXError("CONFIG_INVALID", CONFLICT_MESSAGE);
     if (current !== undefined && current.text === file.content) continue;
     changes.push(file);
   }
@@ -170,7 +175,7 @@ export async function commitFilesOn(context: GithubWriteContext, request: Commit
  * request closes that pull request, which is why the pass uses it to clean up a write whose pull request was never recorded.
  */
 export async function deleteBranchOn(context: GithubWriteContext, branch: string): Promise<"deleted" | "gone"> {
-  if (!LESSON_FILE_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+  if (ownedBranchKind(branch) === undefined) throw agentXError("CONFIG_INVALID", "branch name is invalid");
   const response = await send(context, `/git/refs/heads/${encodePath(branch)}`, { method: "DELETE" });
   // Only GitHub's own "Reference does not exist" (a 422) means there was nothing to delete. A 404 (the repository or the permission), any other 422 and every other refusal is a failure the caller tries again, never "gone" (review L3).
   if (response.status === 422 && await doesNotExist(response)) { drop(response); return "gone"; }

@@ -17,8 +17,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
-  agentXError, canonicalJson, change, evalCommandFingerprintOf, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
+  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_OUTPUT_UNREADABLE_MESSAGE, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
+  agentXError, canonicalJson, change, evalCommandFingerprintOf, evalOutputNeedsWrapper, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import type { SetupEvalDiscoveryView } from "../local-pages/views.js";
@@ -226,6 +226,8 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   if (row.state !== "reported") refuse(log, "eval_discovery_confirm_refused", "confirmed", "CHANGE_STALE", "That eval report was already confirmed.");
   const suite = row.report.suites.find((entry) => entry.selection === body.selection);
   if (suite === undefined) refuse(log, "eval_discovery_confirm_refused", "selection", "CONFIG_INVALID", "That eval is not in the setup run's report.");
+  // L4-EVW2 (D2): an eval whose results Rovara cannot read yet is not approved for spend: it would only ever read "Not run". Its wrapper pull request is merged first, and setup reads the eval again.
+  if (evalOutputNeedsWrapper(suite.output)) refuse(log, "eval_discovery_confirm_refused", "unreadable_output", "CONFIG_INVALID", EVAL_OUTPUT_UNREADABLE_MESSAGE);
   const reported = new Set(suite.questions.map((question) => question.path));
   if (body.paths.some((path) => !reported.has(path))) refuse(log, "eval_discovery_confirm_refused", "path", "CONFIG_INVALID", "A selected file is not in the setup run's report.");
   const at = commitFor(row.commits, suite.repository);
