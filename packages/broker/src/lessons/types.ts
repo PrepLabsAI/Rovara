@@ -236,8 +236,14 @@ export const LessonSchema = z.object({
   trial: z.object({ state: z.enum(["trial", "stable"]), startedAt: z.number(), stableAt: z.number().optional() }).strict().optional(),
   supersedes: z.string().max(64).optional(),
   /** People who asked for this lesson to become a How we work rule; a tier-2 lesson needs two before it is published. */
-  promotionApprovals: z.array(z.object({ by: z.string().max(100), at: z.number() }).strict()).max(5).optional(),
+  promotionApprovals: z.array(z.object({ by: z.string().max(100), at: z.number(), /** Phase 4: a digest of what was asked for (the target and where it applies); the second person must ask for the same. */ binding: z.string().max(64).optional(),
+    /** Phase 4: what the first person chose (shown to the second person, who must choose the same). */ ask: z.object({ target: z.enum(["rule", "check", "skill"]), paths: z.array(z.string().max(200)).max(20) }).strict().optional() }).strict()).max(5).optional(),
   promotedRuleId: z.string().max(100).optional(),
+  /**
+   * Phase 4 (graduation): what this lesson BECAME once a person made it permanent: a team rule in Rovara (`ref` = the rule's id), a draft check task a person starts (`ref` = the draft's id), or a Rovara skill (`ref` = its
+   * name). A lesson that carries this is retired: it is not handed to any step as a lesson again, but it stays in the archive with this link and its whole history. Holds no person (the ledger names who).
+   */
+  became: z.object({ kind: z.enum(["rule", "check", "skill"]), ref: z.string().min(1).max(100), at: z.number() }).strict().optional(),
   /** Set when a paused source was resumed: a person decides this lesson; it is never applied automatically, however it is merged later. */
   reviewRequired: z.boolean().optional(),
   /** The lesson this one contradicts, when both go to a person on one card. */
@@ -283,6 +289,7 @@ export const LESSON_AUDIT_ACTIONS = [
   "lesson.trial_started", "lesson.trial_retired", "lesson.trial_stable", "lesson.harm_reversed", "lesson.proposal_withdrawn", "lesson.preset_changed", "lesson.preset_proposed", "lesson.mode_changed", "lesson.trial_offer_answered", "lesson.digest_switched",
   "lesson.repo_file_pr_opened", "lesson.repo_file_pr_closed", "lesson.repo_file_switched", "lesson.local_tools_switched", "lesson.repo_file_retire_decided",
   "lesson.replay_started", "lesson.replay_read", "lesson.snapshot_created",
+  "lesson.graduated",
 ] as const;
 export type LessonAuditAction = (typeof LESSON_AUDIT_ACTIONS)[number];
 

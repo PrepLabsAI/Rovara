@@ -81,7 +81,9 @@ export interface ApproverDirectory {
 
 /** Publishes one paragraph as a How we work rule (the host's own accept path for a suggested rule). It inherits that path's own less-safe checks. */
 export interface RulePublisher {
-  publish(input: { workspaceId: string; project: string; paragraph: string; lessonId: string; approverId: string }): Promise<{ ruleId: string }>;
+  publish(input: { workspaceId: string; project: string; paragraph: string; lessonId: string; approverId: string;
+    /** Phase 4: where the rule applies (the lesson's own path globs, repositories and stages), so a team rule is scoped to its code area. Absent: the whole project. A publisher that cannot scope ignores them. */
+    paths?: readonly string[] | undefined; repos?: readonly string[] | undefined; stages?: readonly string[] | undefined }): Promise<{ ruleId: string }>;
 }
 
 export type CorrectionKind = "send_back" | "review_comment" | "human_edit" | "revert";

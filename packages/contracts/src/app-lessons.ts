@@ -97,6 +97,8 @@ export const LessonViewSchema = z.object({
   /** Set on a possible-duplicate card that cannot be merged into the other lesson: this one came only from the repository's own reviews, the other did not, and a merge would take that away. Approve (keep both) or reject. */
   mergeBlocked: z.literal(true).optional(),
   rejectedReason: z.string().max(200).optional(),
+  /** Phase 4: a lesson a person made permanent is retired and says what it became: a team rule, a draft check task (`ref` is the draft's id) or a skill (`ref` is its name). */
+  became: z.object({ kind: z.enum(["rule", "check", "skill"]), ref: z.string().min(1).max(100), at: z.number() }).strict().optional(),
   /** What this viewer may do with it, worked out by the server (the routes check again when asked). */
   canApprove: z.boolean(), canReject: z.boolean(), canRetire: z.boolean(),
   /** "Used in N tasks": the distinct tasks the lesson was given to in the last 180 days, at most 500 (`usedInTasksMore`: there were more). Absent: not counted (the Lessons tab, the proposed list), or it could not be counted. */
