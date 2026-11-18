@@ -128,7 +128,7 @@ export interface TaskFailureTally {
   /** What the task's learning calls have held so far (the reflection's quote, then the outcome judge's): Public's per-task cap is one total for them together. */
   heldUsd: number;
   /**
-   * when the task has a shared cap ledger, every paid call of the task (a reflection, a curator judge, the outcome judge, a repo-only reflection) reserves its hold here BEFORE it is made.
+   * when the task has a shared cap ledger, every paid call of the task (a reflection, a curator judge, the outcome judge) reserves its hold here BEFORE it is made.
    * False: the cap's steps are used up, and the call is not made. Absent: no shared ledger (Enterprise, or a task nothing else runs for).
    */
   reserve?: (usd: number) => Promise<boolean>;

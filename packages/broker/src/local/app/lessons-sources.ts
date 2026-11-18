@@ -103,11 +103,11 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
   const deciderOf = (decision: { actorId?: string | undefined }): string | undefined => (hosted === undefined ? ownerId : decision.actorId);
 
   /** The comments of one pull request, as spans. */
-  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<{ spans: EvidenceSpan[] }> {
+  async function reviewComments(task: TaskRecord, pullRequest: NonNullable<WorkflowSnapshot["pullRequests"]>[number], repo: LessonRepository): Promise<EvidenceSpan[]> {
     const host: CodeHost = repo.codeHost;
     const ref: ChangeRequestRef = changeRequestRef(repo.url, pullRequest.number);
     let feedback;
-    try { feedback = await host.feedback(ref, repo.scope); } catch { return { spans: [] }; }
+    try { feedback = await host.feedback(ref, repo.scope); } catch { return []; }
     const provider = providerOf(host);
     const audience: Audience = { kind: "restricted", acl: { source: aclSourceOf(provider), scope: repo.place, capturedAt: new Date(options.now()).toISOString(), liveCheck: "none" } };
     const standing = new Map<string, TrustClass>();
@@ -152,7 +152,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         ...(place === undefined || place === "" ? {} : { paths: [place] }),
       });
     }
-    return { spans };
+    return spans;
   }
 
   const source: TaskSubjectSource = {
@@ -207,8 +207,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
           const repo = await options.repos.ofTask(project, task.startingRevision, pullRequest.repositoryId);
           if (repo === undefined) continue;
           const read = await reviewComments(task, pullRequest, repo);
-          taken += read.spans.length;
-          spans.push(...read.spans);
+          taken += read.length;
+          spans.push(...read);
         }
       }
 
