@@ -37,7 +37,7 @@ export function hostedThreadNotification(input: HostedThreadNotificationInputs):
   return {
     registry: {
       get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : registry.get(point as never, name))) as never,
-      names: ((point: string) => (point === "channel" ? [...threads.channels] : registry.names(point as never))) as never,
+      names: ((point: string) => (point === "channel" ? [...threads.channels] : registry.names(point as never))),
     },
     companyOf: threads.companyOf,
     link: (session) => (session.orgId === companyId ? sessionPageUrl(input.origin(), session.sessionId) : undefined),

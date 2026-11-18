@@ -140,7 +140,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
       // HW5: a session that follows a chat thread gets its `plan_ready` and `closed` moments (the thread's plan card and end line). Written in THIS pass's store; the items and the delivery are the company's milestones (handlers
       // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are not written here (`ticketBindings: false`): only a thread's.
       const moments: readonly SessionChangeHook[] = options.threadMoments === true && deps.milestones !== undefined
-        ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, log: () => log() })] : [];
+        ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, companyId, log: () => log() })] : [];
       const sessions = createSessionService({ store, ...summary, notices: noticesFor(store), onChange: moments, now: clock, log });
       return { ...await sessions.sweep({ companyId, scan: sessionScan, maxItems: 100, budgetMs: Math.max(0, deadlineMs - now()) }) };
     }),
