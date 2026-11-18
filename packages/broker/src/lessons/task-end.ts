@@ -45,6 +45,10 @@ export interface TaskSubjectBase {
    * repository-visible correction. Absent or empty: no second reflection.
    */
   repoChanges?: readonly RepoChangeRequest[];
+  /**
+   * The files the task's merged change touched, whole, for the area overlap a clean merge's credit needs (`credit.ts`). Absent: not known (the credit then excludes no lesson for overlap). A source that cannot read the list whole leaves it out.
+   */
+  touchedPaths?: readonly string[];
 }
 export interface TaskSubjectSource {
   /**
@@ -210,7 +214,7 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     const judging = attempt === undefined || !needsJudge ? undefined : { deadlineAt: attempt.deadlineAt, ...(attempt.signal === undefined ? {} : { signal: attempt.signal }), ...(attempt.attemptId === undefined ? {} : { attemptId: `${attempt.attemptId}-outcome` }) };
     const run = () => recordTaskOutcome(counters, {
       workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: ended, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
-      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}),
+      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}), ...(base.touchedPaths === undefined ? {} : { touchedPaths: base.touchedPaths }),
     });
     const result = await (judging === undefined ? run() : withLearningAttempt(judging, run));
     // Counted for good only when no judging was cut for time; a cut one is tried again by the next delivery (the harmful marks are once per person, the queued mark is replaced, so nothing counts twice).

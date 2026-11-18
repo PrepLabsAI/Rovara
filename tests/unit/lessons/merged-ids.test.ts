@@ -5,7 +5,7 @@ import { approveLesson, rollbackLessonSet, type ApproveDeps } from "../../../pac
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { loadLessonsForStage, approvedForUse, type LoadDeps } from "../../../packages/broker/src/lessons/load.js";
 import { DEFAULT_APPROVAL_POLICY } from "../../../packages/broker/src/lessons/policy.js";
-import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, allowAllAccess } from "./lesson-helpers.js";
+import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, directory, embedder, lessonRecord, seed, settings, allowAllAccess, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 /** ann-old and bob-old were merged away: they now read as ann and bob. */
 const MERGES: Record<string, string> = { "ann-old": "ann", "bob-old": "bob" };
@@ -108,7 +108,7 @@ describe("the people a tier needs are counted as members", () => {
     const review = (over: Parameters<typeof lessonRecord>[0] = {}) => tier2(["carl"], { status: "active", type: "review_check", stages: ["REVIEW"], approvals: two, expiresAt: 9e15, scope: {}, ...over });
     function loaderWorld(resolveMember?: LoadDeps["resolveMember"]) {
       const store = new InMemoryLessonStore();
-      const deps: LoadDeps = { access: allowAllAccess, store, embedder, vectors: new MemoryVectors(), settings: settings(), audit: new Audit(), now: new Clock().now, ...(resolveMember === undefined ? {} : { resolveMember }) };
+      const deps: LoadDeps = { ranking: NO_FIT_FLOOR, access: allowAllAccess, store, embedder, vectors: new MemoryVectors(), settings: settings(), audit: new Audit(), now: new Clock().now, ...(resolveMember === undefined ? {} : { resolveMember }) };
       return { store, deps };
     }
     const request = { workspaceId: WS, project: PROJECT, taskId: "t1", stage: "REVIEW" as const, round: 1, intent: "x", repos: ["api"], files: [], languages: [], taskAudience: { kind: "shared" as const } };

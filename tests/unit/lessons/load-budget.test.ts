@@ -5,12 +5,12 @@ import { LOAD_MAX_BYTES, LOAD_MAX_LESSONS, loadLessonsForStage, type LoadDeps, t
 import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS, resolveLearning, resolveLoadBudget } from "../../../packages/broker/src/lessons/policy.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import { Audit, Clock, MemoryVectors, PROJECT, WS, allowAllAccess, embedder, lessonRecord, seed, settings } from "./lesson-helpers.js";
+import { Audit, Clock, MemoryVectors, PROJECT, WS, allowAllAccess, embedder, lessonRecord, seed, settings, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 function setup(s = settings()) {
   const store = new InMemoryLessonStore();
   const vectors = new MemoryVectors();
-  const deps: LoadDeps = { access: allowAllAccess, store, embedder, vectors, settings: s, audit: new Audit(), now: new Clock().now };
+  const deps: LoadDeps = { ranking: NO_FIT_FLOOR, access: allowAllAccess, store, embedder, vectors, settings: s, audit: new Audit(), now: new Clock().now };
   const add = async (...input: Lesson[]) => {
     const lessons = input.map((l) => ({ ...l, approvals: [...l.approvals, { approvalId: "ap-ann", by: "ann", at: 1, mode: "one" as const }] }));
     await seed(store, ...lessons);

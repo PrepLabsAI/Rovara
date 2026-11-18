@@ -7,7 +7,7 @@ import { readVisible } from "../../../packages/broker/src/lessons/read-visible.j
 import { LOAD_DEFAULT_BYTES, LOAD_DEFAULT_LESSONS } from "../../../packages/broker/src/lessons/policy.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, embedder, lessonRecord, seed, settings, allowAllAccess } from "./lesson-helpers.js";
+import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, embedder, lessonRecord, seed, settings, allowAllAccess, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 const restrictedAudience = { kind: "restricted" as const, acl: { source: "slack" as const, scope: "slack:T/C9", principals: ["U-member"], capturedAt: "x", liveCheck: "none" as const } };
 
@@ -212,7 +212,8 @@ describe("lessons are ranked against the task by the fused score", () => {
 
   for (const mode of ["no embedder", "a fake embedder"] as const) {
     describe(mode, () => {
-      const make = () => { const s = setup(); return mode === "no embedder" ? { ...s, deps: { ...s.deps, embedder: undefined } as LoadDeps } : s; };
+      // These tests are about the ORDER lessons are ranked in, so the fit floor is off here (`fit-floor.test.ts` is about the floor).
+      const make = () => { const s = setup(); const base = { ...s, deps: { ...s.deps, ranking: NO_FIT_FLOOR } as LoadDeps }; return mode === "no embedder" ? { ...base, deps: { ...base.deps, embedder: undefined } as LoadDeps } : base; };
 
       it("the lesson that fits the task's intent and plan comes first, and one that does not is last; the similar one says why", async () => {
         const { deps, add } = make();

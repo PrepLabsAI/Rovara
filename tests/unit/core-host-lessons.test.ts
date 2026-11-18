@@ -75,7 +75,7 @@ async function companyWorld(world: FakeWorld, env: NodeJS.ProcessEnv, people: Ho
     lessons?.attach();
     if (lessons !== undefined) hosts.set(companyId, lessons);
     const principal = localOwnerPrincipal({ companyId });
-    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+    const { task } = await runtime.flow.start({ principal, client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200 and wrap network calls in withRetry", workflow: true, workflowPath: "QUICK" });
     out.set(companyId, { runtime, lessons, personId: principal.personId, taskId: task.taskId, workspaceId: task.workspaceId });
   }
   return out;

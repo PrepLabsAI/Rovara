@@ -7,7 +7,7 @@ import { loadLessonsForStage, toLearned, type LoadDeps, type LoadRequest } from 
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { LessonSchema } from "../../../packages/broker/src/lessons/types.js";
-import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, draft, embedder, lessonRecord, seed, settings, verifier } from "./lesson-helpers.js";
+import { Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, draft, embedder, lessonRecord, seed, settings, verifier, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 const A = "github:repo/1001";
 
@@ -15,7 +15,7 @@ function setup(budget?: { lessons?: number; bytes?: number }) {
   const store = new InMemoryLessonStore();
   const vectors = new MemoryVectors();
   const clock = new Clock();
-  const deps: LoadDeps = { access: allowAllAccess, store, embedder, vectors, settings: settings(budget === undefined ? {} : { loadBudget: budget }), audit: new Audit(), now: clock.now };
+  const deps: LoadDeps = { ranking: NO_FIT_FLOOR, access: allowAllAccess, store, embedder, vectors, settings: settings(budget === undefined ? {} : { loadBudget: budget }), audit: new Audit(), now: clock.now };
   const add = async (...input: Lesson[]) => {
     const lessons = input.map((l) => ({ ...l, approvals: [...l.approvals, { approvalId: "ap-ann", by: "ann", at: 1, mode: "one" as const }] }));
     await seed(store, ...lessons);

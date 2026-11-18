@@ -34,13 +34,15 @@ export interface LessonUseCounts {
 /** The tasks each lesson was given to, for one project of one company. */
 export async function countLessonUses(store: Pick<DocumentStore, "query" | "ttlAttribute">, input: {
   companyId: OrgId; project: string; lessonIds: readonly string[]; now: number;
+  /** Count only the uses at or after this time (ms): the chances of a window shorter than the rows are kept for (`expiry.ts`, fade by chances). Absent: every live row. */
+  since?: number;
   /** Tests: the limits. */
   limits?: { rowsTotal?: number; deadlineMs?: number; perLesson?: number };
 }): Promise<LessonUseCounts> {
   const rowsTotal = input.limits?.rowsTotal ?? USED_IN_ROWS_TOTAL;
   const perLesson = input.limits?.perLesson ?? USED_IN_MAX;
   const deadlineAt = Date.now() + (input.limits?.deadlineMs ?? USED_IN_DEADLINE_MS);
-  const oldest = input.now - LESSON_USE_KEEP_SECONDS * 1000;
+  const oldest = Math.max(input.now - LESSON_USE_KEEP_SECONDS * 1000, input.since ?? 0);
   const nowSeconds = Math.floor(input.now / 1000);
   const ttl = store.ttlAttribute;
   const counts = new Map<string, LessonUseCount>();
