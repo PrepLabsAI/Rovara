@@ -200,6 +200,8 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // Sessions (the core's session routes): reading one's own sessions is a task read; following and presence are a reader's own marks.
   { method: "GET", path: "/v1/app/sessions", requires: "tasks:read" },
   { method: "GET", path: "/v1/app/sessions/{sessionId}", requires: "tasks:read" },
+  // The task's log of questions, answers and decisions (B5): the same readers as the session; one more row, nothing existing changed.
+  { method: "GET", path: "/v1/app/sessions/{sessionId}/log", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
   { method: "DELETE", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/unfollow", requires: "tasks:read" },

@@ -74,3 +74,10 @@ export function taskLogKey(taskId: string, entryKey: string): { pk: string; sk: 
 
 /** The prefix every entry of the task has under its partition. */
 export const TASK_LOG_SORT_PREFIX = "TASKLOG#";
+
+/**
+ * What a reader gets from `GET /v1/app/sessions/<session>/log` (B5): the task's log, oldest first, at most `TASK_LOG_ENTRIES_MAX` entries, each one as it was written (redacted, bounded, one line) and nothing else of the
+ * rows (no company, no task id). Who may read it is who may read the task's session (`core/sessions/access.ts`); anyone else gets the missing session's answer.
+ */
+export const TaskLogViewSchema = z.object({ entries: z.array(TaskLogEntrySchema).max(TASK_LOG_ENTRIES_MAX) }).strict();
+export type TaskLogView = z.infer<typeof TaskLogViewSchema>;

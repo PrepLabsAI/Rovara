@@ -116,14 +116,12 @@ export function threadFollows(deps: { store: Pick<DocumentStore, "get"> }): (org
   return async (orgId, sessionId) => (await readTaskThread(deps.store, orgId, sessionId)) !== undefined;
 }
 
-export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
+/**
+ * The two steps every message to a task's thread goes through, shared by the milestone lines and the task log's mirror (`log-mirror.ts`): `reach` finds the adapter of a thread that is this company's and whose person is served,
+ * and `send` claims a notice (one row per session and key) before it is delivered, renews the claim while the delivery runs and gives it back when the delivery fails, so a notice is sent once and a failed one is sent again.
+ */
+export function threadSender(deps: Pick<ThreadNoticeDeps, "store" | "registry" | "now" | "companyOf" | "isMember" | "log">) {
   const log: Log = deps.log ?? (() => undefined);
-  const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
-  const open = (taskId: string): string => {
-    const link = deps.taskUrl?.(taskId);
-    return link !== undefined ? link : deps.footer ?? "";
-  };
-
   /** The thread to tell, when it is this company's and its person is served; otherwise nothing is sent. */
   async function reach(orgId: OrgId, thread: TaskThread) {
     const { conversation } = thread;
@@ -154,6 +152,17 @@ export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandl
     }
     await deps.store.update({ key: at, ops: [change.set("state", "done"), change.remove("leaseUntil"), ...(sent === undefined ? [] : [change.set("cardUntil", sent.cardUntil)])] }).catch(() => undefined);
   }
+  return { reach, send };
+}
+
+export function channelThreadHandler(deps: ThreadNoticeDeps): CodeMilestoneHandler {
+  const log: Log = deps.log ?? (() => undefined);
+  const milestonesOn = (): boolean => (typeof deps.milestones === "function" ? deps.milestones() : deps.milestones !== false);
+  const open = (taskId: string): string => {
+    const link = deps.taskUrl?.(taskId);
+    return link !== undefined ? link : deps.footer ?? "";
+  };
+  const { reach, send } = threadSender({ ...deps, log });
 
   return {
     name: CHANNEL_THREAD_HANDLER,

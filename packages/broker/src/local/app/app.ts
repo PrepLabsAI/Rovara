@@ -118,6 +118,7 @@ import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
 import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
 export { TASK_FLOW_INDEXES };
@@ -615,6 +616,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER, milestones: channelMilestonesOn,
       log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
     }));
+    // What is answered or decided elsewhere (the web page, a ticket) is told to the thread as one line; what was said in the thread is not said back (`core/channel/log-mirror.ts`).
+    taskLog.subscribe(taskLogThreadMirror({ store, registry, now: () => clock().getTime(), enabled: channelMilestonesOn, log: (event, fields) => log({ component: "channel_thread", event, ...fields }) }));
   }
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
