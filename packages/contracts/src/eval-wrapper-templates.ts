@@ -1,4 +1,4 @@
-// L4-EVW2 (DEC 254zzz20 D2): the wrapper file Rovara proposes as a pull request when the customer's eval writes something Rovara cannot read as it is. Made by CODE from the setup run's description of the output
+// L4-EVW2 (DEC 254zzz20 D2, moved to contracts by DEC 254zzz43 so the setup run's sandbox dry-run and the broker make the SAME file): the wrapper file a person copies, or has Rovara open as a pull request, when the customer's eval writes something Rovara cannot read as it is. Made by CODE from the setup run's description of the output
 // (`EvalOutputShape`): no model writes it for a `rows` shape, and no model runs at task time for any shape. Pure: no store, no host, no clock.
 //
 // WHAT THE FILE DOES (and says in its own first lines, so the person who reviews it knows):
@@ -8,9 +8,8 @@
 //   - it exits with the command's own code when the command wrote no results, and 0 when it wrote results (an eval that exits non-zero because some cases failed is a measured result, not a broken run).
 //
 // The configuration is data (a JSON literal the file loads), never text spliced into code: a command, field or id can only ever be a string in that literal, which is encoded so that it cannot end the literal.
-import {
-  EVAL_WRAPPER_REPORT_PATH, evalWrapperPathOf, type EvalOutputShape, type EvalWrapperLanguage, type EvalCommand, type EvalReportPath,
-} from "@agentx/contracts";
+import type { EvalCommand, EvalReportPath } from "./eval-plan-record.js";
+import { EVAL_WRAPPER_REPORT_PATH, EVAL_WRAPPER_TEMPLATE_VERSION, evalWrapperPathOf, type EvalOutputShape, type EvalWrapperLanguage } from "./eval-wrapper.js";
 
 export interface EvalWrapperFile { path: string; content: string; language: EvalWrapperLanguage }
 
@@ -34,9 +33,10 @@ function configJson(config: WrapperConfig): string {
 }
 
 const REVIEW_NOTE = [
-  "Proposed by Rovara so it can read the results of your eval. It is a small file you own: read it, run it, change it, or close the pull request that added it.",
+  "Made by Rovara so it can read the results of your eval. It is a small file you own: read it, run it, change it.",
   "It runs your eval command unchanged, reads the rows the command wrote, and writes a JUnit report (one test case per question) that Rovara reads.",
   "It reads ROVARA_EVAL_IDS (comma separated question ids; empty means all), calls no network and reads no secret. Rovara never merges it.",
+  `rovara-eval-wrapper-template: ${EVAL_WRAPPER_TEMPLATE_VERSION}`,
 ];
 
 function pythonSource(config: WrapperConfig): string {
@@ -230,7 +230,8 @@ process.exit(main());
 const customHeader = (language: EvalWrapperLanguage, summary: string): string => {
   const comment = language === "python" ? "#" : "//";
   return [`${comment} Written by Rovara's setup agent so Rovara can read the results of your eval: ${summary.replace(/[\r\n]+/gu, " ")}`,
-    `${comment} It is a small file you own: read it, run it, change it, or close the pull request that added it. Rovara never merges it.`].join("\n");
+    `${comment} It is a small file you own: read it, run it, change it. Rovara never merges it.`,
+    `${comment} rovara-eval-wrapper-template: ${EVAL_WRAPPER_TEMPLATE_VERSION}`].join("\n");
 };
 
 /**

@@ -56,8 +56,66 @@ export function evalOutputNeedsWrapper(output: EvalOutputShape | undefined): out
   return output !== undefined && (output.kind === "rows" || output.kind === "custom");
 }
 
-/** The fixed words on the setup card and the refusals. */
-export const EVAL_OUTPUT_UNREADABLE_MESSAGE = "Rovara can't read this eval's results yet. It needs a small file in your repository: the pull request Rovara opens for it is shown here. Review and merge it, then set up again.";
+/** The fixed words on the setup card and the refusals. A found file is how it becomes readable: there is no "run setup again". */
+export const EVAL_OUTPUT_UNREADABLE_MESSAGE = "Rovara can't read this eval's results yet. It needs a small file in your repository. Add it yourself or let Rovara open a pull request for it; once the file is on your default branch, approve a test run.";
+/** DEC 254zzz43: the one line a pull request carries while the project's eval card was set aside ("Not now") or its file is not there yet. */
+export const EVAL_NOT_READ_LINE = "Eval not read: setup needed";
+/** The card's title: "Rovara can't read the results of <eval> yet". The eval's name is the repository's own text and is shown as data. */
+export const evalWrapperTitleOf = (selection: string): string => `Rovara can't read the results of ${selection} yet`;
+/** The version a wrapper file made by Rovara's templates says it is (a line `rovara-eval-wrapper-template: N` in its first lines). Raised when a template changes; a found file with a lower number is out of date. */
+export const EVAL_WRAPPER_TEMPLATE_VERSION = 1;
+/** The template version a file says it is, or undefined (a file Rovara did not make, or one that lost the line). Reads only the first 8 lines. */
+export function evalWrapperTemplateVersionOf(content: string): number | undefined {
+  const head = content.split("\n", 8).join("\n");
+  const found = /rovara-eval-wrapper-template:\s*([0-9]{1,4})\b/u.exec(head);
+  return found === null ? undefined : Number(found[1]);
+}
+
+/**
+ * DEC 254zzz43: a person's act on the card. `open_pull_request` (the template wrapper only; names the suite), `dismiss` ("Not now", per project), `reopen` (undo Not now) and `check` ("Check now": look for the file on the default
+ * branch again). The first three need a company owner, admin or project maintainer; `check` is a read any member may ask.
+ */
+export const EVAL_WRAPPER_ACTIONS = ["open_pull_request", "dismiss", "reopen", "check"] as const;
+export const EvalWrapperActionBodySchema = z.object({
+  requestId: z.string().uuid(),
+  action: z.enum(EVAL_WRAPPER_ACTIONS),
+  /** The eval the act is about (`open_pull_request` requires it). */
+  selection: z.string().min(1).max(512).regex(/^[^\p{Cc}\p{Cf}]+$/u).optional(),
+}).strict().refine(body => body.action !== "open_pull_request" || body.selection !== undefined, "open_pull_request names the eval");
+export type EvalWrapperActionBody = z.infer<typeof EvalWrapperActionBodySchema>;
+
+/** Where the wrapper stands for one eval (the card's one word; the line says it in a sentence). */
+export const EVAL_WRAPPER_STEPS = ["needs_file", "pull_request_open", "file_found", "file_outdated", "test_approved", "readable", "unreadable", "not_offered", "dismissed"] as const;
+export type EvalWrapperStep = (typeof EVAL_WRAPPER_STEPS)[number];
+/** Why a person can only copy the file, never have Rovara open a pull request for it. */
+export const EVAL_WRAPPER_COPY_REASONS = ["custom", "another_eval", "cannot_write", "file_exists", "closed", "not_checked"] as const;
+export type EvalWrapperCopyReason = (typeof EVAL_WRAPPER_COPY_REASONS)[number];
+export const EvalWrapperCardSchema = z.object({
+  selection: z.string().min(1).max(512),
+  repository: z.string().max(200).optional(),
+  language: EvalWrapperLanguageSchema,
+  /** `template`: made by code from the setup run's description of the output (a pull request may be opened); `custom`: the setup agent's own text (copy only). */
+  kind: z.enum(["template", "custom"]),
+  /** Where the file goes in the repository and what it holds, for the "View the file" and "I'll add it myself" views (members see and copy them too). */
+  path: z.string().min(1).max(200),
+  content: z.string().max(EVAL_WRAPPER_CUSTOM_MAX_BYTES * 2),
+  summary: z.string().max(300).optional(),
+  title: z.string().max(700),
+  step: z.enum(EVAL_WRAPPER_STEPS),
+  /** One sentence for the step (fixed words; the pull request number is the host's). */
+  line: z.string().max(400),
+  /** Rovara ran the wrapper in the setup sandbox against sample results and it read them: only then is the file offered. */
+  offered: z.boolean(),
+  /** Whether a person with the right role may press "Let Rovara open a pull request" now. */
+  canOpenPullRequest: z.boolean(),
+  copyOnly: z.object({ reason: z.enum(EVAL_WRAPPER_COPY_REASONS), text: z.string().max(400) }).strict().optional(),
+  pullRequest: z.object({ number: z.string().max(40).optional(), url: z.string().max(500).optional(), state: z.enum(["opening", "open", "merged", "closed", "failed"]) }).strict().optional(),
+  fileStatus: z.enum(["same", "edited", "outdated"]).optional(),
+  /** The file was set aside with "Not now" for this report (the PR says "Eval not read: setup needed"; the Evals page keeps a row). */
+  dismissed: z.boolean(),
+  checkedAt: z.iso.datetime().optional(),
+}).strict();
+export type EvalWrapperCard = z.infer<typeof EvalWrapperCardSchema>;
 
 /** Where a wrapper of this language lives in the repository (one of the two fixed paths). */
 export const evalWrapperPathOf = (language: EvalWrapperLanguage): string => (language === "python" ? EVAL_WRAPPER_PYTHON_PATH : EVAL_WRAPPER_NODE_PATH);

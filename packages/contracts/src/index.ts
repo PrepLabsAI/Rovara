@@ -461,6 +461,7 @@ export * from "./eval-run-diagnostic.js";
 export * from "./eval-plan-record.js";
 export * from "./eval-discovery-report.js";
 export * from "./eval-wrapper.js";
+export * from "./eval-wrapper-templates.js";
 export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";

@@ -5,8 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { EVAL_WRAPPER_NODE_PATH, EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_REPORT_PATH, EvalOutputShapeSchema, evalOutputNeedsWrapper, type EvalOutputShape } from "@agentx/contracts";
-import { evalWrapperFor } from "../../packages/broker/src/core/setup-agent/eval-wrapper-templates.js";
+import { EVAL_WRAPPER_NODE_PATH, EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_REPORT_PATH, EvalOutputShapeSchema, evalOutputNeedsWrapper, evalWrapperFor, type EvalOutputShape } from "@agentx/contracts";
 import { caseRowsOf, measuresFromCaseReports } from "../../packages/worker/src/verification/eval-report-formats.js";
 
 const roots: string[] = [];
@@ -138,7 +137,7 @@ describe("the Python wrapper, run against a fake eval", () => {
 
   it("says in its first lines what it is, and does not touch the network or a secret", () => {
     const text = readFileSync(repository(rows(), jsonlEval(records)).wrapperPath, "utf8");
-    expect(text.split("\n").slice(0, 4).join(" ")).toMatch(/Proposed by Rovara.*Rovara never merges it/u);
+    expect(text.split("\n").slice(0, 4).join(" ")).toMatch(/Made by Rovara.*Rovara never merges it/u);
     expect(text).not.toMatch(/\b(urllib|socket|requests|http\.client|getpass|keyring)\b/u);
     expect(text).not.toMatch(/os\.environ\[|environ\.get\((?!"ROVARA_EVAL_IDS")/u);
   });

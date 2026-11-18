@@ -14,11 +14,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
-  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, change, evalOutputNeedsWrapper, evalWrapperDigestOf, queryAll, when,
+  COMMIT_CONFLICT_MESSAGE, COMMIT_SYMLINK_MESSAGE, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_BRANCH_PREFIX, EVAL_WRAPPER_REPORT_PATH, change, evalOutputNeedsWrapper, evalWrapperDigestOf, evalWrapperFor, queryAll, when,
   type DocumentStore, type EvalWrapperLanguage, type OrgId, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import { assertGuarded, guardTarget, headOf, readOwnPr, verifyRepository, type RepoFileTarget } from "../../lessons/repo-file-host.js";
-import { evalWrapperFor } from "./eval-wrapper-templates.js";
 import { setupPartition } from "./keys.js";
 
 const hex32 = z.string().regex(/^[a-f0-9]{32}$/u);
