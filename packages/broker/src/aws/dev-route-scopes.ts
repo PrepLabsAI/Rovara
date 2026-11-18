@@ -345,6 +345,9 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // L4-EVC (DEC 254zzz20): the project's ONE eval card (dollars), its single approval (confirm and approve the eval's spend in one act: a fresh step-up, then the live owner/admin/maintainer rule). Full access only, like the setup candidate.
   { method: "GET", path: "/v1/app/projects/{project}/setup-agent/eval", requires: "full" },
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
+  // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
+  // web app's own client, a fresh step-up and the task's owner. Additive: no existing row changed.
+  { method: "POST", path: "/v1/app/tasks/{taskId}/review-findings", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

@@ -180,6 +180,11 @@ describe("the broker's core root, switch on", () => {
     const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" }, clientId: "web-app" });
     expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" } });
     expect(await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-gone", sessionId: "s", name: "Gone" })).toBeUndefined();
+    // DEC 254zzz39 (6): the web app's own client marker rides along only as the broker's sign-in set it (exactly true), never otherwise.
+    const map = deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN));
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "web-app", webApp: true })).toMatchObject({ webApp: true });
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "tool" })).not.toHaveProperty("webApp");
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "tool", webApp: "yes" as never })).not.toHaveProperty("webApp");
     const standing = personStandingFromDynamo(tables.client, SIGN_IN);
     expect(await standing(ORG, "dev-a")).toBe("member");
     expect(await standing(ORG, "dev-gone")).toBe("former");

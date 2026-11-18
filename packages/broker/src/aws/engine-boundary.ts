@@ -164,6 +164,11 @@ export interface CoreTaskEntry {
    * the task must be one this caller may act on, and the conversation's tenant must belong to that company; anything else records nothing (`false`). Written once: a repeat changes nothing. Absent: the deployment keeps no thread.
    */
   recordThread?(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean>;
+  /**
+   * Core task web routes (Cloud #188 item 5): what one of the caller's own core tasks has cost and its limit, for the task list's detail. The company is the caller's live membership's and the task must be one they may
+   * act on; `undefined` for anything else (and for any failure). Absent: the deployment gives the list no money for core tasks.
+   */
+  taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
 }
 
 /**
@@ -187,6 +192,8 @@ export interface CoreEntryCaller {
   name: string;
   stepUp?: { at: string; method: string } | undefined;
   clientId?: string | undefined;
+  /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. */
+  webApp?: true | undefined;
 }
 
 /** The developer start route's path: a start is the core's only where the core's routes say so (`undefined` keeps the old start). */
@@ -199,12 +206,21 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
 ): CoreTaskEntry {
+  const taskMoney = routes.taskMoney?.bind(routes);
   return {
+    ...(taskMoney === undefined ? {} : {
+      async taskMoney(caller: CoreEntryCaller, taskId: string) {
+        let deployed: DeployedCaller | undefined;
+        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        if (deployed === undefined) return undefined;
+        try { return await taskMoney(deployed, taskId); } catch { return undefined; }
+      },
+    }),
     ...(recordThread === undefined ? {} : {
       async recordThread(caller: CoreEntryCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }): Promise<boolean> {
         let deployed: DeployedCaller | undefined;

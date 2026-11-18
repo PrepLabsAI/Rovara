@@ -41,7 +41,7 @@ export interface TaskAccess {
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
+export type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
   "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
@@ -62,6 +62,20 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   if (task === undefined) throw notFound();
   // Lane E2: a task the core owns is never acted on through the workflow's access (engine-boundary.ts); it reads exactly like a missing one.
   if (await ownerOfExistingTask(deps, taskId) === "core") throw notFound();
+  return await taskAccessOfRecord(deps, caller, task, action, taskId);
+}
+
+/**
+ * Core task web routes (Cloud #188 item 3): the very same rule as `resolveTaskAccess`, for a core task's record that the CORE has already read and checked against the caller's live company (aws/core-task-rule-routes.ts).
+ * The core's routes mirror the old task routes' access exactly by calling this one function; nothing here knows which engine runs the task.
+ */
+export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action?: TaskAction): Promise<TaskAccess> {
+  if (!TASK_ID.test(task.taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return await taskAccessOfRecord(deps, caller, task, action, task.taskId);
+}
+
+async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, action: TaskAction | undefined, taskId: string): Promise<TaskAccess> {
+  const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
   try {
     const people = await resolveTaskPeopleAccess(deps, task, caller.developerId);
     if (people !== undefined) {

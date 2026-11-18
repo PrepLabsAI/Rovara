@@ -5,7 +5,7 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { INTENT_NOT_WAITING_MESSAGE, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
+import { DeveloperTaskDetailedListResponseSchema, INTENT_NOT_WAITING_MESSAGE, orgProjectCatalogKey, projectRevisionKey, recordIntentAssessment, sharedTaskKey, startWorkflowUnderstand, type JsonValue, type ProjectDefinition, type StoredDocument } from "@agentx/contracts";
 import { readTask as readCoreTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -180,7 +180,7 @@ const ownerRule = (): TaskFlowDeps["access"] => ({
   ownerActing: async (principal, task) => (principal.personId === task.developerId || developerIdOf(principal) === task.developerId ? { actorId: task.ownerKey } : undefined),
 });
 
-async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true; understand?: true } = {}) {
+async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "membership"; actions?: boolean; newTasksOnWorkflow?: true; understand?: true; roundCap?: () => Promise<{ limitUsd: number; spentUsd: number | undefined } | undefined> } = {}) {
   const world = createFakeWorld();
   await registerProject(world, FAKE_COMPANY);
   await registerProject(world, OTHER);
@@ -193,7 +193,7 @@ async function coreWorld(options: { wired?: boolean; unknown?: "principal" | "me
   // OMAR signed in to the broker but unknown to the core: no principal for him, or a principal with no membership.
   if (options.unknown === "principal") principals.delete(OMAR.developerId);
   if (options.unknown === "membership") members.delete(`${owner.personId}${OTHER}`);
-  const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", ...(options.actions === true ? { taskActions: { roundCap: async () => undefined } } : {}) }) });
+  const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", ...(options.actions === true ? { taskActions: { roundCap: options.roundCap ?? (async () => undefined) } } : {}) }) });
   const entry: CoreTaskEntry = coreTaskEntryFrom(routes, async (caller) => principals.get(caller.developerId));
   // Step 6: a start goes to the core where the switch sends the company's NEW tasks. `newTasksOnWorkflow`: the core still holds its task, but new ones start on the workflow (a narrowed switch).
   const coreTasks: CoreTaskEntry = options.newTasksOnWorkflow !== true ? entry : { route: async (request, caller) => (request.method === "POST" && request.path.split("?")[0] === "/v1/dev/tasks" ? undefined : await entry.route(request, caller)) };
@@ -499,13 +499,70 @@ describe("the AWS readers see only workflow rows", () => {
     expect(workspaceReads()).toEqual([]);
   });
 
+  it("?detail=1 adds each row's detail (Cloud #188 item 5): a core task's workflow stage and state, its cost and run limit from the core's own money read, as its owner; nothing is written", async () => {
+    const { db, task, dev, workspaceReads } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 7.5, spentUsd: 1.25 }) });
+    db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
+    const row = { pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" };
+    db.set(row);
+    const writes: unknown[] = [];
+    db.onWrite((change) => writes.push(change));
+    const listed = await dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
+    expect(listed.status).toBe(200);
+    expect(DeveloperTaskDetailedListResponseSchema.parse(listed.body)).toEqual({ tasks: [{
+      taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: row.createdAt, updatedAt: row.updatedAt,
+      workflow: { stage: task.workflow!.stage, state: task.workflow!.state, revision: task.workflow!.revision, path: "QUICK" }, costUsd: 1.25, runLimitUsd: 7.5,
+    }] });
+    expect(writes).toEqual([]);
+    expect(workspaceReads()).toEqual([]);
+    // A spend the core cannot tell: the limit only (never a made-up cost); a money read that fails or is not wired: neither.
+    for (const [roundCap, money] of [[async () => ({ limitUsd: 5, spentUsd: undefined }), { runLimitUsd: 5 }], [async () => { throw new Error("ledger down"); }, {}], [async () => undefined, {}], [async () => ({ limitUsd: Number.NaN, spentUsd: 1 }), {}]] as const) {
+      const other = await coreWorld({ actions: true, roundCap });
+      other.db.set({ ...(other.db.get(`DEVTASK#${other.task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
+      other.db.set({ ...row, taskId: other.task.taskId, sk: `TASK#2026-11-15T00:00:00.000Z#${other.task.taskId}` });
+      const answer = await other.dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
+      const [listedRow] = (answer.body as { tasks: Array<Record<string, unknown>> }).tasks;
+      expect({ costUsd: listedRow!["costUsd"], runLimitUsd: listedRow!["runLimitUsd"] }).toEqual({ costUsd: undefined, runLimitUsd: undefined, ...money });
+    }
+  });
+
+  it("?detail=1 on a workflow task's row: its own spend totals as the cost, no run limit, and the workflow as its own view says it; another company's caller lists none of it", async () => {
+    const { dev, db } = await coreWorld({ newTasksOnWorkflow: true });
+    const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the flaky retry test", client: "claude-code" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const meta = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string };
+    db.set({ ...meta, spentRuns: 3, spentUsd: 0.42, spentUpdatedAt: "2026-11-15T00:00:00.000Z" });
+    const plainList = await dev(MAYA, "GET", "/v1/dev/tasks");
+    const detailed = await dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
+    const plainRow = (plainList.body as { tasks: Array<Record<string, unknown>> }).tasks.find((row) => row["taskId"] === taskId)!;
+    const row = DeveloperTaskDetailedListResponseSchema.parse(detailed.body).tasks.find((one) => one.taskId === taskId)!;
+    // The ordinary row's fields are exactly the plain list's; the detail is added beside them.
+    expect(Object.fromEntries(Object.keys(plainRow).map((key) => [key, (row as Record<string, unknown>)[key]]))).toEqual(plainRow);
+    expect(row.costUsd).toBe(0.42);
+    expect(row.runLimitUsd).toBeUndefined();
+    expect(row.workflow === undefined || typeof row.workflow.stage === "string").toBe(true);
+    const theirs = await dev(OMAR, "GET", "/v1/dev/tasks?detail=1");
+    expect(JSON.stringify(theirs.body)).not.toContain(taskId);
+  });
+
+  it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {
+    const { task, coreTasks, routes, owner } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 9, spentUsd: 2 }) });
+    expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toEqual({ costUsd: 2, runLimitUsd: 9 });
+    // Another company's owner, a caller the core does not know, a malformed id and a missing task: nothing.
+    expect(await coreTasks.taskMoney!({ developerId: OMAR.developerId, sessionId: "s", name: "Omar" }, task.taskId)).toBeUndefined();
+    expect(await coreTasks.taskMoney!({ developerId: "nobody", sessionId: "s", name: "x" }, task.taskId)).toBeUndefined();
+    expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, "not-a-task")).toBeUndefined();
+    expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, randomUUID())).toBeUndefined();
+    // A script token never reads money.
+    expect(await routes.taskMoney({ principal: owner, client: "cli", scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }, task.taskId)).toBeUndefined();
+  });
+
   it("the ordinary task list is unchanged by the involved list: every query but exactly involved=1 is the same list, byte for byte (web task channel C5)", async () => {
     const { db, task, dev } = await coreWorld();
     db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
     db.set({ pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" });
     const golden = { tasks: [{ taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" }] };
     expect((await dev(MAYA, "GET", "/v1/dev/tasks")).body).toEqual(golden);
-    for (const query of ["?involved=0", "?involved=true", "?involved=11", "?involved=", "?involved=1x", "?involvedx=1"]) {
+    for (const query of ["?involved=0", "?involved=true", "?involved=11", "?involved=", "?involved=1x", "?involvedx=1", "?detail=0", "?detail=true", "?detail=", "?detail=11", "?details=1"]) {
       const answer = await dev(MAYA, "GET", `/v1/dev/tasks${query}`);
       expect(JSON.stringify(answer), query).toBe(JSON.stringify({ status: 200, body: golden }));
     }

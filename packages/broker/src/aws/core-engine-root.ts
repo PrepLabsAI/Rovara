@@ -67,6 +67,8 @@ import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/up
 import { queueSetupBroken } from "../core/notify/attention.js";
 import type { ChatThreads } from "../core-host/chat-threads.js";
 import { channelThreadHandler } from "../core/channel/thread-notices.js";
+import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
+import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
@@ -146,6 +148,11 @@ export interface BrokerCoreModuleContext {
 export interface BrokerCoreRootInputs {
   env: NodeJS.ProcessEnv;
   checkTaskPerson?: CheckTaskPerson;
+  /**
+   * Core task web routes (Cloud #188 item 3): for one signed-in person and their live company, exactly the dependencies the developer routes build for the old task routes (`developerTaskRouteDependencies`), so a core
+   * task's People, readers, events and plan comments are answered with the old routes' own rules (aws/core-task-rule-routes.ts). Absent: those routes are not the core's here.
+   */
+  taskRules?: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies;
   /** The State table and the sign-in table, as the broker's document client reads them (membership, project grants, the person's name). */
   documentClient: DynamoSender;
   stateTableName: string;
@@ -490,7 +497,7 @@ export function deployedCallerFromMembership(membershipOf: (personId: string) =>
     const membership = await membershipOf(caller.developerId);
     if (membership === undefined) return undefined;
     const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }) };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
   };
 }
 
@@ -674,8 +681,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
-      // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
-      ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
+      // L2-4 + core-task-web-routes: every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
+      // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
+      startExtras: ticketSessionStartExtras(companyId),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
@@ -832,6 +840,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
+          // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
+          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules) }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
@@ -1044,6 +1054,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const entry = coreTasks;
     coreTasks = {
       route: (request, caller) => entry.route(request, caller),
+      // Cloud #188 item 5: the task list's money read for a core task (the caller's own, in their live company).
+      ...(entry.taskMoney === undefined ? {} : { taskMoney: entry.taskMoney.bind(entry) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);

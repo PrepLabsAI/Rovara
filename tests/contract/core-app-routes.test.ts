@@ -117,6 +117,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/company/system-runs", "full"], ["PUT", "/v1/app/company/system-runs", "full"],
     // L4-EVC (DEC 254zzz20): the eval card and its one approval.
     ["GET", "/v1/app/projects/payments/setup-agent/eval", "full"], ["POST", "/v1/app/projects/payments/setup-agent/eval-approve", "full"],
+    // DEC 254zzz39 (6): the task owner's Accept findings on the web page (a security finding needs it). Additive: no existing row changed.
+    ["POST", "/v1/app/tasks/t1/review-findings", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -155,6 +157,8 @@ describe("the /v1/app route table", () => {
       // The upkeep switch: GET and PUT only, no other tail.
       ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
       ["POST", "/v1/app/tasks/t1/feature-choices"], ["GET", "/v1/app/tasks/t1/feature-choices/extra"], ["GET", "/v1/app/tasks/feature-choices"],
+      // The page's Accept findings: one POST, no other method or tail.
+      ["GET", "/v1/app/tasks/t1/review-findings"], ["PUT", "/v1/app/tasks/t1/review-findings"], ["POST", "/v1/app/tasks/t1/review-findings/x"], ["POST", "/v1/app/tasks/review-findings"],
       // The company's automatic-runs control: GET and PUT only, no other tail.
       ["POST", "/v1/app/company/system-runs"], ["DELETE", "/v1/app/company/system-runs"], ["PATCH", "/v1/app/company/system-runs"], ["GET", "/v1/app/company/system-runs/extra"], ["PUT", "/v1/app/company/system-run"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
