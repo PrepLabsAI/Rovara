@@ -117,9 +117,12 @@ export type UpkeepCap = z.infer<typeof UpkeepCapSchema>;
  *   systemRunsOn         EFFECTIVE system runs: the ceiling AND the company's consent (what actually runs now).
  *   canEnableSystemRuns  the caller may set the company's consent (a live company owner or admin) and the ceiling is on (there is something to consent to).
  *   cap                  see `UpkeepCapSchema`.
+ *   paused               (L4-U5, managers only) nightly upkeep is paused right now and why; see the schema.
  */
 export const UpkeepViewSchema = z.object({
   enabled: z.boolean(), canManage: z.boolean(), available: z.boolean(), systemRunsOn: z.boolean(), canEnableSystemRuns: z.boolean(), cap: UpkeepCapSchema,
+  /** L4-U5: for a person who manages the project, only while the LAST night that was decided was a pause this month: why nightly upkeep is paused (the admins' notice's reason; the page says it in `UPKEEP_NOTICE_WORDS`). Absent otherwise. */
+  paused: z.object({ reason: UpkeepPauseReasonSchema, month: UpkeepMonthSchema }).strict().optional(),
 }).strict();
 export type UpkeepView = z.infer<typeof UpkeepViewSchema>;
 

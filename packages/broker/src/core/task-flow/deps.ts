@@ -228,6 +228,11 @@ export interface TaskFlowDeps {
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
   systemRuns?: { enabled(): boolean | Promise<boolean> };
+  /**
+   * L4-U5: tells the project's admins ONCE that its setup broke (the re-check settled as broken). The host builds it over its own recipient read and the attention queue (`queueSetupBroken`); it never throws and says
+   * nothing twice for one re-check. Absent: nobody is told here (the setup page's card and the task's pause still say it).
+   */
+  setupBroken?: (input: { project: string; recheckKey: string }) => Promise<void>;
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */

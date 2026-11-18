@@ -202,7 +202,7 @@ export async function advanceCurrentRecheck(deps: TaskFlowDeps, project: string)
 export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: string): Promise<RecheckRow | undefined> {
   const row = await readRecheck(deps, project, key);
   if (row === undefined) return row;
-  if (row.state === "broken") { await markProjectBroken(deps, project, row); return row; }
+  if (row.state === "broken") { await markProjectBroken(deps, project, row); await tellAdmins(deps, project, row); return row; }
   if (row.state !== "running") return row;
   const orgId = deps.companyId;
   const revision = await deps.projects.revision(project, row.setupRevision);
@@ -235,7 +235,7 @@ export async function advanceRecheck(deps: TaskFlowDeps, project: string, key: s
   }
   if (health.class === "environment") {
     const done = await settled("broken", await brokenItems(deps, project, row, failedStep), failedStep);
-    if (done?.state === "broken") await markProjectBroken(deps, project, done);
+    if (done?.state === "broken") { await markProjectBroken(deps, project, done); await tellAdmins(deps, project, done); }
     return done;
   }
   return settled("unclear");
@@ -338,8 +338,22 @@ async function markProjectBroken(deps: TaskFlowDeps, project: string, row: Reche
   }
 }
 
+/**
+ * L4-U5: the project's admins hear of the break ONCE per re-check (the host's notice writes its own marker first, so any number of readers of this break say nothing more). Only while the break still holds (a newer
+ * setup or a person's newer check ended it). Best effort: a fault is logged by kind and never changes the re-check.
+ */
+async function tellAdmins(deps: TaskFlowDeps, project: string, row: RecheckRow): Promise<void> {
+  if (deps.setupBroken === undefined) return;
+  try {
+    if ((await deps.projects.latest(project))?.definition.revision !== row.setupRevision || !(await brokenStillHolds(deps, project, row))) return;
+    await deps.setupBroken({ project, recheckKey: row.key });
+  } catch (error) {
+    log(deps, { event: "setup_drift.admins_not_told", error: errorName(error) });
+  }
+}
+
 /** The project's open admin card, when its setup is broken and no newer setup has been approved since. */
-export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "companyId" | "projects">, project: string): Promise<(SetupRepairCard & { classes: SetupDriftClass[]; at: string }) | undefined> {
+export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "companyId" | "projects">, project: string): Promise<(SetupRepairCard & { classes: SetupDriftClass[]; at: string; failedStep: string; key: string }) | undefined> {
   const stored = await deps.store.get(repairNoticeKey(deps.companyId, project));
   if (!isRow(stored, deps.companyId, project, "SETUP_REPAIR_NOTICE")) return undefined;
   const notice = stored as unknown as RepairNoticeRow;
@@ -347,7 +361,7 @@ export async function readSetupRepairCard(deps: Pick<TaskFlowDeps, "store" | "co
   const latest = await deps.projects.latest(project);
   if (!isRow(recheck, deps.companyId, project, "SETUP_RECHECK") || latest === undefined || (recheck as unknown as RecheckRow).setupRevision !== latest.definition.revision) return undefined;
   if (!(await brokenStillHolds(deps, project, recheck as unknown as RecheckRow))) return undefined;
-  return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at };
+  return { ...setupRepairCardOf(notice.failedStep), classes: notice.classes, at: notice.at, failedStep: notice.failedStep, key: notice.key };
 }
 
 // ---- the wait before Build

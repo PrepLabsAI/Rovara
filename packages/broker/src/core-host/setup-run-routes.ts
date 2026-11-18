@@ -41,6 +41,7 @@ import { listHostAsks } from "../core/setup-agent/host-ask.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { ensureCoreInUse } from "./engine-stamp.js";
 import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
+import { setupRepairViewOf } from "../core/setup-agent/repair-view.js";
 
 export const SETUP_RUN_PROJECT_NOT_FOUND = "project not found";
 export const SETUP_RUN_NOT_ALLOWED = "Only company owners and admins, or this project's admins, can run the project's setup.";
@@ -329,7 +330,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
 
 // ---- "Re-check setup" (L4-P1, the Thursday fallback): the project's plain setup check, on a fresh machine, started by a person.
 //
-//   GET  /v1/app/projects/{project}/setup-check    where the project's setup check stands (the core's `SetupState`); any live role on the project reads it
+//   GET  /v1/app/projects/{project}/setup-check    where the project's setup check stands (the core's `SetupState`, plus `canManage` and, while the setup is broken, `repair`: the "Setup needs repair" card); any live role on the project reads it
 //   POST /v1/app/projects/{project}/setup-check    start the check ({ requestId } and nothing else): a person who MANAGES the project's setup (a company owner or admin, or the project's administrator), read now.
 //                                                  202 started, 200 a repeat of the same request id, 409 when a check of this project is already running.
 // It is an ordinary PERSON-started check (the person is the starter and the record says so): no system owner, no flag, no AI, no model key. It is the way to prove the re-check on staging and the button a manager
@@ -356,7 +357,12 @@ export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise
     // The project is read in the caller's company only: another company's project of the same name is never this one.
     const latest = await flow.projects.latest(project);
     if (latest === undefined) throw notFound();
-    if (input.request.method === "GET") return json(200, await setupStateOf(flow, project, latest.definition));
+    if (input.request.method === "GET") {
+      // L4-U5: the setup state, who may act (read live above), and, while the setup is broken, the "Setup needs repair" card in the words every surface shares. The card's actions are empty for a person who may not act.
+      const canManage = standing.access === "manage";
+      const repair = await setupRepairViewOf({ flow, store: flow.store, companyId, now: input.now }, project, { canManage }).catch(() => undefined);
+      return json(200, { ...(await setupStateOf(flow, project, latest.definition)), canManage, ...(repair === undefined ? {} : { repair }) });
+    }
     if (input.request.method !== "POST") throw agentXError("NOT_FOUND", "route not found");
     if (standing.access !== "manage") throw agentXError("FORBIDDEN", SETUP_RUN_NOT_ALLOWED);
     const body = parsed(SetupCheckBodySchema, bodyOf(input.request));

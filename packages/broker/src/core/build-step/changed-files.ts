@@ -1,3 +1,4 @@
+import { setupPullRequestLineOf } from "../setup-agent/recheck-rows.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // Lane L12: the files the checked code changes, for the pull request's description and the risk it shows.
 //
@@ -173,7 +174,8 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
       const lessonsUsed = await lessonsUsedOf(deps, task, entry.repositoryId);
       // MR3b and MR4: the order lines are about the whole task; each description adds the words about its own repository's CI.
       const mergeOrderLines = await deps.mergeOrderLines?.(task, entry.repositoryId).catch(() => []) ?? [];
-      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
+      const setupLine = await setupPullRequestLineOf(deps, task.project, task.taskId);
+      const body = workflowPullRequestBody(task, judged.risk === undefined ? workflow : { ...workflow, risk: judged.risk }, plan?.text, undefined, { changedFiles: read, ...(setupLine === undefined ? {} : { setupLine }), ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
       const record = await pullRequestRecordOf(deps, task.workspaceId, entry.repositoryId, entry.number);
       const ref = changeRequestRef(entry.url, entry.number);
       beforeRequest?.();
