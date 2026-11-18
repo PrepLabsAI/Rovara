@@ -47,7 +47,7 @@ export class GitHubFixtureApi {
   /** Every request served, in order: method and path. */
   readonly requests: Array<{ method: string; path: string }> = [];
   /** DEC 213: how the commit read (`GET /repos/../commits/<sha>`) answers: files a page (GitHub's is 100), a file whose patch GitHub leaves out, totals that do not add up (GitHub's 3,000-file limit). */
-  readonly commitReads: { pageSize: number; withoutPatch?: string; extraAdditions?: number; answerSha?: string; parentsAfterFirstPage?: string[] } = { pageSize: 100 };
+  readonly commitReads: { pageSize: number; withoutPatch?: string; extraAdditions?: number; answerSha?: string; parentsAfterFirstPage?: string[]; /** L4-LM1c: the commit's `author` exactly as given (a malformed one), in place of the model's. */ rawAuthor?: unknown } = { pageSize: 100 };
   /** DEC 213: how the compare read (`GET /repos/../compare/<base>...<head>`) answers: at most `filesMax` files (GitHub's is 300), a file whose patch GitHub leaves out, another merge base, a "next" link. */
   readonly compareReads: { filesMax: number; withoutPatch?: string; mergeBase?: string; nextLink?: boolean } = { filesMax: 300 };
 
@@ -56,6 +56,13 @@ export class GitHubFixtureApi {
    * only. `rows` replaces that with explicit deployments (a newest-first status list each); `next` adds a "next" link to the list; `statusHttp` answers every status read with that HTTP status; `listHttp` the list.
    */
   readonly deploymentReads: { rows?: Array<{ id: number; sha?: string; environment: string; statuses: Array<{ state: string; environment?: string }> }>; next?: boolean; statusHttp?: number | undefined; listHttp?: number | undefined; listHeaders?: Record<string, string> | undefined; listMessage?: string | undefined } = {};
+
+  /**
+   * Lane L4-LM1b: how the commit listing (`GET /repos/../commits?sha=<branch>&per_page=<n>`) answers: the raw rows as GitHub shapes them, a "next" link, or an HTTP status (with headers and a message, for a rate limit).
+   * Every request is also kept in `recentCommitRequests` (the query as asked).
+   */
+  readonly recentCommits: { rows?: unknown[]; next?: boolean; http?: number | undefined; headers?: Record<string, string> | undefined; message?: string | undefined } = {};
+  readonly recentCommitRequests: Array<{ sha: string | null; perPage: string | null }> = [];
 
   private deploymentRows(sha: string): Array<{ id: number; sha: string; environment: string; statuses: Array<{ state: string; environment?: string }> }> {
     if (this.deploymentReads.rows !== undefined) return this.deploymentReads.rows.map((row) => ({ ...row, sha: row.sha ?? sha }));
@@ -267,8 +274,17 @@ export class GitHubFixtureApi {
       }));
       const stats = { additions: all.reduce((total, file) => total + file.additions, 0) + (this.commitReads.extraAdditions ?? 0), deletions: all.reduce((total, file) => total + file.deletions, 0) };
       const parents = page > 1 && this.commitReads.parentsAfterFirstPage !== undefined ? this.commitReads.parentsAfterFirstPage : revision.parents;
-      return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size) },
+      // Who GitHub says wrote the commit (L4-LM1c): the accounts it linked, as its API words them; an unlinked identity is `null`.
+      const identity = this.model.commitIdentities.get(revision.sha);
+      const accountJson = (account: { login: string; hostUserId?: string | undefined; accountType: string } | undefined) => account === undefined ? null : { login: account.login, ...(account.hostUserId === undefined ? {} : { id: Number(account.hostUserId) }), type: account.accountType === "person" ? "User" : account.accountType === "bot" ? "Bot" : "Organization" };
+      return json(200, { sha: this.commitReads.answerSha ?? revision.sha, parents: parents.map((sha) => ({ sha })), stats: { ...stats, total: stats.additions + stats.deletions }, files: all.slice((page - 1) * size, page * size),
+        author: "rawAuthor" in this.commitReads ? this.commitReads.rawAuthor : accountJson(identity?.author), committer: identity?.webFlow === true ? { login: "web-flow", id: 19864447, type: "User" } : accountJson(identity?.committer) },
         all.length > page * size ? { link: `<${API}${ROOT}/commits/${revision.sha}?per_page=100&page=${page + 1}>; rel="next"` } : {});
+    }
+    if (method === "GET" && path === `${ROOT}/commits`) {
+      this.recentCommitRequests.push({ sha: url.searchParams.get("sha"), perPage: url.searchParams.get("per_page") });
+      if (this.recentCommits.http !== undefined) return json(this.recentCommits.http, { message: this.recentCommits.message ?? "Resource not accessible by integration" }, this.recentCommits.headers ?? {});
+      return json(200, this.recentCommits.rows ?? [], this.recentCommits.next === true ? { link: `<${API}${ROOT}/commits?sha=main&per_page=50&page=2>; rel="next"` } : {});
     }
     if (method === "GET" && path === `${ROOT}/deployments`) {
       if (this.deploymentReads.listHttp !== undefined) return json(this.deploymentReads.listHttp, { message: this.deploymentReads.listMessage ?? "Resource not accessible by integration" }, this.deploymentReads.listHeaders ?? {});

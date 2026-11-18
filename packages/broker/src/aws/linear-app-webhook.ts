@@ -68,6 +68,19 @@ function teamOf(type: "Issue" | "Comment", body: unknown): string | undefined {
   return parsed.success ? parsed.data.data.issue?.teamId ?? parsed.data.data.issue?.team?.id : undefined;
 }
 
+/**
+ * One fixed line when a signature fails, naming the workspace the (unverified) body claims, so a per-workspace signing secret would show up quickly: Rovara assumes ONE app-wide
+ * secret. The workspace id is read only when it has the shape of an id (so nothing else from the body can reach the log); the secret and the signature are never logged.
+ */
+function signatureFailed(wiring: LinearWebhookWiring, rawBody: string): void {
+  let organizationId: string | undefined;
+  try {
+    const claimed = z.object({ organizationId: Id }).passthrough().safeParse(JSON.parse(rawBody));
+    organizationId = claimed.success ? claimed.data.organizationId : undefined;
+  } catch { organizationId = undefined; }
+  try { wiring.log({ event: "linear.webhook_signature_failed", ...(organizationId === undefined ? {} : { organizationId }) }); } catch { /* a log that fails changes nothing */ }
+}
+
 /** One delivery, end to end. Never throws to the caller: every answer is one of three fixed ones (no echo of the body, the cause or a company). */
 export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input: { rawBody: string | undefined; headers: Readonly<Record<string, string | undefined>> }): Promise<LinearWebhookAnswer> {
   let app: LinearAppSettings | undefined;
@@ -77,7 +90,10 @@ export async function handleLinearAppWebhook(wiring: LinearWebhookWiring, input:
   const raw = Buffer.from(input.rawBody, "utf8");
   if (raw.byteLength > MAX_BODY_BYTES) return refused();
   // 1. The signature, over the raw bytes, before anything is parsed.
-  if (!verifyLinearSignature(raw, input.headers, app.webhookSecret)) return refused();
+  if (!verifyLinearSignature(raw, input.headers, app.webhookSecret)) {
+    signatureFailed(wiring, input.rawBody);
+    return refused();
+  }
   let parsedBody: unknown;
   try { parsedBody = JSON.parse(input.rawBody); } catch { return refused(); }
   const envelope = Envelope.safeParse(parsedBody);

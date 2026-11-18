@@ -35,7 +35,7 @@ import { installBranchSyncDeciders } from "../../core/branch-sync/branch-sync.js
 import { installCiFixDecider } from "../../core/ci-fix/ci-fix.js";
 import { registerMergeActionDecider } from "../../core/merge/merge-tracking.js";
 import { createCiWaitLines, createMergeOrderLines, createTaskRepositoryEdgesSeam } from "../../core/merge/repository-edges.js";
-import { createAsk } from "../../core/sessions/ask.js";
+import { createAsk } from "../../core/sessions/ask.js"; import { withLocalAnswers } from "./project-answers.js"; import { withLocalStartSuggest } from "./project-start-suggest.js";
 import { createAskDiffReader, createPeekClient } from "../../core/sessions/peek.js";
 import { createLocalAskModel } from "../ask-model.js";
 import { createLocalDiagnosisModel } from "../diagnosis-model.js";
@@ -69,6 +69,7 @@ import { createLocalEvidence, type LocalEvidence } from "./evidence.js";
 import { createLocalFlakyChecks } from "./flaky-checks.js";
 import { createLocalComments, type LocalComments } from "./comments.js";
 import { createLocalLessons, type LocalLessons } from "./lessons.js";
+import type { HumanEditSink } from "../../core/merge/seams.js";
 import { createLessonRoutes } from "./lessons-routes.js";
 import { createLocalMilestones, createLocalTracking, sessionTimeline, type LocalTracking } from "./tracking.js";
 import type { DocumentMilestones } from "../../core/milestones/milestones.js";
@@ -104,6 +105,9 @@ import { withStartFenceExtras } from "../../core/task-flow/start-fence.js";
 import { createLocalDesignReview } from "./design-review.js";
 import { createLocalChat } from "./chat.js";
 import { createLocalIntake } from "./intake.js";
+import { createTaskLogHooks } from "../../core/task-log/hooks.js";
+import { planSummarySourceOf } from "../../core/task-log/plan-summary-source.js";
+import type { PlanSummaryFacts } from "../../core/task-log/milestones.js";
 import { sessionBindingsOf } from "../../core/sessions/bindings.js";
 import { createLocalAutomation, type LocalAutomation } from "./automation.js";
 import { createLocalAfterMerge } from "./after-merge.js";
@@ -115,6 +119,7 @@ import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
 import { channelThreadHandler, planCardPosted, threadFollows } from "../../core/channel/thread-notices.js";
+import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
 import { ticketMomentsOnChange } from "../../core/ticket-updates/moments.js";
 
 export { TASK_FLOW_INDEXES };
@@ -355,6 +360,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const timeline = sessionTimeline();
   // The milestone hook: rows and session lines in the change's transaction, delivered after the commit to the handlers an adapter registered (`app.milestones.register`); none by default.
   const milestones = createLocalMilestones({ store, now: () => clock().getTime(), log: (event, fields) => log({ component: "milestones", event, ...fields }) });
+  // The task log (`core/task-log`): what the answers, the questions and the decisions write in their own transactions is told, once committed, to the surfaces that draw it (the ticket's thread).
+  const taskLog = createTaskLogHooks((event, fields) => log({ component: "task_log", event, ...fields }));
+  // The plan's summary for the log is read through the decision gate, which is made after the intake it serves: bound here, filled in when the gate exists.
+  let planSummary: ((orgId: OrgId, taskId: string) => Promise<PlanSummaryFacts | undefined>) | undefined; // eslint-disable-line prefer-const -- assigned once the decision gate exists, below
 
   const ledger = createCostLedger({ store, metering: registry.require("metering"), ...(options.now === undefined ? {} : { now: options.now }) });
   // What the model proxy meters. A call of a task is recorded in the task's cost ledger (the Metering port prices it, the ledger keeps it once), so the ledger is what the task has spent: the next step's budget, the plan page,
@@ -379,7 +388,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const testEnvironment = createLocalTestEnvironment({
     store, companyId, now: () => clock().getTime(), audit: registry.require("audit-sink"), log,
     gate: () => gate,
-    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(options.testServiceImages !== undefined && path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
+    openPage: async (path) => { if (pagesServer.current === undefined) throw new Error("the pages are not up yet"); await (options.openBrowser ?? openInSystemBrowser)(pagesServer.current.onceLink(path, { label: "browser", ...(path.startsWith("/test-environment/") ? { fresh: true } : {}) })); },
     // Where the owner approves service images, the page opens in a NEW page session: an approval needs one opened in the last ten minutes (the same rule as making a script token).
     // What this computer does not do yet, said on the page instead of left for the owner to find out.
     extraLines: async () => [
@@ -480,6 +489,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // The ticket a task started from: a pull request's description says which issue it fixes.
     sessionBindings: { read: (orgId, sessionId) => sessionBindingsOf(store, orgId, sessionId) },
     milestones,
+    taskLog,
     keepEvidence: (input) => evidence.keepAfterChecks(input),
     // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
     flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
@@ -499,7 +509,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   // Tickets that ask for work (the project's intake rule, the poll, the owner's list) and the write-back to the ticket a task started from. It registers its milestone handler now, before any milestone is written.
-  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log });
+  const intake = createLocalIntake({ registry, flow, companyId, owner, milestones, now: () => clock().getTime(), fenceKey: deriveKey(rootKey, "intake-ticket-fence"), log, taskLog, planSummaryOf: (orgId, taskId) => (planSummary === undefined ? Promise.resolve(undefined) : planSummary(orgId, taskId)) });
 
   // The design review stage (a Full task's design is read by fresh reviewers before anyone approves it). It fills `flow.deps.designReview`; with the switch off no task enters it.
   const designReview = createLocalDesignReview({
@@ -513,7 +523,9 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   const repositoryEdges = createTaskRepositoryEdgesSeam({ flow: flow.deps, blobs, companyId });
   flow.deps.mergeOrderLines = createMergeOrderLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
   flow.deps.ciWaitLines = createCiWaitLines({ flow: flow.deps, companyId, repositoryEdges, log: (event, fields) => log({ component: "merge_order", event, ...fields }) });
-  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges });
+  // L4-LM1c: a person's push to a Rovara pull request is told to lessons, which are built below (the tracking service is made first, so the notice reaches them through this reference).
+  const lessonsForHumanEdits: { current?: { noteHumanEdit: HumanEditSink } } = {};
+  const tracking = createLocalTracking({ flow: flow.deps, registry, companyId, milestones, timeline, now: () => clock().getTime(), log, repositoryEdges, humanEdit: async (push) => { await lessonsForHumanEdits.current?.noteHumanEdit(push); } });
 
   // Merge tracking's action slots (L7A-3): a failing CI, a conflict and a branch that is behind are decided by the deciders of the code, which ask for a coding run (an IMPLEMENT row) or a merge of the
   // base (a SYNC row). They are installed only here, where the dispatch runner knows both kinds (the build step), and once per process.
@@ -596,6 +608,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     ...(options.now === undefined ? {} : { now: options.now }),
   });
   const gate = decisions.gate;
+  planSummary = planSummarySourceOf({ store, artifacts: blobs, gate });
   const designPageActions = designReview.pageActions({ gate, owner });
   const decisionActions = decisions.actions;
   // Chat (owner decision 58): the owner's own acts on the chat page, and what an adapter may hand the core. Nothing here approves: see chat.ts.
@@ -606,6 +619,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       store, registry, now: () => clock().getTime(), plan: { gate }, footer: ATTENTION_FOOTER, milestones: channelMilestonesOn,
       log: (event, fields) => log({ component: "channel_thread", event, ...fields }),
     }));
+    // What is answered or decided elsewhere (the web page, a ticket) is told to the thread as one line; what was said in the thread is not said back (`core/channel/log-mirror.ts`).
+    taskLog.subscribe(taskLogThreadMirror({ store, registry, now: () => clock().getTime(), enabled: channelMilestonesOn, log: (event, fields) => log({ component: "channel_thread", event, ...fields }) }));
   }
   // Lessons: what Rovara learned from finished tasks, loaded into later steps and decided on the owner's page. On unless `ROVARA_LESSONS=0`, in Suggest mode (every lesson waits for the owner); the pages still show what exists.
   const lessonNames = registry.names("learning");
@@ -615,6 +630,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     learning: lessonNames.length === 0 ? undefined : registry.get("learning", lessonNames.find((name) => name !== "local") ?? lessonNames[0]!),
     ...(options.lessonsEnabled === undefined ? {} : { enabled: options.lessonsEnabled }), now: () => clock().getTime(), log,
   });
+  lessonsForHumanEdits.current = lessons;
   flow.deps.learned = (input) => lessons.learnedFor(input);
   flow.deps.lessonsUsed = (task, repositoryId) => lessons.usedInPullRequest(task, repositoryId);
   flow.deps.lessonsSentBack = (taskId) => lessons.noteSentBack(taskId);
@@ -681,6 +697,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
       ...(browserEvidence === undefined ? {} : { browserEvidence: (input: Parameters<LocalBrowserEvidence["action"]>[0], context: { fresh: boolean }) => browserEvidence.action(input, context) }),
       decidePlan: decisionActions.decidePlan, decideDesign: decisionActions.decideDesign, designChoice: designPageActions.designChoice, designResume: designPageActions.designResume, connectionAction: (input, context) => connections.action(input, context), decideTestEnvironment: (input) => testEnvironment.decideTestEnvironment(input),
       approveServiceImage: (input) => testEnvironment.approveServiceImage(input), removeServiceImage: (input) => testEnvironment.removeServiceImage(input),
+      setTestEnvironmentMachine: (input) => testEnvironment.setMachineSize(input),
       ...createPageExtraActions({ flow: flow.deps, companyId, owner, comments, secondReview, modelSelection, diagnosis, lessons, designAnswers: (input) => designPageActions.answerQuestions(input) }),
       ...(setupAgent.enabled ? {
         setupStart: setupAgent.page.start, setupStop: setupAgent.page.stop, setupCommand: setupAgent.page.command, setupConfirm: setupAgent.page.confirm, setupDiscard: setupAgent.page.discard, setupForgetHost: setupAgent.page.forgetHost,
@@ -767,6 +784,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     await comments.poll().catch(logFailure("local_app.comments_failed"));
     // The tickets that ask for work are read through the trackers the registry holds; a source that is not due costs nothing.
     await intake.poll().catch(logFailure("local_app.intake_failed"));
+    // A ticket thread whose root was edited a moment before something new landed is brought up to date.
+    await intake.flushThreads().catch(logFailure("local_app.ticket_threads_failed"));
   };
   // The after-merge watcher's pass: windows that ended close, and a report that could not be sent goes out again. It reads and writes nothing for a project whose own setting is off, and has its own timer: the code host is
   // asked over the network, so neither the dispatch nor the pull request reads wait for it.
@@ -832,7 +851,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
 
   return {
     flow, meter, pages, gate, blobs, tracking, evidence, comments, lessons, modelGrants, secondReview, modelSelection, diagnosis, milestones, scriptTokens, playbook, setupAgent, automation, browserEvidence, afterMerge,
-    routes: (request, caller) => routes(request, caller),
+    // Lead 4 J3: the start box's path suggestion (POST /v1/app/projects/{p}/code/suggest), in front of the owner's routes.
+    routes: withLocalStartSuggest({ flow: flow.deps, now: () => clock().getTime(), log, ask: { choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) } }, withLocalAnswers({ flow: flow.deps, registry, store, companyId, now: () => clock().getTime(), log, ask: { choice: chosen, keys, companyId, providers, ...(options.modelProviderEndpoints === undefined ? {} : { endpoints: options.modelProviderEndpoints }), ...(options.askFetch === undefined ? {} : { fetch: options.askFetch }) }, prices: modelPrices }, (request, caller) => routes(request, caller))),
     callbacks: callbackHandler,
     tick,
     async stop() {

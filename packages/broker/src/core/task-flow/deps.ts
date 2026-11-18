@@ -1,4 +1,4 @@
-import type { AgentXError, WorkOrigin } from "@agentx/contracts";
+import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
 import type { MoneyStop } from "./money-stop.js";
@@ -30,6 +30,7 @@ import type {
   WorkflowReviewPhase,
   WorkflowSnapshot,
 } from "@agentx/contracts";
+import type { TaskLogHooks } from "../task-log/hooks.js";
 import type { RepositoryGrantService } from "../../repository-access.js";
 import type { OperationRecord, DispatchRowRecord, TaskRecord } from "./records.js";
 import type { StepOutcome } from "./outcome.js";
@@ -54,12 +55,12 @@ export interface TaskCaller {
   /**
    * Set only by intake, never by a request body: the task starts from this ticket, so the request text is the ticket's (the plan's "why" credits it to the ticket, not to the person who started the task).
    */
-  ticket?: { system: string; id: string; url: string } | undefined;
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /**
    * Set only by the script token check: the request is a script token's, scoped to these projects and permissions. The start gives such a task the fixed client "Script token", whatever
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
-  scriptToken?: { tokenId: string; name: string; permissions: readonly ("read" | "start" | "lessons")[]; projects: readonly string[] } | undefined;
+  scriptToken?: { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] } | undefined;
   /**
    * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
    * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
@@ -108,6 +109,11 @@ export interface TaskAccess {
   checkStart(principal: Principal, project: string, purpose?: string, origin?: string): Promise<StartVerdict>;
   /** Whether this principal may read and drive the task. A task of someone else is "not found" to a principal who may not (no leak). */
   canAct(principal: Principal, task: { developerId: string; project: string }): Promise<boolean>;
+  /**
+   * Whether this principal may only READ the task (web task channel C6): its owners, and the commenters and viewers its People list gives a role to, each under the same live proof. Used for reads and nothing else:
+   * every move, answer and decision still asks `canAct` or `ownerActing`. Absent: `canAct` (Code's own rule, where reading and driving are the same).
+   */
+  canRead?(principal: Principal, task: { taskId: string; developerId: string; project: string }): Promise<boolean>;
   /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
   checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
   /**
@@ -153,7 +159,11 @@ export interface StartExtrasInput {
   client: string;
   receivedAt: string;
   /** The ticket the task starts from (intake only): the session is bound to it in the same transaction, so the task and its ticket follow each other or the start does not commit. */
-  ticket?: { system: string; id: string; url: string } | undefined;
+  ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
+  /** Where the task started (the surface that asked for it). */
+  origin?: WorkOrigin | undefined;
+  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
+  purpose?: "setup_agent" | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
@@ -227,7 +237,7 @@ export interface TaskFlowDeps {
    * L4-P1 (owner DEC 254zzl): whether this company's SYSTEM RUNS are on (the per-company `CoreSystemRuns` flag). Absent (the laptop): today's behaviour. Present and off: Rovara starts nothing by itself, the free
    * re-check at task start included. A hosted install fills it from the flag, read for this company.
    */
-  systemRuns?: { enabled(): boolean | Promise<boolean> };
+  systemRuns?: { enabled(): boolean | Promise<boolean> } | undefined;
   /** Issues the short-lived repository grant a prepare carries. Called when the invocation is built, so a retried delivery gets a fresh one. */
   repositoryGrants: Pick<RepositoryGrantService, "issue">;
   /** Signs the callback capability (HMAC-SHA256, the format the callback API checks). At least 32 bytes. */
@@ -254,6 +264,11 @@ export interface TaskFlowDeps {
   taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
   /** How long (seconds) a worker machine may be lost or unhealthy before the operation running on it is ended INTERRUPTED (`sweepLostRuns`). Default `RUN_LOST_GRACE_SECONDS`. */
   runLostGraceSeconds?: number;
+  /**
+   * L4-RD: told, best effort, right after a free setup re-check settled as "setup broken" (once per failure, from `advanceRecheck`). The host wires the automatic repair draft here (`core/setup-agent/repair-draft.ts`):
+   * it starts one only when upkeep is on with cap room. Never decides anything itself; a fault is logged by its kind and never reaches the caller.
+   */
+  afterSetupBroken?: (project: string, recheckKey: string) => Promise<void>;
   now?: () => Date;
   newId?: () => string;
   log?: (entry: Record<string, unknown>) => void;
@@ -298,6 +313,11 @@ export interface TaskFlowDeps {
   autonomy?: (task: TaskRecord) => Promise<{ autonomy: Autonomy; unreadable?: true; noCompany?: true }>;
   /** Lane L10: records a milestone ("fixing", "stuck") in the transaction of the change that caused it. Absent: none is recorded (the workflow change still is). */
   milestones?: CodeMilestones;
+  /**
+   * The task log's hook (`core/task-log/hooks.ts`): told after a change that wrote log entries in its own transaction is committed (the answers to Understand's questions, the questions it asked), so the surfaces that draw the log
+   * catch up. Absent: nothing is told; the entries are written all the same.
+   */
+  taskLog?: Pick<TaskLogHooks, "changed">;
   /**
    * Lane L12: keeps the evidence of a run whose checks were just recorded for a candidate (the proof page and the pull request read it). Informational: called best effort after the verification is recorded, and
    * a fault or a slow store changes nothing about the task. Absent: no evidence is kept.
@@ -358,6 +378,11 @@ export interface TaskFlowDeps {
   secondReview?: Pick<SecondReview, "prepare" | "opinionOf" | "prLines" | "mergeWait" | "operationEnded" | "releaseHold"> & Partial<Pick<SecondReview, "prStatus">>;
   /** Lane L9-wire: called once per start, before the transaction is built. Its items join the start's transaction. */
   startExtras?: (input: StartExtrasInput) => StartExtras;
+  /**
+   * Lead 4, slice A4: write work events (`work-events/flow-events.ts`) in the transactions of the flow's own workflow changes, so the cost report can split a task's time into working and waiting and count send-backs.
+   * Only `true` writes them (the core host turns it on); absent or false: every transaction is exactly what it was. A failure to make an event never fails a step.
+   */
+  workEvents?: boolean;
   /**
    * The project's approved test environment, as the flow uses it: a starting task pins the newest usable revision, and a coding or verification run is told the plan of the revision it pinned (its checks, selection,
    * budget and dependencies). Absent: no task uses an environment and every payload is what it was.

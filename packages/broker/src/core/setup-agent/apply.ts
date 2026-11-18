@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
   ProjectDefinitionSchema, SETUP_TIMEOUT, TEST_TIMEOUT, agentXError, canonicalJson, change, formatCommandLine, orgProjectCatalogKey, parseCommandLine, projectMetaKey, projectRevisionKey, setupItemsOf, when,
-  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type SetupVerification, type TransactItem,
+  type DocumentKey, type DocumentStore, type OrgId, type Principal, type ProjectCommand, type ProjectDefinition, type SetupVerification, type TransactItem,
 } from "@agentx/contracts";
 import { SubjectRefusal, type AppliedDecision, type DecisionAttempt, type DecisionSubject, type LoadedSubject } from "../decisions/approval-gate.js";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
@@ -117,7 +117,7 @@ export function commandsFromProposal(
 }
 
 /** What the owner approves: the commands, as a digest. The candidate check ran exactly these, and the approval names this digest. */
-export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[]): string => createHash("sha256").update(canonicalJson({ setup, readiness })).digest("hex");
+export const setupApplyDigest = (setup: readonly ProjectCommand[], readiness: readonly ProjectCommand[], extra: Record<string, unknown> = {}): string => createHash("sha256").update(canonicalJson({ setup, readiness, ...extra })).digest("hex");
 
 export interface SetupApplyDeps extends SetupAgentDeps { flow: TaskFlowDeps }
 
@@ -157,22 +157,49 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
+  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: made.used, unchecked: made.unchecked, left: made.left }, alsoTransact: [] });
+}
+
+export interface StoreCandidateInput {
+  project: string; by: string; requestId: string; taskId: string;
+  /** The project's current approved revision the candidate was made from. */
+  baseRevision: number;
+  /** The candidate definition (already parsed, with the next revision number). */
+  candidate: ProjectDefinition;
+  /** Fields the reply carries between the digest and the candidate revision (what was used, left out, and so on). */
+  replyExtra: Record<string, unknown>;
+  /** Items written in the same transaction (a setup update offer marked prepared, say). */
+  alsoTransact: readonly TransactItem[];
+  /** More of the candidate the approval must be bound to (L4-SC: the fakes a plan's mock adds), folded into the digest the approver sees and approves. Absent: the digest is of the commands only, as before. */
+  digestExtra?: Record<string, unknown>;
+}
+
+/**
+ * The shared tail of every way a setup CANDIDATE is made (a setup run's `confirmSetupAgent`, a merged plan's "Update setup", plan-update.ts): refuse a command too long to show whole, store the candidate as the next
+ * revision (written, not the project's latest), start its check on a NEW workspace, and keep the one proposal row; all in one transaction that also requires the project to still be at `baseRevision` and no other
+ * proposal to be waiting. Nothing is applied and nothing is approved: only the approval (`createSetupProposalSubject`) makes a candidate the project's latest.
+ */
+export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCandidateInput): Promise<Record<string, unknown>> {
+  const { project, by, requestId, taskId, baseRevision, candidate } = input;
+  const orgId = deps.companyId;
+  const candidateRevision = candidate.revision;
   // The approver reads every command whole: one too long to show is refused, never cut.
-  if ([...candidate.data.setup, ...candidate.data.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
-  const digest = setupApplyDigest(candidate.data.setup, candidate.data.readiness);
-  const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId: body.requestId, candidate: true });
-  const reply = { digest, used: made.used, unchecked: made.unchecked, left: made.left, candidateRevision, proved: false, next: "check" };
+  if ([...candidate.setup, ...candidate.readiness].some((command) => formatCommandLine(command).length > SETUP_COMMAND_SHOWN_MAX)) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.tooLong);
+  const digest = setupApplyDigest(candidate.setup, candidate.readiness, input.digestExtra);
+  const started = buildSetupCheck(deps.flow, { project, revision: candidateRevision, startedBy: by, requestId, candidate: true });
+  const reply = { digest, ...input.replyExtra, candidateRevision, proved: false, next: "check" };
   const now = new Date(deps.now()).toISOString();
-  // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval).
-  const baseCommits = await readBaseCommits(deps.flow, full.definition);
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId: view.taskId ?? "", requestId: body.requestId, by, digest, baseRevision: full.definition.revision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
+  // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval). The candidate keeps the base's repositories.
+  const baseCommits = await readBaseCommits(deps.flow, candidate);
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
-    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate.data)) as never }, condition: when.absent() },
+    { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
     // The proposal row replaces a finished one, never a waiting one; the project must still be at the revision the person looked at.
     { kind: "put", item: { ...setupApplyKey(orgId, project), ...(JSON.parse(JSON.stringify(row)) as Record<string, never>) }, condition: when.or(when.absent(), when.not(when.eq("state", "checking"))) },
-    { kind: "check", key: orgProjectCatalogKey(orgId, project), condition: when.eq("latestRevision", full.definition.revision) },
+    { kind: "check", key: orgProjectCatalogKey(orgId, project), condition: when.eq("latestRevision", baseRevision) },
     ...started.items,
+    ...input.alsoTransact,
   ] satisfies TransactItem[]);
   if (!result.applied) throw agentXError("WORKSPACE_BUSY", SETUP_CONFIRM_WORDS.waiting);
   await relayCheck(deps.flow, started);
@@ -180,7 +207,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
 }
 
 /** What the page shows of the waiting proposal: the commands, and where the check on them stands. */
-export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[] }) | undefined> {
+export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<(SetupApplyRow & { checkState: Awaited<ReturnType<typeof setupStateOfCheck>>; setup: string[]; readiness: string[]; fakes?: unknown }) | undefined> {
   const raw = await deps.store.get(setupApplyKey(deps.companyId, project));
   if (raw === undefined || raw["entityType"] !== "SETUP_APPLY") return undefined;
   const row = raw as unknown as SetupApplyRow;
@@ -190,16 +217,19 @@ export async function readSetupApply(deps: Pick<SetupApplyDeps, "flow" | "store"
   const checkState = await setupStateOfCheck(deps.flow, row.check, definition.data);
   // Each command as the person would type it (quoted where it needs it) and whole: the approver must see all of what will run.
   const text = (commands: readonly ProjectCommand[]): string[] => commands.map((command) => formatCommandLine(command));
-  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness) };
+  return { ...row, checkState, setup: text(definition.data.setup), readiness: text(definition.data.readiness), fakes: definition.data.generalFakes };
 }
 
-/** The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. */
-export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string): Promise<boolean> {
+/**
+ * The owner drops a waiting proposal: the candidate is removed and the project is free to change again. Not an approval: it applies nothing. With `onlyRequestId` (L4-RD: Rovara's own failed draft) it drops the
+ * waiting proposal ONLY if it is that request's: a person's candidate that replaced it is never touched.
+ */
+export async function discardSetupApply(deps: Pick<SetupApplyDeps, "store" | "companyId" | "now">, project: string, by: string, onlyRequestId?: string): Promise<boolean> {
   const row = await waitingSetupApply(deps.store, deps.companyId, project);
-  if (row === undefined) return false;
+  if (row === undefined || (onlyRequestId !== undefined && row.requestId !== onlyRequestId)) return false;
   const at = new Date(deps.now()).toISOString();
   const result = await deps.store.transact([
-    { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: when.eq("state", "checking") },
+    { kind: "update", key: setupApplyKey(deps.companyId, project), ops: [change.set("state", "discarded"), change.set("decidedAt", at), change.set("decidedBy", by)], condition: onlyRequestId === undefined ? when.eq("state", "checking") : when.and(when.eq("state", "checking"), when.eq("requestId", onlyRequestId)) },
     { kind: "delete", key: projectRevisionKey(deps.companyId, project, row.candidateRevision) },
   ]);
   return result.applied;
@@ -254,6 +284,11 @@ export interface SetupProposalApproval {
   mayDecide: (approver: Principal, input: { project: string; risk: SetupRisk; outcome: "approve" | "reject" }) => Promise<boolean>;
   /** The fixed words of a refusal, by the risk the candidate is at and the answer. */
   refusal: (risk: SetupRisk, outcome: "approve" | "reject") => string;
+  /**
+   * L4-SF (c): more steps for the APPROVAL's transaction, for a host that keeps another copy of the project's revisions (the old broker's registry, aws/setup-registry-mirror.ts). Called only when approving;
+   * it throws a `SubjectRefusal` when that copy no longer matches what the setup was made from. Absent: nothing more is written.
+   */
+  registryMirror?: { itemsFor: (row: { project: string; baseRevision: number; candidateRevision: number }, at: string) => Promise<readonly TransactItem[]> };
 }
 
 /** The candidate's risk and its changes, from its stored revision against the project's approved (base) revision. A row it cannot read is high. */
@@ -301,6 +336,8 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
       const approver = approvers[0]!;
       const orgId = row.orgId;
       if (attempt.outcome === "approve") {
+        // A host's other copy of the revisions moves in the same transaction (L4-SF c); a copy that has moved refuses the approval.
+        const mirrored = approval?.registryMirror === undefined ? [] : await approval.registryMirror.itemsFor({ project: row.project, baseRevision: row.baseRevision, candidateRevision: row.candidateRevision }, at);
         // L4-DR (DEC 254z c): what the setup was approved against, saved in the approval's own transaction (the files that decide whether it still works, by id, and the websites it allows). Read from the code host
         // BEFORE the transaction; one that cannot be read whole saves none, and the next re-check saves the baseline instead. It never makes the approval wait on, or fail for, the host.
         const snapshot = await snapshotOfApproved(flow, row, at);
@@ -310,6 +347,7 @@ export function createSetupProposalSubject(options: { flow: Pick<TaskFlowDeps, "
             // The project moves to the candidate only if it is still at the revision the owner looked at.
             { kind: "update", key: orgProjectCatalogKey(orgId, row.project), ops: [change.set("latestRevision", row.candidateRevision)], condition: when.eq("latestRevision", row.baseRevision) },
             { kind: "update", key: projectMetaKey(orgId, row.project), ops: [change.set("setupCheck", { ...row.check })], condition: when.present() },
+            ...mirrored,
             ...(snapshot === undefined ? [] : [snapshotItem(orgId, row.project, snapshot)]),
           ],
           result: { project: row.project, revision: row.candidateRevision },

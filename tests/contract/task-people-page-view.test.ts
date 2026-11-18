@@ -70,11 +70,16 @@ describe("task People page presentation", () => {
     expect(html).not.toMatch(/\b(?:action|method|onclick)=/i);
   });
 
-  it("gives managers the manual Slack next step without revealing it to readers", () => {
-    const manager = renderTaskPeoplePanel(TASK_ID, view({ canManage: true }));
-    const reader = renderTaskPeoplePanel(TASK_ID, view({ canManage: false }));
+  const SLACK_ADD_URL = "https://slack.com/archives/C0PEOPLE1/p1791720000123456";
+  it("gives managers the manual Slack next step on a Slack-shared task (C4: and the web add on every task) without revealing either to readers", () => {
+    const manager = renderTaskPeoplePanel(TASK_ID, view({ canManage: true, addPeopleUrl: SLACK_ADD_URL }));
+    const reader = renderTaskPeoplePanel(TASK_ID, view({ canManage: false, addPeopleUrl: SLACK_ADD_URL }));
     expect(manager).toContain("Invite them to this task channel in Slack, then return and choose their task role.");
+    expect(manager).toContain("data-people-add-form");
     expect(reader).not.toContain("Invite them to this task channel in Slack");
+    expect(reader).not.toContain("data-people-add-form");
+    // A task with no Slack share shows no Slack-only words (plan 4.2 "Remove Slack-only wording").
+    expect(renderTaskPeoplePanel(TASK_ID, view({ canManage: true }))).not.toContain("in Slack");
   });
 
   it("shows a distinct takeover hint and no restart promise", () => {

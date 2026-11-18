@@ -45,6 +45,8 @@ import { developerIdOf } from "../sessions/create.js";
 import { setupFailedMessage, setupStateOf } from "../setup-agent/check.js";
 import { setupDriftAtStart } from "../setup-agent/recheck.js";
 import { PREPARE_PINS_FEATURE, type SetupAgentLimits, type WikiBuildWire } from "@agentx/contracts";
+import { reportOriginOf, startIsReported } from "../report/task-row.js";
+import { startWorkEventItems } from "../work-events/flow-events.js";
 
 export interface StartResult {
   task: TaskView;
@@ -171,7 +173,7 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
   const title = redactedTitle(request);
   const ownerKey = taskOwnerKey(developerId, taskId);
   const requestText = storedRequestText(request.instructions);
-  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
+  const extras = deps.startExtras?.({ taskId, project: request.project, title, principal, client, receivedAt, origin: origin.data, ...(run?.setupAgent === undefined ? {} : { purpose: "setup_agent" as const }), ...(caller.ticket === undefined ? {} : { ticket: caller.ticket }) });
   // L4-DR (DEC 254z c): the free drift check. No model runs; the base commit's setup files are compared with the snapshot saved at the setup's approval, and a change starts the project's own setup check by itself (once per
   // commit, under the monthly cap on automatic runs). The task is not held here: only its first coding run waits for the result. A setup run (it IS the fix) is never checked; any fault is logged and the start goes on.
   const driftItems = run?.setupAgent === undefined ? await setupDriftAtStart(deps, { project: request.project, taskId, definition: project.definition }) : [];
@@ -262,6 +264,8 @@ export async function startTask(deps: TaskFlowDeps, caller: TaskStartCaller, val
     // A task that understands first starts by understanding the request, as a dispatch row like every automatic step; it runs once the preparation has ended.
     ...(understandFirst ? [dispatchRowItem(deps, taskId, 1, "UNDERSTAND", receivedAt)] : []),
     ...(extras?.items ?? []),
+    // Slice A4: the task's first work events (it started, and what it waits for first), next to its report row and under the same rule; only when the flow writes events.
+    ...(deps.workEvents === true && run?.setupAgent === undefined && startIsReported({ origin: origin.data, receivedAt }) ? startWorkEventItems({ companyId: deps.companyId, taskId, project: request.project, origin: reportOriginOf(origin.data), receivedAt, workflow: task.workflow }) : []),
     ...driftItems,
     ...(testEnvironment?.pin === undefined ? [] : [testEnvironment.pin]),
     ...(run?.setupAgent === undefined ? [] : [setupAgentPointerItem({ orgId: deps.companyId, project: request.project, taskId, requestId: request.requestId, requestedBy: developerIdOf(principal), basedOnRevision: revision, startedAt: receivedAt, limits: run.setupAgent.limits, seenTaskId: run.setupAgent.seenTaskId })]),

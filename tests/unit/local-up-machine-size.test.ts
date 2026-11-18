@@ -10,7 +10,7 @@ import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/
 import { recordMachineMeasurement, readMachineChoice, setMachineChoice } from "../../packages/broker/src/core/test-env/machine-size.js";
 import { CHOOSE_MACHINE_SIZE_ON_THE_PAGE } from "../../packages/broker/src/local/app/test-environment.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
-import { raw } from "../support/local-pages-fakes.js";
+import { raw, formOf, formBody } from "../support/local-pages-fakes.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanup.length > 0) await cleanup.pop()!(); });
@@ -28,6 +28,7 @@ const environment = () => TestEnvironmentBodySchema.parse({
 });
 
 async function launch(environmentVariables: NodeJS.ProcessEnv = {}) {
+  let now = Date.now();
   const root = await mkdtemp(join(tmpdir(), "rovara-machine-"));
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const stateDirectory = join(root, "state");
@@ -35,7 +36,7 @@ async function launch(environmentVariables: NodeJS.ProcessEnv = {}) {
   const machines = new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] });
   const opened: string[] = [];
   const runtime: LocalRuntime = await startLocalRuntime({
-    stateDirectory, cwd: join(root, "project"), environment: environmentVariables, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
+    now: () => new Date(now), stateDirectory, cwd: join(root, "project"), environment: environmentVariables, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9", machines, timers: false,
     openBrowser: async (url) => { opened.push(url); },
   });
   cleanup.push(() => runtime.stop());
@@ -45,22 +46,26 @@ async function launch(environmentVariables: NodeJS.ProcessEnv = {}) {
     const text = await response.text();
     return { status: response.status, text, body: (text === "" ? {} : JSON.parse(text)) as Record<string, unknown> };
   };
-  const pageOf = async (path: string): Promise<string> => {
+  const pageSession = async (path: string) => {
     expect((await api("/v1/local/pages/open", { method: "POST", body: { path } })).status).toBe(200);
     const once = new URL(opened.at(-1)!);
     const hop = await raw(runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } });
     const page = new URL(hop.headers["location"] as string, runtime.pagesUrl);
-    return (await raw(runtime.pagesUrl, { path: page.pathname, headers: { host: page.host } })).body;
+    return { html: (await raw(runtime.pagesUrl, { path: page.pathname, headers: { host: page.host } })).body,
+      post: (action: string, fields: Record<string, string>) => raw(runtime.pagesUrl, { method: "POST", path: action, headers: { host: page.host, origin: page.origin, "content-type": "application/x-www-form-urlencoded" }, body: formBody(fields) }) };
+
   };
-  const deps = () => ({ store: runtime.registry.require("storage"), now: () => Date.now(), env: environmentVariables });
-  return { api, pageOf, deps };
+  const deps = () => ({ store: runtime.registry.require("storage"), now: () => now, env: environmentVariables });
+  const pageOf = async (path: string) => (await pageSession(path)).html;
+  return { api, pageOf, pageSession, deps, advance: (ms: number) => { now += ms; } };
 }
 
 const measured = (digest: string) => ({
   jobId: "job-1", leaseToken: "l".repeat(40),
   result: { ok: true, report: { schemaVersion: 1, proposalDigest: digest, machineChip: "arm64", steps: [{ step: "full_suite", status: "passed", durationMs: 35 * 60_000 }], services: [], finishedAt: new Date().toISOString(), fullSuite: { peakMemoryMiB: 6246, durationMs: 35 * 60_000, tests: 10 } } },
 });
-const ON = { ROVARA_MACHINE_SIZE: "1" };
+const ON = {};
+const OFF = { ROVARA_MACHINE_SIZE: "0" };
 
 async function proposed(env: NodeJS.ProcessEnv) {
   const h = await launch(env);
@@ -110,8 +115,33 @@ describe("rovara up: the machine size at setup", () => {
     expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBeUndefined();
   });
 
+  it("a fresh page form stores the choice once; a reused or bad form stores nothing", async () => {
+    const h = await proposed(ON);
+    const page = await h.pageSession("/test-environment/payments");
+    const form = formOf(page.html, "/machine");
+    expect((await page.post(form.action, { ...form.fields, rowId: "arm64-4-16" })).headers["location"]).toContain("?n=machine");
+    expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBe("arm64-4-16");
+    expect((await page.post(form.action, { ...form.fields, rowId: "x86_64-8-32" })).headers["location"]).toContain("?n=form");
+    expect((await page.post(form.action, { rowId: "x86_64-8-32" })).headers["location"]).toContain("?n=form");
+    expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBe("arm64-4-16");
+  });
+
+  it("a stale page redirects for freshness without storing", async () => {
+    const h = await proposed(ON); const page = await h.pageSession("/test-environment/payments"); const form = formOf(page.html, "/machine");
+    h.advance(11 * 60_000);
+    expect((await page.post(form.action, { ...form.fields, rowId: "arm64-4-16" })).headers["location"]).toContain("?n=machinefresh");
+    expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBeUndefined();
+  });
+
+  it("an unknown row is invalid, an unknown project is missing, and neither stores a choice", async () => {
+    const h = await proposed(ON); const page = await h.pageSession("/test-environment/payments"); const form = formOf(page.html, "/machine");
+    expect((await page.post(form.action, { ...form.fields, rowId: "x86-16-64" })).headers["location"]).toContain("?n=invalid");
+    expect(await readMachineChoice(h.deps(), IMPLICIT_COMPANY_ID, "payments")).toBeUndefined();
+    expect(await h.pageOf("/test-environment/unknown")).toContain("not found");
+  });
+
   it("with the switch off the state and the page have no machine section, and the choice route is as unknown as before", async () => {
-    const off = await proposed({});
+    const off = await proposed(OFF);
     const state = await off.api("/v1/app/projects/payments/test-environment");
     expect(Object.keys(state.body)).not.toContain("machine");
     expect(await off.pageOf("/test-environment/payments")).not.toContain("Machine size");

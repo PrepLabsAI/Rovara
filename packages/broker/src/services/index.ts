@@ -12,6 +12,7 @@ export {
   createMergeTrackingService, createMilestoneService, createReadBudget, createRepositoryResolver, sessionTimeline,
   type MergeTrackingService, type MergeTrackingServiceOptions,
 } from "./merge-tracking.js";
+export { rovaraCheckSource, type RovaraCheckSourceOptions } from "./rovara-check.js";
 export { createSessionService, type SessionService, type SessionServiceOptions } from "./sessions.js";
 export { createNoticeService, type NoticeService, type NoticeServiceOptions } from "./notices.js";
 export { createDecisionService, type DecisionService, type DecisionServiceOptions } from "./decisions.js";

@@ -7,7 +7,7 @@
 //   - small skips every planning step today's flow would still run for the task (plan check, design review, the requirements, design and plan approvals), except what a person asked for themselves;
 //   - standard and risky keep today's steps.
 import {
-  FLOW_QUICK_CHECK_DETAIL_MAX, FLOW_QUICK_CHECKS_MAX, WorkflowSnapshotSchema, advanceStage, type FlowQuickCheck, type FlowSkippableStep, type FlowTier, type FlowTierKind, type IntentAssessment, type PlanDocument, type WorkflowFlow, type WorkflowSnapshot,
+  FLOW_QUICK_CHECK_DETAIL_MAX, FLOW_QUICK_CHECKS_MAX, WorkflowSnapshotSchema, advanceStage, planHasSetupChanges, type FlowQuickCheck, type FlowSkippableStep, type FlowTier, type FlowTierKind, type IntentAssessment, type PlanDocument, type WorkflowFlow, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { estimateTier, fitFlow, recordTier, TIER_RULES_VERSION } from "../decisions/change-tier.js";
 import { pathsIn, planFiles } from "../decisions/plan-facts.js";
@@ -158,6 +158,8 @@ export function smallPlanRoute(input: {
   const waiting = (submitted.stage === "PLAN_CRITIQUE" && submitted.state === "READY") || (submitted.stage === "PLAN_REVIEW" && submitted.state === "WAITING");
   if (!waiting || input.noChangeNeeded || submitted.definitionVersion !== "1.1.0" || submitted.path !== "QUICK" || submitted.designReview !== undefined) return undefined;
   if ((input.plan?.workBreakdown?.items.length ?? 0) > 0) return undefined;
+  // L4-SC (DEC 254z c): a plan that changes the test setup is approved by a maintainer on its card, whatever its size; it is never skipped.
+  if (input.plan !== undefined && planHasSetupChanges(input.plan)) return undefined;
   const assessment = submitted.intent?.assessment;
   const paths = [...new Set([...(input.plan === undefined ? [] : planFiles(input.plan)), ...namedPaths(input.requestText, assessment)])];
   // The plan's own words count against it, never for it: its sensitive words (the classifier's list, read over the plan as over the request), a path it names that the estimate's files do not hold, and, for

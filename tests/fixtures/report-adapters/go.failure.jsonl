@@ -1,0 +1,3 @@
+{"Action":"run","Package":"cart","Test":"same"}
+{"Action":"output","Package":"cart","Test":"same","Output":"--- FAIL: TestSame (0.01s)\n    cart_test.go:8: src/cart.go:8 unexpected total\n"}
+{"Action":"fail","Package":"cart","Test":"same","Elapsed":0.012}

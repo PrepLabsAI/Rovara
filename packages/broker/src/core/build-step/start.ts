@@ -4,7 +4,7 @@
 import { planApprovalSkipped } from "../task-flow/stage-selection.js";
 import { createHash } from "node:crypto";
 import {
-  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, generalFakesPayloadOf, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
+  AgentXError, BROWSER_EVIDENCE_FEATURE, BROWSER_EVIDENCE_VIDEO_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVIDENCE_CAPTURE_FEATURE, GENERAL_FAKES_FEATURE, WORKFLOW_BLOCK_REASONS, abandonWorkflowFix, blockWorkflow, isBaseMergedRetry, sendBackProblems, workflowIsReviewOnly, workflowRequestId, workflowReviewRoles, workflowSelectedChecks, workflowVerificationPosition,
   WORKFLOW_PLAN_MAX_BYTES, ownerPlanInstructions, type GeneralFakesPayload, type JsonValue, type ProjectCommand, type ProjectDefinition, type WorkflowApprovedPlan, type WorkflowDependencyInvocation, type WorkflowReviewChecks, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { evalRequestForChecks } from "../proof/eval-round-reader.js";
@@ -24,6 +24,7 @@ import { firstGraphInvocation, restartedGraphInvocation, resumeGraphInvocation, 
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { shortenMarkdown } from "../../developer/plan-document-reader.js";
 import { approvedCodingPlan, reviewPlanOf } from "./plan-input.js";
+import { fakesFor } from "../setup-agent/plan-setup.js";
 import {
   AUTOMATIC_REVIEW_NOTE, AUTOMATIC_REVIEW_ONLY_NOTE, NO_PUBLISH_NOTE, implementPrompt, ownerConstraintsSection, promptTagId, reviewCheckCommand, reviewPrompt, selectedCheckCommands,
   sendBackPrompt, sendBackProblemsPromptSection,
@@ -72,9 +73,13 @@ function fixStartHead(workflow: WorkflowSnapshot): string | undefined {
 }
 
 /** General fakes (DEC 234): the CHECKS payload field while the task's project revision has the setting on; undefined (off) otherwise, and when the project cannot be read. */
-async function generalFakesOf(deps: TaskFlowDeps, task: TaskRecord): Promise<GeneralFakesPayload | undefined> {
+async function generalFakesOf(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<GeneralFakesPayload | undefined> {
   try {
-    return generalFakesPayloadOf((await deps.projects.revision(task.project, task.startingRevision))?.definition.generalFakes);
+    const setting = (await deps.projects.revision(task.project, task.startingRevision))?.definition.generalFakes;
+    // L4-SC (DEC 254z c): the mocks the approved plan made for THIS task ride along with the project's own, for this task's runs only. The plan is read back by digest and counts only with a person's approval recorded for
+    // it (`approvedCodingPlan`); a plan that cannot be read adds none, and nothing here ever writes the project's setting.
+    const approved = workflow.artifacts.some((artifact) => artifact.type === "plan") ? await approvedCodingPlan(deps.artifacts, workflow).catch(() => undefined) : undefined;
+    return fakesFor(setting, approved?.setupChanges);
   } catch {
     return undefined;
   }
@@ -187,7 +192,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   }
   const operationId = graph === undefined ? undefined : newId(deps);
   // General fakes (slice 2): the coding run verifies with the same fakes a CHECKS round would, but only when it has checks to run.
-  const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task);
+  const generalFakes = readiness === undefined || readiness.length === 0 ? undefined : await generalFakesOf(deps, task, workflow);
   const payload = jsonOf({
     ...(readiness === undefined ? {} : { readiness }),
     ...(generalFakes === undefined ? {} : { generalFakes }),
@@ -274,7 +279,7 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
     return settled(deps, row, "STALE");
   }
   const evalRequest = await evalRequestForChecks(deps, task, workflow);
-  const generalFakes = await generalFakesOf(deps, task);
+  const generalFakes = await generalFakesOf(deps, task, workflow);
   // TE-H1 browser evidence (DEC 241): only with the evidence capture, and only for a project whose owner set a recipe (read fail-closed by the seam; a fault is no recipe). It asks the worker to photograph the changed pages; a worker without
   // the feature is refused the step by `requires` below, never sent a field it cannot read.
   const browserRecipe = capture ? await deps.browserEvidence?.recipe(task).catch(() => undefined) : undefined;

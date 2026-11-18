@@ -20,7 +20,7 @@ import {
   aws_stepfunctions as sfn,
 } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
+import { MACHINE_LAUNCH_AMI_PARAMETERS, MACHINE_LAUNCH_INSTANCE_TYPES, WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
 import { EC2_WORKER_AMI_PARAMETER } from "./ec2-workers.js";
 import type { AgentXNaming } from "./naming.js";
@@ -129,7 +129,11 @@ export class SessionLifecycle extends Construct {
         sid: "LaunchFromTemplate",
         actions: ["ec2:RunInstances"],
         resources: [ec2Arn("instance/*")],
-        conditions: { ArnEquals: { "ec2:LaunchTemplate": ec2Arn(`launch-template/${launchTemplateId.valueAsString}`) } },
+        // DEC 254zb: a worker launches only as one of the machine size rows' types (the template's own m6g.large among them), whatever the input says.
+        conditions: {
+          ArnEquals: { "ec2:LaunchTemplate": ec2Arn(`launch-template/${launchTemplateId.valueAsString}`) },
+          StringEquals: { "ec2:InstanceType": [...MACHINE_LAUNCH_INSTANCE_TYPES] },
+        },
       }),
       new iam.PolicyStatement({
         sid: "LaunchResources",
@@ -143,7 +147,8 @@ export class SessionLifecycle extends Construct {
       new iam.PolicyStatement({
         sid: "ResolveWorkerAmi",
         actions: ["ssm:GetParameters", "ssm:GetParameter"],
-        resources: [`arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${EC2_WORKER_AMI_PARAMETER}`],
+        // The x86 public AMI parameter: an x86 machine size boots `resolve:ssm:` of it, which EC2 resolves with the caller's permission.
+        resources: [EC2_WORKER_AMI_PARAMETER, MACHINE_LAUNCH_AMI_PARAMETERS.x86_64].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}::parameter${name}`),
       }),
       new iam.PolicyStatement({
         sid: "ReadQualifiedWorkerAmi",

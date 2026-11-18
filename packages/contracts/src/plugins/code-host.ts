@@ -321,8 +321,18 @@ export const ChangeRequestFileSchema = z.object({
 export type ChangeRequestFile = z.infer<typeof ChangeRequestFileSchema>;
 export const ChangeRequestFilesPageSchema = z.object({ files: z.array(ChangeRequestFileSchema).max(1_000), nextPage: z.number().int().positive().optional() }).strict();
 export type ChangeRequestFilesPage = z.infer<typeof ChangeRequestFilesPageSchema>;
-/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). */
-export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[] }
+/**
+ * Who the host says wrote a commit (L4-LM1c, add-only): the accounts the host linked to the commit's author and committer, by its own stable ids. An account is absent when the host could not tie the commit's
+ * author (or committer) to any account (a commit made with an unlinked identity, as Rovara's own git identity is). `webFlow`: the committer is the host's own web committer (an edit or squash made on the host's
+ * web pages), whose commit has the author as the person. Never an email or a name: nothing here can be a person's contact detail.
+ */
+export interface CommitIdentity {
+  author?: { login: string; hostUserId?: string | undefined; accountType: HostAccountKind } | undefined;
+  committer?: { login: string; hostUserId?: string | undefined; accountType: HostAccountKind } | undefined;
+  webFlow: boolean;
+}
+/** One commit's own changes (`CodeHost.commitChanges`, DEC 213). `identity` is optional and add-only: a host that does not say who wrote a commit leaves it out. */
+export interface CommitChanges { files: ChangeRequestFile[]; complete: boolean; parents: string[]; identity?: CommitIdentity | undefined }
 /** One revision's changes against an earlier revision it builds on (`CodeHost.compareChanges`, DEC 213): a merge against its second parent. */
 export interface CompareChanges { files: ChangeRequestFile[]; complete: boolean }
 /** DEC 213: the hook a multi-page read calls before EACH page it asks the host for (it throws when the pass's read allowance or time is used up; the read then stops and throws it on). */
@@ -465,6 +475,28 @@ export const DeploymentStatusReadSchema = z.object({
 }).strict();
 export type DeploymentStatusRead = z.infer<typeof DeploymentStatusReadSchema>;
 
+/** The most commits one `recentCommits` read answers, and the most characters of a commit message it keeps (a revert's subject and its "This reverts commit" line are at the top). */
+export const RECENT_COMMITS_MAX = 100;
+export const RECENT_COMMIT_MESSAGE_MAX = 4_000;
+/**
+ * One commit of a branch as the host shows it (lane L4-LM1b, revert detection): enough to tell a git revert and to prove who stands behind it. `parents` is the NUMBER of parents (a merge commit never counts as a revert).
+ * `webFlow` is the host's own web committer (squash and web edits), set by the adapter from the host's account id and never from a login or the message. The message is untrusted text.
+ */
+export const RecentCommitSchema = z.object({
+  sha: RevisionSchema,
+  message: z.string().max(RECENT_COMMIT_MESSAGE_MAX),
+  parents: z.number().int().min(0).max(100),
+  verified: z.boolean(),
+  author: HostAccountSchema.optional(),
+  committer: HostAccountSchema.optional(),
+  webFlow: z.boolean().optional(),
+  authorIsBot: z.boolean().optional(),
+}).strict();
+export type RecentCommit = z.infer<typeof RecentCommitSchema>;
+/** What `CodeHost.recentCommits` answers: the newest commits of one branch, newest first, and whether that is every commit asked for (`complete` false when the host cut the list or an entry was unusable). */
+export const RecentCommitsReadSchema = z.object({ commits: z.array(RecentCommitSchema).max(RECENT_COMMITS_MAX), complete: z.boolean() }).strict();
+export type RecentCommitsRead = z.infer<typeof RecentCommitsReadSchema>;
+
 const EventBase = { eventId: ExternalIdSchema, host: PluginKindSchema, occurredAt: ISO_TIME.optional() } as const;
 /**
  * What happened at the host, in neutral words. Every adapter maps its own webhooks (or its poller's findings) to these. `eventId` is the host's delivery id
@@ -604,6 +636,11 @@ export interface CodeHost {
    * (a refused read is never an empty list). The setup snapshot and the drift check read through it; a host without it leaves drift "not checked".
    */
   setupFileVersions?(repository: RepositoryRef, revision: string, scope: HostScope, options: { match: (path: string) => boolean; max: number; timeoutMs?: number }): Promise<SetupFilesRead>;
+  /**
+   * Lane L4-LM1b (revert detection, add-only, optional, read-only): the newest `max` (1 to RECENT_COMMITS_MAX) commits of `branch`, newest first, from ONE request, with what a revert check needs (message, parent count, verification, author and committer
+   * accounts). `budget`, when given, is called before the request. A host that cannot answer THROWS (a refused read is never "no commits"). A host without it is never watched for reverts by polling.
+   */
+  recentCommits?(repository: RepositoryRef, branch: string, scope: HostScope, options: { max: number }, budget?: PageBudget): Promise<RecentCommitsRead>;
   listBranches(repository: RepositoryRef, page: number, scope: HostScope): Promise<BranchPage>;
   /**
    * The code owners of a branch, read and understood by the host itself (the owners file's syntax and its matching rules are the host's, never the core's), or undefined when the branch has none.

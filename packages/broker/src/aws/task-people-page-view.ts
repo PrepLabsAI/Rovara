@@ -67,8 +67,12 @@ export function renderTaskPeoplePanel(taskId: string, view: TaskPeopleView): str
     return `<li class="task-people-person"><h3>${escapeHtml(name)} ${you}</h3><p class="task-people-role-label">${escapeHtml(role)}</p>${effective}${controls}</li>`;
   }).join("");
   const addUrl = view.canManage ? addPeopleLink(view.addPeopleUrl) : undefined;
-  const add = addUrl === undefined ? "" : `<p><a class="task-people-add" href="${escapeHtml(addUrl)}">Add people in Slack</a></p>`;
-  const manualNextStep = view.canManage
+  // C4 (plan 4.2 "Add a person from the web"): an owner adds people of the task's company here; a Slack-shared task also keeps its Slack link.
+  const webAdd = view.canManage
+    ? `<form class="task-people-add-web" data-people-add-form data-people-revision="${view.revision}"><button type="button" data-people-find>Find people to add</button><label for="task-people-add-person">Person</label><select id="task-people-add-person" name="person" disabled></select><label for="task-people-add-role">Access</label><select id="task-people-add-role" name="role" disabled><option value="commenter">Commenter</option><option value="viewer">Viewer</option><option value="owner">Owner</option></select><button type="button" data-people-add disabled>Review addition</button><span class="task-people-status" role="status" aria-live="polite"></span></form>`
+    : "";
+  const add = addUrl === undefined ? webAdd : `${webAdd}<p><a class="task-people-add" href="${escapeHtml(addUrl)}">Add people in Slack</a></p>`;
+  const manualNextStep = addUrl !== undefined
     ? '<p class="task-people-manual-step">Invite them to this task channel in Slack, then return and choose their task role.</p>'
     : "";
   const takeover = view.canTakeOwnership

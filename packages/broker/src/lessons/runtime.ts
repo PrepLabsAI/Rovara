@@ -19,6 +19,7 @@ import { DocumentLessonStore } from "./document-store.js";
 import { documentLearningSettings, DocumentLocalToolsSettings, DocumentPresetStore, DocumentSoleOwnerSwitch, DocumentTier0Settings } from "./document-settings.js";
 import type { LocalToolsSettingsStore } from "./local-tools.js";
 import { documentLessonVectors } from "./document-vectors.js";
+import { documentMeasureSink } from "./measure.js";
 import { modelCorrectionJudge } from "./judge-model.js";
 import type { LoadDeps } from "./load.js";
 import { gatedByLessonsSwitch } from "./model-gate.js";
@@ -142,7 +143,8 @@ export function createLessonsRuntime(input: LessonsRuntimeInput): LessonsRuntime
   const model = input.model;
   const spend = input.spend ?? DENYING_SPEND;
   const judgeModel = model === undefined ? REFUSING_MODEL : gatedByLessonsSwitch(model);
-  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access };
+  // Phase 0 (measure only, `measure.ts`): each live load writes its fit numbers, for this company only. It changes nothing about what loads.
+  const load: LoadDeps = { ...base, store, embedder, vectors, settings, access, measure: documentMeasureSink(input.store, input.companyId, input.now) };
   const outcomeJudge = model === undefined || input.spend === undefined ? REFUSING_JUDGE : modelCorrectionJudge({ model, spend, pause, edition });
   const counters: CounterDeps = { ...base, store, judge: outcomeJudge, settings, vectors };
   const process: ProcessDeps = {

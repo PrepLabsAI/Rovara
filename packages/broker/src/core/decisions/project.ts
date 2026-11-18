@@ -8,8 +8,8 @@
 //   - a Full-path requirements and design pair is ONE card with two tabs that still records two approvals (owner Q1).
 // Anything an item says in words (a title, a question, a path) is flattened to plain text and cut; fixed words come from this file.
 import {
-  CI_STATE_WORDS, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, decisionFriction, canonicalJson,
-  type CardAction, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
+  CI_STATE_WORDS, SETUP_CHANGE_CHIP, DECISION_LABELS, DECISION_REJECT_REASONS, decisionFocusPath, DESIGN_SOURCE_ONLY_LABEL, DecisionCardIdSchema, DecisionCardSchema, DecisionPlanChoicesSchema, DecisionTabsSchema, PlanFeatureSchema, decisionFriction, canonicalJson,
+  type CardAction, type PlanFeature, type DecisionPlanChoices, type DecisionCard, type DecisionKind, type DecisionDetailGroup, type DecisionRejectReason, type DecisionRisk, type DecisionTab, type DecisionTabId, type EvidenceChip,
 } from "@agentx/contracts";
 import { DECISION_SPEND_LOW_MAX_USD, riskTierOf, type DecisionLocks, type TierInputs, type TierResult } from "./risk-tier.js";
 import { reviewCoverage, type DesignCardFacts } from "./design-facts.js";
@@ -62,8 +62,12 @@ export type DecisionItem =
     kind: "approve_plan"; path: "quick" | "full"; files: readonly string[]; claims: number; untestedClaims: number; cost?: Cost | undefined; tooBig?: boolean | undefined;
     /** Slice 2: the run limit approving sets (`proposedUsd`) and the one the task has now (`currentUsd`, absent: none). The card shows it and, when it raises the limit, asks for a tick. */
     runLimit?: { currentUsd?: number | undefined; proposedUsd: number } | undefined;
+    /** Lead 4 PCF: the task's feature as one line, and whether this person may change it (`core/report/plan-feature.ts`). It is not in the digest; one that does not read is left off, never a reason to drop the card. */
+    planFeature?: PlanFeature | undefined;
     /** Slice 2 review fix: the files or the checks could not be read from the plan. The card shows neither chip and is at least medium (risk-tier). */
     unread?: boolean | undefined;
+    /** L4-SC (DEC 254z c): the plan proposes a change to the test setup (a mock, a command, a variable, a dependency): one level riskier, and a chip says so. */
+    setupChange?: boolean | undefined;
     /** OWNER DECISION 7: the plan's questions, optional checks and open comments, decided on the card (plan-cards.ts). */
     choices?: DecisionPlanChoices | undefined;
   })
@@ -192,6 +196,7 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
             chip("test_proof", "Planned proof", item.untestedClaims === 0 ? "every claim has a check" : `${plural(item.untestedClaims, "claim", "claims")} with none`, item.untestedClaims === 0 ? "good" : "warning"),
           ]),
           ...(item.tooBig === true ? [chip("other", "Size", "too big for one screen", "warning")] : []),
+          ...(item.setupChange === true ? [chip("environment", "Setup", SETUP_CHANGE_CHIP, "warning")] : []),
         ],
         why: item.unread === true ? "The plan does not say what it changes or how it is proved; read it before you approve." : item.untestedClaims === 0 ? "Every claim in the plan has a planned check." : "Some claims have no planned check; look before you approve.",
       };
@@ -322,7 +327,7 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
 
 function tierInputsOf(item: DecisionItem): TierInputs {
   switch (item.kind) {
-    case "approve_plan": return { plan: { files: item.files, untestedClaims: item.untestedClaims, costHighUsd: item.cost?.highUsd, ...(item.unread === true ? { unread: true } : {}) } };
+    case "approve_plan": return { plan: { files: item.files, untestedClaims: item.untestedClaims, costHighUsd: item.cost?.highUsd, ...(item.unread === true ? { unread: true } : {}), ...(item.setupChange === true ? { setupChange: true } : {}) } };
     case "approve_design": return { design: { files: item.files, ...(item.review === undefined ? {} : { review: item.review }) } };
     case "merge": return { merge: { prRisk: item.prRisk, prReasons: item.prReasons, failedChecks: item.proof.failed, untestedClaims: item.proof.notTested, securityFindingsHigh: item.securityFindingsHigh, fullSuitePending: item.fullSuitePending, ciFailing: item.ci === "failing" } };
     case "approve_dependency": return { dependency: { newInstallScripts: item.newInstallScripts } };
@@ -414,6 +419,7 @@ export function cardOfItem(item: DecisionItem, locks: DecisionLocks = {}): { car
     actions: closed ? [] : actions,
     ...(item.kind === "approve_plan" && item.runLimit !== undefined && Number.isFinite(item.runLimit.proposedUsd)
       ? { runLimit: { proposedUsd: item.runLimit.proposedUsd, ...(item.runLimit.currentUsd === undefined || !Number.isFinite(item.runLimit.currentUsd) ? {} : { currentUsd: item.runLimit.currentUsd }) } } : {}),
+    ...(item.kind === "approve_plan" && !closed && item.planFeature !== undefined && PlanFeatureSchema.safeParse(item.planFeature).success ? { planFeature: item.planFeature } : {}),
     rejectReasons: closed || !actions.some((action) => action.kind === "reject") ? [] : [...REJECTABLE_REASONS],
     ...(answered === undefined ? {} : { answeredByRule: { ruleId: plainLine(answered.ruleId, 64), at: answered.at } }),
     status, createdAt: item.createdAt, ...(item.expiresAt === undefined ? {} : { expiresAt: item.expiresAt }),

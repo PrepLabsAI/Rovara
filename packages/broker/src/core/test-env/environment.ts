@@ -38,6 +38,7 @@ import {
   type DecisionRisk,
   type DocumentKey,
   type OrgId,
+  type Principal,
   type TestEnvLessSafeField,
   type TestEnvSeedTrust,
   type TestEnvironment,
@@ -417,12 +418,24 @@ function storedProposer(item: Item | undefined): { provider: string; personId: s
 interface LoadedState { orgId: OrgId; project: string; digest: string; body: TestEnvironmentBody; current: TestEnvironment | undefined; trust: TestEnvSeedTrust; lessSafe: TestEnvChangeFlag[]; risk: DecisionRisk; prove: ReturnType<typeof TestEnvProveReportSchema.safeParse> | undefined }
 
 /**
+ * Who may approve a proposal, on a host that has its own rule (L4-B3b, DEC 254z b: hosted Code reads the approver's LIVE company role and project grant against the proposal's risk). The laptop passes
+ * nothing: its gate's approvers (the owner's own session) are the rule, exactly as before.
+ */
+export interface TestEnvironmentApproverRule {
+  /** Whether this verified approver may approve this project's proposal at this risk, read now. A throw or anything but `true` is a refusal. */
+  mayDecide: (approver: Principal, input: { project: string; risk: DecisionRisk }) => Promise<boolean>;
+  /** The fixed words of a refusal. */
+  refusal: string;
+}
+
+/**
  * The approval of a proposed, proved environment as the project's next revision. The only inputs from the person are the digest and the revision they looked at (the gate's `seen`): the body comes from the
  * stored proposal and the report from the stored Prove run. One transaction commits the revision and moves the pointer, only if the pointer is still where the person saw it.
  * `deps` is the same as for the other functions here; the gate adds the audit record, the proof's single use and the replay of a repeated request.
  */
-export function createTestEnvironmentSubject(deps: TestEnvDeps, options: { companyId: OrgId }): DecisionSubject {
+export function createTestEnvironmentSubject(deps: TestEnvDeps, options: { companyId: OrgId; approval?: TestEnvironmentApproverRule }): DecisionSubject {
   const orgId = options.companyId;
+  const approval = options.approval;
   return {
     kind: TEST_ENVIRONMENT_KIND,
 
@@ -464,6 +477,14 @@ export function createTestEnvironmentSubject(deps: TestEnvDeps, options: { compa
     async apply(loaded, attempt, approvers, at): Promise<AppliedDecision> {
       const state = loaded.state as LoadedState;
       if (attempt.outcome !== "approve") throw new SubjectRefusal("invalid_outcome", "A test environment is approved or left alone: there is nothing to reject or send back.");
+      // A host's own rule, for every approver the point vouched for, read now (inside the decision, after the route's own check); a read that fails is a refusal.
+      if (approval !== undefined) {
+        for (const approver of approvers) {
+          let allowed: unknown;
+          try { allowed = await approval.mayDecide(approver, { project: state.project, risk: state.risk }); } catch { allowed = false; }
+          if (allowed !== true) throw new SubjectRefusal("not_the_approver", approval.refusal);
+        }
+      }
       const details = (attempt.details ?? {}) as TestEnvironmentDecisionDetails;
       const proved = testEnvIsProved(state.prove?.success === true ? state.prove.data : undefined, state.digest, state.body);
       if (!proved) throw new SubjectRefusal("invalid", "prove this environment (boot, smoke test and a full run) before approving it");

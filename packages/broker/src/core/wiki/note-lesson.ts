@@ -1,0 +1,98 @@
+// Lead 4 C1 (DEC 254zh/254zi): "Suggest as a lesson" for a wiki note that reads like a rule. There is no route that proposes a lesson (lessons are only ever learned), so this is the one seam that
+// does: it writes ONE lesson, status `pending`, with `reviewRequired`, and nothing else. It is never approved here, never on trial, never applied: the lessons library's own approval (the existing
+// approve route and its rules about who may decide) is the only way it goes live.
+//
+//  - The text is cleaned and screened exactly as an edit at approval is (`cleanForLearning`, `requestsCapabilityChange`); a note that asks for a change of tools, permissions, budgets or approvals is refused.
+//  - The lesson's id comes from the company, the project and the note, and a "seen once" marker is set after the write, so suggesting the same note twice is the same lesson (`already_proposed`), never a second card.
+//  - The project's learning mode must allow lessons (not Off); the install's lessons switch is checked by the caller (`lessonsOf(company)` is undefined where it is off).
+//  - The company and the project come from the caller's live membership (the route), never from the note.
+import { createHash } from "node:crypto";
+import type { OrgId } from "@agentx/contracts";
+import { WIKI_LESSON_BODY_MAX } from "@agentx/contracts";
+import { firstExpiry, pendingExpiry } from "../../lessons/expiry.js";
+import { cleanForLearning, requestsCapabilityChange } from "../../lessons/guards.js";
+import { classifyTier } from "../../lessons/tier.js";
+import { emitAudit, modeAllows, resolveLearning, type LearningSettingsReader } from "../../lessons/policy.js";
+import type { LessonAuditSink } from "../../lessons/ports.js";
+import type { LessonStore } from "../../lessons/store.js";
+import { LessonSchema, type Lesson } from "../../lessons/types.js";
+
+export interface WikiNoteLessonInput {
+  companyId: OrgId;
+  project: string;
+  noteId: string;
+  /** The person who wrote the note (the lesson names them as its author, so erasing them deletes it). */
+  authorId: string;
+  /** The person who pressed the button (the note's author or a maintainer): the audit names them. */
+  actorId: string;
+  text: string;
+  /** The file the note is tied to; it becomes the lesson's scope. */
+  file?: { repo: string; path: string } | undefined;
+}
+export type WikiNoteLessonResult =
+  | { state: "proposed" | "already_proposed"; lessonId: string }
+  | { state: "off" | "too_long" | "refused" };
+
+export interface WikiNoteLessonDeps {
+  store: LessonStore;
+  settings: LearningSettingsReader;
+  audit: LessonAuditSink;
+  now: () => number;
+}
+
+/** The lesson id for a note: the same note in the same project and company is always the same lesson. */
+export const lessonIdOfNote = (companyId: string, project: string, noteId: string): string =>
+  `wn_${createHash("sha256").update(`wiki-note-lesson\u0000${companyId}\u0000${project}\u0000${noteId}`).digest("hex").slice(0, 24)}`;
+
+const firstLine = (text: string, max: number): string => {
+  const line = text.split("\n").map((part) => part.trim()).find((part) => part !== "") ?? text;
+  const points = [...line];
+  return points.length <= max ? line : `${points.slice(0, max - 1).join("").trimEnd()}.`;
+};
+
+/** Writes the pending lesson for a note. Throws when the lessons store cannot be read or written (the route then answers its fixed "try again"). */
+export async function proposeLessonFromNote(deps: WikiNoteLessonDeps, input: WikiNoteLessonInput): Promise<WikiNoteLessonResult> {
+  const key = { workspaceId: input.companyId, project: input.project };
+  const resolved = await resolveLearning(deps.settings, key.workspaceId, key.project);
+  if (!modeAllows(resolved.chosenMode, "load")) return { state: "off" };
+  const body = cleanForLearning(input.text, WIKI_LESSON_BODY_MAX + 1);
+  if ([...body].length > WIKI_LESSON_BODY_MAX) return { state: "too_long" };
+  const title = cleanForLearning(firstLine(input.text, 80), 80);
+  if (body === "" || title === "" || requestsCapabilityChange(title, body)) return { state: "refused" };
+  const id = lessonIdOfNote(input.companyId, input.project, input.noteId);
+  // Suggested before? A marker the library keeps for exactly this ("seen once"), written after the lesson is: this seam reads no lesson (the access guard lists every file that does).
+  const marker = `wiki-note-lesson:${input.noteId}`;
+  if (await deps.store.seenOnce(key, marker)) return { state: "already_proposed", lessonId: id };
+
+  const now = deps.now();
+  const stages = ["PLAN", "IMPLEMENT", "REVIEW"] as const;
+  const scope = input.file === undefined ? {} : { repos: [input.file.repo], paths: [input.file.path] };
+  // The tier is the library's own rule on this text (reviewer stage, escalation words, commands, paths): a note that reads as risky needs two people, never the author, exactly like any other lesson.
+  // A person's note is at least tier 1 (never applied by itself), and a "never" result is refused.
+  const decision = classifyTier({ type: "convention", stages: [...stages], scope, citations: [], title, description: "", body, provenance: { minTrust: "member", audience: { kind: "project" } } }, {}, { tier: 1, reasons: ["wiki_note"] });
+  if (decision.tier === "never") return { state: "refused" };
+  const lesson: Lesson = LessonSchema.parse({
+    id, version: 1, workspaceId: key.workspaceId, project: key.project,
+    scope,
+    type: "convention", stages: [...stages],
+    title, description: "", body, citations: [],
+    // A person's own words, from a note a person wrote: member trust, a strong signal, but NOT a "member correction" (nothing here lets it go live on trial) and not proved against any code.
+    provenance: {
+      sourceEvents: [], sourceKinds: [], authors: [input.authorId], supportTasks: [], sources: [`member:${input.authorId}`], inputSources: [`member:${input.authorId}`], measured: false,
+      minTrust: "member", audience: { kind: "project" }, reflectorRun: "wiki-note", model: "none", memberSignal: true,
+    },
+    tier: decision.tier, tierReasons: decision.reasons, status: "pending", reviewRequired: true, pendingExpiresAt: pendingExpiry(now),
+    counters: { loaded: 0, helpful: 0, harmful: 0, citationStale: 0 }, staleAt: [], expiresAt: firstExpiry("convention", now, resolved.expiryDays), approvals: [], createdAt: now, updatedAt: now,
+  });
+  // A lost race with another write to the project's lessons is retried on a fresh set version; the lesson's id is the note's, so it can never be written twice.
+  let written = false;
+  for (let attempt = 0; attempt < 3 && !written; attempt += 1) {
+    written = (await deps.store.commit(key, await deps.store.setVersion(key), [lesson], now)).ok;
+    // Another suggest of the same note that won the race has set the marker by now: this one is the same lesson.
+    if (!written && (await deps.store.seenOnce(key, marker))) return { state: "already_proposed", lessonId: id };
+  }
+  if (!written) throw new Error("the lesson could not be written");
+  await deps.store.markOnce(key, marker);
+  await emitAudit(deps.audit, { action: "lesson.candidate_created", workspaceId: key.workspaceId, project: key.project, lessonId: id, actor: input.actorId, facts: { type: "convention" } });
+  return { state: "proposed", lessonId: id };
+}

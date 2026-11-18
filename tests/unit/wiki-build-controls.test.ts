@@ -190,6 +190,61 @@ describe("Refresh now: the same entry, a filtered plan", () => {
     expect(w.audited.map((entry) => entry.action)).toEqual(["refresh_requested"]);
   });
 
+  it("a claim-level mark (not only a page-level one) makes the page part of the refresh, in the view count and in the plan", async () => {
+    const w = world();
+    await seedWiki(w, "beacon", FULL);
+    await w.wiki.addFlag("beacon", { pageId: "repo-web", claimId: "c0001", by: { kind: "person", personId: "p1" } });
+    expect((await wikiControlsView(w.controls, ADMIN, "beacon")).wiki).toEqual({ pages: FULL.length, refreshPages: 1 });
+    expect((await refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() })).status).toBe(202);
+    expect((await readWikiBuildPointer(w.store, w.company, "beacon"))!.plan.map((p) => p.id)).toEqual(["repo-web"]);
+  });
+
+  it("a claim mark older than the page (a refresh already rewrote it and kept the claim) does not pick it up again; a resolved mark never does", async () => {
+    const w = world();
+    await seedWiki(w, "beacon", FULL);
+    await w.wiki.addFlag("beacon", { pageId: "repo-web", claimId: "c0001", by: { kind: "person", personId: "p1" } });
+    await w.wiki.addFlag("beacon", { pageId: "repo-api", claimId: "c0001", by: { kind: "person", personId: "p1" } });
+    // The pages are rewritten a moment later (a refresh ran): the marks stay open (disputed) but were looked at.
+    const later = createWikiStore({ store: w.store, companyId: w.company, now: () => T0 + 60_000 });
+    await later.writePage("beacon", page("repo-web"));
+    await later.writePage("beacon", page("repo-api"));
+    expect((await wikiControlsView(w.controls, ADMIN, "beacon")).wiki).toEqual({ pages: FULL.length, refreshPages: 0 });
+    await expect(refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.nothingToRefresh}` });
+    // A new mark after the rewrite counts again; a resolved one does not.
+    const newer = createWikiStore({ store: w.store, companyId: w.company, now: () => T0 + 120_000 });
+    await newer.addFlag("beacon", { pageId: "repo-web", claimId: "c0001", by: { kind: "person", personId: "p2" } });
+    await newer.resolveFlags("beacon", "repo-api");
+    expect((await wikiControlsView(w.controls, ADMIN, "beacon")).wiki.refreshPages).toBe(1);
+    await refreshWikiControl(w.controls, ADMIN, "beacon", { requestId: id() });
+    expect((await readWikiBuildPointer(w.store, w.company, "beacon"))!.plan.map((p) => p.id)).toEqual(["repo-web"]);
+  });
+
+  it("when the marks cannot all be read, every page counts (never a partial answer); when they cannot be read at all, the view and Refresh say so in fixed words", async () => {
+    const w = world();
+    await seedWiki(w, "beacon", FULL);
+    const unsure = { ...w.controls, wiki: { ...w.wiki, openClaimFlagPages: async () => ({ pages: [], complete: false }) } } as WikiControlsDeps;
+    expect((await wikiControlsView(unsure, ADMIN, "beacon")).wiki).toEqual({ pages: FULL.length, refreshPages: FULL.length });
+    await refreshWikiControl(unsure, ADMIN, "beacon", { requestId: id() });
+    expect((await readWikiBuildPointer(w.store, w.company, "beacon"))!.plan).toHaveLength(FULL.length);
+    const broken = { ...w.controls, wiki: { ...w.wiki, openClaimFlagPages: async () => { throw new Error("secret row detail"); } } } as WikiControlsDeps;
+    await expect(wikiControlsView(broken, ADMIN, "beacon")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${WIKI_CONTROLS_WORDS.unreadable}` });
+    await expect(refreshWikiControl(broken, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${WIKI_CONTROLS_WORDS.unreadable}` });
+  });
+
+  it("claim marks are per project and per company: another project's or company's mark makes no refresh here", async () => {
+    const store = new MemoryDocumentStore();
+    const a = world({ store, manages: ["beacon", "other"] });
+    const b = world({ store, company: COMPANY_B });
+    for (const [x, project] of [[a, "beacon"], [a, "other"], [b, "beacon"]] as const) await seedWiki(x, project, FULL);
+    await a.wiki.addFlag("other", { pageId: "repo-api", claimId: "c0001", by: { kind: "person", personId: "p1" } });
+    await b.wiki.addFlag("beacon", { pageId: "repo-api", claimId: "c0001", by: { kind: "person", personId: "p1" } });
+    expect((await wikiControlsView(a.controls, ADMIN, "beacon")).wiki.refreshPages).toBe(0);
+    await expect(refreshWikiControl(a.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.nothingToRefresh}` });
+    expect((await wikiControlsView(a.controls, ADMIN, "other")).wiki.refreshPages).toBe(1);
+    expect((await wikiControlsView(b.controls, ADMIN, "beacon")).wiki.refreshPages).toBe(1);
+    expect(a.starter.started).toHaveLength(0);
+  });
+
   it("refuses with nothing started when there is no wiki, or when everything is up to date", async () => {
     const empty = world();
     await expect(refreshWikiControl(empty.controls, ADMIN, "beacon", { requestId: id() })).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${WIKI_CONTROLS_WORDS.buildFirst}` });

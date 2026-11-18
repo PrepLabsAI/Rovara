@@ -352,6 +352,9 @@ describe("v1 to v2 converter", () => {
   it("is a different digest from the v1 set's, so the pin has to be renewed", () => {
     expect(mocks.fixtureSetDigest(convert(v1()))).not.toBe(mocks.serviceMockFixtureSetDigest(v1()));
   });
+  it("pins the literal digest of a fixed legacy v1 FixtureSet", () => {
+    expect(mocks.serviceMockFixtureSetDigest(v1())).toBe("bfc44cef24d6ddf406231ba6aabe4c385fb03c27612213afc1119463871d21f4");
+  });
   it("keeps a v1 set with no entries", () => {
     expect(convert(v1({ entries: [] })).entries).toEqual([]);
   });

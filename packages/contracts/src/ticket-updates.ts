@@ -25,15 +25,30 @@ export const TicketStatusMapSchema = z.object({
 export type TicketStatusMap = z.infer<typeof TicketStatusMapSchema>;
 
 /**
+ * How much Rovara writes on a ticket (owner decision 254z d, design B5), widest last. Everyone who can see the ticket sees it, so it is a project setting and nothing gets wider by itself:
+ *   status_only     today's five fixed comments (the task's title, the moment and the pull request's link), nothing else. The default for every project that exists and for a laptop;
+ *   decisions       the status, plus one thread on the ticket (a root comment edited in place) that records each question with its answer and each approval: what, who, where. No plan summary;
+ *   plan_decisions  that, plus the plan's summary (the lines of the decision card) with its risk and estimate in the root;
+ *   full            that, plus replies in the thread when a person must act (a question, the plan ready) and when the pull request opens.
+ * "Off" is `comments: false`, as before.
+ */
+export const TICKET_UPDATE_LEVELS = ["status_only", "decisions", "plan_decisions", "full"] as const;
+export const TicketUpdateLevelSchema = z.enum(TICKET_UPDATE_LEVELS);
+export type TicketUpdateLevel = z.infer<typeof TicketUpdateLevelSchema>;
+export const DEFAULT_TICKET_UPDATE_LEVEL: TicketUpdateLevel = "status_only";
+
+/**
  * A project's ticket updates.
  *   comments        post a comment at each moment (on by default: the ticket asked for the work);
- *   changeStatus    "Also change the ticket's status" (OFF by default), to the names in `statuses`.
+ *   changeStatus    "Also change the ticket's status" (OFF by default), to the names in `statuses`;
+ *   level           how much goes on the ticket (`TICKET_UPDATE_LEVELS`). Absent: `status_only`, so every setting saved before the levels existed keeps writing exactly what it wrote.
  * A task only its owner (or a named few) can see NEVER writes to a public tracker (a GitHub issue in a repository that is not private): an owner rule, with no project switch.
  */
 export const TicketUpdatesSettingsSchema = z.object({
   comments: z.boolean(),
   changeStatus: z.boolean(),
   statuses: TicketStatusMapSchema,
+  level: TicketUpdateLevelSchema.optional(),
 }).strict();
 export type TicketUpdatesSettings = z.infer<typeof TicketUpdatesSettingsSchema>;
 
@@ -41,6 +56,25 @@ export type TicketUpdatesSettings = z.infer<typeof TicketUpdatesSettingsSchema>;
 export const DEFAULT_TICKET_STATUSES: Readonly<TicketStatusMap> = { started: "In Progress", pr_opened: "In Review", merged: "Done" };
 
 export const DEFAULT_TICKET_UPDATES: Readonly<TicketUpdatesSettings> = { comments: true, changeStatus: false, statuses: DEFAULT_TICKET_STATUSES };
+
+/**
+ * What a NEW hosted project with Linear or Jira intake starts with (design B5, the recommended default behind the setting): the whole conversation. Whoever creates the project's settings (the connect step, which says in
+ * one plain line who will see it) saves this; nothing reads it as the default of a project that has settings already. Existing projects and a laptop stay on `DEFAULT_TICKET_UPDATES`.
+ */
+export const NEW_HOSTED_TICKET_UPDATES: Readonly<TicketUpdatesSettings> = { comments: true, changeStatus: false, statuses: DEFAULT_TICKET_STATUSES, level: "full" };
+
+/** The level a project's settings give: absent is `status_only`. */
+export function ticketUpdateLevelOf(settings: Pick<TicketUpdatesSettings, "level">): TicketUpdateLevel {
+  return settings.level ?? DEFAULT_TICKET_UPDATE_LEVEL;
+}
+
+/** The plain line the connect step and the setting show beside the choice: who will see what. */
+export const TICKET_UPDATE_LEVEL_WORDS: Readonly<Record<TicketUpdateLevel, string>> = {
+  status_only: "Everyone who can see the ticket sees when Rovara starts, has a plan ready, opens a pull request and finishes. Nothing else.",
+  decisions: "Everyone who can see the ticket also sees each question Rovara asked with its answer, who answered and where, and each approval.",
+  plan_decisions: "Everyone who can see the ticket also sees a short summary of the plan, its risk and its estimated cost.",
+  full: "Everyone who can see the ticket also sees Rovara's questions and plan-ready notices as replies, and a reply when the pull request opens.",
+};
 
 /** `PUT /v1/app/projects/{project}/intake/updates`: a maintainer replaces the project's settings. */
 export const TicketUpdatesPutBodySchema = z.object({ requestId: z.string().uuid(), settings: TicketUpdatesSettingsSchema }).strict();

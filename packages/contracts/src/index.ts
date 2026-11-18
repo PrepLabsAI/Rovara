@@ -46,6 +46,7 @@ export * from "./rovara-code-node.js";
 export * from "./rovara-code-intent.js";
 export * from "./intake.js";
 export * from "./ticket-updates.js";
+export * from "./task-log.js";
 export * from "./rovara-code-understand.js";
 export * from "./plan-critique-block.js";
 export * from "./workflow-proposed-checks.js";
@@ -173,6 +174,7 @@ export * from "./comment-triggers.js";
 export * from "./agent-run-node.js";
 export * from "./agent-guardrails.js";
 export * from "./agent-templates.js";
+export * from "./agent-directory-view.js";
 export * from "./app-projects.js";
 export * from "./public-suffix.js";
 export * from "./default-allow-domains.js";
@@ -284,6 +286,7 @@ export * from "./decision-focus.js";
 export * from "./decision-card-tabs.js";
 export * from "./test-environment.js";
 export * from "./service-mocks.js";
+export * from "./mock-spec-slices.js";
 export * from "./test-services-aws-resources.js";
 export * from "./test-services-shared.js";
 export * from "./test-env-dependency.js";
@@ -293,6 +296,9 @@ export * from "./sagemaker-words.js";
 export * from "./pii-scan.js";
 export * from "./sagemaker-recording.js";
 export * from "./test-answer-labels.js";
+// TE-A6 (DEC 254zt): which change most likely broke each failing test, the pure join.
+export * from "./failure-attribution.js";
+export * from "./failure-causes.js";
 export * from "./seed-script-lock.js";
 export * from "./generated/aws-emulator-services.js";
 export * from "./aws-emulator-service-keys.js";
@@ -381,6 +387,15 @@ export * from "./lesson-keys.js";
 export * from "./wiki-store.js";
 // Lead 4 A1: what a task's agents are given of the project wiki, and the worker's report.
 export * from "./wiki-agents.js";
+// Lead 4 C1: the wiki corrections (notes, Mark wrong, approvals) routes contract.
+export * from "./wiki-corrections.js";
+// Lead 4 J1: the smart Just answer service (limits, request, answer object, fixed words).
+export * from "./answers.js";
+export * from "./answer-keys.js";
+export * from "./slack-answers.js";
+// Lead 4 J3: the web start box's path suggestion (the Slack intake's first look and classifier, for the web).
+export * from "./start-suggest.js";
+export * from "./answer-feedback.js";
 export * from "./spec-target.js";
 
 // Wiki W0: the free file map and forecast.
@@ -434,6 +449,8 @@ export { EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EvalSpendInp
 export { MUTATION_SPOT_LIMITS, MUTATION_NOT_RUN_WORDS, mutationLimits, mutationLanguage, mutationPathRefused, mutationPathFingerprint, planMutants, mutationSentence, mutationMeasureEntry, type MutationLimits, type MutationLines, type MutationOperator, type MutationReason, type MutationOutcome, type MutationMethod, type MutationSpotResult, type MutationPlan, type SpotMutant } from "./mutation-spot.js";
 export * from "./machine-size.js";
 export * from "./machine-setup.js";
+export * from "./machine-size-launch.js";
+export * from "./machine-size-price.js";
 
 export * from "./setup-prove.js";
 export * from "./eval-round-artifact.js";
@@ -449,8 +466,11 @@ export * from "./ports/company-log.js";
 export * from "./service-contract.js";
 export * from "./service-contract-mock.js";
 export * from "./general-fakes.js";
+export * from "./plan-setup-changes.js";
 export * from "./general-fakes-set.js";
 export * from "./openapi-fake.js";
 export * from "./agent-model-choice.js";
 export * from "./company-engine-model.js";
+export * from "./report-keys.js";
+export * from "./cost-report.js";
 export * from "./upkeep.js";

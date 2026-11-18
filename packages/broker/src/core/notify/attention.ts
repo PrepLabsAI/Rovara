@@ -78,16 +78,28 @@ async function followersOf(store: Pick<DocumentStore, "query">, session: AgentSe
 }
 
 /**
- * Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed; the session's followers for a failure and for the end. A closed task tells only its followers
- * (a merged one tells its owner too).
+ * The task's People list as the host reads it (web task channel): the co-owners and the commenters, as attention ids (the ids the queue's rows and the inbox use). Absent: only the task's own person, as before.
+ * A host that has People says who: nothing here reads a role by itself, and a name on the list is no more than a person to ask again about (delivery and the inbox check each person's live access).
  */
-export async function attentionRecipients(store: Pick<DocumentStore, "query">, session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind): Promise<string[]> {
+export interface PeopleRecipients { owners: readonly string[]; commenters: readonly string[] }
+export type PeopleOf = (session: AgentSessionRecord) => Promise<PeopleRecipients>;
+
+const PERSON = /^[a-f0-9]{64}$/u;
+const personIds = (value: unknown): string[] => (Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && PERSON.test(id)) : []);
+
+/**
+ * Who is told about a change of this kind: the owner and, for a wait or a pause, the people the summary names as needed; the session's followers for a failure and for the end. A closed task tells only its followers
+ * (a merged one tells its owner too). People (web task channel): the task's co-owners are told like its owner, and its commenters like its followers (a failure and the end).
+ */
+export async function attentionRecipients(store: Pick<DocumentStore, "query">, session: AgentSessionRecord, summary: SessionSummary, kind: AttentionKind, people?: PeopleRecipients): Promise<string[]> {
   const owner = session.owner.developerId;
-  const named = summary.needsPeople.filter((id) => /^[a-f0-9]{64}$/u.test(id));
+  const named = summary.needsPeople.filter((id) => PERSON.test(id));
   const followers = kind === "failed" || kind === "done" ? await followersOf(store, session) : [];
   const ownerToo = kind !== "done" || sessionTaskStatus(summary).state === "merged";
-  const people = [...(ownerToo ? [owner] : []), ...(kind === "needs_you" || kind === "paused" ? named : []), ...followers];
-  return [...new Set(people)].slice(0, RECIPIENTS_MAX);
+  const coOwners = ownerToo ? personIds(people?.owners) : [];
+  const commenters = kind === "failed" || kind === "done" ? personIds(people?.commenters) : [];
+  const told = [...(ownerToo ? [owner] : []), ...coOwners, ...(kind === "needs_you" || kind === "paused" ? named : []), ...followers, ...commenters];
+  return [...new Set(told)].slice(0, RECIPIENTS_MAX);
 }
 
 /**
@@ -110,7 +122,7 @@ async function publishAttentionChanged(realtime: Pick<RealtimePublisher, "publis
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
-export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
+export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; peopleOf?: PeopleOf; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
   try {
     if (change.session.subject.kind !== "task") return 0;
     const kind = attentionKindOf(change.summary);
@@ -121,7 +133,12 @@ export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | 
     if (change.session.endedAt !== undefined && kind !== "done" && kind !== "failed") return 0;
     const before = sessionTaskStatus(change.previous), after = sessionTaskStatus(change.summary);
     if (before.state === after.state && before.reason === after.reason) return 0;
-    const people = await attentionRecipients(deps.store, change.session, change.summary, kind);
+    // The task's People, when the host keeps them: a list that cannot be read tells the others as before (and says so in fixed words), it never holds the queue back.
+    let onTask: PeopleRecipients | undefined;
+    if (deps.peopleOf !== undefined) {
+      try { onTask = await deps.peopleOf(change.session); } catch { (deps.log ?? (() => undefined))({ event: "attention.people_failed", sessionId: change.sessionId }); }
+    }
+    const people = await attentionRecipients(deps.store, change.session, change.summary, kind, onTask);
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
     for (const developerId of people) {
       if (deps.pending !== false) await deps.store.put({
@@ -221,7 +238,7 @@ export interface AttentionDeliveryDependencies {
    */
   urgent?: (orgId: OrgId, row: { developerId: string; sessionId: string; kind: AttentionKind }) => Promise<boolean>;
   /** The links an email carries (change the setting, stop these emails, the list of everything waiting); each only when it is a plain https link. */
-  emailLinks?: AttentionEmailLinks;
+  emailLinks?: AttentionEmailLinks | ((orgId: OrgId, developerId: string) => AttentionEmailLinks);
   /**
    * Lead 4 N1: what an `upkeep_paused` row needs. `administers`: whether the person still administers the project now (a project admin, or a company owner or admin), read live before every send; a row whose person no
    * longer does, or any failure to tell, is dropped without a word. `link`: the address of the Spending limits page for the project (a plain https link), or undefined. Absent: no upkeep row is delivered (it is dropped).
@@ -481,7 +498,7 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
       const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done");
       let ok = false, refused = false;
       if (tkey === EMAIL_TARGET) {
-        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", deps.emailLinks);
+        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : "attention", typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks);
         try {
           await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
           ok = true;

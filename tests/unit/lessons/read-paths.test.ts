@@ -26,6 +26,7 @@ const INTERNAL_LESSON_FILES: Record<string, string> = {
   "lessons/repo-file-readback.ts": "read-back re-reads a lesson only to write the team's own words back to it (an edit, a retirement) and to make new lessons from text in the repository; it returns counts and fingerprints, never a lesson, and shows nothing to anyone",
   "lessons/trial.ts": "moves a trial lesson that earned it to stable (14 days, 3 loads, no thumbs-down); acts on it and returns ids, never a lesson",
   "lessons/task-end.ts": "reads the task's load records and the source tasks of the lessons loaded into it to add them to a new draft's provenance (LV-1 M2); returns task ids, never a lesson",
+  "lessons/revert-question.ts": "after a revert, reads the lessons a reverted task loaded (their code area and whether they are in use) to write an evidence row of ids and numbers; it returns the ids it flagged, never a lesson or any text, and changes no lesson (revert-question.test.ts pins that)",
   "lessons/approve.ts": "decisions (approve, reject, retire, roll back) act on a lesson after mayHandle; the lists use readVisible",
 };
 const LESSON_READS = new Set(["list", "get", "manifests", "listAllHeads", "getHead", "versions"]);

@@ -23,6 +23,7 @@ import type { CitationFileReader } from "../citations/citation-check.js";
 import { checkWikiPage, storeCheckCache } from "./check.js";
 import { wikiBuildNotesKey, wikiBuildPartition, wikiBuildRunKey, wikiExpiryOf, wikiPageDoneKey, type WikiRunScope } from "./keys.js";
 import { planWikiPages } from "./plan.js";
+import { releaseWikiBuildSlot, reserveWikiBuildSlot, type WikiCompanySlot } from "./company-cap.js";
 import { cleanWikiNotes, frameWikiNotes, wikiPageInstructions } from "./prompt.js";
 
 /** The operation mode of a build run's own step (defined in the contract so the worker and the broker read one definition). */
@@ -62,6 +63,8 @@ export type WikiBuildStanding = { access: "manage" } | { access: "view" | "none"
 // ---- the pointer
 
 export interface WikiBuildPointer {
+  /** Ownership of this run's slot on the existing company limit row. */
+  companySlot?: WikiCompanySlot;
   orgId: OrgId;
   project: string;
   taskId: string;
@@ -256,9 +259,10 @@ async function launch(
   const starter = deps.starter!;
   const limits = effectiveWikiBuildLimits(await deps.limitSetting?.(project), await deps.limitLock?.());
   const startedAt = new Date(deps.now()).toISOString();
+  const companySlot = await reserveWikiBuildSlot(deps.store, deps.companyId, project, Date.parse(startedAt), Date.parse(startedAt) + (limits.wallClockMin + STALE_GRACE_MIN) * 60_000);
   const payer = { kind: WIKI_BUILD_PAYER_KIND, project };
   const pointerFor = (taskId: string): WikiBuildPointer => ({
-    orgId: deps.companyId, project, taskId, requestId, requestedBy: personId, startedAt, limits, pins: shape.pins, plan: shape.plan, keptFromEarlier: shape.keptFromEarlier,
+    companySlot, orgId: deps.companyId, project, taskId, requestId, requestedBy: personId, startedAt, limits, pins: shape.pins, plan: shape.plan, keptFromEarlier: shape.keptFromEarlier,
     ...(shape.continuedFrom === undefined ? {} : { continuedFrom: shape.continuedFrom }), doneIds: [], pagesWritten: 0, claimsKept: 0, claimsDropped: 0, spentCents: 0, spentEarlierCents: shape.spentEarlierCents, payer, buildKind: shape.buildKind,
     ...(shape.unattended === true ? { unattended: true as const } : {}),
   });
@@ -271,8 +275,13 @@ async function launch(
         condition: when.absent(),
       },
     });
+    if (started.duplicate) await releaseWikiBuildSlot(deps.store, deps.companyId, companySlot);
     return started.taskId;
   } catch (error) {
+    // A failed response can follow a committed task start. The port's strongly
+    // consistent read tells us whether the running task already owns this slot.
+    const committed = await readWikiBuildPointer(deps.store, deps.companyId, project);
+    if (committed?.companySlot?.token !== companySlot.token) await releaseWikiBuildSlot(deps.store, deps.companyId, companySlot);
     if (error instanceof Error && (error as { code?: unknown }).code === "WORKSPACE_BUSY") throw agentXError("WORKSPACE_BUSY", WIKI_BUILD_WORDS.busy);
     throw error;
   }
@@ -413,11 +422,14 @@ export async function stopWikiBuild(deps: WikiBuildDeps, personId: string, proje
 /**
  * Ends the run with a word (the first word stands). A page that is out stays granted, so the worker can still hand in a page it finished (a stop keeps finished pages); no new page is granted.
  */
-export async function endWikiBuild(store: Pick<DocumentStore, "update">, scope: WikiRunScope, word: WikiBuildEndWord, now: () => number): Promise<boolean> {
+export async function endWikiBuild(store: Pick<DocumentStore, "get" | "update">, scope: WikiRunScope, word: WikiBuildEndWord, now: () => number): Promise<boolean> {
+  const pointer = await readWikiBuildPointer(store, scope.orgId, scope.project);
   const written = await store.update({
     key: wikiBuildRunKey(scope), ops: [change.setIfAbsent("end", { word, at: new Date(now()).toISOString() })],
     condition: when.and(when.present(), when.eq("taskId", scope.taskId), when.notExists("end")),
   });
+  // Retry a failed release even when the first end write already succeeded.
+  if (pointer?.taskId === scope.taskId && pointer.companySlot !== undefined) await releaseWikiBuildSlot(store, scope.orgId, pointer.companySlot);
   return written.applied;
 }
 
