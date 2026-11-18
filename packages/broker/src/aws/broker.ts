@@ -1,5 +1,5 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
-import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js";
+import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
 import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
@@ -15652,6 +15652,9 @@ function buildBrokerHandler(callbackSigningKey: string) {
     lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration))),
     // L4-HW8: the lessons' Slack source reads a task's own thread through the signed `thread_messages` command of the deployment's Slack adapter (aws/hosted-slack-thread.ts); no adapter env, no source.
     ...((slack) => (slack === undefined ? {} : { lessonsSlack: slack }))(hostedLessonsSlack({ env: process.env, secretsManager, workspaces: slackCompany?.workspaces, legacyTeamId: process.env.SLACK_TEAM_ID || process.env.SLACK_ADAPTER_TEAM_ID })),
+    // L4-HW3d: the project's stored CI mode (real_check) and the company's rules lock decide merge tracking's CI mode, as on the settings page; cached per company and project, unreadable refuses.
+    // Same table and same rules service as the per-task limit reader (no new IAM, store or outside call). The dispatcher roots wire none (they track no merges).
+    hostedPolicySource: (hook) => hostedPolicySource({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: Date.now }, hook),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },

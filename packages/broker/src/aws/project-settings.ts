@@ -46,6 +46,8 @@ export function createProjectSettingsPolicySource(
   const scope = Object.freeze({ key: `${target.companyId}/${target.projectName}` });
   let snapshot: SettingsRow | undefined;
   let proposed: SettingsRow | undefined;
+  // The earliest expiry (ms) of any rules-service answer used by a resolve of this source; undefined when none was asked or answered.
+  let answerExpiresAt: number | undefined;
   const source = createRowsPolicySource(async (asked) => {
     if (asked.key !== scope.key) return undefined;
     if (proposed === undefined) {
@@ -66,10 +68,16 @@ export function createProjectSettingsPolicySource(
       const client = "jwks" in hook.settings
         ? createHostedPolicyHookClient(hook.settings, hook.install, { ...hook, now: deps.now })
         : createPolicyHookClient({ ...hook, settings: hook.settings, now: deps.now });
-      policy = withPolicyHookValues(source, policyHookValuesAsker(client), { scopeOf: (asked) => asked.key === scope.key ? target : undefined, now: deps.now, graceMs: 0 });
+      const ask = policyHookValuesAsker(client);
+      const noting: typeof ask = async (companyId, projectName) => {
+        const answer = await ask(companyId, projectName);
+        if (answer !== undefined && Number.isFinite(answer.expiresAt)) answerExpiresAt = answerExpiresAt === undefined ? answer.expiresAt : Math.min(answerExpiresAt, answer.expiresAt);
+        return answer;
+      };
+      policy = withPolicyHookValues(source, noting, { scopeOf: (asked) => asked.key === scope.key ? target : undefined, now: deps.now, graceMs: 0 });
     } catch { throw unavailable(); }
   }
-  return { source: policy, scope, snapshot: () => snapshot, propose: (row: SettingsRow) => { proposed = row; } };
+  return { source: policy, scope, snapshot: () => snapshot, answerExpiresAt: () => answerExpiresAt, propose: (row: SettingsRow) => { proposed = row; } };
 }
 
 /**
