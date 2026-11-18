@@ -10,6 +10,9 @@
 // What an excerpt keeps, verbatim from the vendor file: the openapi version, the API title and version, and for each listed operation its path, method, operationId and the one success
 // response's schema; for each schema named there, its `required` list and, for each REQUIRED property only, the keywords `type`, `format`, `enum` and `nullable`. Everything else (descriptions,
 // examples, vendor extensions, optional properties, nested definitions, error responses) is removed, so the excerpt stays small and carries no example values.
+//
+// One addition of ours, `x-rovara-not-extracted-paths`: the vendor's other published paths that could be confused with a kept one, because an actual path fits both (for example `/v1/charges/search` fits
+// `/v1/charges/{charge}`). A mock of one of them has no operation in the excerpt, so the check says no spec for it instead of reading it against the wrong operation.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -41,6 +44,14 @@ const KEPT_PROPERTY_KEYWORDS = ["type", "format", "enum", "nullable"] as const;
 const isObj = (value: Json | undefined): value is Obj => typeof value === "object" && value !== null && !Array.isArray(value);
 const need = (value: Json | undefined, what: string): Obj => { if (!isObj(value)) throw new Error(`vendor spec has no ${what}`); return value; };
 const str = (value: Json | undefined, what: string): string => { if (typeof value !== "string") throw new Error(`vendor spec has no ${what}`); return value; };
+const NOT_EXTRACTED_KEY = "x-rovara-not-extracted-paths";
+/** True when one actual path could fit both templates (same length, and at each place equal words or at least one parameter). */
+export function templatesOverlap(a: string, b: string): boolean {
+  const left = a.split("/");
+  const right = b.split("/");
+  const isParameter = (part: string): boolean => /^\{[^/{}]+\}$/u.test(part);
+  return left.length === right.length && left.every((part, index) => part === right[index] || isParameter(part) || isParameter(right[index]!));
+}
 const schemaNameOf = (ref: string): string => { const match = /^#\/components\/schemas\/([^/]+)$/u.exec(ref); if (match === null) throw new Error(`unsupported $ref ${ref}`); return match[1]!; };
 
 /** Builds one excerpt object from a parsed vendor spec. Throws when a listed operation, its success response or a schema is missing, so a spec change cannot silently shrink the excerpt. */
@@ -81,11 +92,15 @@ export function extractExcerpt(spec: Json, selection: readonly ExtractSelection[
     const forPath = (outPaths[path] ??= {}) as Obj;
     forPath[method] = { operationId, responses: { [status]: { content: { "application/json": { schema: kept } } } } };
   }
+  // Published paths outside the selection that a kept template could be confused with (never a path of the selection itself).
+  const kept = new Set(selection.map((entry) => entry.path));
+  const notExtracted = Object.keys(paths).filter((path) => !kept.has(path) && [...kept].some((own) => templatesOverlap(own, path))).sort();
   return {
     openapi: str(root.openapi, "openapi version"),
     info: { title: str(info.title, "title"), version: str(info.version, "version") },
     paths: outPaths,
     components: { schemas: Object.fromEntries(Object.entries(outSchemas).sort(([a], [b]) => (a < b ? -1 : 1))) },
+    [NOT_EXTRACTED_KEY]: notExtracted,
   };
 }
 

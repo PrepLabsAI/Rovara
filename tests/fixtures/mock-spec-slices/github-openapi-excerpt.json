@@ -225,5 +225,11 @@
         }
       }
     }
-  }
+  },
+  "x-rovara-not-extracted-paths": [
+    "/repos/{owner}/{repo}/issues/comments",
+    "/repos/{owner}/{repo}/issues/comments/{comment_id}",
+    "/repos/{owner}/{repo}/issues/events",
+    "/repos/{owner}/{repo}/issues/events/{event_id}"
+  ]
 }

@@ -10,6 +10,11 @@ const CHARGE = { id: "ch_1", object: "charge", amount: 1000, amount_captured: 10
 const REFUND = { id: "re_1", object: "refund", amount: 500, created: 1700000000, currency: "usd" };
 const ISSUE = { assignee: null, closed_at: null, comments: 0, comments_url: "https://api.github.com/x", events_url: "https://api.github.com/x", html_url: "https://github.com/x", id: 1, node_id: "I_1", labels: [], labels_url: "https://api.github.com/x", milestone: null, number: 7, repository_url: "https://api.github.com/x", state: "open", locked: false, title: "Bug", url: "https://api.github.com/x", user: null, created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" };
 const COMMENT = { id: 2, node_id: "IC_2", url: "https://api.github.com/x", html_url: "https://github.com/x", issue_url: "https://api.github.com/x", user: null, created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" };
+const twoAnswers = (): FixtureSet => {
+  const dependency = { id: "payments", family: "http:api.stripe.com", protocol: "http_json" as const, target: "api.stripe.com" };
+  const answer = (method: "GET" | "POST", path: string, status: number, body: string) => fixtureEntry({ dependency, match: { ignorePaths: [] } }, { method, path, contentType: "application/json", body: "{}" }, { status, headers: [], contentType: "application/json", body, latencyMs: 0 });
+  return FixtureSetSchema.parse({ schemaVersion: 2, dependency, origin: "recorded", revision: 1, recordedAt: "2026-11-01T00:00:00.000Z", syntheticOnly: true, match: { ignorePaths: [] }, faults: [], entries: [answer("POST", "/v1/charges", 200, JSON.stringify(CHARGE)), answer("POST", "/v1/refunds", 402, JSON.stringify({ error: { type: "card_error" } }))] });
+};
 const entryOf = (vendor: "stripe" | "github") => MOCK_SPEC_CATALOG.find((item) => item.vendor === vendor)!;
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const set = (method: "GET" | "POST", path: string, body = "{}", status = 200, host = "api.stripe.com"): FixtureSet => {
@@ -33,8 +38,8 @@ describe("pinned vendor spec slices", () => {
     }
     // Literal pins: a regenerated excerpt (a new upstream commit) changes these lines, so the change is visible in review.
     expect(MOCK_SPEC_CATALOG.map((entry) => [entry.vendor, entry.upstream.commit, entry.specSha256])).toEqual([
-      ["github", "c9c95fe34ced05fe076001f5c55704742bc8e7f8", "35caf0c363a16320e18ab3c5ede4e76132506f93fd8371a784e93ecdcac87ca2"],
-      ["stripe", "ed463ff0873e207ec317de52bf483aa94929144e", "22bd2df2447ecff07dc6bdc605c386bcd0ed633f981d8bde6ecac5f36a4bc434"],
+      ["github", "c9c95fe34ced05fe076001f5c55704742bc8e7f8", "4bec9f4f1fd636cd45ce923eed89128e4caf3b75b644338c20bc6f8cc8efc10f"],
+      ["stripe", "ed463ff0873e207ec317de52bf483aa94929144e", "20fce4c35e21303b1759e67761e9be76a8040d2876784b2ecd93489114789c43"],
     ]);
     expect(MOCK_SPEC_CATALOG.find((entry) => entry.vendor === "stripe")!.operations.map((operation) => operation.operationId)).toEqual(["PostCharges", "GetChargesCharge", "PostRefunds", "PostPaymentIntents", "GetPaymentIntentsIntent", "PostCustomers"]);
     expect(MOCK_SPEC_CATALOG.find((entry) => entry.vendor === "github")!.operations.map((operation) => operation.operationId)).toEqual(["issues/list-for-repo", "issues/create", "issues/get", "issues/list-comments", "issues/create-comment"]);
@@ -59,7 +64,7 @@ describe("pinned vendor spec slices", () => {
       expect(entry.specSource).not.toMatch(/\b(?:sk|pk|rk|whsec)_(?:live|test)_/u);
       expect(entry.specSource).not.toMatch(/\bgh[pousr]_[A-Za-z0-9]{20,}/u);
       expect(entry.specSource).not.toMatch(/AKIA[0-9A-Z]{16}|-----BEGIN/u);
-      expect(entry.specSource).not.toMatch(/"(?:description|example|examples|x-[A-Za-z-]+)"/u);
+      expect(entry.specSource).not.toMatch(/"(?:description|example|examples|x-(?!rovara-not-extracted-paths)[A-Za-z-]+)"/u);
     }
   });
 
@@ -89,7 +94,7 @@ describe("pinned vendor spec slices", () => {
       ["Stripe create charge", set("POST", "/v1/charges", JSON.stringify(CHARGE)), "stripe"],
       ["Stripe get charge", set("GET", "/v1/charges/ch_123", JSON.stringify(CHARGE)), "stripe"],
       ["Stripe create refund", set("POST", "/v1/refunds", JSON.stringify(REFUND)), "stripe"],
-      ["Stripe error answer is not read against the success schema", set("POST", "/v1/charges", JSON.stringify({ error: { type: "card_error" } }), 402), "stripe"],
+      ["Stripe success plus an error answer: the error is not read against the success schema", twoAnswers(), "stripe"],
       ["GitHub get issue", set("GET", "/repos/acme/widgets/issues/7", JSON.stringify(ISSUE), 200, "api.github.com"), "github"],
       ["GitHub list issues", set("GET", "/repos/acme/widgets/issues", JSON.stringify([ISSUE, ISSUE]), 200, "api.github.com"), "github"],
       ["GitHub create issue answers 201", set("POST", "/repos/acme/widgets/issues", JSON.stringify(ISSUE), 201, "api.github.com"), "github"],
@@ -139,6 +144,27 @@ describe("pinned vendor spec slices", () => {
     expect(sha(entryOf("github").specSource)).toBe(entryOf("github").specSha256);
   });
 
+  it("never reads a mock of a literal sibling route against the parameterised operation it also fits", () => {
+    const stripeSearch = set("GET", "/v1/charges/search", JSON.stringify({ object: "search_result", data: [] }));
+    expect(validateMockAgainstSpec(stripeSearch, entryOf("stripe"))).toMatchObject({ result: "no_spec" });
+    expect(validateMockAgainstSpec(set("GET", "/v1/payment_intents/search", JSON.stringify({ object: "search_result" })), entryOf("stripe")).result).toBe("no_spec");
+    const gh = (path: string) => validateMockAgainstSpec(set("GET", path, JSON.stringify([{ id: 1 }]), 200, "api.github.com"), entryOf("github")).result;
+    expect(gh("/repos/acme/widgets/issues/comments")).toBe("no_spec");
+    expect(gh("/repos/acme/widgets/issues/events")).toBe("no_spec");
+    expect(gh("/repos/acme/widgets/issues/comments/5")).toBe("no_spec");
+    // the kept templates still read their own paths
+    expect(validateMockAgainstSpec(set("GET", "/v1/charges/ch_1", JSON.stringify(CHARGE)), entryOf("stripe")).result).toBe("matches");
+    expect(MOCK_SPEC_CATALOG.map((entry) => (JSON.parse(entry.specSource) as Record<string, unknown>)["x-rovara-not-extracted-paths"])).toEqual([
+      ["/repos/{owner}/{repo}/issues/comments", "/repos/{owner}/{repo}/issues/comments/{comment_id}", "/repos/{owner}/{repo}/issues/events", "/repos/{owner}/{repo}/issues/events/{event_id}"],
+      ["/v1/charges/search", "/v1/payment_intents/search"],
+    ]);
+  });
+
+  it("says no spec, not matches, when only error answers fit an operation", () => {
+    const errorOnly = set("POST", "/v1/charges", JSON.stringify({ error: { type: "card_error" } }), 402);
+    expect(validateMockAgainstSpec(errorOnly, entryOf("stripe"))).toMatchObject({ result: "no_spec", findings: ["Only error answers match a published spec operation, and the pinned excerpt keeps no error shapes."] });
+  });
+
   describe("the extractor", () => {
     const vendor: Json = {
       openapi: "3.0.3", info: { title: "T", version: "9", description: "long text" },
@@ -147,8 +173,13 @@ describe("pinned vendor spec slices", () => {
     };
     it("keeps only the required properties' type keywords and drops descriptions, examples and optional properties", () => {
       const text = excerptText(extractExcerpt(vendor, [{ path: "/a/{id}", method: "get" }]));
-      expect(JSON.parse(text)).toEqual({ openapi: "3.0.3", info: { title: "T", version: "9" }, paths: { "/a/{id}": { get: { operationId: "getA", responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/a" } } } } } } } }, components: { schemas: { a: { type: "object", required: ["id", "kind"], properties: { id: { type: "string" }, kind: { type: "string", enum: ["a"] } } } } } });
+      expect(JSON.parse(text)).toEqual({ "x-rovara-not-extracted-paths": [], openapi: "3.0.3", info: { title: "T", version: "9" }, paths: { "/a/{id}": { get: { operationId: "getA", responses: { "200": { content: { "application/json": { schema: { $ref: "#/components/schemas/a" } } } } } } } }, components: { schemas: { a: { type: "object", required: ["id", "kind"], properties: { id: { type: "string" }, kind: { type: "string", enum: ["a"] } } } } } });
       expect(text).not.toContain("sk_test_x");
+    });
+    it("records the published paths a kept template could be confused with, and not unrelated ones", () => {
+      const spec = structuredClone(vendor) as { paths: Record<string, unknown> };
+      spec.paths["/a/search"] = {}; spec.paths["/a/{id}/more"] = {}; spec.paths["/b/{id}"] = {};
+      expect(extractExcerpt(spec as unknown as Json, [{ path: "/a/{id}", method: "get" }])["x-rovara-not-extracted-paths"]).toEqual(["/a/search"]);
     });
     it("refuses a spec that no longer has a listed operation, rather than shrinking the excerpt", () => {
       expect(() => extractExcerpt(vendor, [{ path: "/gone", method: "get" }])).toThrow("no path /gone");

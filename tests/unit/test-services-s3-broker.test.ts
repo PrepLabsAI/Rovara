@@ -349,6 +349,11 @@ describe("the vendor spec check on a fake's evidence row (L4-VS)", () => {
     const noMethod = { ...store, specSlice: undefined } as unknown as FixtureStore;
     expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => noMethod }, { orgId: ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies![0]!.fake).not.toHaveProperty("mockSpec");
     expect((await evidenceEnvironmentOf({ ...h.deps, fixtureStore: () => store }, { orgId: OTHER_ORG, project: PROJECT, taskId: "t1" }, ON)).dependencies).toBeUndefined();
+    // the slice row itself is the company's: another company, or another project of this one, is refused by the store
+    const digest = fixtureSetDigest(stripeSet(GOOD));
+    expect((await store.specSlice(ORG, PROJECT, digest)).ok).toBe(true);
+    expect((await store.specSlice(OTHER_ORG, PROJECT, digest)).ok).toBe(false);
+    expect((await store.specSlice(ORG, "other-project", digest)).ok).toBe(false);
   });
   it("a fake that did not start carries no spec result", () => {
     const record = { ...usageOf([]), dependencies: [{ id: "payments", started: false, healthy: false, startMs: 0, resetCount: 0, failure: "start_failed" }] } as RawUsage;

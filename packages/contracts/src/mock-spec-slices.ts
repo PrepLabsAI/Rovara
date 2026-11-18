@@ -20,8 +20,12 @@ const asObject = (value: unknown, what: string): Record<string, unknown> => {
 };
 
 /** Reads the operations out of a pinned excerpt (see scripts/extract-mock-spec-excerpts.ts for what an excerpt keeps). The caller has already checked the excerpt against its hash pin. */
-function excerptOperations(specSource: string): ExcerptOperation[] {
+function excerptOperations(specSource: string): ExcerptOperation[] { return readExcerpt(specSource).operations; }
+
+/** The operations of a pinned excerpt, and the published paths it names as not extracted (a mock of one of those is never read against a kept operation that the same actual path also fits). */
+function readExcerpt(specSource: string): { operations: ExcerptOperation[]; notExtracted: string[] } {
   const root = asObject(JSON.parse(specSource), "root");
+  const notExtracted = z.array(z.string().min(1).max(300)).parse(root["x-rovara-not-extracted-paths"] ?? []);
   const schemas = asObject(asObject(root.components, "components").schemas, "schemas");
   const operations: ExcerptOperation[] = [];
   for (const [path, item] of Object.entries(asObject(root.paths, "paths"))) {
@@ -43,7 +47,7 @@ function excerptOperations(specSource: string): ExcerptOperation[] {
       operations.push({ operationId: z.string().min(1).parse(operation.operationId), method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).parse(method.toUpperCase()), path, status, list, required, fields });
     }
   }
-  return operations;
+  return { operations, notExtracted };
 }
 
 const catalogEntryOf = (vendor: "stripe" | "github", specSource: string, pin: { specSha256: string; specVersion: string; upstream: MockSpecCatalogEntry["upstream"] }): MockSpecCatalogEntry => ({
@@ -114,22 +118,26 @@ function responseProblems(operation: ExcerptOperation, body: unknown): string[] 
 export function validateMockAgainstSpec(set: FixtureSet, catalog: MockSpecCatalogEntry): { result: "matches" | "mismatch" | "no_spec"; operations: MockSpecCatalogEntry["operations"]; findings: string[] } {
   const entry = MockSpecCatalogEntrySchema.parse(catalog);
   if (mockSpecCatalogEntryDigest(entry) !== entry.specSha256) throw new Error("vendor spec catalog hash mismatch");
-  const known = excerptOperations(entry.specSource);
+  const { operations: known, notExtracted } = readExcerpt(entry.specSource);
   const findings = new Set<string>();
   let hasOperation = false;
+  let readSuccess = false;
   for (const fixture of set.entries) {
+    if (notExtracted.some((template) => pathMatches(template, fixture.request.path))) continue;
     const operation = known.find((candidate) => candidate.method === fixture.request.method && pathMatches(candidate.path, fixture.request.path));
     if (operation === undefined) continue;
     hasOperation = true;
     const status = fixture.response.status;
     if (status < 200 || status > 299) continue;
+    readSuccess = true;
     if (String(status) !== operation.status) findings.add(`${operation.operationId}: answers ${String(status)}, but the pinned spec documents ${operation.status}.`);
     let response: unknown;
     try { response = JSON.parse(fixture.response.body); } catch { findings.add(`${operation.operationId}: response is not JSON.`); continue; }
     for (const problem of responseProblems(operation, response)) findings.add(problem);
   }
   if (!hasOperation) findings.add("No published spec operation matches this mock.");
-  return { result: !hasOperation ? "no_spec" : findings.size === 0 ? "matches" : "mismatch", operations: entry.operations, findings: [...findings].slice(0, 100) };
+  else if (!readSuccess) findings.add("Only error answers match a published spec operation, and the pinned excerpt keeps no error shapes.");
+  return { result: !hasOperation || !readSuccess ? "no_spec" : findings.size === 0 ? "matches" : "mismatch", operations: entry.operations, findings: [...findings].slice(0, 100) };
 }
 
 /** Pin at approval time. The returned record is separate from FixtureSet and never affects its canonical digest. */
