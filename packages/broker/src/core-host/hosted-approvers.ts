@@ -6,7 +6,7 @@
 //   - the request's subject is a core task of that company, and the person is its own person (`developerId` on the task record read from the store, never the caller's word);
 //   - a fresh STEP-UP (#662, merged via #695): the person proved it was them with a factor Code owns (an emailed code, a passkey, a company re-authentication) no longer ago than the
 //     window (FRESH_SIGN_IN_SECONDS, ten minutes; the company's own "fresh sign-in" setting, the policy hook wrapper and the dev routes may only shorten it). A Slack, Google or GitHub round trip never counts.
-// Anything else (another subject type, another person, a company admin, a code host comment, a chat press) is refused: the install offers one method, `rovara-step-up`.
+// Anything else (another subject type, another person, a company admin, a code host comment, a chat press) is refused: the install offers one method, `rovara-step-up` (HW5b: and, where the deployment serves a chat, the chat's press at low or medium risk, `hosted-chat-approval.ts`).
 //
 // L4-D (DEC 254z b): a project's SETUP CANDIDATE (`setup_proposal`, its id the project's name) is the one other subject. Its proof is issued for that subject only (`issueSetupStepUpApproval`,
 // marked so a task proof can never stand for it and the other way round) and needs the same fresh step-up, card binding and one-time part; the person must be a live member of the company.
@@ -31,7 +31,7 @@ import {
   type IdentityProvider, type Principal,
 } from "@agentx/contracts";
 import { decisionRequestIdOf } from "../core/decisions/approval-gate.js";
-import { readApprovalSignInRule } from "../core/decisions/sign-in-setting.js";
+import { readApprovalSignInRule } from "../core/decisions/sign-in-setting.js"; import { chatApprovalMethod, chatMethodsOf, verifyChatPress, type HostedChatApproval } from "./hosted-chat-approval.js"; export { chatApprovalMethod, type HostedChatApproval } from "./hosted-chat-approval.js";
 import { STEP_UP_METHODS } from "../core/script-tokens/index.js";
 import { taskKey } from "../core/task-flow/keys.js";
 
@@ -190,7 +190,7 @@ export interface HostedApproversOptions {
   key?: Buffer | undefined;
   /** The install's step-up window in seconds. Default FRESH_SIGN_IN_SECONDS. Only ever shortened: by the company's own "fresh sign-in" setting (a shorter window), and by the policy hook in front of this adapter. */
   windowSeconds?: number;
-  now: () => Date;
+  now: () => Date; /** HW5b (hosted-chat-approval.ts): the chat a press may approve a low or medium risk plan in. Absent: the install offers the step-up method alone. */ chat?: HostedChatApproval | undefined;
 }
 
 /** The deployed `approvers` point (see the file comment). */
@@ -199,7 +199,7 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
   const windowSeconds = options.windowSeconds ?? FRESH_SIGN_IN_SECONDS;
   if (!Number.isSafeInteger(windowSeconds) || windowSeconds < 60 || windowSeconds > FRESH_SIGN_IN_SECONDS) throw new Error("the step-up window must be a whole number of seconds from 60 to the default");
   const nowMs = (): number => options.now().getTime();
-  const method = [STEP_UP_APPROVAL_METHOD];
+  const method = [STEP_UP_APPROVAL_METHOD]; const chat = options.chat;
 
   /** A live claim, matched by its id, as the condition every settle writes under. */
   const liveClaim = (claimId: string, at: number) => when.and(when.eq("state", "claimed"), when.eq("claimId", claimId), when.gt("until", at));
@@ -223,16 +223,16 @@ export function createHostedApprovers(options: HostedApproversOptions): Approver
   return {
     async requirement(request: ApprovalRequest): Promise<ApprovalRequirement> {
       // One method for every answer: a fresh step-up. The sign-in rule says the same to the decision gate (it checks `authTime`, the step-up's time).
-      const seconds = await windowFor(request?.companyId);
+      const seconds = await windowFor(request?.companyId); const withChat = [...method, ...chatMethodsOf(chat, request)]; // HW5b: a chat press is offered for a task's plan of low or medium risk and nothing else (never a strong or a rejecting method)
       return {
-        methods: [...method], minApprovers: 1, selfApprovalAllowed: true,
-        strongMethods: [...method], rejectMethods: [...method], changesMethods: [...method],
+        methods: withChat, minApprovers: 1, selfApprovalAllowed: true,
+        strongMethods: [...method], rejectMethods: [...method], changesMethods: withChat,
         signIn: { mode: "window", seconds },
       };
     },
 
     async verify(request: ApprovalRequest, proof: ApprovalProof): Promise<ApprovalVerdict> {
-      const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason });
+      const refuse = (reason: string): ApprovalVerdict => ({ approved: false, reason }); if (chat !== undefined && proof?.method === chatApprovalMethod(chat.channel)) return await verifyChatPress({ store, identity, now: nowMs }, chat, request, proof);
       if (proof?.method !== STEP_UP_APPROVAL_METHOD) return refuse("unknown_method");
       if (key === undefined) return refuse("method_not_available");
       // A read-only check of a one-time part would leave it replayable: only a caller that settles claims may use this method.

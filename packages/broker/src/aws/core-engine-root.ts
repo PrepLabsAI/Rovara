@@ -45,7 +45,8 @@ import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hostedDecisionService, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
@@ -63,6 +64,7 @@ import type { ChatThreads } from "../core-host/chat-threads.js";
 import { projectPageUrl } from "../core/decisions/open-path.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
+import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
@@ -528,6 +530,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
+  // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
+  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : stepUpApprovalKeyOf(inputs.callbackSigningKey));
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true;
   // L2b: read when first needed (a serving switch only); a broken setting throws in fixed words and refuses the runtime.
@@ -589,7 +593,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -783,7 +787,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     });
     const deployedCallerOf = deployedCallerFromMembership(membershipOf);
     const chatThreads = inputs.chatThreads;
-    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
+    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
+      // L4-U5d: a later message in that thread is input for the task (one line here; the rule and the routing are core-host/chat-thread-input.ts).
+      chatThreads === undefined ? undefined : (deployed, input) => addChatThreadInput({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
+      // HW5b: a press of Approve, or the words for Request changes, on the plan card (one line here; the rule is core-host/chat-decision.ts and the approvers' `chat-<channel>` method).
+      chatApproval === undefined || chatThreads?.personOf === undefined ? undefined : (deployed, press) => decideFromChat({
+        chatThreads, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
+        companyFor: async (companyId) => {
+          const runtime = await app.runtimeFor(companyId);
+          const registry = await app.registry();
+          // The same gate as the web's decision cards (the company's approvers point, with the policy hook's wrapper); it is rebuilt per press, as the card routes' is per company.
+          return { store: runtime.flow.deps.store, gate: hostedDecisionService({ deps: runtime.flow.deps, registry, companyId, now }).gate };
+        },
+      }, deployed, press));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
@@ -845,6 +861,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const entry = coreTasks;
     coreTasks = {
       route: (request, caller) => entry.route(request, caller),
+      // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
+      ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
+      ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
+      ...(entry.chatDecision === undefined ? {} : { chatDecision: (caller: CoreEntryCaller, press: Parameters<NonNullable<CoreTaskEntry["chatDecision"]>>[1]) => entry.chatDecision!(caller, press) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);

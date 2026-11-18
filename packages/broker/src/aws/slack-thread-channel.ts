@@ -5,9 +5,12 @@ import { SLACK_CHANNEL, type ChannelAdapter, type ChannelEvent, type OrgId } fro
 import type { ChatThreads } from "../core-host/chat-threads.js";
 import { SLACK_CAPABILITIES, SlackChannel } from "../plugins/channel/slack/index.js";
 import { slackCallerToken, type SlackCallerWorkspaces } from "./slack-workspace-tokens.js";
+import type { SlackPerson } from "./slack-person.js";
 
 export interface HostedSlackThreadsOptions {
   workspaces: SlackCallerWorkspaces;
+  /** HW5b: which Rovara person a Slack account is in a company (`createSlackPersonResolver`: a link or the Slack sign-in membership, a live member). Absent: a press in the thread decides nothing. */
+  person?: ((input: { teamId: string; userId: string }) => Promise<SlackPerson>) | undefined;
   fetch?: typeof fetch | undefined;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -47,5 +50,15 @@ export function hostedSlackThreads(options: HostedSlackThreadsOptions): ChatThre
       try { return await workspaces.requireCompany(tenant); } catch { return undefined; }
     },
     adapterFor: (companyId, channel) => (channel === SLACK_CHANNEL ? adapterOf(companyId) : undefined),
+    ...(options.person === undefined ? {} : {
+      async personOf(companyId, actor) {
+        if (actor.channel !== SLACK_CHANNEL) return undefined;
+        try {
+          // The resolver reads the workspace's company, the link and the live membership on this call; a person of another company, or an unlinked account, is nobody here.
+          const found = await options.person!({ teamId: actor.tenant, userId: actor.userId });
+          return found.kind === "linked" && found.companyId === companyId ? { personId: found.personId, via: found.via } : undefined;
+        } catch { return undefined; }
+      },
+    }),
   };
 }

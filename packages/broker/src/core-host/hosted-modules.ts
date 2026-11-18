@@ -36,7 +36,7 @@ import { readTask, workspaceOperations } from "../core/task-flow/reads.js";
 import { DEFAULT_PLANNING_LIMIT_USD } from "../core/cost/limits.js";
 import type { CoreService } from "./core-runtime.js";
 import { costMicrosOf, createModelPrices, type ModelPrices } from "../core/cost/price-table.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "./hosted-approvers.js";
+import { createHostedApprovers, stepUpApprovalKeyOf, type HostedChatApproval } from "./hosted-approvers.js";
 import { coreAdapter, type CoreAdapterModule } from "./registry.js";
 
 /** The identity adapter's name on a deployed install: the principals it names were signed in by Code's own sign-in. */
@@ -507,6 +507,8 @@ export interface HostedSecurityInputs {
   runStopWired?: boolean;
   /** L2-5 (b): the project's own per-task limit (see `HostedAdmissionOptions.projectTaskCap`). */
   projectTaskCap?: ProjectTaskCap | undefined;
+  /** HW5b: the chat a press may approve a low or medium risk plan in (see `HostedChatApproval`). Absent (the dispatcher): the approvers point takes the step-up alone. */
+  chat?: HostedChatApproval | undefined;
 }
 
 /**
@@ -532,6 +534,7 @@ export function hostedSecurityModules(inputs: HostedSecurityInputs): CoreAdapter
       create: (context, registry) => createHostedApprovers({
         store: registry.require("storage"), identity: registry.require("identity"), now: context.now,
         ...(inputs.callbackSigningKey === undefined ? {} : { key: stepUpApprovalKeyOf(inputs.callbackSigningKey) }),
+        ...(inputs.chat === undefined ? {} : { chat: inputs.chat }),
       }),
     }),
     coreAdapter({
