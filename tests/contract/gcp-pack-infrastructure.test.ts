@@ -1,5 +1,5 @@
 // L4-E8I (owner DEC 254zzz62): the infrastructure half of the GCP stand-in pack, named environments only, off by default. What must hold, on the synthesized templates and on the policy documents:
-//   1. EGRESS. The worker hosts may pull from Google's image registries gcr.io and us-docker.pkg.dev and nothing else, only while the setting names the `pulled` group: the base allow list's Domains is an Fn::If of itself with
+//   1. EGRESS. The VPC's DNS allow list gains Google's image registries gcr.io and us-docker.pkg.dev and nothing else, only while the setting names the `pulled` group: the base allow list's Domains is an Fn::If of itself with
 //      and without exactly those two exact names; no new list, rule, priority, endpoint or resolver rule; the block-everything rule stays last. HTTPS only: the worker security group's egress is the one 443 rule it always had.
 //   2. THE SEALED BOX. Nothing that gives a box a route out was touched: the security groups' egress, routes, NAT gateways, gateway endpoints, the firewall rule group and the launch template are the ones in the recorded snapshot
 //      (named-templates.test.ts: the snapshot passes with only these additions taken out), and the stage's wall code is byte for byte what it was (ec2-test-services-stage.test.ts).
@@ -8,7 +8,7 @@
 //   4. IAM. The worker role reads exactly those three repositories with exactly the three ECR read actions, in one statement of its own; the existing prefix read does not reach them (so this is the narrowest addition); no push, delete,
 //      pull-through or create. The deploy role and the default boundary allow what CloudFormation does for these resources (checked on the policy documents: a template diff misses the boundary).
 //   5. THE SETTING. TestServicesGcpPack, default off, the same values on the foundation and the control plane; packed `gp` for the broker and the dispatcher; one plain variable for the session steps; the legacy deployment has none of it.
-import { Stack, type App } from "aws-cdk-lib";
+import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -16,6 +16,9 @@ import {
   gcpPackMirrorRepositories, gcpPackPullsFromSource, serviceRoleStatements, type PolicyStatementJson,
 } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { EGRESS_ALLOW_DOMAINS_CONTEXT_KEY } from "../../infra/lib/agent-dns-firewall.js";
+import { environmentNaming } from "../../infra/lib/naming.js";
+import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
 import { GCP_PACK_MIRROR_KEEP_TAGGED, GCP_PACK_MIRROR_LIFECYCLE_POLICY, GCP_PACK_MIRROR_READ_SID, TEST_SERVICE_MIRROR_READ_ACTIONS } from "../../infra/lib/test-service-mirror.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -23,7 +26,7 @@ skipLambdaBundling();
 
 type Resource = { Type: string; Properties: Record<string, unknown>; DeletionPolicy?: string; UpdateReplacePolicy?: string; Condition?: string };
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown };
-const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
+const stacksOf = (app: Pick<App, "node">) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
 const resourcesOf = (template: Template) => template.toJSON().Resources as Record<string, Resource>;
 const ofType = (template: Template, type: string) => Object.entries(resourcesOf(template)).filter(([, r]) => r.Type === type);
 const asList = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
@@ -107,6 +110,17 @@ describe("the GCP pack's infrastructure (L4-E8I)", () => {
       expect(on).toEqual([...off, "gcr.io", "us-docker.pkg.dev"]);
       expect(off.some((domain) => /(^|\.)gcr\.io$|(^|\.)pkg\.dev$|^\*$/u.test(domain))).toBe(false);
       expect(on.slice(off.length)).toEqual([...GCP_PACK_PULL_REGISTRY_HOSTS]);
+    });
+
+    it("an operator's extra domain that is already one of the two registries is listed once, in both branches' result", () => {
+      for (const extra of ["gcr.io", "GCR.IO"]) {
+        const app = new App({ context: { [EGRESS_ALLOW_DOMAINS_CONTEXT_KEY]: extra } });
+        const template = Template.fromStack(new ProductionFoundationStack(app, "DupFoundation", { deploymentRegion: "us-west-2", naming: environmentNaming("staging") }));
+        const allow = ofType(template, "AWS::Route53Resolver::FirewallDomainList").find(([, list]) => list.Properties.Name === "agentx-staging-allow")![1];
+        const [, on] = (allow.Properties.Domains as { "Fn::If": [string, string[], string[]] })["Fn::If"];
+        expect(on.filter((domain) => typeof domain === "string" && domain.toLowerCase() === "gcr.io"), extra).toHaveLength(1);
+        expect(on.filter((domain) => domain === "us-docker.pkg.dev")).toHaveLength(1);
+      }
     });
 
     it("the condition is true for exactly the values that name `pulled`, and no other", () => {
