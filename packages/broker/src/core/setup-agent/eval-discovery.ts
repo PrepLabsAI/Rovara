@@ -17,11 +17,12 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
-  agentXError, canonicalJson, change, evalCommandFingerprintOf, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
+  EVAL_DEFAULT_CALL_BUDGET, EVAL_DEFAULT_COST_BUDGET_MICROS, EVAL_DISCOVERY_REPORT_MAX_BYTES, EVAL_OUTPUT_UNREADABLE_MESSAGE, EVAL_QUESTION_FILE_MAX_BYTES, EVAL_QUESTION_FILES_TOTAL_MAX_BYTES, EvalDiscoveryConfirmBodySchema, SetupEvalDiscoveryReportSchema,
+  EVAL_WRAPPER_REPORT_PATH, agentXError, canonicalJson, change, evalCommandFingerprintOf, evalOutputNeedsWrapper, evalWrapperCommandOf, evalWrapperFor, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
 import type { SetupEvalDiscoveryView } from "../local-pages/views.js";
+import { listEvalWrapperFiles, needsOf, recordEvalWrapperTest, wrapperFileFor } from "./eval-wrapper.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import { taskKey } from "../task-flow/keys.js";
@@ -226,6 +227,19 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   if (row.state !== "reported") refuse(log, "eval_discovery_confirm_refused", "confirmed", "CHANGE_STALE", "That eval report was already confirmed.");
   const suite = row.report.suites.find((entry) => entry.selection === body.selection);
   if (suite === undefined) refuse(log, "eval_discovery_confirm_refused", "selection", "CONFIG_INVALID", "That eval is not in the setup run's report.");
+  // L4-EVW4 (DEC 254zzz43): an eval whose results Rovara cannot read as they are is not approved for spend until its wrapper file is on the project's DEFAULT branch (found by `detectEvalWrappers`, whoever put it there): it
+  // would only ever read "Not run". From then on the eval runs THROUGH the file: the plan's command is the wrapper and its report is the wrapper's JUnit file, so the plan, its fingerprint and the dollars the person saw
+  // are for exactly that run (the cost is the same eval spend approval, bound by `seen`).
+  let wrapped: { language: "python" | "node" } | undefined;
+  let run: Pick<typeof suite, "command" | "report"> = suite;
+  if (evalOutputNeedsWrapper(suite.output)) {
+    const wrapper = evalWrapperFor(suite);
+    const firstOfFile = needsOf(row.report).find((entry) => entry.selection === suite.selection)?.firstOfFile === true;
+    const file = wrapper === undefined ? undefined : wrapperFileFor(await listEvalWrapperFiles({ store: deps.store, companyId: company }, project), { ...(suite.repository === undefined ? {} : { repository: suite.repository }), selection: suite.selection, firstOfFile }, wrapper.language);
+    if (wrapper === undefined || file === undefined) refuse(log, "eval_discovery_confirm_refused", "unreadable_output", "CONFIG_INVALID", EVAL_OUTPUT_UNREADABLE_MESSAGE);
+    wrapped = { language: wrapper.language };
+    run = { command: evalWrapperCommandOf(wrapper.language), report: { cwd: ".", argument: EVAL_WRAPPER_REPORT_PATH } };
+  }
   const reported = new Set(suite.questions.map((question) => question.path));
   if (body.paths.some((path) => !reported.has(path))) refuse(log, "eval_discovery_confirm_refused", "path", "CONFIG_INVALID", "A selected file is not in the setup run's report.");
   const at = commitFor(row.commits, suite.repository);
@@ -244,7 +258,7 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
   const selected = new Set(body.paths);
   const questions = suite.questions.filter((question) => selected.has(question.path)).map((question) => ({ id: question.id, category: question.category, path: question.path, hash: hashes.get(question.path)! }));
   const evalSetHash = evalSetHashOf([...files].map(([path, bytes]) => ({ path, bytes })));
-  const commandFingerprint = evalCommandFingerprintOf(suite.command, suite.report);
+  const commandFingerprint = evalCommandFingerprintOf(run.command, run.report);
   const settings = { imageDigest: suite.image, route: suite.route };
   const inputs = { evalSetHash, judgePin, modelVersion: suite.modelVersion, model: suite.model, catalogRowId: suite.catalogRowId, commandFingerprint, settingsFingerprint: evalSettingsFingerprintOf(settings, judgePin) };
   const plan: EvalPlanBody = {
@@ -253,7 +267,7 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
     // A model judge goes through the eval's one product row, so it is the product model's family: the existing notice says so (DEC 253q(b)).
     settings, evalSetHash, evalConfigured: true, judgePin, baselineJudgePin: judgePin, ...(suite.judge.kind === "model" ? { sameJudgeFamily: true } : {}),
     subsetSupported: suite.subsetSupported, questions, maxCallsPerQuestion: suite.maxCallsPerQuestion, maxCostMicrosPerQuestion: suite.maxCostMicrosPerQuestion,
-    command: suite.command, report: suite.report, judgeScoring,
+    command: run.command, report: run.report, judgeScoring,
   };
   const planDigest = evalPlanDigest(company, project, plan);
   // F3d's whole estimate: three runs of every question at its caps. The maximum is at least the default and never below the estimate.
@@ -296,6 +310,8 @@ export async function confirmEvalDiscovery(deps: EvalDiscoveryConfirmDeps, proje
     }
     item = await readEvalSpendItem(table, project);
   }
+  // The test run of a wrapped eval is approved with its cost: the spend approval the person just gave (or the carried one) is that approval. The file's record keeps it until the run's results are read.
+  if (wrapped !== undefined && item?.state === "approved") await recordEvalWrapperTest({ store: deps.store, companyId: company, now: deps.now }, project, { ...(suite.repository === undefined ? {} : { repository: suite.repository }), selection: suite.selection, language: wrapped.language }, "approved").catch(() => false);
   return { planDigest, evalSpend: item };
 }
 

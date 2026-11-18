@@ -99,6 +99,7 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
     }
     case "command_done":
       return { finished: await finishSetupCommand(table, run, { seq: body.seq, journalN: body.journalN }) };
+    // DEC 254zzz43: recording the report is ALL it does. A wrapper file is never proposed or written from here: only a person's click (the card's POST) may open a pull request.
     case "eval_discovery":
       return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
   }

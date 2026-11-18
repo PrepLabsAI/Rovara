@@ -389,6 +389,42 @@ export type HostComment = z.infer<typeof HostCommentSchema>;
 export const HostCommentsPageSchema = z.object({ comments: z.array(HostCommentSchema).max(200), nextPage: z.number().int().positive().optional() }).strict();
 export type HostCommentsPage = z.infer<typeof HostCommentsPageSchema>;
 
+/**
+ * L4-EVW6 (DEC 254zzz43, narrowing DEC 254zzz14): the ONE thing Rovara may put in a customer's repository outside a task, and only when a person clicks: a small wrapper file that turns the output of the customer's own eval
+ * into one Rovara can read, as a NEW file on a NEW branch with ONE pull request that a person merges. It is not a generic write API: the port offers no way to name any other branch or path, to update a branch, to
+ * write to the default branch or to touch a file that exists. Every adapter holds all of these: a branch `rovara/eval-wrapper-<12 hex>` that does not exist (it is created at the commit the file was added in, so a branch
+ * never exists without its file), exactly one of the two fixed paths, nothing at that path (no file, folder, link or submodule) at the default branch's head the caller read, and one pull request against the default branch.
+ */
+export const EVAL_WRAPPER_BRANCH_PREFIX = "rovara/eval-wrapper-";
+export const EVAL_WRAPPER_BRANCH_PATTERN = /^rovara\/eval-wrapper-[0-9a-f]{12}$/u;
+export const EVAL_WRAPPER_PYTHON_PATH = "rovara/eval-wrapper.py";
+export const EVAL_WRAPPER_NODE_PATH = "rovara/eval-wrapper.mjs";
+export const EVAL_WRAPPER_WRITE_PATHS: readonly string[] = [EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_NODE_PATH];
+export const EVAL_WRAPPER_FILE_MAX_BYTES = 100_000;
+/** The fixed sentences an adapter refuses with, so a caller can tell a lost race or a taken path from another refusal without reading the host's words. */
+export const EVAL_WRAPPER_CONFLICT_MESSAGE = "the repository changed since Rovara read it";
+export const EVAL_WRAPPER_PATH_TAKEN_MESSAGE = "something is already at the eval wrapper's path";
+export const EvalWrapperPullRequestInputSchema = z.object({
+  repository: RepositoryRefSchema,
+  /** The repository's default branch and the commit it was at when the caller checked the path: the new branch starts from exactly this commit, and the write is refused when the branch has moved since. */
+  baseBranch: BranchNameSchema,
+  baseRevision: RevisionSchema,
+  branch: BranchNameSchema.regex(EVAL_WRAPPER_BRANCH_PATTERN),
+  path: z.enum([EVAL_WRAPPER_PYTHON_PATH, EVAL_WRAPPER_NODE_PATH]),
+  content: z.string().min(1).refine((text) => new TextEncoder().encode(text).length <= EVAL_WRAPPER_FILE_MAX_BYTES, "the wrapper is too long"),
+  title: z.string().min(1).max(500),
+  body: z.string().max(65_536),
+}).strict();
+export type EvalWrapperPullRequestInput = z.infer<typeof EvalWrapperPullRequestInputSchema>;
+export const EvalWrapperPullRequestOpenedSchema = z.object({ revision: RevisionSchema, ref: ChangeRequestRefSchema }).strict();
+export type EvalWrapperPullRequestOpened = z.infer<typeof EvalWrapperPullRequestOpenedSchema>;
+export interface EvalWrapperPullRequestHost {
+  /** Creates the branch with the one new file and opens the one pull request (see above). A failure after the branch was made removes the branch Rovara just made. THROWS on any refusal; nothing is left then. */
+  open(input: EvalWrapperPullRequestInput, scope: HostScope): Promise<EvalWrapperPullRequestOpened>;
+  /** The pull request (any state) whose source is one of Rovara's `rovara/eval-wrapper-<12 hex>` branches, or undefined. Any other branch name is refused. A read: nothing is written. */
+  forBranch(repository: RepositoryRef, branch: string, scope: HostScope): Promise<ChangeRequestRef | undefined>;
+}
+
 /** L4-DR: the files a tree read kept, by path and content id, and whether the list is whole. */
 export interface SetupFilesRead { files: Array<{ path: string; id: string }>; complete: boolean }
 /** What a path is at a revision: a file, a directory, a symbolic link, or nothing. */
@@ -606,6 +642,12 @@ export interface CodeHost {
    * `unsupported` is true when the file holds something the host cannot read the way it does: the answer is then not trusted, and the core treats the owners as unreadable.
    */
   codeOwners?(repository: RepositoryRef, branch: string, scope: HostScope): Promise<CodeOwnersRead | undefined>;
+
+  /**
+   * L4-EVW6 (optional, add-only): the narrow write of the eval wrapper pull request (see `EvalWrapperPullRequestHost`). A host without it can still have the file copied; Rovara then never opens the pull request for it.
+   * It is not a general way to write files.
+   */
+  evalWrapperPullRequest?: EvalWrapperPullRequestHost;
 
   // change requests
   /** Idempotent create or update: the same source and target branches never make two change requests. */
