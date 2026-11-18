@@ -43,6 +43,10 @@ export function createCompanyEvidenceBlobs(options: CompanyEvidenceBlobsOptions)
       await blobs.put(key, bytes, meta, putOptions);
     },
     async get(key: string, maxBytes: number): Promise<Uint8Array | undefined> {
+      // The keeper's own folders, and a worker's saved artifact (callback-shaped key, held to this company's ARTIFACT row by the reader); no other owner-keyed document (plans, designs) is read through here.
+      const scope = artifactKeyScopeOf(key);
+      const folder = key.split("/")[3];
+      if (scope !== undefined && scope.form === "owner" && (folder === undefined || !EVIDENCE_FOLDERS.has(folder))) { note("not_evidence_key"); return undefined; }
       return await reader.get(key, maxBytes);
     },
     async stat(key: string): Promise<ObjectStat | undefined> {

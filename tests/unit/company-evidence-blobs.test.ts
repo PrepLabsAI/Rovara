@@ -5,6 +5,7 @@ import { ObjectKeyError, type ObjectMeta, type ObjectStorage, type OrgId } from 
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY_EVIDENCE_READ_MAX_BYTES, EVIDENCE_STORE_REFUSAL, createCompanyEvidenceBlobs } from "../../packages/broker/src/core-host/company-evidence-blobs.js";
+import { COMPANY_ARTIFACT_READ_MAX_BYTES, createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
 import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId, B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -113,6 +114,20 @@ describe("a company's evidence store", () => {
     expect(await a.get(big, 100 * 1_048_576)).toBeUndefined();
     expect(await a.get(big, 0)).toBeUndefined();
     expect(await a.get(big, Number.NaN)).toBeUndefined();
+  });
+
+  it("reads no other owner-keyed document (a plan, a design) of the company, and a bad read cap leaves the flow reader's own", async () => {
+    const w = world(); await w.workspace(A, "ws-a", "owner-a");
+    w.objects.set("private/owner-a/ws-a/plan-documents/art-1.json", bytes("plan"));
+    expect(await w.blobsOf(A).get("private/owner-a/ws-a/plan-documents/art-1.json", 100)).toBeUndefined();
+    expect(w.calls).toEqual([]);
+    // The flow's own artifacts reader (no maxReadBytes) keeps its 1.5 MiB room; a cap that is not a whole positive number is no cap.
+    const big = new Uint8Array(COMPANY_ARTIFACT_READ_MAX_BYTES + 1);
+    w.objects.set("private/owner-a/ws-a/plan-documents/big.json", big);
+    for (const maxReadBytes of [undefined, Number.NaN, 0, -5, 1.5, Number.POSITIVE_INFINITY]) {
+      const reader = createCompanyArtifactReader({ blobs: w.raw, store: w.store, companyId: A, ...(maxReadBytes === undefined ? {} : { maxReadBytes }) });
+      expect(await reader.get("private/owner-a/ws-a/plan-documents/big.json", 10 * 1_048_576), String(maxReadBytes)).toBeUndefined();
+    }
   });
 
   it("offers no prefix delete (the erase walks use their own handle)", async () => {
