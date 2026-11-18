@@ -1930,7 +1930,7 @@ describe("install company import reads (DEC 254zzz(2))", () => {
       send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
         const input = command.input as { TableName: string; Key?: { pk: string }; ExpressionAttributeValues?: Record<string, string> };
         calls.push({ command: command.constructor.name, table: input.TableName, pk: input.Key?.pk ?? input.ExpressionAttributeValues?.[":pk"] ?? "" });
-        return db.send(command as never);
+        return db.send(command);
       },
     };
     const reads = { documentClient: documentClient as never, tableName: "State", signInTableName: "signin" };
