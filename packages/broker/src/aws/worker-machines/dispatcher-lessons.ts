@@ -13,7 +13,7 @@ import { documentLearningSettings } from "../../lessons/document-settings.js";
 import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
-import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, PUSH_FIT_FLOOR, selectLessons } from "../../lessons/load.js";
+import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
 import { buildKnowledgeContext, pullable } from "../../lessons/knowledge-brief.js";
 import { readVisible } from "../../lessons/read-visible.js";
 import { modeAllows, resolveLearning, resolveLoadBudget, whyLearningOff } from "../../lessons/policy.js";
@@ -159,7 +159,8 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         intent: [task.title, task.requestText?.slice(0, 600) ?? ""].join("\n"),
         repos: codeRepositoriesOf(project.definition).map((repo) => repo.name), files: [], languages: [],
         reader: { running: { taskId: task.taskId } }, where: "load", budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
-        ...(request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE) ? { fitFloor: PUSH_FIT_FLOOR } : {}),
+        // The ONE fit floor and the newcomer place (`scoring-settings.ts`): this is a live push.
+        push: true,
       });
       check();
       if (!selected.ok || !selected.complete) refuse();

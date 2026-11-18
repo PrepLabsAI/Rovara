@@ -37,6 +37,8 @@ import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
 import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
+import { codeHostAreaPorts } from "../../lessons/area-check-hosts.js";
+import { codeHostForRecord } from "../../plugins/routing.js";
 import type { KnowledgeSources } from "../../lessons/knowledge-brief.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
@@ -192,6 +194,8 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
       // A laptop's identity point that says it links no accounts places nobody (an edit by anyone is then skipped, so none is read).
       canPlaceAuthors: () => options.identity.capabilities?.externalAccounts !== false,
     },
+    // The nightly area checks read the project's repositories through the install's own code hosts (a host that is not registered is "not known": nothing is marked).
+    areaChecks: codeHostAreaPorts({ projects: flow.projects, companyId, hostOf: (repository) => { try { return codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }); } catch { return undefined; } } }),
     now, log: (event, fields) => log(event, fields),
   });
   options.milestones.register(host.milestone);

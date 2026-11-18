@@ -25,7 +25,7 @@ async function world(companyId = A) {
     await store.put({ item: { ...projectRevisionKey(company, "payments", 1), definition: definition as unknown as JsonValue } });
     await store.put({ item: { ...orgProjectCatalogKey(company, "payments"), latestRevision: 1 } });
     const lessons = new DocumentLessonStore(store, () => now);
-    const lesson = lessonRecord({ id: company === A ? "les_aaaa1111" : "les_bbbb1111", workspaceId: company, project: "payments", title: company === A ? "A advice" : "B private advice", tier: 1, approvals: [{ approvalId: "approved", by: "person-1", at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], provenance: { ...lessonRecord().provenance, supportTasks: [] } });
+    const lesson = lessonRecord({ id: company === A ? "les_aaaa1111" : "les_bbbb1111", workspaceId: company, project: "payments", title: company === A ? "Retry network calls" : "B private advice", body: company === A ? "Retry network calls with withRetry." : "B private advice for retry network calls with withRetry.", tier: 1, approvals: [{ approvalId: "approved", by: "person-1", at: 1, mode: "one" }], citations: [], citationChecks: [], scope: {}, stages: ["PLAN"], provenance: { ...lessonRecord().provenance, supportTasks: [] } });
     expect((await lessons.commit({ workspaceId: company, project: "payments" }, 0, [lesson], now)).ok).toBe(true);
   }
   await store.put({ item: { ...workspaceKey(companyId, WS), entityType: "WORKSPACE", companyId } });

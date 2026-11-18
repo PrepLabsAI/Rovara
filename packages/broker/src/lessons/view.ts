@@ -7,6 +7,7 @@ import { attributionNameOf, type AttributionReader } from "./people.js";
 import type { AccessCheckPort } from "./access-port.js";
 import { approversRequired, resolveLearning, stricterMode, LearningModeSchema, type LearningSettingsReader } from "./policy.js";
 import { buildWeeklyDigest } from "./digest.js";
+import type { WeeklyExtras, WeeklyRow } from "./weekly-order.js";
 import { lessonPanelRows } from "./panel.js";
 import { createLessonLiveReader, LESSON_LIVE_TIMEOUT_MS } from "./live-visibility.js";
 import { readVisible, readVisibleRanked, type LessonLog } from "./read-visible.js";
@@ -26,6 +27,8 @@ export interface LessonViewDeps {
   pause?: LessonsPauseStore;
   /** Whether a recorded reason still holds (true), or its cause is gone (false: a provider was connected, the budget was raised). A reason whose cause is gone is cleared when it is read. Absent: every reason is shown until a learning call succeeds. */
   pauseStillApplies?: (workspaceId: string, project: string, code: LessonsPauseCode) => Promise<boolean>;
+  /** What the weekly list needs beyond the lessons (lessons under question, lessons a person was asked to keep, repeat counts, recent tasks, names): read once per digest. Absent or failing: the list is built from the lessons alone. */
+  weeklyExtras?: (key: ScopeKey) => Promise<WeeklyExtras | undefined>;
 }
 export interface LessonCaller { orgId: OrgId; developerId: string }
 
@@ -286,17 +289,22 @@ export async function buildLessonHistory(deps: LessonViewDeps, caller: LessonCal
   return { versions: versions.map((v) => ({ version: v.version, at: v.updatedAt, status: v.status, title: v.title, body: v.body, approvedBy: v.approvals.filter((a) => a.mode !== "auto" && a.mode !== "trial").map((a) => person(a.by)) })) };
 }
 
+/** A weekly row as the API gives it: only the fields the contract names (no internal rank). */
+const weeklyRow = (r: WeeklyRow) => ({ id: r.id, title: r.title, type: r.type, ...(r.band === undefined ? {} : { band: r.band }), ...(r.cause === undefined ? {} : { cause: r.cause }), area: r.area, reason: r.reason, ...(r.repeat === undefined ? {} : { repeat: r.repeat }) });
+
 /** The weekly digest, led by the top lessons. For people who decide. */
 export async function buildLessonsDigest(deps: LessonViewDeps, caller: LessonCaller, project: string) {
   const key = keyOf(caller, project);
   const state = await deciderState(deps, key, caller);
   if (!state.canDecide) throw agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can read the weekly digest.");
-  const digest = await buildWeeklyDigest(deps.store, key, deps.now(), state.viewer, deps.access, deps.log);
+  const extras = await deps.weeklyExtras?.(key).catch(() => undefined);
+  const digest = await buildWeeklyDigest(deps.store, key, deps.now(), state.viewer, deps.access, deps.log, extras);
   const item = (i: { id: string; title: string; type: Lesson["type"]; tier: Lesson["tier"]; links: string[] }) => ({ id: i.id, title: i.title, type: i.type, tier: i.tier, links: i.links.slice(0, 10) });
   return {
     since: digest.since, top: digest.top.map(item), needsReview: digest.needsReview.map(item), autoApplied: digest.autoApplied.map(item), waiting: digest.waiting.slice(0, 100).map(item),
     retired: digest.retired.slice(0, 100).map(item), staleOrRetireProposed: digest.staleOrRetireProposed.slice(0, 100).map(item),
     queued: digest.queuedCount, pausedSources: digest.pausedSources.slice(0, 50), pausedSourcesHidden: digest.pausedSourcesHidden, hidden: digest.restrictedHidden,
+    weekly: { needLook: digest.weekly.needLook.map(weeklyRow), picks: digest.weekly.picks.map(weeklyRow) },
   };
 }
 

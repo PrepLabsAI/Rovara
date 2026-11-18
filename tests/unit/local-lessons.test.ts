@@ -85,7 +85,7 @@ async function world(options: { identity?: IdentityProvider; defaultSwitch?: boo
     model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: providerFetch(prompts, options.candidates ?? (() => [])) },
     ...(options.defaultSwitch === true ? {} : { enabled: () => enabled }), ...(options.knowledge === undefined ? {} : { knowledge: options.knowledge }), now: () => h.clock.now, log: (entry) => { logs.push(JSON.stringify(entry)); },
   });
-  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200 and wrap network calls in withRetry from the retry helper", workflow: true, workflowPath: "QUICK" });
   return { h, lessons, handlers, taskId: task.taskId, workspaceId: task.workspaceId, key: { workspaceId: COMPANY, project: "payments" }, prompts, logs, setEnabled: (value) => { enabled = value; } };
 }
 
@@ -936,7 +936,7 @@ describe("the knowledge briefing and look-up (lead 4 L4-AK2)", () => {
 
   it("a fix round's correction words pick the lessons again (they rank; they are never stored or shown)", async () => {
     const w = await world();
-    await put(w, scoped("les_health001", { scope: {}, title: "Quokka handling", description: "", body: "Quokka cases need care in the quokka module.", type: "convention" }));
+    await put(w, scoped("les_health001", { scope: {}, title: "Quokka module test", description: "", body: "Quokka module test cases need care.", type: "convention" }));
     // The task is about a health endpoint: an unscoped lesson about quokkas does not pass the fit floor ...
     const plain = await w.lessons.learnedFor({ workspaceId: w.workspaceId, operationId: "op-fix0", workflowMode: "IMPLEMENT", features: BOTH });
     expect(plain.learnedContext?.lessons.map((l) => l.id) ?? []).toEqual([]);

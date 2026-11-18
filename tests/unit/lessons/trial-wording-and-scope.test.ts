@@ -13,8 +13,7 @@ import { NO_REASON_TEXT } from "../../../packages/broker/src/lessons/task-subjec
 import { TRIAL_APPROVER, hasRiskyTrialWording, isPublishable, isTrialLesson, keyIdentifiers, lessonClaimsSupported, promoteIfStable, trialBlockers, type TrialContext } from "../../../packages/broker/src/lessons/trial.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import {
-  Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, candidateJson, codeCite, directory, draft, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, subject, verifier,
-} from "./lesson-helpers.js";
+  Alerts, Audit, Clock, KEY, MemoryVectors, PROJECT, ScriptedModel, Spend, WS, allowAllAccess, candidateJson, codeCite, directory, draft, embedder, facts, lessonRecord, memberSpan, reply, seed, settings, subject, verifier, NO_FIT_FLOOR } from "./lesson-helpers.js";
 
 const DAY = 86_400_000;
 const STANDARD = settings({ preset: "standard" });
@@ -226,7 +225,7 @@ describe("trial respects every stricter setting", () => {
     const run = async (value: LearningSettings) => {
       const store = new InMemoryLessonStore();
       await seed(store, live);
-      const loadDeps: LoadDeps = { access: allowAllAccess, store, embedder, vectors: new MemoryVectors(), settings: { read: async () => value }, audit: new Audit(), now: new Clock().now };
+      const loadDeps: LoadDeps = { ranking: NO_FIT_FLOOR, access: allowAllAccess, store, embedder, vectors: new MemoryVectors(), settings: { read: async () => value }, audit: new Audit(), now: new Clock().now };
       const result = await loadLessonsForStage(loadDeps, { workspaceId: WS, project: PROJECT, taskId: "t1", stage: "IMPLEMENT", round: 1, intent: "x", repos: ["api"], files: [], languages: [], taskAudience: { kind: "shared" } });
       return result.context?.lessons.map((l) => l.id) ?? [];
     };

@@ -43,6 +43,10 @@ export interface TaskSubjectBase {
   sendBackRequestIds: readonly string[];
   /** Lead 4 L4-LP3Wc: when the task was alive (creation to close), so evidence of a kind stopped at any time during it is not read after the resume. Absent: unknown (judged as alive the whole time). */
   lifetime?: TaskLifetime;
+  /**
+   * The files the task's merged change touched, whole, for the area overlap a clean merge's credit needs (`credit.ts`). Absent: not known (the credit then excludes no lesson for overlap). A source that cannot read the list whole leaves it out.
+   */
+  touchedPaths?: readonly string[];
 }
 export interface TaskSubjectSource {
   /**
@@ -232,7 +236,7 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     const judging = attempt === undefined || !needsJudge ? undefined : { deadlineAt: attempt.deadlineAt, ...(attempt.signal === undefined ? {} : { signal: attempt.signal }), ...(attempt.attemptId === undefined ? {} : { attemptId: `${attempt.attemptId}-outcome` }) };
     const run = () => recordTaskOutcome(counters, {
       workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: ended, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
-      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}),
+      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}), ...(base.touchedPaths === undefined ? {} : { touchedPaths: base.touchedPaths }),
       ...(noMarks ? { skipOutcomeMarks: true as const } : {}),
     });
     const result = await (judging === undefined ? run() : withLearningAttempt(judging, run));

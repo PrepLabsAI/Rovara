@@ -7,6 +7,7 @@ import type { AccessCheckPort } from "./access-port.js";
 import { readVisible, type LessonLog } from "./read-visible.js";
 import { sameSource, type IdentitySet, type Lesson } from "./types.js";
 import { lessonValue } from "./value.js";
+import { orderWeekly, sourceKeptRates, type WeeklyExtras, type WeeklyList } from "./weekly-order.js";
 
 const WEEK = 7 * 86_400_000;
 export const DIGEST_TOP = 5;
@@ -26,9 +27,14 @@ export interface WeeklyDigest {
   pausedSourcesHidden: number;
   /** Lessons left out because the viewer could not see their source. */
   restrictedHidden: number;
+  /**
+   * The weekly list in bands with a reason line per row (`weekly-order.ts`, lessons phase 1): the need-a-look cards first (not counted), then at most 5 suggestions: a person's direct correction, then a measured result, then a weak source seen
+   * twice, at most 2 per code area and per source. `top` above keeps its older order (by `lessonValue`, active and waiting together) for the callers that read it.
+   */
+  weekly: WeeklyList;
 }
 
-export async function buildWeeklyDigest(store: LessonStore, key: ScopeKey, now: number, viewer: IdentitySet, access: AccessCheckPort, log?: LessonLog): Promise<WeeklyDigest> {
+export async function buildWeeklyDigest(store: LessonStore, key: ScopeKey, now: number, viewer: IdentitySet, access: AccessCheckPort, log?: LessonLog, extras?: WeeklyExtras): Promise<WeeklyDigest> {
   const since = now - WEEK;
   const all = await store.list(key);
   // Only the lessons the digest can show are checked (a status it lists, a retirement of the week, or a lesson that mentions a paused source, whose name is shown only if the viewer sees all of them): not the
@@ -54,6 +60,8 @@ export async function buildWeeklyDigest(store: LessonStore, key: ScopeKey, now: 
     queuedCount: all.filter((l) => l.status === "candidate").length,
     ...(await pausedSourcesFor(store, key, all, visible)),
     restrictedHidden: considered.length - shown.length,
+    // Only lessons this viewer may read are listed (the same set as every other list here); each source's kept rate is counted over the whole project's lessons (counts only: nothing of a lesson, and no source, leaves).
+    weekly: orderWeekly({ lessons: shown, now, keptStats: sourceKeptRates(all, now), ...(extras === undefined ? {} : { extras }) }),
   };
 }
 

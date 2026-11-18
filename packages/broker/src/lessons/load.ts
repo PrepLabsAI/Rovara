@@ -15,16 +15,15 @@ import { createLessonLiveReader, lessonTaskRefs, type LessonLiveReader } from ".
 import { readVisible, readVisibleRanked } from "./read-visible.js";
 import { memberView, type MemberOf, type MemberResolver } from "./members.js";
 import { MEASURE_LEFT_OUT, type FitSample, type MeasureSink } from "./measure.js";
+import { fitOrder, passesFitFloor } from "./fit.js";
+import { RECENCY_DAYS, resolveRanking, type RankingSettings } from "./scoring-settings.js";
+import type { SignalsReader } from "./signals.js";
+import { NO_EVIDENCE, betaStrength, legacyEvidence } from "./strength.js";
 import { pullable } from "./knowledge-brief.js";
 import { normId, type IdentitySet, type Lesson } from "./types.js";
 
 export const LOAD_MAX_LESSONS = LEARNED_CONTEXT_MAX_LESSONS;
 export const LOAD_MAX_BYTES = LEARNED_CONTEXT_MAX_BYTES;
-/**
- * The fit floor of the push (design 3.3): a lesson is a candidate when its path globs match a path the step touches, or its fused fit to the task text passes this floor. A lesson with no scope, or whose globs match
- * nothing in play, must pass it, so a team of 40 lessons does not send the same five to every task. The start value of the research doc; measured numbers replace it.
- */
-export const PUSH_FIT_FLOOR = 0.35;
 /** The byte budget given to the look-up's selection: the unit limit decides, and `pullUnitsOf` enforces the contract's own byte limit on the units themselves. */
 const PULL_SELECT_BYTES = 256 * 1024;
 const DAY = 86_400_000;
@@ -43,8 +42,6 @@ export interface LoadRequest {
   intent: string; planSummary?: string;
   repos: readonly string[]; files: readonly string[]; languages: readonly string[];
   taskAudience: TaskAudience;
-  /** The fit floor of the push (`PUSH_FIT_FLOOR`), for a step whose worker takes the knowledge briefing. Absent: no floor, as before (an older worker is sent exactly the lessons it always was). */
-  fitFloor?: number;
   /** Asked just before the load record is written: false when the dispatch stopped waiting (its deadline passed), so a load nobody received is never recorded as used. */
   wanted?: () => boolean;
   /** Only an eval-batch dispatch may ask for `off`; the broker route refuses it from production (task). */
@@ -78,6 +75,13 @@ export interface LoadDeps extends LessonDeps {
    * not waited on past its own short limit.
    */
   measure?: MeasureSink | undefined;
+  /**
+   * Phases 1 and 2: the project's clean-merge rate (the prior's centre), each lesson's windowed evidence and the lessons under question (`signals.ts`). Absent, or no answer in its short wait: the neutral prior, the lessons' own
+   * counters as evidence and nothing under question (a project with no rows). It is read once per project and reused, so a load pays for it at most once in a few minutes.
+   */
+  signals?: SignalsReader | undefined;
+  /** The settings of the fit floor, the weights, the prior and the newcomer place (`scoring-settings.ts`). Absent: the research's starting values. A test or the replay harness may change them. */
+  ranking?: Partial<Omit<RankingSettings, "weights">> & { weights?: Partial<RankingSettings["weights"]> } | undefined;
   log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
@@ -95,7 +99,10 @@ export function scopeMatch(lesson: Lesson, request: Pick<LoadRequest, "repos" | 
   return { matches: true, byPath: false };
 }
 
-/** The lower bound of the Wilson interval for helpful of loaded (95%). Zero when a lesson has never been loaded. */
+/**
+ * The lower bound of the Wilson interval for helpful of loaded (95%). Zero when a lesson has never been loaded. NOT used by the loader any more (phase 1 replaced it with the Beta strength of `strength.ts`: this bound is 0 for a
+ * lesson never loaded, so a new lesson ranked as if it had failed); kept as the "before" of the replay comparison and its own tests.
+ */
 export function wilsonLower(helpful: number, loaded: number): number {
   if (loaded <= 0) return 0;
   const n = loaded;
@@ -158,16 +165,21 @@ export interface SelectInput {
   active: readonly Lesson[];
   intent: string; planSummary?: string; repos: readonly string[]; files: readonly string[]; languages: readonly string[];
   reader: SelectReader; where: string; budget: LoadBudget;
-  /** The fit floor: a lesson whose globs match no touched path must reach this fused fit to the task text. Absent: no floor (the local-tools read, replay snapshots). */
-  fitFloor?: number;
   /** A further cheap, caller-owned filter of the lessons that fit the stage and scope, before any are ranked or read (the local-tools filters). It may read; a lesson it drops is never read further. */
   prefilter?: (eligible: readonly Lesson[]) => Promise<readonly Lesson[]>;
+  /**
+   * The PUSH channel (a step's dispatch, `loadLessonsForStage`): lessons must pass the fit floor on an absolute measure, and one place is kept for a well-fitting newcomer (phase 1). Absent: the local-tools read, where the tool
+   * asks for the lessons of a change it describes (a pull): every lesson of the stage and scope is ranked and none is dropped for fit.
+   */
+  push?: true;
 }
 export type SelectOutcome =
   | { ok: false; skipped: "members_unavailable" | "access_unavailable" }
   | { ok: true; chosen: LearnedLesson[]; picked: Lesson[]; entries: LoadManifestEntry[]; bytes: number; complete: boolean; viewer: IdentitySet | undefined; live: LessonLiveReader; log: (event: string, fields: Record<string, unknown>) => void;
       /** Phase 0 (measure only): the fit and rank score of every lesson that was ranked, in rank order, read by nothing that decides a load. */
-      ranking: ReadonlyArray<{ id: string; fit: number; score: number; words: number; cos: number | undefined }> };
+      ranking: ReadonlyArray<{ id: string; fit: number; score: number; words: number; cos: number | undefined }>;
+      /** Phase 1: how many lessons that fit the stage and scope were left out because they did not pass the fit floor, and which loaded lessons were given the newcomer place. */
+      belowFloor: number; newcomers: readonly string[] };
 
 /**
  * The one ranking and budget of lessons, shared by the dispatch loader (`loadLessonsForStage`, reader = the running task) and the local-tools read (reader = the whole project): the approval rule now, the stage and scope, the fused
@@ -212,17 +224,38 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
     for (const r of ranked) absolute.set(r.id, { words: r.containment, cos: r.cosine });
   } catch { deps.metrics?.count("learning_load_similarity_failed"); }
 
-  const scored: Array<{ lesson: Lesson; score: number; fit: number; why: LoadManifestEntry["why"] }> = [];
+  // Phases 1 and 2 (`scoring-settings.ts`): the strength of each lesson is a Beta score over its windowed evidence with a prior at the project's own clean-merge rate; a lesson must pass the fit floor on an ABSOLUTE
+  // measure (a scope path matched, or the shared-word share, or the embedder's cosine) to be loaded at all; a lesson under question ranks lower. The project's signals are read once (cached, bounded, never a failure).
+  const settings = resolveRanking(deps.ranking);
+  const signals = deps.signals === undefined ? undefined : await deps.signals.read(key).catch(() => undefined);
+  const recencyMs = RECENCY_DAYS * DAY;
+  type Scored = { lesson: Lesson; score: number; fit: number; why: LoadManifestEntry["why"]; passes: boolean; order: number };
+  const everyone: Scored[] = [];
   for (const lesson of eligible) {
     const match = scopeMatch(lesson, scope);
     const sim = similarity.get(lesson.id) ?? 0;
-    if (input.fitFloor !== undefined && !match.byPath && sim < input.fitFloor) continue;
-    const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / (90 * DAY));
-    const score = 0.6 * sim + 0.3 * wilsonLower(lesson.counters.helpful, lesson.counters.loaded) + 0.1 * recency;
-    scored.push({ lesson, score, fit: sim, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope" });
+    const recency = Math.exp(-Math.max(0, now - (lesson.lastValidatedAt ?? lesson.updatedAt)) / recencyMs);
+    // A lesson with evidence rows is weighed by its rows alone; one with none by its own counters inside the window (what it had before the rows began). No signals at all: the counters.
+    const rows = signals?.evidence.get(lesson.id);
+    // (When the signals read was cut short, a lesson with no row may only have been cut off: no lesson is then weighed by its old counters, so no lesson is judged by a different rule from another.)
+    const evidence = rows ?? (lesson.counters.helpful + lesson.counters.harmful === 0 || signals?.truncated === true ? NO_EVIDENCE : legacyEvidence(lesson, now, settings.evidenceWindowDays * DAY));
+    const strength = betaStrength(evidence, signals?.cleanMergeRate, settings);
+    const questioned = signals?.underQuestion.has(lesson.id) === true;
+    const w = settings.weights;
+    const score = Math.max(0, w.fit * sim + w.strength * strength + w.recency * recency - (questioned ? settings.underQuestionPenalty : 0));
+    const fit = { words: absolute.get(lesson.id)?.words ?? 0, cos: absolute.get(lesson.id)?.cos, byPath: match.byPath };
+    everyone.push({ lesson, score, fit: sim, why: match.byPath ? "path" : sim >= 0.6 ? "similar" : "scope", passes: input.push !== true || passesFitFloor(fit, settings), order: fitOrder(fit, settings) });
   }
-  scored.sort((a, b) => b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
+  everyone.sort((a, b) => b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
+  const scored = everyone.filter((entry) => entry.passes);
+  const belowFloor = everyone.length - scored.length;
+  if (belowFloor > 0) deps.metrics?.count("learning_load_below_floor", { where: input.where });
   const rank = new Map(scored.map((entry) => [entry.lesson.id, entry] as const));
+  // The newcomer place: the best-fitting lessons with fewer than `newcomerMaxUses` uses are checked first (so the access pages reach them), and `choose` keeps one place for one of them.
+  const isNewcomer = (lesson: Lesson): boolean => lesson.counters.loaded < settings.newcomerMaxUses;
+  const newcomerOrder = scored.filter((entry) => isNewcomer(entry.lesson)).sort((a, b) => b.order - a.order || b.score - a.score || a.lesson.id.localeCompare(b.lesson.id));
+  const hoisted = new Set(newcomerOrder.slice(0, Math.max(3, settings.newcomerSlots + 2)).map((entry) => entry.lesson.id));
+  const checkOrder = [...scored.filter((entry) => hoisted.has(entry.lesson.id)), ...scored.filter((entry) => !hoisted.has(entry.lesson.id))];
 
   const log = (event: string, fields: Record<string, unknown>): void => {
     deps.log?.(event, fields);
@@ -235,11 +268,13 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
   const picked: Lesson[] = [];
   const entries: LoadManifestEntry[] = [];
   let bytes = 0;
-  const choose = (candidates: readonly Lesson[]): void => {
+  let newcomers: string[] = [];
+  /** Fills the chosen lessons from `order` up to `limit` places and the byte budget. */
+  const fill = (order: readonly Lesson[], limit: number): void => {
     chosen.length = 0; picked.length = 0; entries.length = 0; bytes = 0;
-    // In rank order, each lesson that fits the lessons and bytes left.
-    for (const lesson of candidates) {
-      if (chosen.length >= budget.lessons) continue;
+    // In rank order, each lesson that fits the places and bytes left (batch 17: the twins of #998's base are gone, #979).
+    for (const lesson of order) {
+      if (chosen.length >= limit) continue;
       const entry = rank.get(lesson.id)!;
       const learned = toLearned(lesson);
       const size = sizeOf(learned);
@@ -250,10 +285,33 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
       bytes += size;
     }
   };
+  const choose = (candidates: readonly Lesson[]): void => {
+    // Rank order (what the access pages do not promise once newcomers are checked first).
+    const byRank = [...candidates].filter((lesson) => rank.has(lesson.id)).sort((a, b) => rank.get(b.id)!.score - rank.get(a.id)!.score || a.id.localeCompare(b.id));
+    fill(byRank, budget.lessons);
+    newcomers = [];
+    if (input.push !== true || settings.newcomerSlots <= 0 || budget.lessons < settings.newcomerMinBudget) return;
+    const have = picked.filter(isNewcomer).length;
+    if (have >= settings.newcomerSlots) return;
+    // Not enough newcomers in the natural picks: the best-fitting ones (no randomness: fit, then score, then id) go first and take the places, the rest fill the others.
+    const wanted = byRank.filter((lesson) => isNewcomer(lesson) && !picked.some((p) => p.id === lesson.id))
+      .sort((a, b) => rank.get(b.id)!.order - rank.get(a.id)!.order || rank.get(b.id)!.score - rank.get(a.id)!.score || a.id.localeCompare(b.id)).slice(0, settings.newcomerSlots - have);
+    if (wanted.length === 0) return;
+    const front = new Set(wanted.map((lesson) => lesson.id));
+    fill([...wanted, ...byRank.filter((lesson) => !front.has(lesson.id))], budget.lessons);
+    const placed = wanted.filter((lesson) => picked.some((p) => p.id === lesson.id)).map((lesson) => lesson.id);
+    if (placed.length === 0) { fill(byRank, budget.lessons); return; }
+    newcomers = placed;
+    // Back into rank order, so the prompt lists the lessons the way it did before (the newcomer is not read first for having been placed first).
+    const order = new Map(byRank.map((lesson, index) => [lesson.id, index] as const));
+    const rows = picked.map((lesson, index) => ({ lesson, learned: chosen[index]!, entry: entries[index]! })).sort((a, b) => order.get(a.lesson.id)! - order.get(b.lesson.id)!);
+    picked.length = 0; chosen.length = 0; entries.length = 0;
+    for (const row of rows) { picked.push(row.lesson); chosen.push(row.learned); entries.push(row.entry); }
+  };
   let complete: boolean;
   try {
     const checked = await readVisibleRanked({
-      access: deps.access, key, viewer, where: input.where, log, live, ranked: scored.map((entry) => entry.lesson), pageSize: CHECK_PAGE,
+      access: deps.access, key, viewer, where: input.where, log, live, ranked: checkOrder.map((entry) => entry.lesson), pageSize: CHECK_PAGE,
       enough: (kept) => { choose(kept); return chosen.length >= budget.lessons; }, deadlineAt,
     });
     choose(checked.kept);
@@ -263,7 +321,8 @@ export async function selectLessons(deps: LoadDeps, input: SelectInput): Promise
     deps.metrics?.count("learning_load_skipped", { reason: "access_unavailable" });
     return { ok: false, skipped: "access_unavailable" };
   }
-  return { ok: true, chosen, picked, entries, bytes, complete, viewer, live, log, ranking: scored.map((entry) => ({ id: entry.lesson.id, fit: entry.fit, score: entry.score, words: absolute.get(entry.lesson.id)?.words ?? 0, cos: absolute.get(entry.lesson.id)?.cos })) };
+  if (newcomers.length > 0) deps.metrics?.count("learning_load_newcomer_placed", { where: input.where });
+  return { ok: true, chosen, picked, entries, bytes, complete, viewer, live, log, belowFloor, newcomers, ranking: everyone.map((entry) => ({ id: entry.lesson.id, fit: entry.fit, score: entry.score, words: absolute.get(entry.lesson.id)?.words ?? 0, cos: absolute.get(entry.lesson.id)?.cos })) };
 }
 
 export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest): Promise<LoadResult> {
@@ -301,8 +360,8 @@ export async function loadLessonsForStage(deps: LoadDeps, request: LoadRequest):
     key, stage, resolved, active, intent: request.intent, ...(request.planSummary === undefined ? {} : { planSummary: request.planSummary }),
     repos: request.repos, files: request.files, languages: request.languages, reader: { running: { taskId: request.taskId } }, where: "load",
     budget: resolveLoadBudget(resolved.loadBudget, { lessons: LOAD_MAX_LESSONS, bytes: LOAD_MAX_BYTES }),
-    // The fit floor is asked for by the caller (the knowledge briefing's steps); a replay copy's frozen snapshot is delivered exactly as chosen, so the floor applies to the live set only.
-    ...(snapshot === undefined && request.fitFloor !== undefined ? { fitFloor: request.fitFloor } : {}),
+    // ONE fit floor (`scoring-settings.ts`, on the ABSOLUTE fit: a scope path matched, the shared-word share or the cosine) and the newcomer place, for the live push only: a replay copy's frozen snapshot is delivered exactly as chosen, so neither applies to it.
+    ...(snapshot === undefined ? { push: true as const } : {}),
   });
   if (!selected.ok) return empty(selected.skipped, setVersion);
   const { chosen, entries, bytes, live, viewer, log } = selected;

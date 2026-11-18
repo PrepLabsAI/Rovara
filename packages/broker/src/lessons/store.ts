@@ -36,7 +36,11 @@ export interface LoadManifest {
   taskId: string; workspaceId: string; project: string; stage: LessonStage; round: number; setVersion: number;
   memory: "live" | "off" | "snapshot"; /** The frozen snapshot a replay copy was given (memory "snapshot"). Such a manifest is an eval load: the live counters never see it. */ snapshotId?: string; at: number; lessons: LoadManifestEntry[]; bytes: number;
 }
-export interface PendingOutcome { key: string; workspaceId: string; project: string; lessonId: string; taskId: string; dueAt: number }
+export interface PendingOutcome {
+  key: string; workspaceId: string; project: string; lessonId: string; taskId: string; dueAt: number;
+  /** The share of the clean merge's credit this mark is worth when it settles (1/k, `credit.ts`). Absent (a mark queued before shares existed): a whole one. */
+  weight?: number;
+}
 /** A source paused by spike detection: its lessons are collected but held until a maintainer resumes the source. */
 export interface ProjectFlags {
   pausedSources?: Record<string, { at: number; reason: string }>; volumeAlertedAt?: number;

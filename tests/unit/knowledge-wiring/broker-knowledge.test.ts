@@ -6,7 +6,7 @@ import {
 } from "../../../packages/contracts/src/index.js";
 import { areaLabelOf, buildKnowledgeContext, deliveryRecordOf, isScoped, pathsNamedIn, pullUnitsOf, pullable, unitOfLesson } from "../../../packages/broker/src/lessons/knowledge-brief.js";
 import { flakyFactsOf, flakyFactsPort } from "../../../packages/broker/src/lessons/knowledge-facts.js";
-import { PUSH_FIT_FLOOR, loadLessonsForStage, loadPullForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
+import { loadLessonsForStage, loadPullForStage, type LoadDeps, type LoadRequest } from "../../../packages/broker/src/lessons/load.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
 import { Audit, Clock, KEY, MemoryVectors, PROJECT, WS, embedder, lessonRecord, seed, settings, allowAllAccess } from "../lessons/lesson-helpers.js";
@@ -197,9 +197,9 @@ describe("the fit floor", () => {
 
   const keywordOnly = (deps: LoadDeps): LoadDeps => ({ ...deps, embedder: undefined });
 
-  it("without a floor (an older worker) an unscoped, unrelated lesson loads as it always did", async () => {
+  it("with the floor settings at 0 (no floor) an unscoped, unrelated lesson loads, as it did before the floor", async () => {
     const { deps: full, add } = setup();
-    const deps = keywordOnly(full);
+    const deps = { ...keywordOnly(full), ranking: { fitFloorWords: 0, fitFloorCosine: 0 } };
     await add(conv("les_unrel0001", { scope: {}, citations: [], title: "Prefer tabs in Go files", description: "", body: "Use tabs when editing Go source." }));
     expect(await loadedIds(deps, {})).toEqual(["les_unrel0001"]);
   });
@@ -211,21 +211,23 @@ describe("the fit floor", () => {
       conv("les_unrel0001", { scope: {}, citations: [], title: "Prefer tabs in Go files", description: "", body: "Use tabs when editing Go source." }),
       conv("les_fits0001", { scope: {}, title: "Partial refunds in the billing API must keep integer cents", description: "", body: "Add partial refunds to the billing API with integer cents only." }),
     );
-    expect(await loadedIds(deps, { fitFloor: PUSH_FIT_FLOOR })).toEqual(["les_fits0001"]);
+    expect(await loadedIds(deps, {})).toEqual(["les_fits0001"]);
   });
 
   it("with the floor, a lesson whose globs match a touched path always loads, even with a poor text fit", async () => {
     const { deps: full, add } = setup();
     const deps = keywordOnly(full);
     await add(conv("les_path0001", { scope: { repos: ["api"], paths: ["src/billing/**"] }, citations: [], title: "Prefer tabs in Go files", description: "", body: "Use tabs when editing Go source." }));
-    expect(await loadedIds(deps, { fitFloor: 0.99 })).toEqual(["les_path0001"]);
-    expect(await loadedIds(deps, { fitFloor: 0.99, files: ["docs/readme.md"] })).toEqual([]);
+    // (The ONE floor, on the absolute fit: raised so that no text could pass it, only the path match does.)
+    const strict = { ...deps, ranking: { fitFloorWords: 0.99, fitFloorCosine: 0.99 } };
+    expect(await loadedIds(strict, {})).toEqual(["les_path0001"]);
+    expect(await loadedIds(strict, { files: ["docs/readme.md"] })).toEqual([]);
   });
 
   it("a frozen replay snapshot is never cut by the floor", async () => {
     const { deps } = setup();
     const lesson = conv("les_snap0001", { scope: {}, title: "Prefer tabs in Go files", description: "", body: "Use tabs when editing Go source." });
-    const result = await loadLessonsForStage(deps, request({ fitFloor: PUSH_FIT_FLOOR, memory: { mode: "snapshot", snapshotId: "snp_00000000000000000000", lessons: [lesson] } }));
+    const result = await loadLessonsForStage(deps, request({ memory: { mode: "snapshot", snapshotId: "snp_00000000000000000000", lessons: [lesson] } }));
     expect(result.context?.lessons.map((l) => l.id)).toEqual(["les_snap0001"]);
   });
 });

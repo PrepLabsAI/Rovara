@@ -155,6 +155,15 @@ const DigestItemSchema = z.object({
   /** Pull request links the lesson came from (https only). */
   links: z.array(z.string().url().max(300)).max(10),
 }).strict();
+/** One row of the weekly list (lessons phase 1): why it is there in plain words, never a score; a suggestion carries its band, a need-a-look card its cause. */
+const WeeklyRowSchema = z.object({
+  id: z.string().min(1).max(64), title: z.string().max(80), type: LessonTypeSchema,
+  band: z.enum(["direct_correction", "measured", "weak_twice"]).optional(),
+  cause: z.enum(["conflict", "retire_proposed", "revert_overlap", "area_gone", "area_rewritten", "asked_to_keep", "sent_back"]).optional(),
+  area: z.string().max(200), reason: z.string().max(500),
+  /** "Since this lesson: the correction came back `back` times in `matched` matching tasks." */
+  repeat: z.object({ matched: z.number().int().min(0), back: z.number().int().min(0) }).strict().optional(),
+}).strict();
 export const LessonsDigestSchema = z.object({
   since: z.number(),
   /** The most important lessons first: measured outcomes, then recurrence, then severity. */
@@ -163,6 +172,8 @@ export const LessonsDigestSchema = z.object({
   queued: z.number().int().min(0),
   /** Sources paused because they spiked, named only where the viewer can see every lesson that mentions them. */
   pausedSources: z.array(z.string().max(120)).max(50), pausedSourcesHidden: z.number().int().min(0), hidden: z.number().int().min(0),
+  /** The weekly list in bands with a reason per row: need-a-look cards first (not counted), then at most 5 suggestions. Absent from an older broker. */
+  weekly: z.object({ needLook: z.array(WeeklyRowSchema).max(3), picks: z.array(WeeklyRowSchema).max(5) }).strict().optional(),
 }).strict();
 export const LessonsDigestReaderSchema = forwardReader(LessonsDigestSchema);
 

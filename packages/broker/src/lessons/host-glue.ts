@@ -24,9 +24,11 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import type { LessonsUsedSection } from "../core/proof/pull-request-body.js";
 import type { CodeMilestoneHandler } from "../core/milestones/milestones.js";
 import { applyLoadReport } from "./counters.js";
+import type { FadePorts } from "./expiry.js";
+import { runAreaChecks, type AreaCheckPorts } from "./area-check.js";
 import { logTaskCorrections } from "./correction-log.js";
 import type { Lesson } from "./types.js";
-import { PUSH_FIT_FLOOR, learnedContextForDispatch, lessonsAndPickedForDispatch, loadPullForStage } from "./load.js";
+import { learnedContextForDispatch, lessonsAndPickedForDispatch, loadPullForStage } from "./load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pathsNamedIn, type KnowledgeSources } from "./knowledge-brief.js";
 import { recordKnowledgeUseReport } from "./knowledge-use.js";
 import { modeAllows, resolveLearning } from "./policy.js";
@@ -91,6 +93,8 @@ export interface LessonsHostInput {
     /** Whether this install can place a code host account as a member at all (its identity point links accounts). False: no push is read or queued, since no author could ever be named. */
     canPlaceAuthors(): boolean;
   } | undefined;
+  /** The nightly area checks' reads of the project's repositories (`area-check.ts`). Absent: the checks do not run. */
+  areaChecks?: AreaCheckPorts;
   now: () => number;
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
@@ -187,8 +191,6 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         const loadRequest = {
           workspaceId: companyId, project: task.project, taskId: task.taskId, stage, round, intent, ...(plan === undefined || plan.summary === "" ? {} : { planSummary: plan.summary }),
           repos, files, languages: [] as string[], taskAudience: { kind: "shared" as const }, wanted: () => !abandoned,
-          // The fit floor goes with the briefing: a worker that takes it gets the sharper push; an older one is sent exactly what it always was.
-          ...(briefing ? { fitFloor: PUSH_FIT_FLOOR } : {}),
         };
         // The look-up's lessons, the measured facts and the skill names are asked AT THE SAME TIME as the lessons, each on a short clock of its own, so they never add to the lessons' wait: a slow one is left out and the lessons still go.
         const parts = KNOWLEDGE_STAGE_PARTS[stage];
@@ -347,13 +349,21 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
 
   async function nightly(projects: readonly string[]): Promise<void> {
     const { sweepExpired } = await import("./expiry.js");
+    const { countLessonUses } = await import("./use-count.js");
     const { promoteStableTrials } = await import("./trial.js");
     for (const project of projects) {
       const key = { workspaceId: companyId, project };
       const resolved = await resolveLearning(runtime.settings, companyId, project);
       if (!modeAllows(resolved.chosenMode, "capture")) continue;
-      await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, {}).catch(() => undefined);
+      // Fade by chances (phase 2): a lesson no task had a chance to use is renewed once and then a person is asked; one that had chances and never helped fades (`expiry.ts`). The chance count is the lesson's use rows in its window.
+      const fade: FadePorts = {
+        evidence: runtime.evidence, expiryDays: resolved.expiryDays,
+        chances: async (scope, lessonId, since) => { const counted = await countLessonUses(flow.store, { companyId, project: scope.project, lessonIds: [lessonId], now: now(), since }); return counted.counts.get(lessonId)?.tasks; },
+      };
+      await sweepExpired({ ...runtime.counters, vectors: runtime.vectors }, runtime.store, key, { fade }).catch(() => undefined);
       await promoteStableTrials({ ...runtime.counters, store: runtime.store }, key).catch(() => undefined);
+      // The nightly area checks (no model): a lesson whose code area is gone goes under question; one whose area was rewritten asks a person (`area-check.ts`). A fault is information only.
+      if (input.areaChecks !== undefined) await runAreaChecks({ lessons: runtime.store, docs: flow.store, companyId, now, ports: input.areaChecks, log: (event, fields) => log(event, fields) }, key).catch(() => undefined);
     }
   }
 
