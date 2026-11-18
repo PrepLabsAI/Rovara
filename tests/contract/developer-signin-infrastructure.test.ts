@@ -16,6 +16,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
+import { withoutSavedEnvSwitch } from "../support/saved-env-switch-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
 import { withoutChatGptKeyDeny } from "../support/chatgpt-key-deny-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
@@ -679,6 +680,8 @@ describe("task-token key and membership IAM", () => {
     withoutBrokerSlackPoster(remainder, "staging");
     // L4-SE6: the saved environment images' roles, creation template, outputs and the broker's four variables are asserted exactly (tests/support/saved-env-images-template.ts) and taken out too.
     withoutSavedEnvImages(remainder, "staging");
+    // L4-SE (#1081): the saved-environment switch parameter and its two packed settings are asserted exactly (tests/support/saved-env-switch-template.ts) and taken out too.
+    withoutSavedEnvSwitch(remainder);
     // L4-HARD (c): the ChatGPT key's Deny (UseOnlyAsBroker) is asserted in full by chatgpt-key-deny-infrastructure.test.ts and taken out so the digest still pins everything else (rule D).
     withoutChatGptKeyDeny(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
