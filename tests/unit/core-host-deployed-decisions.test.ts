@@ -506,6 +506,16 @@ describe("the plan card's feature line (lead 4 PCF)", () => {
     expect(await planFeature(t, "dev-a", mine)).toMatchObject({ canChange: false });
   });
 
+  it("Change needs the filing right: a card whose person the task access no longer lets act shows the line with no Change", async () => {
+    const t = await withFeatures();
+    const taskId = await t.waitingTask("dev-a");
+    const denied = { ...t.runtime, flow: { ...t.runtime.flow, deps: { ...t.runtime.flow.deps, access: { ...t.runtime.flow.deps.access, canAct: async () => false } } } } as typeof t.runtime;
+    const deps = deployedDecisionCards({ runtime: denied, registry: t.registry, people: t.people, proofs: t.point.proofs, log: t.log });
+    const card = (await view(deps, "dev-a")).cards.find((entry) => entry.id === cardOf(taskId));
+    expect(card?.planFeature).toMatchObject({ line: "Feature: No feature", canChange: false, canCreate: false });
+    expect((await planFeature(t, "dev-a", taskId))!.canChange).toBe(true);
+  });
+
   it("a change is not a changed card: the digest the person was shown stays the digest", async () => {
     const t = await withFeatures();
     const one = await t.features().create({ name: "One" }, { type: "system", id: "test" });
