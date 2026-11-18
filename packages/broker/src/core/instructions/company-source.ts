@@ -22,6 +22,14 @@ export async function readCompanyInstructions(source: CompanyInstructionsSource 
     console.log(JSON.stringify({ component: "broker", event: "company_instructions.read_failed", company, error: error instanceof Error ? error.name : "unknown" }));
     throw agentXError("RUNTIME_UNAVAILABLE", "The company rules could not be read, so this step did not start. Try again in a moment.");
   }
+  return checkedCompanyInstructions(answer);
+}
+
+/**
+ * A snapshot the way a step may use it: `undefined` when there is none or it holds no rules, a refusal when it is not a snapshot or is over the limits. Used for a live read and for the copy a hosted task
+ * pinned at its start (read back from the store, so it is checked again, never trusted).
+ */
+export function checkedCompanyInstructions(answer: unknown): CompanyInstructionsSnapshot | undefined {
   if (answer === undefined) return undefined;
   const parsed = CompanyInstructionsSnapshotSchema.safeParse(answer);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "The company rules are not in a form this version of Rovara can read, so this step did not start.");

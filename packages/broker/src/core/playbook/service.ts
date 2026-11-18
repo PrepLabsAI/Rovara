@@ -91,6 +91,11 @@ export interface PlaybookServiceDeps {
   source: PlaybookSource;
   codeSettings?: CodeSettingsReader;
   now?: () => Date;
+  /**
+   * False: a read at the head never writes the stored project item (the design review setting a file carries). The hosted broker's pin uses it: there the stored item belongs to the company's admin path, and a
+   * task start must not let repository text change it. Default true (the laptop's behaviour).
+   */
+  syncStored?: boolean;
 }
 
 const stateOf = (reading: PlaybookReading): PlaybookFileState =>
@@ -109,7 +114,7 @@ export function createPlaybookService(deps: PlaybookServiceDeps): PlaybookServic
     if (reading.status === "invalid") throw agentXError("PROCESS_UNAVAILABLE", playbookRefusal(reading.problems));
     const file = reading.status === "ok" && !playbookIsEmpty(reading.file) ? reading.file : undefined;
     // A task's pinned read never writes: the item says what the head of the default branch says, and an older file must not take it back.
-    if (options.commit !== undefined) return { file, playbook: await readProjectPlaybook({ store: deps.store, companyId: deps.companyId }, project), reading };
+    if (options.commit !== undefined || deps.syncStored === false) return { file, playbook: await readProjectPlaybook({ store: deps.store, companyId: deps.companyId }, project), reading };
     const synced = await sync(project, file, file === undefined ? undefined : reading.status === "ok" ? reading.digest : undefined);
     return { file, playbook: synced.playbook, reading };
   }
@@ -151,13 +156,21 @@ export function createPlaybookService(deps: PlaybookServiceDeps): PlaybookServic
     },
     async layersFor(project, mode, commit) {
       const { file } = await current(project, commit === undefined ? {} : { commit });
-      if (file === undefined) return [];
-      const recipe = runningProcessOf(file).recipe;
-      const step = stepForMode(recipe, mode);
-      const builtin = new Set(recipe.chain.filter((entry) => entry.builtin).map((entry) => entry.name));
-      const layers: InstructionLayer[] = [...wholeAgentLayers(recipe, step), ...stepInstructionLayers(recipe, step, mode)];
-      // Rovara's own layers (the built-in's plan and build guidance) are Rovara's, not the project's process: only what the file wrote is the project's.
-      return layers.filter((layer) => layer.text.length > 0 && !builtin.has(layer.agentName)).map((layer) => ({ agentName: layer.agentName, text: layer.text }));
+      return playbookLayersOf(file, mode);
     },
   };
+}
+
+/**
+ * The instruction layers a step of this mode is given from a checked file, in order: whole-process rules (not for a reviewing stage), then the stage's own. Pure (no host, no store): the laptop reads the file
+ * at the task's pinned commit and a hosted dispatcher is handed the file the broker pinned, and both come here. Empty for no file.
+ */
+export function playbookLayersOf(file: PlaybookFile | undefined, mode: PlaybookMode | undefined): Array<{ agentName: string; text: string }> {
+  if (file === undefined) return [];
+  const recipe = runningProcessOf(file).recipe;
+  const step = stepForMode(recipe, mode);
+  const builtin = new Set(recipe.chain.filter((entry) => entry.builtin).map((entry) => entry.name));
+  const layers: InstructionLayer[] = [...wholeAgentLayers(recipe, step), ...stepInstructionLayers(recipe, step, mode)];
+  // Rovara's own layers (the built-in's plan and build guidance) are Rovara's, not the project's process: only what the file wrote is the project's.
+  return layers.filter((layer) => layer.text.length > 0 && !builtin.has(layer.agentName)).map((layer) => ({ agentName: layer.agentName, text: layer.text }));
 }
