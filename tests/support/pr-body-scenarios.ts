@@ -119,7 +119,7 @@ const LESSONS = { count: 2, taskUrl: SESSION, entries: [
 ] };
 
 /** The typical task of design example 1, but with every requirement proven and the tests before and after compared. `agreed`: a second review in mode on agreed. */
-export function greenScenario(variant: "today" | "clean" = "today"): Scenario {
+export function greenScenario(variant: "today" | "clean" = "today", extra: Partial<PullRequestBodyContext> = {}): Scenario {
   const provenAt = variant === "clean" ? [0, 1, 2] : [0];
   const compared = variant === "clean";
   const evidence = packOf({
@@ -134,7 +134,7 @@ export function greenScenario(variant: "today" | "clean" = "today"): Scenario {
   return render(variant === "clean" ? "green-clean" : "green", {
     workflow, evidence, claims: 3, checkCount: 4, provenAt: provenAt, compared: compared, files: [file("src/invoice/view.ts", 40, 6), file("src/invoice/pdf.ts", 30, 4), file("tests/invoice/tax.test.ts", 9, 1), file("tests/invoice/pdf.test.ts", 7, 1)],
     dependencies: new Map([["unit", [{ dependencyId: "Postgres", trust: "real" as const }, { dependencyId: "Stripe", trust: "recorded" as const }]]]),
-    context: { lessonsUsed: LESSONS, linearIssueKey: "ENG-482", reviewSameModel: false, ciBasis: "required", baseBranch: "main", secondReview: { state: "agreed" } },
+    context: { lessonsUsed: LESSONS, linearIssueKey: "ENG-482", reviewSameModel: false, ciBasis: "required", baseBranch: "main", secondReview: { state: "agreed" }, ...extra },
   });
 }
 

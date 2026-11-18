@@ -58,6 +58,8 @@ import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
+import { queueSetupBroken } from "../core/notify/attention.js";
+import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
 import { CompanySignInStore } from "../developer/company-membership.js";
@@ -566,7 +568,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const recipients = createUpkeepRecipients(companyId, sources);
     const administers = createUpkeepAdministers(companyId, sources);
     const pauses = upkeepPauseHooks({ store, companyId, now: () => now().getTime(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.upkeep", ...entry }) });
-    return { gate, administers, pauses };
+    // L4-U5: the admins' one "Setup needs repair" notice (queued once per re-check), over the same recipients and attention queue as the pause notice.
+    const setupBroken = (input: { project: string; recheckKey: string }): Promise<unknown> => queueSetupBroken({ store, now: () => now(), recipients, realtime: registry.get("realtime", registry.names("realtime")[0] ?? ""), log: (entry) => log({ event: "core_engine.setup_broken", ...entry }) }, { orgId: companyId, project: input.project, recheckKey: input.recheckKey });
+    return { gate, administers, pauses, setupBroken };
   };
   const lessonsByCompany = new Map<string, CoreLessons>();
   const teamRecords = new Map<string, CoreTeamRecord>();
@@ -647,6 +651,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
         hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
         const upkeep = upkeepPartsFor(registry, companyId);
+        // L4-U5: a re-check that settles as broken tells the project's admins once (the notice writes its own marker); the same flow's repair card is what the delivery re-reads before every send.
+        flow.deps.setupBroken = async (input) => { await upkeep.setupBroken(input); };
         // L4-P2: the AI step of the night (the wiki refresh) over the SAME flow and its own Admission; it starts only where a dollar cap is really enforced and both locks are open. The file map is the night's own.
         const wikiMapForNight: HostedWikiMapWiring = { standing: setupRunStanding, hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }) };
         const modelConfigured = (): boolean => { try { return modelGateway() !== undefined; } catch { return false; } };
@@ -657,7 +663,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, { ...wiring, upkeep: { administers: upkeep.administers } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, { ...wiring, upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
           ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },

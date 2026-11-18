@@ -1,6 +1,5 @@
 // L4-DR: the stored rows, keys, fixed words and the quiet evidence line of the setup re-check. Light on purpose (contracts and keys only): the task page's read imports it, and the re-check itself (recheck.ts) does not.
-import { setupDriftWords, type DocumentKey, type OrgId, type SetupDriftClass } from "@agentx/contracts";
-import type { TaskFlowDeps } from "../task-flow/deps.js";
+import { setupDriftWords, type DocumentKey, type DocumentStore, type OrgId, type SetupDriftClass } from "@agentx/contracts";
 import type { SetupCheckMark } from "./check.js";
 import { setupPartition } from "./keys.js";
 
@@ -27,6 +26,30 @@ export const setupMayBeOutOfDateWords = (classes: readonly SetupDriftClass[]): s
 /** What the requester is told when the task pauses before Build (design 3c), with the check's failing step. */
 export const setupBrokenTaskWords = (failedStep: string): string =>
   `I can't build this yet. This project's setup stopped working after recent code changes (${failedStep}). I've asked the project's admins to approve a fix. Retry this step once the setup is fixed.`;
+
+/**
+ * L4-U5: the fixed words every surface shares (the web card, the chat thread, the ticket, the admins' notice). Slack and Linear carry the same sentences as the web and never a dollar figure: what a fix costs is said
+ * on the web page only, where the person presses the button.
+ */
+export const SETUP_REPAIR_WORDS = { title: "Setup needs repair", fixSetup: "Fix setup", approveNewSetup: "Approve new setup", recheckSetup: "Re-check setup", openSetup: "Setup page" } as const;
+/** What the project's admins are told when its setup broke (once per project and re-check): the card's sentence and the one action that fits (`fixReady`: a checked fix waits for approval). No cost, no repository text beyond the check's own failing step. */
+export const setupAdminNoticeWords = (failedStep: string, fixReady = false): string =>
+  `${SETUP_REPAIR_WORDS.title}. The project's setup stopped working after recent code changes (${inertSetupStep(failedStep)}). Rovara cannot build on this project until it is fixed. ${fixReady ? SETUP_REPAIR_WORDS.approveNewSetup : SETUP_REPAIR_WORDS.fixSetup} on the setup page.`;
+
+/** Where the person goes: the setup page's link when the host has one (a plain https address), else the words that say to open it in Rovara. The same on every surface. */
+export const setupPageWords = (url?: string): string => (url === undefined ? "Open the project's setup page in Rovara." : `${SETUP_REPAIR_WORDS.openSetup}: ${url}`);
+/** A plain https address with no sign-in data (the only kind that goes into a chat or a ticket), or undefined. */
+export function plainSetupLink(link: string | undefined): string | undefined {
+  if (link === undefined) return undefined;
+  try {
+    const url = new URL(link);
+    return url.protocol === "https:" && url.username === "" && url.password === "" && link.length <= 2000 && !/[\s<>\p{Cc}]/u.test(link) ? url.toString() : undefined;
+  } catch { return undefined; }
+}
+/** The check's failing step made safe for a chat or a ticket (it is repository text): no controls, no mention or markup characters, no `://`, one line, cut. Plain steps such as `setup step 0 (npm ci) failed: exit 1` are unchanged. */
+export const inertSetupStep = (step: string): string => step.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/:\/\//gu, ": ").replace(/[@<>`]/gu, "").replace(/\s+/gu, " ").trim().slice(0, 200);
+/** What the requester reads in the chat thread and on the ticket when their task paused before Build: the task page's own sentence, then where to go. One message, no buttons, no cost. */
+export const setupPausedMessage = (failedStep: string, setupUrl?: string): string => `${setupBrokenTaskWords(inertSetupStep(failedStep))}\n${setupPageWords(plainSetupLink(setupUrl))}`;
 
 export interface SetupRepairCard {
   title: "Setup needs repair";
@@ -68,11 +91,24 @@ export const isRow = (row: Record<string, unknown> | undefined, orgId: OrgId, pr
 
 // ---- the evidence line
 
+/** The states a task's setup evidence can be in. `not_rechecked`: the check could not run or finish; `may_be_out_of_date`: the company's automatic runs are off, so nothing was started. */
+/** What the evidence reads: the company's store and the company (a read only). */
+export interface EvidenceReader { store: Pick<DocumentStore, "get">; companyId: OrgId }
+export type SetupEvidenceState = RecheckState | "not_rechecked" | "may_be_out_of_date";
+export interface SetupEvidence {
+  state: SetupEvidenceState;
+  line: string;
+  /** The result gives less reason to trust the task's tests (the check could not be made or finished): the PR and the chat message say so. A pass, a running check and failing tests do not (the PR's Testing section already names those). */
+  lowersTrust: boolean;
+  /** The re-check this evidence is about (absent when none was started). Used to tell a chat once per re-check. */
+  recheckKey?: string;
+  failedStep?: string;
+}
+
 /**
- * The one quiet line a task shows when a re-check ran for it: "Checking setup again..." while it runs, "Setup re-checked after X changed: still works." once it passed, and nothing for a task that had no
- * drift (no link) or a re-check that could not be told. Never throws; a fault is no line.
+ * What a re-check says about one task: the one line and its state, or nothing for a task that had no drift (no link) or a re-check that could not be told. Never throws; a fault is no evidence.
  */
-export async function setupRecheckLineOf(deps: Pick<TaskFlowDeps, "store" | "companyId">, project: string, taskId: string): Promise<string | undefined> {
+export async function setupEvidenceOf(deps: EvidenceReader, project: string, taskId: string): Promise<SetupEvidence | undefined> {
   try {
     const orgId = deps.companyId;
     const link = await deps.store.get(driftTaskKey(orgId, project, taskId));
@@ -80,19 +116,42 @@ export async function setupRecheckLineOf(deps: Pick<TaskFlowDeps, "store" | "com
     const noRecheck = (link as { noRecheck?: { classes?: unknown } }).noRecheck;
     if (noRecheck !== undefined) {
       const classes = Array.isArray(noRecheck.classes) ? (noRecheck.classes as SetupDriftClass[]) : [];
-      return (noRecheck as { reason?: unknown }).reason === "off" ? setupMayBeOutOfDateWords(classes) : setupNotRecheckedWords(classes);
+      return (noRecheck as { reason?: unknown }).reason === "off"
+        ? { state: "may_be_out_of_date", line: setupMayBeOutOfDateWords(classes), lowersTrust: true }
+        : { state: "not_rechecked", line: setupNotRecheckedWords(classes), lowersTrust: true };
     }
     const stored = await deps.store.get(recheckRowKey(orgId, project, link["recheckKey"]));
     if (!isRow(stored, orgId, project, "SETUP_RECHECK")) return undefined;
     const row = stored as unknown as RecheckRow;
+    const base = { recheckKey: row.key };
     switch (row.state) {
-      case "running": return SETUP_CHECKING_WORDS;
-      case "passed": return setupStillWorksWords(row.classes);
-      case "tests_failing": return setupTestsFailingWords(row.classes);
-      case "broken": return setupBrokenTaskWords(row.failedStep ?? "setup");
-      case "unclear": return setupNotRecheckedWords(row.classes);
+      case "running": return { ...base, state: "running", line: SETUP_CHECKING_WORDS, lowersTrust: false };
+      case "passed": return { ...base, state: "passed", line: setupStillWorksWords(row.classes), lowersTrust: false };
+      case "tests_failing": return { ...base, state: "tests_failing", line: setupTestsFailingWords(row.classes), lowersTrust: false };
+      case "broken": return { ...base, state: "broken", line: setupBrokenTaskWords(row.failedStep ?? "setup"), lowersTrust: false, failedStep: row.failedStep ?? "setup" };
+      case "unclear": return { ...base, state: "unclear", line: setupNotRecheckedWords(row.classes), lowersTrust: true };
     }
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The one quiet line a task shows when a re-check ran for it: "Checking setup again..." while it runs, "Setup re-checked after X changed: still works." once it passed, and nothing for a task that had no
+ * drift (no link) or a re-check that could not be told. Never throws; a fault is no line.
+ */
+export async function setupRecheckLineOf(deps: EvidenceReader, project: string, taskId: string): Promise<string | undefined> {
+  return (await setupEvidenceOf(deps, project, taskId))?.line;
+}
+
+/** The evidence line only when it lowers trust (the chat message and the ticket comment carry it; a pass never posts there). */
+export async function setupTrustLineOf(deps: EvidenceReader, project: string, taskId: string): Promise<string | undefined> {
+  const evidence = await setupEvidenceOf(deps, project, taskId);
+  return evidence?.lowersTrust === true ? evidence.line : undefined;
+}
+
+/** The line a pull request carries about the setup (a finished re-check or the note that none could be made); nothing while it runs or after a break (a broken setup never opens a pull request). */
+export async function setupPullRequestLineOf(deps: EvidenceReader, project: string, taskId: string): Promise<string | undefined> {
+  const evidence = await setupEvidenceOf(deps, project, taskId);
+  return evidence === undefined || evidence.state === "running" || evidence.state === "broken" ? undefined : evidence.line;
 }

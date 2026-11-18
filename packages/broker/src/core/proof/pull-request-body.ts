@@ -94,6 +94,11 @@ export interface PullRequestBodyContext {
    * Text only: no image, no address of one and no digest ever reaches GitHub, because an image a PR reader's browser can fetch would be public. Absent or empty: the description is exactly what it was.
    */
   browserEvidenceLines?: readonly string[] | undefined;
+  /**
+   * L4-U5: the one line about the setup when Rovara re-checked it for this task ("Setup re-checked after dependency files changed: still works." or the note that the check could not be made), from the task's own re-check rows
+   * (`setupPullRequestLineOf`). Printed first in the "Test setup" drawer. Absent (no drift): the description is exactly what it was.
+   */
+  setupLine?: string | undefined;
 }
 
 /** One lesson the task loaded, for the description: its title and the https link to the task page that offers "not helpful" for it. */

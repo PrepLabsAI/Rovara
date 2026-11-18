@@ -124,7 +124,14 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef): Prom
   const setupGate = await setupGateBeforeBuild(deps, { project: task.project, taskId: task.taskId });
   if (setupGate.answer === "wait") return "WAITING";
   if (setupGate.answer === "blocked") {
-    await commitWorkflow(deps, task, blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps)));
+    const blocked = blockWorkflow(workflow, setupGate.words.slice(0, 500), iso(deps));
+    // L4-U5: the thread and the ticket the task came from are told ONCE that it paused, in the same transaction as the pause (the milestone hook tells them and tries again after a failure). The handlers read the words from the
+    // project's own re-check rows; the text here is only the session's timeline line.
+    const told = deps.milestones === undefined ? [] : deps.milestones.items({
+      kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: iso(deps), text: setupGate.words.slice(0, 500),
+    }, blocked.revision);
+    const committed = await commitWorkflow(deps, task, blocked, told);
+    if (committed && told.length > 0) await deps.milestones?.deliver(task.taskId).catch(() => undefined);
     return settled(deps, row, "STALE");
   }
   // A fix is made for the head Rovara pushed: if a person pushed meanwhile, the round ends here and the task waits for the merge again.

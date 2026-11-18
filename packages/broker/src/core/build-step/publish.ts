@@ -26,6 +26,7 @@ import { fromDocument, toDocument, type OperationRecord, type PublicationExpecta
 import { workspaceOperations } from "../task-flow/reads.js";
 import { acceptStep, commitWorkflow, runDispatchRow, type StepStart } from "../task-flow/stage-machine.js";
 import { iso, log } from "../task-flow/support.js";
+import { setupPullRequestLineOf } from "../setup-agent/recheck-rows.js";
 import { startPullRequestUpdate } from "./maintain.js";
 import { approvedCodingPlan } from "./plan-input.js";
 import { pullRequestRecordKey, taskOfOperation, type PullRequestRecord } from "./records.js";
@@ -86,7 +87,9 @@ export async function startPublication(deps: TaskFlowDeps, row: RowRef, options:
   // TE-H1: what the browser evidence run showed for exactly this code, as fixed text lines (none on an install without it, or for a run that took none).
   const browserLines: readonly string[] = await deps.browserEvidence?.linesOf(task, candidate.digest).catch((): readonly string[] => []) ?? [];
   const mergeOrderLines = await deps.mergeOrderLines?.(task, repository.repositoryId).catch(() => []) ?? [];
-  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
+  // L4-U5: the one line about the setup when it was re-checked for this task (none when there was no drift).
+  const setupLine = await setupPullRequestLineOf(deps, task.project, task.taskId);
+  const body = workflowPullRequestBody(task, judged, plan?.text, undefined, { ...(setupLine === undefined ? {} : { setupLine }), ...(mergeOrderLines.length === 0 ? {} : { mergeOrderLines }), ...(acceptedBy === undefined ? {} : { acceptedBy }), ...(linearIssueKey === undefined ? {} : { linearIssueKey }), ...(lessonsUsed === undefined ? {} : { lessonsUsed }), ...(secondLines.length === 0 ? {} : { secondReviewLines: secondLines }), ...(secondStatus === undefined ? {} : { secondReview: secondStatus }), ...(proof === undefined ? {} : { proof }), ...(browserLines.length === 0 ? {} : { browserEvidenceLines: browserLines }) });
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
   const operationId = newId(deps);
   const headBranch = headBranchOf(operationId);

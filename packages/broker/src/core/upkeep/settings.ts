@@ -7,10 +7,10 @@
 //   - The schedule follows the switch: ON puts the project's upkeep night on the scheduler, OFF removes it. A schedule that could not be changed is thrown AFTER the row is written (the switch is what is true; a retry of
 //     the same request puts it right).
 // The monthly dollar cap is NOT here: the gateway holds it (Cloud's `upkeep_month`), so no number written in Code can lift it.
-import { SYSTEM_RUNS_CONSENT_WORDS, UpkeepSwitchBodySchema, agentXError, when, type DocumentStore, type OrgId, type UpkeepView } from "@agentx/contracts";
+import { SYSTEM_RUNS_CONSENT_WORDS, UPKEEP_PAUSE_REASONS, UpkeepSwitchBodySchema, agentXError, upkeepMonthOf, when, type DocumentStore, type OrgId, type UpkeepPauseReason, type UpkeepView } from "@agentx/contracts";
 import { readSystemRunsConsentRow, systemRunsConsentKey } from "../system-runs/consent.js";
 import { requireFreshStepUp } from "../system-runs/consent-control.js";
-import { upkeepSettingsKey, type UpkeepScope } from "./keys.js";
+import { upkeepNoticeKey, upkeepPartition, upkeepSettingsKey, type UpkeepScope } from "./keys.js";
 
 export const UPKEEP_WORDS = {
   notAllowed: "Only company owners and admins, or this project's admins, can switch nightly upkeep on or off.",
@@ -69,6 +69,29 @@ export async function upkeepIsOn(deps: Pick<UpkeepSettingsDeps, "store" | "compa
   return (await readUpkeepSetting(deps, project)).enabled;
 }
 
+/**
+ * L4-U5: why nightly upkeep is paused NOW, for the project's admins' page. A pause counts only while the LAST night that was decided (the project's newest `NIGHT#<day>` row) ended as `paused`, and only with this month's
+ * admins' notice marker naming the reason (the newest marker when more than one). A later night that ran, or a month with no marker, reads as not paused. Never throws (a read that fails is "not paused").
+ */
+export async function readUpkeepPause(deps: Pick<UpkeepSettingsDeps, "store" | "companyId" | "now">, project: string): Promise<{ reason: UpkeepPauseReason; month: string } | undefined> {
+  try {
+    const scope = { orgId: deps.companyId, project };
+    const latest = await deps.store.query({ pk: upkeepPartition(scope), sk: { op: "beginsWith", prefix: "NIGHT#" }, descending: true, limit: 1 });
+    const night = latest.items[0];
+    if (night === undefined || night["entityType"] !== "UPKEEP_NIGHT" || night["orgId"] !== deps.companyId || night["project"] !== project || night["outcome"] !== "paused") return undefined;
+    const month = upkeepMonthOf(deps.now());
+    let found: { reason: UpkeepPauseReason; at: string } | undefined;
+    for (const reason of UPKEEP_PAUSE_REASONS) {
+      const marker = await deps.store.get(upkeepNoticeKey(scope, month, reason));
+      if (marker === undefined || marker["entityType"] !== "UPKEEP_NOTICE" || marker["orgId"] !== deps.companyId || marker["project"] !== project || marker["reason"] !== reason || typeof marker["at"] !== "string") continue;
+      if (found === undefined || marker["at"] > found.at) found = { reason, at: marker["at"] };
+    }
+    return found === undefined ? undefined : { reason: found.reason, month };
+  } catch {
+    return undefined;
+  }
+}
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
 /** Switches nightly upkeep on or off for one project. `fromPage`: set only by the setup page's own route (never a token's or a script's). */
@@ -118,7 +141,9 @@ export async function upkeepView(deps: UpkeepControlDeps, personId: string, proj
       return typeof read === "number" && Number.isFinite(read) && read >= 0 ? read : null;
     } catch { return null; }
   })();
+  const paused = standing.access === "manage" ? await readUpkeepPause(deps, project) : undefined;
   return {
+    ...(paused === undefined ? {} : { paused }),
     enabled: (await readUpkeepSetting(deps, project)).enabled, canManage: standing.access === "manage", available,
     systemRunsOn: available && (deps.noConsentNeeded === true || (await readSystemRunsConsentRow(deps)).enabled), canEnableSystemRuns: available && companyAdmin, cap: { monthlyUsd: standing.access === "manage" ? monthlyUsd : null, canRaise: companyAdmin },
   };

@@ -19,6 +19,7 @@ import type { CodeMilestoneHandler } from "../milestones/milestones.js";
 import { taskKey } from "../task-flow/keys.js";
 import { sessionBindingsOf } from "../sessions/bindings.js";
 import { noteWriteAccessMissing, noteWriteAccessOk, readTicketUpdates } from "./settings.js";
+import { setupEvidenceOf, setupPausedMessage, setupTrustLineOf } from "../setup-agent/recheck-rows.js";
 
 export const TICKET_UPDATES_PER_HOUR = 120;
 export const TICKET_UPDATES_PER_TASK = 12;
@@ -38,6 +39,8 @@ export interface TicketUpdatesDependencies {
   trackerFor(system: string): Tracker | undefined;
   /** What a tracker call is scoped to (the install's company). */
   scope: HostScope;
+  /** L4-U5: the project's setup page when the host has an https address for it. Absent: the comment says to open the setup page in Rovara. */
+  setupUrl?: ((project: string) => string | undefined) | undefined;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
 }
 
@@ -62,12 +65,13 @@ function plainHttpsLink(link: string): string | undefined {
 }
 
 /** The words of one update: the moment, the title, the status it moved to, the pull request's link. Nothing else. */
-export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined }): string {
+export function ticketUpdateText(input: { moment: TicketUpdateMoment; title: string; pullRequests?: readonly string[] | undefined; status?: string | undefined; /** L4-U5: the setup's evidence line (fixed words), only when the check could not be made or finished. */ setupLine?: string | undefined }): string {
   const links = (input.pullRequests ?? []).flatMap((link) => plainHttpsLink(link) ?? []).slice(0, 5);
   return [
     `${TICKET_MOMENT_WORDS[input.moment]}: "${inertTicketTitle(input.title)}".`,
     ...(input.status === undefined ? [] : [`Status: ${inertTicketTitle(input.status)}.`]),
     ...links.map((link) => `Pull request: ${link}`),
+    ...(input.setupLine === undefined ? [] : [input.setupLine]),
   ].join("\n");
 }
 
@@ -129,8 +133,11 @@ const refusalOf = (error: unknown): string => (error instanceof TrackerWriteRefu
 
 /** One milestone: the update it calls for, sent once to the ticket the task started from. Never throws for a ticket that cannot be written; throws a fault that may pass. */
 export async function sendTicketUpdate(deps: TicketUpdatesDependencies, milestone: CodeMilestone): Promise<string> {
-  const moment = MOMENT_OF[milestone.kind];
-  if (moment === undefined) return "not_a_moment";
+  // L4-U5: `setup_paused` (the task paused before Build because the project's setup broke) is a comment of its own, in the page's fixed words; it never moves a ticket's status.
+  const setupPaused = milestone.kind === "setup_paused";
+  const moment = setupPaused ? undefined : MOMENT_OF[milestone.kind];
+  if (moment === undefined && !setupPaused) return "not_a_moment";
+  const momentName = setupPaused ? "setup_paused" : moment!;
   const task = await deps.store.get(taskKey(milestone.taskId)) as Item | undefined;
   const taskOrg = task?.["orgId"] ?? task?.["companyId"];
   if (task === undefined || taskOrg !== milestone.orgId || typeof task["project"] !== "string") return "no_task";
@@ -141,11 +148,22 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
   const ticket = await originTicketOf(deps, { orgId, project, taskId: milestone.taskId, sessionId });
   if (ticket === undefined) return "no_ticket";
   const { settings } = await readTicketUpdates(deps, orgId, project);
-  const status = settings.changeStatus ? settings.statuses[moment] : undefined;
+  const status = moment === undefined || !settings.changeStatus ? undefined : settings.statuses[moment];
   if (!settings.comments && status === undefined) return "off";
   const tracker = deps.trackerFor(ticket.tracker);
   if (tracker === undefined || (tracker.comment === undefined && tracker.setStatusByName === undefined)) return "not_connected";
-  const key = claimKeyOf(milestone, moment);
+  // The setup pause says its words only while the break still holds for this task, and once per re-check (a task paused twice by the same break is told once).
+  let setupText: string | undefined;
+  let setupKey: string | undefined;
+  if (setupPaused) {
+    const evidence = await setupEvidenceOf({ store: deps.store, companyId: orgId }, project, milestone.taskId);
+    if (evidence?.state !== "broken" || evidence.recheckKey === undefined) return "not_broken";
+    setupKey = `setup_paused#${evidence.recheckKey}`;
+    setupText = setupPausedMessage(evidence.failedStep ?? "setup", deps.setupUrl?.(project));
+  }
+  // The evidence line rides on the pull request comment only when the setup could not be re-checked (a pass never posts).
+  const trustLine = moment === "pr_opened" ? await setupTrustLineOf({ store: deps.store, companyId: orgId }, project, milestone.taskId) : undefined;
+  const key = setupKey ?? claimKeyOf(milestone, moment!);
   const claimed = await claim(deps, milestone.taskId, key);
   if (claimed === "done") return "already_sent";
   if (claimed === "busy") throw new Error("ticket update in flight");
@@ -161,7 +179,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     if (spent.length === 1 && await countWithin(deps, perHour, TICKET_UPDATES_PER_HOUR, Math.floor(now / 1000) + 2 * 3600)) spent.push(perHour);
     if (spent.length < 2) {
       await refund();
-      deps.log?.("ticket_update.rate_limited", { orgId, taskId: milestone.taskId, tracker: ticket.tracker, moment });
+      deps.log?.("ticket_update.rate_limited", { orgId, taskId: milestone.taskId, tracker: ticket.tracker, moment: momentName });
       await settle(deps, milestone.taskId, key, "rate_limited");
       return "rate_limited";
     }
@@ -179,7 +197,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     if (settings.comments) {
       if (tracker.comment === undefined) posted = "not_connected";
       else {
-        const text = ticketUpdateText({ moment, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }) });
+        const text = setupText ?? ticketUpdateText({ moment: moment!, title: typeof task["title"] === "string" ? task["title"] : "", status: moved, ...(milestone.pullRequests === undefined ? {} : { pullRequests: milestone.pullRequests.map((pr) => pr.url) }), ...(trustLine === undefined ? {} : { setupLine: trustLine }) });
         // The comment's key is the claim's: the same update again is the same comment, never a second one. A task only its owner can see is written as an internal comment.
         posted = await tracker.comment(ref, text, deps.scope, { key: `ticket_update:${milestone.taskId}:${key}`, requirePrivate: true }).then(() => "posted", (error: unknown) => { if (isFinal(error)) return refusalOf(error); throw error; });
         if (posted === "needs_write_access") missing = true;
@@ -189,7 +207,7 @@ export async function sendTicketUpdate(deps: TicketUpdatesDependencies, mileston
     else if (posted === "posted" || moved !== undefined) await noteWriteAccessOk(deps, orgId, ticket.tracker).catch(() => undefined);
     if (posted !== "posted" && moved === undefined) await refund();
     const outcome = missing ? "needs_write_access" : posted;
-    deps.log?.("ticket_update.sent", { orgId, taskId: milestone.taskId, tracker: ticket.tracker, moment, outcome, ...(moved === undefined ? {} : { statusMoved: true }) });
+    deps.log?.("ticket_update.sent", { orgId, taskId: milestone.taskId, tracker: ticket.tracker, moment: momentName, outcome, ...(moved === undefined ? {} : { statusMoved: true }) });
     await settle(deps, milestone.taskId, key, outcome);
     return outcome;
   } catch (error) {
@@ -204,7 +222,7 @@ export function ticketUpdatesHandler(deps: TicketUpdatesDependencies): CodeMiles
   return {
     name: "ticket_updates",
     async on(milestone) {
-      if (MOMENT_OF[milestone.kind] === undefined) return;
+      if (MOMENT_OF[milestone.kind] === undefined && milestone.kind !== "setup_paused") return;
       await sendTicketUpdate(deps, milestone);
     },
   };
