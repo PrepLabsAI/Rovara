@@ -107,6 +107,25 @@ describe("a tool's suggestion is a weak-source lesson that waits, and only a per
     expect(w.providerCalls).toBe(0);
   });
 
+  it("a person's own tool and their own task's agent are one sighting; a different person's tool is the second", async () => {
+    const w = await world();
+    const ann = w.h.owner.principal.personId;
+    const same = { advice: "Keep jobs idempotent", why: "Retries run twice.", when: "adding a job" };
+    await propose(w, same);
+    // The owner's own task's agent says the same thing: still one sighting (the owner), so still a held candidate.
+    await w.lessons.onEvents({ workspaceId: w.workspaceId, id: randomUUID() }, [{ type: "progress", payload: { [KNOWLEDGE_PROPOSALS_FIELD]: [same] } }]);
+    const held = (await all(w)).filter((l) => l.title === same.advice);
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({ status: "candidate", reviewRequired: true });
+    expect(held[0]!.provenance.authors).toEqual([ann]);
+    expect(held[0]!.provenance.supportTasks).toEqual([w.taskId]);
+    expect(held[0]!.provenance.sources.some((source) => source.startsWith("requester:"))).toBe(true);
+    expect(held[0]!.provenance.sources.filter((source) => source.startsWith("requester:")).join(" ")).not.toContain(ann);
+    // Another person's tool is the second sighting: now it waits for a person.
+    await propose(w, same, "payments", person(w, "person-bob"));
+    expect((await all(w)).filter((l) => l.title === same.advice)[0]).toMatchObject({ status: "pending", approvals: [] });
+  });
+
   it("two ids that are one person's different spellings are one sighting", async () => {
     const w = await world();
     await propose(w, GOOD, "payments", person(w, "Person-Bob"));
@@ -365,7 +384,7 @@ describe("agents: the task and the project are the broker's, never the event's",
     await w.lessons.onEvents({ workspaceId: w.workspaceId, id: randomUUID() }, [{ type: "progress", payload: { [KNOWLEDGE_PROPOSALS_FIELD]: [{ advice: "Keep jobs idempotent", why: "Retries run twice." }] } }]);
     const [lesson] = await all(w);
     expect(lesson).toMatchObject({ status: "candidate", reviewRequired: true });
-    expect(lesson!.provenance).toMatchObject({ supportTasks: [w.taskId], authors: [], sources: ["proposed:agent"], minTrust: "system", memberSignal: false });
+    expect(lesson!.provenance).toMatchObject({ supportTasks: [w.taskId], authors: [], sources: ["proposed:agent", expect.stringMatching(/^requester:[0-9a-f]{16}$/u) as string], minTrust: "system", memberSignal: false });
     // An event that names a project, a task or a company in its payload changes nothing: only the proposal fields are read.
     await w.lessons.onEvents({ workspaceId: w.workspaceId, id: randomUUID() }, [{ type: "progress", payload: { project: "billing", taskId: "x", [KNOWLEDGE_PROPOSALS_FIELD]: [{ advice: "Keep workers idempotent" }] } }]);
     expect(await all(w, { workspaceId: COMPANY, project: "billing" })).toHaveLength(0);

@@ -198,7 +198,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
       if (task === undefined) return;
       const limits = proposeLimits(flow.store, now);
       for (const proposal of proposals.slice(0, 10)) {
-        await proposeKnowledge({ process: runtime.process, limits }, { companyId, project: task.project, proposer: { kind: "agent", taskId: task.taskId }, proposal });
+        await proposeKnowledge({ process: runtime.process, limits }, { companyId, project: task.project, proposer: { kind: "agent", taskId: task.taskId }, requesterId: task.developerId, proposal });
       }
     } catch { /* information only: a lost suggestion costs nothing */ }
   }
