@@ -200,6 +200,8 @@ describe("the health route's grants (A13)", () => {
       // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
       "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
       "packages/broker/src/core/automatic-runs/cap.ts", "packages/broker/src/core/automatic-runs/start.ts", "packages/broker/src/core/automatic-runs/end.ts",
+      // Nightly upkeep (lead 4 N1): the last-night, per-night and pause-notice marker rows expire after 62 days (`upkeepExpiryOf`); the switch row (SETTINGS) is durable and carries no expiry.
+      "packages/broker/src/core/upkeep/keys.ts",
       // Work events (U3): one row per flow fact of a task, kept 13 months after its month (WORK_EVENT_RETENTION_MONTHS), then expired. Not a durable record of the work itself.
       "packages/broker/src/core/work-events/work-events.ts",
       // Spend holds (switch-on lane L8): a hold's row and its open-hold index row expire 30 days after the hold's own expiry (the sweep gives an open one back first). The day row and the task

@@ -7,10 +7,11 @@
 //   - the run's scope is the operation's: the callback carries NO company, project or task (the broker reads them from the authenticated operation), so nothing here can name another project's page loop;
 //   - money: the run is metered (the larger of the session's reported cost and the run's own count from each turn's tokens at the catalog price; a turn with no readable usage is unreadable = used up), `spentCents` only
 //     goes up, and the session is stopped BEFORE a turn that could cross the job's `spendCeilingCents`; a stop there reports the failure word `budget_used` (the page is not marked done);
-//   - failures are fixed words: `needs_ai_key` (the gateway refuses the model: no AI source serves it), `repo_unreadable` (a repository folder cannot be read), `budget_used`, `infrastructure`.
+//   - failures are fixed words: `needs_ai_key` (the gateway refuses the model: no AI source serves it), `repo_unreadable` (a repository folder cannot be read), `budget_used`, `infrastructure`, and (lead 4 N1) `upkeep_paused`
+//     with its reason when the gateway's upkeep limit refused a nightly refresh's call (read from the gateway's fixed sentence; the broker only takes it from an unattended run).
 import { lstat, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, WIKI_BUILD_TOOLS, agentXError, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
+import { AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, WIKI_BUILD_TOOLS, agentXError, upkeepPauseReasonOfText, type UpkeepPauseReason, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { assistantOutcome, failedTurn } from "./session-events.js";
 import { SETUP_NEXT_TURN_MARGIN_TOKENS, type ModelPrice } from "./setup-agent-price.js";
@@ -140,8 +141,8 @@ export async function runWikiBuild(input: WikiRunInput): Promise<WikiRunResult> 
       const job = jobOf(await ports.callback({ kind: "next", spentCents }));
       if (job.kind === "end") { await ports.progress("The wiki build ended."); return { workflowMode: "WIKI_BUILD", pagesAttempted, spentCents, end: job.word }; }
       pagesAttempted += 1;
-      const submit = (extra: { draft?: unknown; failure?: "needs_ai_key" | "repo_unreadable" | "budget_used" | "infrastructure" }): Promise<unknown> =>
-        ports.callback({ kind: "page", answer: { pageId: job.page.id, spentCents, ...(extra.draft === undefined ? {} : { draft: extra.draft }), ...(extra.failure === undefined ? {} : { failure: extra.failure }) } });
+      const submit = (extra: { draft?: unknown; failure?: PageOutcome["failure"]; pause?: UpkeepPauseReason }): Promise<unknown> =>
+        ports.callback({ kind: "page", answer: { pageId: job.page.id, spentCents, ...(extra.draft === undefined ? {} : { draft: extra.draft }), ...(extra.failure === undefined ? {} : { failure: extra.failure }), ...(extra.pause === undefined ? {} : { pause: extra.pause }) } });
       // A repository the page needs (every pinned one for the overview and the connections page) must be readable at the commit the workspace holds.
       const needed = job.page.repo === undefined ? input.pins.map((pin) => pin.repo) : [job.page.repo];
       if (!(await Promise.all(needed.map(async (repo) => { const directory = where.get(repo); return directory !== undefined && await readable(directory); }))).every(Boolean)) {
@@ -153,7 +154,7 @@ export async function runWikiBuild(input: WikiRunInput): Promise<WikiRunResult> 
       current = undefined;
       spentCents = Math.max(spentCents, outcome.spentCents);
       if (cancelled) break;
-      await submit(outcome.failure === undefined ? { draft: outcome.draft } : { failure: outcome.failure });
+      await submit(outcome.failure === undefined ? { draft: outcome.draft } : { failure: outcome.failure, ...(outcome.pause === undefined ? {} : { pause: outcome.pause }) });
     }
     return { workflowMode: "WIKI_BUILD", pagesAttempted, spentCents };
   } finally {
@@ -161,7 +162,7 @@ export async function runWikiBuild(input: WikiRunInput): Promise<WikiRunResult> 
   }
 }
 
-interface PageOutcome { spentCents: number; draft?: unknown; failure?: "needs_ai_key" | "repo_unreadable" | "budget_used" | "infrastructure" }
+interface PageOutcome { spentCents: number; draft?: unknown; failure?: "needs_ai_key" | "repo_unreadable" | "budget_used" | "infrastructure" | "upkeep_paused"; pause?: UpkeepPauseReason }
 
 /** One page: a fresh read-only session, metered turn by turn, stopped before a turn that could cross the ceiling. */
 async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, ports: WikiRunPorts, hold: (session: PiSessionHandle | undefined) => void): Promise<PageOutcome> {
@@ -179,7 +180,9 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
   /** Set when a model turn reported no usage and no new cost: what that turn cost cannot be told, so the spend is unreadable (used up) from then on. */
   let unreadable = false;
   let lastReportedCents = 0;
-  let stopped: "budget_used" | "needs_ai_key" | undefined;
+  let stopped: "budget_used" | "needs_ai_key" | "upkeep_paused" | undefined;
+  /** Why the gateway paused upkeep, when its fixed sentence was what refused a call. */
+  let pause: UpkeepPauseReason | undefined;
   const sessionSpend = (): number | undefined => {
     if (session === undefined) return 0;
     const reported = centsFromDollars(session.getSessionStats().cost);
@@ -224,7 +227,9 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
         ownUsd += ((used + written * CACHE_WRITE_EXTRA) * price.inputPerMTok + produced * price.outputPerMTok) / 1_000_000;
         const outcome = assistantOutcome(event);
         const failure = failedTurn(outcome);
-        if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) stopped = "budget_used";
+        const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
+        if (paused !== undefined) { stopped = "upkeep_paused"; pause = paused; void session?.abort().catch(() => undefined); }
+        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) stopped = "budget_used";
         else if (failure instanceof AgentXError && failure.code === "MODEL_NOT_ALLOWED") stopped = "needs_ai_key";
       }
       if (type === "tool_execution_end") toolRuns += 1;
@@ -236,7 +241,9 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
     let failed = false;
     const refused = (error: unknown): void => {
       failed = true;
-      if (error instanceof AgentXError && error.code === "MODEL_NOT_ALLOWED") stopped ??= "needs_ai_key";
+      const paused = upkeepPauseReasonOfText(error instanceof Error ? error.message : undefined);
+      if (paused !== undefined) { stopped ??= "upkeep_paused"; pause ??= paused; }
+      else if (error instanceof AgentXError && error.code === "MODEL_NOT_ALLOWED") stopped ??= "needs_ai_key";
       else if (error instanceof ModelBudgetExhaustedError || (error instanceof Error && error.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE)) stopped ??= "budget_used";
     };
     try { await session.prompt(task); } catch (error) { refused(error); }
@@ -247,12 +254,14 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
     unsubscribe();
     const spent = spendNow();
     const spentCents = spent === undefined ? Math.max(baseCents, job.spendCeilingCents) : spent;
-    if (stopped !== undefined) return { spentCents, failure: stopped };
+    if (stopped !== undefined) return { spentCents, failure: stopped, ...(stopped === "upkeep_paused" && pause !== undefined ? { pause } : {}) };
     if (failed || timedOut) return { spentCents, failure: "infrastructure" };
     const draft = wikiDraftFromAnswer(finalText);
     return draft === undefined ? { spentCents } : { spentCents, draft };
   } catch (error) {
     // A session that could not even open: the gateway's refusal of the model is the missing key; anything else is a fault.
+    const paused = upkeepPauseReasonOfText(error instanceof Error ? error.message : undefined);
+    if (paused !== undefined) return { spentCents: Math.max(baseCents, spendNow() ?? job.spendCeilingCents), failure: "upkeep_paused", pause: paused };
     return { spentCents: Math.max(baseCents, spendNow() ?? job.spendCeilingCents), failure: error instanceof AgentXError && error.code === "MODEL_NOT_ALLOWED" ? "needs_ai_key" : "infrastructure" };
   } finally {
     if (timer !== undefined) clearTimeout(timer);

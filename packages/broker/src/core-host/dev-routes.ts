@@ -70,6 +70,7 @@ import { isReportPath, routeHostedReport, type HostedReportWiring } from "./repo
 import { isWikiBuildPath, routeHostedWikiBuild, type HostedWikiBuildWiring } from "./wiki-build-routes.js";
 import { hostedAnswerService, isAnswersPath, routeHostedAnswers, type HostedAnswersWiring } from "./answer-routes.js";
 import { isStartSuggestPath, routeHostedStartSuggest, type HostedStartSuggestWiring } from "./start-suggest-routes.js";
+import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upkeep-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
 const SESSIONS = /^\/v1\/app\/sessions(?:\/|$)/u;
@@ -190,6 +191,8 @@ export interface CoreDevWiring {
   startSuggest?: HostedStartSuggestWiring;
   /** Lead 4 J1: the smart Just answer route (`POST /v1/app/projects/<p>/answers`, answer-routes.ts). Absent: that path says "not on the core yet". */
   answers?: HostedAnswersWiring;
+  /** Lead 4 N1: the nightly upkeep switch (`/v1/app/projects/<p>/upkeep`, upkeep-routes.ts). Absent: that path says "not on the core yet". */
+  upkeep?: HostedUpkeepWiring;
 }
 
 export interface CoreDevRoutesOptions {
@@ -238,7 +241,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path)) return method === "POST"; if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method)) return true;
+  if (isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path);
 }
 const unauthenticated = (): BrokerResponse => json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
@@ -558,6 +561,14 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedReport({
             request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
+            audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
+          });
+        }
+        if (isUpkeepPath(path, request.method)) {
+          // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedUpkeep({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
           });
         }

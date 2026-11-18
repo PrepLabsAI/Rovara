@@ -99,6 +99,8 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right", "full"], ["GET", "/v1/app/projects/payments/wiki/gaps", "full"],
     // L4-SF: allow or refuse a website a setup run asked for.
     ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
+    // Lead 4 N1: the nightly upkeep switch.
+    ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
@@ -132,6 +134,8 @@ describe("the /v1/app route table", () => {
       ["GET", "/v1/app/projects/payments/answers"], ["PUT", "/v1/app/projects/payments/answers"], ["DELETE", "/v1/app/projects/payments/answers"], ["POST", "/v1/app/projects/payments/answers/a1"], ["POST", "/v1/app/projects/payments/answer"],
       // J5: "Not right" is one POST, and the gap list one GET.
       ["GET", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["PUT", "/v1/app/projects/payments/answers/a0123456789/not-right"], ["POST", "/v1/app/projects/payments/answers/a0123456789/not-right/x"], ["POST", "/v1/app/projects/payments/wiki/gaps"], ["DELETE", "/v1/app/projects/payments/wiki/gaps"],
+      // The upkeep switch: GET and PUT only, no other tail.
+      ["POST", "/v1/app/projects/payments/upkeep"], ["DELETE", "/v1/app/projects/payments/upkeep"], ["PATCH", "/v1/app/projects/payments/upkeep"], ["GET", "/v1/app/projects/payments/upkeep/extra"], ["PUT", "/v1/app/projects/payments/upkeeps"],
       ["PATCH", "/v1/app/sessions"], ["HEAD", "/v1/app/sessions"], ["get", "/v1/app/sessions"], ["GET", "/v1/appx/sessions"], ["GET", "/v1/dev/app/sessions"],
     ] as const) expect(appRouteOf(method, path), `${method} ${path}`).toBeUndefined();
   });

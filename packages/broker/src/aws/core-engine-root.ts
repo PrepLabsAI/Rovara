@@ -717,6 +717,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             map: wikiMapWiring,
             displayName: displayNameOf,
           },
+          // Lead 4 N1: the nightly upkeep switch. The same live standing as the wiki controls; no scheduler is wired here yet (the switch is recorded; the hosted night waits for its scheduler).
+          upkeep: { standing: setupRunStanding },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,

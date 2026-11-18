@@ -7,7 +7,7 @@
 //   page   the worker's answer for the page it was handed (a draft, or a failure word): the broker re-reads every citation and writes what survived.
 // Nothing in a reply is repository text: the instructions are the broker's own fixed words around the page's plan.
 import { z } from "zod";
-import { agentXError, type DocumentStore, type OrgId, type WikiBuildRecord, type WikiPageSink } from "@agentx/contracts";
+import { agentXError, type DocumentStore, type OrgId, type UpkeepPauseReason, type WikiBuildRecord, type WikiPageSink } from "@agentx/contracts";
 import type { CitationFileReader } from "../citations/citation-check.js";
 import { taskKey } from "../task-flow/keys.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
@@ -31,6 +31,10 @@ export interface WikiBuildCallbackDeps {
   sinkFor(project: string): WikiPageSink;
   /** The wiki store's build record write (W2 `WikiStore.writeBuild`). */
   recordBuild?: ((project: string, record: WikiBuildRecord) => Promise<void>) | undefined;
+  /** Lead 4 N1: whether nightly upkeep is ON for a project of this company, read live (the requester of an unattended run is a system owner, not a person). Absent: an unattended run ends `access_lost`. */
+  upkeepOn?: ((project: string) => Promise<boolean>) | undefined;
+  /** Lead 4 N1: told when an unattended run ended because the gateway paused upkeep (the admins' notice). */
+  onUpkeepPaused?: ((scope: { orgId: OrgId; project: string; taskId: string }, reason: UpkeepPauseReason) => Promise<void>) | undefined;
 }
 
 /** The authenticated operation, as the callback route read it. */
@@ -67,6 +71,8 @@ export async function handleWikiBuildCallback(deps: WikiBuildCallbackDeps, opera
     // The sink is made for the run's own project, from the operation: a sink of any other company or project is refused by the loop.
     sink: deps.sinkFor(run.project),
     ...(deps.recordBuild === undefined ? {} : { recordBuild: (record: WikiBuildRecord) => deps.recordBuild!(run.project, record) }),
+    ...(deps.upkeepOn === undefined ? {} : { upkeepOn: deps.upkeepOn }),
+    ...(deps.onUpkeepPaused === undefined ? {} : { onUpkeepPaused: deps.onUpkeepPaused }),
   };
   const body = parsed.data;
   return body.kind === "next" ? await nextWikiPage(loop, run, { spentCents: body.spentCents }) : await submitWikiPage(loop, run, body.answer);

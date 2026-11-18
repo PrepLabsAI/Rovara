@@ -36,12 +36,17 @@ export function projectCitationReader(options: {
 export function wikiBuildCallbackWiring(options: WikiWiringBase & {
   standing(personId: string, project: string): Promise<WikiBuildStanding>;
   readFor(project: string): CitationFileReader;
+  /** Lead 4 N1: nightly upkeep ON for a project of this company (the unattended run's own standing) and the admins' notice of a pause. Both absent: an unattended run ends `access_lost` and tells nobody. */
+  upkeepOn?: ((project: string) => Promise<boolean>) | undefined;
+  onUpkeepPaused?: WikiBuildCallbackDeps["onUpkeepPaused"];
 }): Omit<WikiBuildCallbackDeps, "store" | "companyId" | "now"> {
   const wiki = createWikiStore({ store: options.store, companyId: options.companyId, now: options.now });
   return {
     standing: (personId, project) => options.standing(personId, project), read: undefined, readFor: (project) => options.readFor(project),
     sinkFor: (project) => wiki.pageSink(project),
     recordBuild: async (project, record) => { await wiki.writeBuild(project, record); },
+    ...(options.upkeepOn === undefined ? {} : { upkeepOn: options.upkeepOn }),
+    ...(options.onUpkeepPaused === undefined ? {} : { onUpkeepPaused: options.onUpkeepPaused }),
   };
 }
 
