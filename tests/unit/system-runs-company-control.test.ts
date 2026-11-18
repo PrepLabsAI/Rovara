@@ -23,8 +23,10 @@ function control(options: Options = {}) {
   const base = options.store ?? new MemoryDocumentStore();
   const company = options.company ?? COMPANY_A;
   const transacts: number[] = [];
+  const reads: string[] = [];
   const store = new Proxy(base, {
     get: (target, key) => {
+      if (key === "get") return async (...args: unknown[]) => { reads.push("get"); return (target.get as (...a: unknown[]) => Promise<unknown>).apply(target, args); };
       const value = Reflect.get(target, key, target) as unknown;
       if (key === "transact") return async (items: readonly unknown[]) => { transacts.push(items.length); return options.transact === "fail" ? { applied: false, reason: "condition_failed", failed: [0] } : (target.transact.bind(target))(items as never); };
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
@@ -54,7 +56,7 @@ function control(options: Options = {}) {
   };
   const put = (allowed: boolean, who: { role?: OrgRole } = {}, extra: Record<string, unknown> = {}) => call("PUT", { requestId: randomUUID(), allowed, ...extra }, who);
   if (options.consent === true) void base.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(T0 - 1000).toISOString(), requestId: randomUUID() } });
-  return { store: base, company, audited, call, put, transacts, stepUps };
+  return { store: base, company, audited, call, put, transacts, stepUps, reads };
 }
 const errorOf = (answer: { body: Body }): { code: string; message: string } => answer.body["error"] as { code: string; message: string };
 const consentOf = (store: MemoryDocumentStore, company: OrgId = COMPANY_A) => readSystemRunsConsentRow({ store, companyId: company });
@@ -111,6 +113,8 @@ describe("allowing needs a fresh step-up, checked before the body is acted on", 
     expect(answer.status).toBe(403);
     expect(errorOf(answer)).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
     await nothingDone(w);
+    // MUTANT C1b: the step-up is asked after the company's row is read for the change.
+    expect(w.reads).toEqual([]);
   });
 
   // MUTANT C2: a host with no check (or one that crashes) lets an allow through.
