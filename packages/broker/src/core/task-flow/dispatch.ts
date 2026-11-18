@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE,
+  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -331,6 +331,11 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   // The gateway's address is the dispatcher's own (never a stored or queued value): whatever a stored payload carried is dropped, and it is sent only with an eval request to a worker that lists the feature.
   delete payload["evalGatewayUrl"];
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && features.includes(EVAL_GATEWAY_FEATURE) && EvalGatewayOriginSchema.safeParse(deps.evalGatewayUrl).success) payload["evalGatewayUrl"] = deps.evalGatewayUrl;
+  // L4-EVP: the prompt locations ride with the eval request only to a worker that lists them; an older worker's strict parse would refuse the field.
+  if (spec.kind === "task" && payload["evalPromptLocations"] !== undefined && (payload["evalRequest"] === undefined || !features.includes(EVAL_PROMPT_LOCATIONS_FEATURE))) {
+    delete payload["evalPromptLocations"];
+    log(deps, { event: "eval_prompt_locations_dropped_unsupported_worker" });
+  }
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     // A fix round (a build with `workflowFix`) hands the correction's words over so the lessons are picked again by them; the text only ranks and is never stored.

@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   EVAL_VERTEX_PLACEHOLDER, attestRovaraOnlyBaseCheckout, evalBaseCacheKey, evalCommandFingerprintOf, evalJudgePinOf, evalQuestionHash, evalSetHashOf, evalSpendInputsDigest,
-  routeEgressRequest, type BaseScoreCache, type EvalBaseRecord, type EvalSpendGrant, type ModelEgressFrame, type ModelEgressRow,
+  routeEgressRequest, type BaseScoreCache, type PromptLocation, type EvalBaseRecord, type EvalSpendGrant, type ModelEgressFrame, type ModelEgressRow,
 } from "@agentx/contracts";
 import { fixtureEgressRows } from "../../packages/testing/src/ports/model-egress-fixtures.js";
 import { createEvalBaselines } from "../../packages/worker/src/verification/eval-baseline-refresh.js";
@@ -207,6 +207,8 @@ export interface StandInWorldOptions {
   vertexConnected?: boolean;
   /** The sample's change patch for the candidate (a file under changes/), or undefined for no change. */
   patch?: string | undefined;
+  /** L4-EVP: the prompt locations the project confirmed in setup, handed to the changed-prompt classifier as the broker sends them with the eval request. */
+  promptLocations?: readonly PromptLocation[] | undefined;
   /** Refuse every model call with this class, as the stage's gateway would. */
   providerClass?: "rate_limit" | "provider_error" | undefined;
 }
@@ -256,7 +258,7 @@ async function buildWorld(options: StandInWorldOptions, repo: StandInRepo, onFak
   // The real classifier for "did this call exercise the changed prompt", over the real git objects.
   const repositories = [{ repositoryId: "app", directory: repo.dir, baseCommitSha: repo.baseSha }];
   const identities = [{ repositoryId: "app", commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: repo.baseSha }];
-  const isChanged = changedPromptClassifier(await candidatePromptChanges(repositories, identities, new AbortController().signal, repo.baseSha));
+  const isChanged = changedPromptClassifier(await candidatePromptChanges(repositories, identities, new AbortController().signal, repo.baseSha, undefined, options.promptLocations ?? []));
 
   // The model route: the egress the metered stage forwards to. Gemini: a scripted stage that applies the REAL route check to every frame (the row's path allow-list), then answers from the fake Vertex.
   const scripted = scriptedAccess(async function* (frame) {

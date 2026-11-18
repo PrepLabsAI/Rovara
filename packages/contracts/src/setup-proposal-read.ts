@@ -13,6 +13,7 @@
 import { isAllowedDomain } from "./app-projects.js";
 import { FILE_PROVENANCE_KINDS, PROVENANCE_NOTE_MAX, PROVENANCE_QUOTE_MAX, PROVENANCE_PER_ITEM_MAX, ProvenanceSchema, type Provenance, type ProposalRisk } from "./provenance.js";
 import { RelativeWorkspacePathSchema } from "./project.js";
+import { PromptLocationSchema, promptLocationKey } from "./prompt-locations.js";
 import { IntakeSystemSchema } from "./intake.js";
 import { redactText } from "./redaction.js";
 import {
@@ -48,7 +49,7 @@ const MODEL_CITATION_KINDS = ["file", "ci", "readme", "manifest", "inferred"] as
 const CONFIDENCES = ["high", "medium", "low"] as const;
 const ID_PREFIX: Record<SetupItemKind, string> = {
   repository: "repo", setup: "setup", tests: "tests", check: "check", test_environment: "env", devcontainer: "devcontainer", knowledge: "knowledge",
-  spec_target: "spec", source: "source", intake: "intake", allowed_domain: "domain", secret: "secret", browser_evidence: "browser",
+  spec_target: "spec", source: "source", intake: "intake", allowed_domain: "domain", secret: "secret", browser_evidence: "browser", prompt_location: "prompt",
 };
 
 const slugOf = (key: string): string => key.toLowerCase().replace(/[^a-z0-9._-]+/gu, "-").replace(/^[^a-z0-9]+|-+$/gu, "").slice(0, 48);
@@ -280,6 +281,15 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     return value.success ? { key: "recipe", value: value.data } : undefined;
   });
 
+  // L4-EVP: where the project's AI prompts live inside code. A location is a tracked file of a known repository plus (for a region) a function, variable, decorator or YAML key; the item must cite a place IN THAT FILE, so the
+  // broker's re-read of the citation is also a check that the file is there. Anything the schema refuses is left out (never a location with a part quietly missing).
+  const promptLocations = reader.collect(raw["promptLocations"], "prompt_location", SETUP_ITEM_LIMITS.promptLocations, (entry, from) => {
+    const repo = reader.knownRepo(entry["repo"]);
+    const value = PromptLocationSchema.safeParse({ repo, path: entry["path"], kind: entry["kind"], ...(entry["symbol"] === undefined ? {} : { symbol: entry["symbol"] }) });
+    if (repo === undefined || !value.success || !from.some((citation) => citation.repo === repo && citation.path === value.data.path)) return undefined;
+    return { key: promptLocationKey(value.data), value: value.data };
+  });
+
   const nameLike = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$/u;
   const sources = reader.collect(raw["sources"], "source", SETUP_ITEM_LIMITS.sources, (entry) => {
     const name = typeof entry["name"] === "string" ? entry["name"].trim() : "";
@@ -382,13 +392,14 @@ export function sanitizeSetupProposal(raw: unknown, context: SetupProposalContex
     allowedDomains: idsFor("allowed_domain", allowedDomains, used),
     secretsNeeded: idsFor("secret", secretsNeeded, used),
     ...(browserEvidence[0] === undefined ? {} : { browserEvidence: idsFor("browser_evidence", browserEvidence, used)[0]! }),
+    ...(promptLocations.length === 0 ? {} : { promptLocations: idsFor("prompt_location", promptLocations, used) }),
     flaggedCommands: [...flagged].slice(0, SETUP_ITEM_LIMITS.flagged).map(([command, entry]) => ({ command, reason: entry.reason, from: entry.from.slice(0, PROVENANCE_PER_ITEM_MAX) })),
     foundNotUsed,
     notes: [...allNotes].slice(0, 2000).join(""),
   };
   const empty = proposal.repositories.length + proposal.setup.length + proposal.tests.length + proposal.checks.length + proposal.testEnvironment.length + proposal.knowledge.length
     + proposal.sources.length + proposal.intake.length + proposal.allowedDomains.length + proposal.secretsNeeded.length + proposal.flaggedCommands.length + proposal.foundNotUsed.length === 0
-    && proposal.devcontainer === undefined && proposal.specTarget === undefined && proposal.browserEvidence === undefined;
+    && proposal.devcontainer === undefined && proposal.specTarget === undefined && proposal.browserEvidence === undefined && proposal.promptLocations === undefined;
   if (empty) return { ok: false, errors: ["the answer has nothing in it a person could use"] };
   const checked = SetupProposalSchema.safeParse(proposal);
   return checked.success ? { ok: true, proposal: checked.data } : { ok: false, errors: [`the proposal is not valid: ${checked.error.issues[0]?.path.join(".") ?? "proposal"}`] };

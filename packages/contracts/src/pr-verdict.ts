@@ -59,6 +59,21 @@ export interface VerdictEval {
   promptChanged: boolean;
 }
 
+/**
+ * L4-EVP: the change touches likely-AI code (a prompt location the project confirmed, or code that names a model SDK) and no eval ran. Never silent, and advisory: it is a thing to check, never a held draft or a red Check.
+ * `reason`: `no_eval_configured` (the project has no eval), `not_a_prompt_change` (the AI code changed but no confirmed prompt location did, or no eval call used the changed prompt), `not_connected` (the eval cannot run on this install:
+ * spend not approved or no model meter), `other` (the eval was asked for and said why it did not run, in `detail`: a fixed sentence of the eval's own).
+ */
+export const NO_EVAL_REASONS = ["no_eval_configured", "not_a_prompt_change", "not_connected", "other"] as const;
+export type NoEvalReason = (typeof NO_EVAL_REASONS)[number];
+export const NO_EVAL_TITLE = "No eval ran for this change.";
+export const NO_EVAL_WORDS: Readonly<Record<Exclude<NoEvalReason, "other">, string>> = {
+  no_eval_configured: "Reason: this project has no AI eval set up, so AI quality was not measured.",
+  not_a_prompt_change: "Reason: it touches AI code, but not a prompt location the project confirmed, so Rovara did not ask for the eval. Add the prompt's location in setup if a prompt lives here.",
+  not_connected: "Reason: the eval is not connected on this install, or its spend is not approved, so AI quality was not measured.",
+};
+export interface VerdictNoEval { reason: NoEvalReason; /** `other` only: the eval's own fixed sentence (made inert here). */ detail?: string | undefined }
+
 export interface PrVerdictInput {
   /** The date of the pull request (ISO), for the age of a recorded fake. */
   asOf: string;
@@ -87,6 +102,8 @@ export interface PrVerdictInput {
   };
   secondReview?: VerdictSecondReview | undefined;
   evalCheck?: VerdictEval | undefined;
+  /** L4-EVP: AI code was touched and no eval ran (see `NO_EVAL_REASONS`). Absent: today's verdict, byte for byte. */
+  noEval?: VerdictNoEval | undefined;
   /** Lines already inert from the merge-order module. */
   mergeOrder?: readonly string[] | undefined;
   /** Tests that failed once and passed on the round's rerun: a failure that was set aside is never only in a fold. */
@@ -104,7 +121,7 @@ export const PR_EXCEPTION_KINDS = [
   "service_not_available", "service_made_by_rovara", "service_hand_written", "service_made_up_answers", "service_fell_back", "service_emulated", "service_old_fake", "service_spec_check",
   "tests_weaker", "weakening_not_compared", "flagged_files",
   "finding_accepted", "second_review_blocking", "second_review_not_run", "reviews_partial", "review_same_model",
-  "flaky_rerun", "browser_problem", "eval_worse", "eval_prompt_without_run", "files_incomplete", "files_not_read", "merge_order",
+  "flaky_rerun", "browser_problem", "eval_worse", "eval_prompt_without_run", "eval_no_run", "files_incomplete", "files_not_read", "merge_order",
 ] as const;
 export type PrExceptionKind = (typeof PR_EXCEPTION_KINDS)[number];
 
@@ -379,6 +396,11 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   const evalCheck = input.evalCheck === undefined ? undefined : EVAL_LABELS.includes(input.evalCheck.label) ? input.evalCheck : { ...input.evalCheck, label: "Not run" as const };
   if (evalCheck?.label === "Worse on eval") add("eval_worse", "The AI evaluation got worse.", "Worse on eval: the answers the change gives are worse than before.");
   else if (evalCheck !== undefined && evalCheck.label === "Not run" && evalCheck.promptChanged) add("eval_prompt_without_run", "A prompt changed and no evaluation ran.", "AI quality was not measured.");
+  // L4-EVP: AI code was touched and no eval ran, with the reason. Never together with a result or with the "prompt changed" item above (one line per fact).
+  else if (input.noEval !== undefined && (NO_EVAL_REASONS as readonly string[]).includes(input.noEval.reason) && evalCheck?.label !== "Improved on eval" && evalCheck?.label !== "No regression measured") {
+    const noEval = input.noEval;
+    add("eval_no_run", NO_EVAL_TITLE, noEval.reason === "other" ? `Reason: ${safeLine(noEval.detail ?? "the eval did not run", 200)}` : NO_EVAL_WORDS[noEval.reason]);
+  }
 
   // Files and merge order
   if (changed === undefined) add("files_not_read", "The changed files have not been read yet.", "The risk counts as high until they are.");

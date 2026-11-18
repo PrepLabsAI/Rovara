@@ -57,7 +57,7 @@ async function seedCandidate(world: FakeWorld, companyId: string, name: string, 
   await world.store.put({ item: { ...projectRevisionKey(companyId, name, 2), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
   const workspaceId = randomUUID();
   await world.store.put({ item: { ...workspaceKey(companyId, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId, orgId: companyId, status } });
-  const digest = setupApplyDigest(definition.setup, definition.readiness);
+  const digest = setupApplyDigest(definition.setup, definition.readiness, changes["promptLocations"] === undefined ? {} : { promptLocations: changes["promptLocations"] });
   const at = new Date(world.clock.now).toISOString();
   await world.store.put({ item: {
     ...setupApplyKey(companyId, name), entityType: "SETUP_APPLY", orgId: companyId, project: name, taskId: "", requestId: randomUUID(), by: "p-runner", digest, baseRevision: 1, candidateRevision: 2,
@@ -529,5 +529,61 @@ describe("hosted setup run: the broken-setup card and a candidate Rovara drafted
     const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
     expect(decided.status, decided.raw).toBe(200);
     expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+  });
+});
+
+describe("L4-EVP: prompt locations in a setup candidate", () => {
+  const LOCATIONS = [{ repo: "demo", path: "deskbot/agent.py", kind: "function", symbol: "DeskAgent.build_contents" }];
+  const storedLocations = async (world: FakeWorld, companyId: string, name: string, revision: number) =>
+    (await world.store.get(projectRevisionKey(companyId, name, revision)) as { definition?: { promptLocations?: unknown } } | undefined)?.definition?.promptLocations;
+
+  it("is MEDIUM: a project maintainer sees the locations whole, approves, and the project's revision then holds them", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const view = await call(get(RUN), maintainer);
+    expect(view.body["apply"]).toMatchObject({ risk: "medium", changes: [{ area: "prompt_locations", risk: "medium" }], approver: "maintainer", canApprove: true, promptLocations: ["demo/deskbot/agent.py: function DeskAgent.build_contents"] });
+    const decided = await call(post(`${RUN}/decide`, decideBody(digest)), maintainer);
+    expect(decided.status, decided.raw).toBe(200);
+    expect(decided.body).toMatchObject({ decision: "approved", risk: "medium" });
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
+  });
+  it("a candidate with no locations shows no promptLocations field (the view as it was)", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("npm", ["ci", "--cache", ".c"])] });
+    const view = await call(get(RUN), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }));
+    expect(view.body["apply"]).not.toHaveProperty("promptLocations");
+  });
+  it("a developer grant and a member with no grant cannot approve it; a rejection removes it and the project keeps none", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), person("p-dev", FAKE_COMPANY, "member", { payments: "developer" }))).status).toBe(403);
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), person("p-none", FAKE_COMPANY, "member"))).status).toBe(404);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    const rejected = await call(post(`${RUN}/decide`, decideBody(digest, "reject")), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }));
+    expect(rejected.status, rejected.raw).toBe(200);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 1)).toBeUndefined();
+  });
+  it("is bound to the digest the person saw: another digest (the locations changed under them) is refused", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    const other = setupApplyDigest([command("npm", ["ci"])], [command("npm", ["test"])]);
+    expect((await call(post(`${RUN}/decide`, decideBody(other)), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }))).status).toBeGreaterThanOrEqual(400);
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+  });
+  it("two projects and two companies: approving one project's locations leaves the other project, and another company's same-named project, without any", async () => {
+    const { world, person, call } = await setupWorld();
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { promptLocations: LOCATIONS });
+    await seedCandidate(world, OTHER, "payments", { promptLocations: [{ repo: "demo", path: "other/agent.py", kind: "file" }] });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator", ledger: "administrator" });
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(200);
+    expect(await storedLocations(world, FAKE_COMPANY, "payments", 2)).toEqual(LOCATIONS);
+    expect(await storedLocations(world, FAKE_COMPANY, "ledger", 1)).toBeUndefined();
+    expect(await latestOf(world, FAKE_COMPANY, "ledger")).toBe(1);
+    expect(await latestOf(world, OTHER)).toBe(1);
+    expect(await storedLocations(world, OTHER, "payments", 2)).toEqual([{ repo: "demo", path: "other/agent.py", kind: "file" }]);
+    expect((await applyRow(world, OTHER))).toMatchObject({ state: "checking" });
   });
 });

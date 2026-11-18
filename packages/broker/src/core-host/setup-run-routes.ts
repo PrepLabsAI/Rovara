@@ -187,6 +187,7 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     candidateRevision: apply.candidateRevision, baseRevision: apply.baseRevision, setup: apply.setup, readiness: apply.readiness,
     // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
     ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
+    ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     // L4-RD: the candidate was drafted by Rovara's automatic repair (its check ran as the project's system owner); a person still decides it, by the same rule.

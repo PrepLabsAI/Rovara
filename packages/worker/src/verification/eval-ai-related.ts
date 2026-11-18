@@ -17,7 +17,7 @@
 // an alias: "@/", "~", "#"); a Python import of a package mapped by setup.py package_dir that no path suffix matches reads as an installed package.
 // Linear: every file is scanned by fixed regexes once, lookups go through maps built once, and every node and edge is visited once under one total budget.
 import { builtinModules } from "node:module";
-import { promptFilePath } from "@agentx/contracts";
+import { AI_MARKER, hasAiMarker, promptFilePath } from "@agentx/contracts";
 
 export const AI_WALK_LIMITS = {
   treeEntries: 100_000, files: 20_000, fileBytes: 1024 * 1024, totalBytes: 32 * 1024 * 1024, pathSegments: 2_000_000, edges: 2_000_000,
@@ -33,18 +33,10 @@ const RESOLUTION_FILE = /(?:^|\/)(?:package\.json|package-lock\.json|npm-shrinkw
 /** Code under one of these folders is a root by F4's folder rule (models/ is left out: it is usually database models). */
 const AI_FOLDER = /(?:^|\/)(?:prompts?|llm|ai|agents|system-prompts)\//iu;
 
-/** One regex, case-insensitive, scanned once per file. A mention in a comment counts too: over-counting is the safe side. */
-export const AI_MARKER = new RegExp([
-  String.raw`\b(?:openai|anthropic|genai|generativeai|aiplatform|vertexai|litellm|ollama|cohere|mistralai|llama_index|llamaindex|groq|langchain\w*|langgraph\w*)\b`,
-  String.raw`@anthropic-ai\/|@google\/genai|@google\/generative-ai|@google-cloud\/vertexai|@google-cloud\/aiplatform|@aws-sdk\/client-bedrock|@ai-sdk\/|@langchain\/|@mistralai\/|@azure\/openai|@huggingface\/inference`,
-  String.raw`bedrock[-_](?:agent[-_])?runtime|invoke_?model|converse_?stream|\bconverse\b|api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|aiplatform\.googleapis\.com|openai\.azure\.com`,
-  // Raw HTTP to OpenAI-compatible and other provider APIs, Azure AI Inference.
-  String.raw`chat\/completions|\/v1\/messages|\/v1\/completions|\/v1\/responses|:(?:stream)?generateContent|openrouter|deepseek|api\.together|api\.mistral|api\.x\.ai|api\.groq|api\.cohere|azure\.ai\.inference|ai-inference|huggingface_hub|InferenceClient|invoke_endpoint|:11434|\/api\/chat|\/api\/generate`,
-  String.raw`(["'\x60])ai(?:\/[^"'\x60\s]{0,256})?\1`,
-].join("|"), "iu");
+/** One regex (contracts/ai-markers.ts: shared with the broker's change tier), case-insensitive, scanned once per file. A mention in a comment counts too: over-counting is the safe side. */
+export { AI_MARKER, hasAiMarker };
 
 export function resolutionFile(path: string): boolean { return RESOLUTION_FILE.test(path); }
-export function hasAiMarker(text: string): boolean { return AI_MARKER.test(text); }
 /** Which files of the candidate tree the walk needs as text. */
 export function walkReads(path: string): boolean { return CODE_PATH.test(path) || PACKAGE_JSON.test(path) || TS_CONFIG.test(path); }
 

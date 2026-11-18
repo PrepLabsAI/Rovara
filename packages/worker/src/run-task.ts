@@ -1,7 +1,7 @@
 import { runFinalCheckEval, type EvalFinalCheckPorts } from "./verification/eval-final-check.js";
 import { withEvalChangedPromptClassifier } from "./verification/eval-changed-prompt.js";
 import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
-import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
+import { EVAL_ROUND_ARTIFACT, GENERAL_FAKES_LOCAL_ONLY_SENTENCE, evalResultFromArtifact, promptLocationsOf, type BrowserEvidenceSignInAnswer } from "@agentx/contracts";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { restoreFixStart } from "./fix-start.js";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -740,7 +740,7 @@ async function runTask(
           // because the one shared plan read (made first by the classifier) must happen inside it.
           const running = (ports === undefined || status !== "verified" ? evaluate()
             : pinned(() => !fresh || stop.signal.aborted ? evaluate()
-              : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate)))
+              : withEvalChangedPromptClassifier(repositories, candidateBefore, stop.signal, plan, evaluate, promptLocationsOf(invocation.payload.evalPromptLocations))))
             .then(value => { evalArtifact = value; return value; });
           await untilAborted(running, stop.signal, ABORT_JOIN_MS, runners.kind ?? "local");
         } catch (error) {

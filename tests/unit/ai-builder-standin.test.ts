@@ -7,9 +7,11 @@ import { readFile, readdir } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   EVAL_ROUND_ARTIFACT, EvalRoundArtifactSchema, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, evalResultFromArtifact, readEvidencePack, rovaraCheckOf,
-  type EvalRoundArtifact, type EvidencePack, type EvidencePackRead, type WorkflowSnapshot,
+  type EvalRoundArtifact, type EvidencePack, type EvidencePackRead, type PromptLocation, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { isPromptHintPath } from "../../packages/broker/src/core/decisions/sensitive-list.js";
+import { tierFromDiff, type TierFile } from "../../packages/broker/src/core/decisions/change-tier.js";
+import { noEvalOf } from "../../packages/broker/src/core/proof/pull-request-layout.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceV2Writer } from "../../packages/broker/src/core/proof/evidence-pack.js";
 import { evalRequestFor, loadEvalRound } from "../../packages/broker/src/core/proof/eval-round-reader.js";
 import { rovaraPullRequestBody, rovaraStatusLines, type PullRequestBodyContext } from "../../packages/broker/src/core/proof/pull-request-body.js";
@@ -23,6 +25,11 @@ import {
 
 const GREEN = "01-friendlier-tone.patch";
 const REGRESSION = "02-simplify-prompt-regression.patch";
+const PROMPT_IN_CODE = "03-prompt-in-code.patch";
+const CLIENT_CHANGE = "04-client-timeout.patch";
+const UNRELATED = "05-scoring-trim.patch";
+/** What setup confirmed for Deskbot: the user-message template is built in code, in `DeskAgent.build_contents`. */
+const DESKBOT_LOCATIONS: PromptLocation[] = [{ repo: "app", path: "deskbot/agent.py", kind: "function", symbol: "DeskAgent.build_contents" }];
 const request = { aiChange: true as const, reason: "eval_hint" as const, evalPass: 1 as const, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 };
 const TIMEOUT = 180_000;
 
@@ -57,9 +64,9 @@ async function savedAndReadBack(artifact: EvalRoundArtifact, digest: string): Pr
   return loadEvalRound(actions, { ownerKey: "owner-a", workspaceId: "workspace-a" }, digest);
 }
 const writer: EvidenceV2Writer = { version: 2, producer: { edition: "code", isolation: "sandbox" } };
-async function pullRequest(world: StandInWorld, artifact: EvalRoundArtifact, over: Partial<PullRequestBodyContext> = {}) {
+async function pullRequest(world: StandInWorld, artifact: EvalRoundArtifact | undefined, over: Partial<PullRequestBodyContext> = {}, flow?: WorkflowSnapshot["flow"]) {
   const digest = manifestOf(world).digest;
-  const loaded = await savedAndReadBack(artifact, digest);
+  const loaded = artifact === undefined ? undefined : await savedAndReadBack(artifact, digest);
   const pack = packOf(digest);
   const read: EvidencePackRead = readEvidencePack(JSON.parse(JSON.stringify(evidencePackV2Of(pack, { ...writer, evalArtifact: loaded }))));
   if (read.status !== "v2") throw new Error("not a version 2 pack");
@@ -68,7 +75,7 @@ async function pullRequest(world: StandInWorld, artifact: EvalRoundArtifact, ove
     proof: { evidence: { pack, mode: "link", origin, taskUrl: `${origin}/tasks/1`, read } },
     changedFiles: { files: [{ repository: "app", path: "deskbot/prompts/system.txt", added: 1, removed: 1 }], complete: true }, repositoryKnownPrivate: true, evidenceWriter: 2, ...over,
   };
-  const workflow = workflowOf(world);
+  const workflow = flow === undefined ? workflowOf(world) : { ...workflowOf(world), flow };
   return {
     body: rovaraPullRequestBody({ summary: ["Change the Deskbot prompt"], fallbackTitle: "t", workflow, context, reviewLines: () => ["- no findings"], pageUrl: undefined }),
     block: rovaraStatusLines(workflow, context, () => ["- no findings"]),
@@ -153,11 +160,84 @@ describe("setup: what a customer configures for an eval suite", () => {
     expect(await produceEvalDiscoveryReport({ draft: outside, repositories: [{ name: "app", directory: w.baseDir }], tracked: new Map([["app", new Set(["deskbot/agent.py", SCORING_PATH])]]), image })).toEqual({ refused: "not_found" });
   }, TIMEOUT);
 
-  it("only a prompt-named file asks for an eval: a prompt kept inside code does not", () => {
+  it("a prompt-named file asks for an eval by its name; a prompt kept inside code asks only where setup confirmed its location (L4-EVP closes G4)", () => {
     expect(isPromptHintPath("deskbot/prompts/system.txt")).toBe(true);
-    // KNOWN GAP (G4): the broker's trigger is the changed path's name. A system prompt written as a string in agent code is not a prompt path, so no eval is requested for it.
+    // The path name alone is still not enough: agent.py and persona.py are not prompt paths. What changed is that the project can say where its prompts live (a confirmed prompt location), and the tier reads that (next tests).
     expect(isPromptHintPath("deskbot/agent.py")).toBe(false);
     expect(isPromptHintPath("deskbot/persona.py")).toBe(false);
+  });
+});
+
+// ---- L4-EVP: a prompt kept in code, the tier, the classifier and the description
+
+/** The change tier over the candidate's own diff, the way the broker reads it from the host: every changed file with its patch. */
+function tierOver(w: StandInWorld, locations?: readonly PromptLocation[]) {
+  const names = git(w.repo.dir, "diff", "--name-only", w.repo.baseSha, w.candidate.commitSha).split("\n").filter(name => name !== "");
+  const files: TierFile[] = names.map(path => {
+    const [added, removed] = git(w.repo.dir, "diff", "--numstat", w.repo.baseSha, w.candidate.commitSha, "--", path).split("\t");
+    return { repository: "app", path, status: "modified", additions: Number(added), deletions: Number(removed), patch: git(w.repo.dir, "diff", w.repo.baseSha, w.candidate.commitSha, "--", path).split("\n").slice(4).join("\n") };
+  });
+  return tierFromDiff({ files, complete: true }, { headSha: w.candidate.commitSha, at: "2026-11-18T12:00:00.000Z", ...(locations === undefined ? {} : { promptLocations: locations }) });
+}
+const withTier = (w: StandInWorld, locations?: readonly PromptLocation[]): WorkflowSnapshot["flow"] => ({ tier: tierOver(w, locations) } as unknown as WorkflowSnapshot["flow"]);
+
+describe("L4-EVP: a prompt kept in code (Deskbot's user-message template, changed in agent.py)", () => {
+  let w: StandInWorld; let artifact: EvalRoundArtifact;
+  beforeAll(async () => { w = await world({ patch: PROMPT_IN_CODE, promptLocations: DESKBOT_LOCATIONS }); artifact = await check(w); }, TIMEOUT);
+
+  it("without a confirmed location the change asks for no eval (the gap), with one it does", () => {
+    expect(git(w.repo.dir, "diff", "--name-only", w.repo.baseSha, w.candidate.commitSha)).toBe("deskbot/agent.py");
+    expect(tierOver(w).reasons.map(r => r.code)).not.toContain("eval_hint");
+    expect(tierOver(w, DESKBOT_LOCATIONS).reasons).toEqual([{ code: "eval_hint", path: "deskbot/agent.py" }]);
+    expect(tierOver(w, DESKBOT_LOCATIONS).level).toBe("small");
+    const asked = (flow: WorkflowSnapshot["flow"]) => evalRequestFor({ ...workflowOf(w), flow }, { done: 0, calls: 0, costMicros: 0 });
+    expect(asked(withTier(w))).toBeUndefined();
+    expect(asked(withTier(w, DESKBOT_LOCATIONS))).toMatchObject({ aiChange: true, reason: "eval_hint", evalPass: 1 });
+  });
+  it("then the eval runs on the real path: the changed template counts as a changed prompt on every call, and the answers still pass", () => {
+    expect(artifact.outcome).toBe("done");
+    expect(evalResultFromArtifact(artifact)).toMatchObject({ outcome: "ran", label: "No regression measured (eval)", casesRun: 10, casesTotal: 10 });
+    expect(artifact.options?.changedPromptCalls).toBe(10);
+  });
+  it("and the description says nothing about a missing eval, because one ran", async () => {
+    const { body, block } = await pullRequest(w, artifact, {}, withTier(w, DESKBOT_LOCATIONS));
+    expect(heading(block)).toMatch(/· nothing extra to check$/u);
+    expect(body).toContain("No regression measured.");
+    expect(body).not.toContain("No eval ran for this change.");
+  });
+});
+
+describe("L4-EVP: an unrelated code change does not ask for the eval, and says nothing", () => {
+  it("scoring.py: no hint of either kind, with or without the setting, and no 'no eval' line", async () => {
+    const w = await world({ patch: UNRELATED });
+    for (const locations of [undefined, DESKBOT_LOCATIONS]) expect(tierOver(w, locations).reasons.map(r => r.code).filter(c => c === "eval_hint" || c === "ai_code_touched")).toEqual([]);
+    const { body } = await pullRequest(w, undefined, {}, withTier(w, DESKBOT_LOCATIONS));
+    expect(body).not.toContain("No eval ran for this change.");
+  }, TIMEOUT);
+});
+
+describe("L4-EVP: AI code was touched and no eval ran: the description says so, with the reason", () => {
+  it("a change to the model client (no confirmed prompt location in it) is AI code touched; no eval is asked for; the description says why", async () => {
+    const w = await world({ patch: CLIENT_CHANGE });
+    const tier = tierOver(w, DESKBOT_LOCATIONS);
+    expect(tier.reasons).toEqual([{ code: "ai_code_touched", path: "deskbot/vertex_client.py" }]);
+    expect(tier.level).toBe("small");
+    expect(evalRequestFor({ ...workflowOf(w), flow: { tier } } as unknown as WorkflowSnapshot, { done: 0, calls: 0, costMicros: 0 })).toBeUndefined();
+    const { body, block } = await pullRequest(w, undefined, {}, withTier(w, DESKBOT_LOCATIONS));
+    expect(heading(block)).toMatch(/· 1 thing to check$/u);
+    expect(body).toContain("No eval ran for this change.");
+    expect(body).toContain("not a prompt location the project confirmed");
+    // Advisory (owner, for the pilot): it is a thing to check in the description, and the Rovara Check stays green like for "Worse on eval" (G5).
+    const payload = rovaraCheckOf({
+      proof: { kind: "proceed", warns: false, relaxed: false, provenCount: 1, reasons: [] }, ci: "passing", ciMode: "their_ci_watch", fullSuite: "not_needed", firstSeenAtMs: 1_000, nowMs: 2_000,
+      verdict: { resultKind: "checks_passed", heading: heading(block), body: [] },
+    });
+    expect(payload).toMatchObject({ status: "completed", conclusion: "success" });
+  }, TIMEOUT);
+  it("the other reasons, from the eval's own answer: no eval configured, not connected", () => {
+    const flow = { flow: { tier: { reasons: [{ code: "eval_hint", path: "deskbot/agent.py" }] } } } as unknown as WorkflowSnapshot;
+    expect(noEvalOf(flow, { eval: { label: "Not run", notRunReason: "no_eval_configured" }, promptWithoutEval: false }, true)).toEqual({ reason: "no_eval_configured" });
+    expect(noEvalOf(flow, { eval: { label: "Not run", notRunReason: "not_connected" }, promptWithoutEval: false }, true)).toEqual({ reason: "not_connected" });
   });
 });
 

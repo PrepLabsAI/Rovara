@@ -1,4 +1,4 @@
-import { DESIGN_REVIEW_WORKER_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
+import { DESIGN_REVIEW_WORKER_FEATURE, EVAL_PROMPT_LOCATIONS_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, WIKI_AGENT_FEATURE, EVAL_FILES_FEATURE, GENERAL_FAKES_FEATURE, TASK_FLAKY_RERUN_FEATURE, NIGHTLY_RUN_FEATURE, SECOND_REVIEWER_FEATURE, SETUP_AGENT_FEATURE, SETUP_RECIPES_FEATURE, STANDING_INSTRUCTIONS_FEATURE, WIKI_BUILD_FEATURE, TEST_ENV_BASELINE_FEATURE, USAGE_CHECKPOINTS_FEATURE, TEST_ENV_MULTI_REPO_FEATURE, type WorkerInvocationFeature } from "@agentx/contracts";
 
 /**
  * The optional invocation fields this worker implements, listed by hand and advertised on /ping. WORKER_INVOCATION_FEATURES
@@ -112,5 +112,7 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   TEST_ENV_BASELINE_FEATURE,
   // TE-MR2b: a plan with `repositoryCoverageMap` and a repository on each check is read (verification/multi-repo-selection.ts); selection across repositories stays off (the whole check runs) until it is proven live.
   TEST_ENV_MULTI_REPO_FEATURE,
+  // L4-EVP: the eval's changed-prompt classifier reads the project's confirmed prompt locations, region by region where it can (verification/eval-changed-prompt.ts).
+  EVAL_PROMPT_LOCATIONS_FEATURE,
   // Test services (`task.testServices.v1`) is NOT listed here: it is advertised only by a worker that has a test-services configuration (test-services-run.ts `testServicesAdvertisedFeatures`, added in main.ts).
 ] as const satisfies readonly WorkerInvocationFeature[];

@@ -8,7 +8,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //   - the risk and the description's list come from the CODE HOST, after the push: the files changed between the pull request's base and the pushed, checked head (`verifyPublishedChanges`);
 //   - without a verified list the risk is HIGH (`riskUntilVerified`), never lower, and says why.
 import { createHash } from "node:crypto";
-import { change, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, promptLocationsOf, when, type CodeHost, type HostScope, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import { flowIs } from "../task-flow/flow-guard.js";
 import { boundCommits, readHeadFacts, tierFilesOfRead } from "../merge/change-tier-read.js";
@@ -151,7 +151,9 @@ export async function verifyPublishedChanges(deps: TaskFlowDeps, task: TaskRecor
   const judged = riskFromFiles(workflow, read);
   // The tier of the code the host shows, bound to the head commits Rovara checked and the base they were built on. It only goes up, and the growth after the build is recorded.
   const at = iso(deps);
-  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }) });
+  // L4-EVP: the prompt locations the project confirmed, at the revision the task started on; none is today's tier, byte for byte.
+  const promptLocations = promptLocationsOf(project?.definition.promptLocations);
+  const fresh = tierFromDiff({ files: tierFiles, complete: tierComplete && hosts.length > 0 }, { ...boundCommits(pullRequests.map((entry) => ({ repositoryId: entry.repositoryId, headSha: entry.headSha ?? "", baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === entry.repositoryId)?.baseCommitSha }))), at, ...(headFacts === undefined ? {} : { head: headFacts }), ...(promptLocations.length === 0 ? {} : { promptLocations }) });
   const tiered = recordTier(workflow.flow, fresh);
   const previousLevel = workflow.flow?.tier?.level;
   const flow = tiered.grew && previousLevel !== undefined ? recordGrowth(tiered.flow, previousLevel, tiered.tier.level, at) : tiered.flow;
