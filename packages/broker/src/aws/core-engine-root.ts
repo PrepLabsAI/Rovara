@@ -28,7 +28,7 @@ import { enginePolicyHook, policyHookSettingsFromEnvironment } from "./engine-po
 import { outboxCompaniesOf, relayCoreOutboxStream } from "./core-outbox-stream.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../core-host/app.js";
@@ -54,6 +54,7 @@ import { codeHostForRecord } from "../plugins/routing.js";
 import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hostedDecisionService, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
 import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
+import { createEvalStandInDescriptorSource } from "../core/setup-agent/eval-stand-in-descriptor.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { boundEvalMonthlyCap, boundEvalProviderConnected } from "../core/setup-agent/eval-reservation.js";
 import { createEvalWrapperTargets } from "../core/setup-agent/eval-wrapper-targets.js";
@@ -331,9 +332,11 @@ const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable."
  * approval through the install's bound `eval-reservation` adapter only, and the company's base-score cache. The approver's CURRENT role is the hosted members reader
  * (`deployedSessionMembers`: live `COMPANY_MEMBER#` membership in THIS company, the broker's project grant), never the role stored at approval or a role the gateway names.
  */
-export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource): EvalPlanSources {
+export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource, env: Readonly<Record<string, string | undefined>> = {}): EvalPlanSources {
+  // L4-EINT: the stand-in descriptor, only where the operator's switch AGENTX_EVAL_STAND_INS is "1" (default off: today's answer).
+  const standIns = evalStandInsOn(env) ? createEvalStandInDescriptorSource({ store: registry.require("storage"), companyId, objects: fixtureObjectPortOf(registry.require("object-storage")) }, env) : undefined;
   return createEvalPlanSources({
-    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }),
+    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }), ...(standIns === undefined ? {} : { standIns }),
     ...(log === undefined ? {} : { log: (event) => { log({ event: `core_engine.${event}` }); } }),
   });
 }
@@ -1283,7 +1286,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             store: registry.require("storage"), companyId, now: () => now().getTime(), env, repositoryPaths: repositoryPathsOf(runtime.flow.deps.projects),
             savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: () => registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
             log: (event) => { log({ event: `core_engine.${event}` }); },
-          })),
+          }), env),
           // L4-EVH: the opt-in eval health run's own preparation asks for its plan and posts its one result here (only where a run can really happen).
           ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is

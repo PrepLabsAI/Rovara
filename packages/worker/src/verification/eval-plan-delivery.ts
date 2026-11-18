@@ -6,7 +6,7 @@
 // (another key is a miss) and never writes: base rounds are not saved from a worker through this route. Nothing here logs, stores or echoes the answer.
 import {
   EVAL_PLAN_DELIVERY_ACTION, EVAL_PLAN_DELIVERY_MAX_BYTES, EvalPlanDeliverySchema, evalBaseCacheKey,
-  type BaseScoreCache, type EvalEnvironment, type EvalPlanDelivery, type EvalSpendApproval,
+  type BaseScoreCache, type EvalEnvironment, type EvalPlanDelivery, type EvalSpendApproval, type EvalStandInDescriptor,
 } from "@agentx/contracts";
 
 const NOT_AVAILABLE: EvalPlanDelivery = Object.freeze({ status: "not_available" });
@@ -64,6 +64,8 @@ export interface DeliveredEvalSources {
   plan(): Promise<unknown>;
   /** L4-EVS: the environment the sealed eval runs in (saved image or install steps), when the broker delivered one. A fresh copy per read; the login in it is for one pull and is never stored or logged. */
   environment(): Promise<EvalEnvironment | undefined>;
+  /** L4-EINT: what the project's evals reach (the dry run's outside hosts, the writer's set), when the broker delivered it (the operator's switch is on). A fresh copy per read. */
+  standIns(): Promise<EvalStandInDescriptor | undefined>;
   readonly approval: EvalSpendApproval;
   readonly cache: BaseScoreCache;
 }
@@ -71,7 +73,7 @@ export interface DeliveredEvalSources {
 /** The plan, approval and cache of a delivered answer, or undefined for "not_available". Each read returns a fresh copy; the cache answers only the key the broker read and never writes. */
 export function evalSourcesFromDelivery(answer: EvalPlanDelivery): DeliveredEvalSources | undefined {
   if (answer.status !== "ready") return undefined;
-  const { plan, approval, baseline, environment } = structuredClone(answer);
+  const { plan, approval, baseline, environment, standIns } = structuredClone(answer);
   const sameKey = (parts: Parameters<BaseScoreCache["read"]>[0]): boolean => {
     if (baseline === null) return false;
     try { return evalBaseCacheKey(parts) === baseline.key; } catch { return false; }
@@ -79,6 +81,7 @@ export function evalSourcesFromDelivery(answer: EvalPlanDelivery): DeliveredEval
   return {
     plan: async () => structuredClone(plan),
     environment: async () => (environment === undefined ? undefined : structuredClone(environment)),
+    standIns: async () => (standIns === undefined ? undefined : structuredClone(standIns)),
     approval: { read: async () => approval === null ? undefined : Object.freeze({ ...approval }) },
     cache: {
       read: async (parts) => sameKey(parts) && baseline?.record != null ? structuredClone(baseline.record) : undefined,

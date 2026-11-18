@@ -15,6 +15,7 @@ import { createRunDirectoryFiles, helperSecretValues, removeRunDirectory } from 
 import { HelperStartError, startHelpers, type StartedHelper } from "../service-helpers.js";
 import { environmentFor, materialize, requireLocalImages, resolveDependencies, type TestServicesConfig } from "../test-services-run.js";
 import type { RunHostEntry } from "../check-sandbox.js";
+import type { SeedFileTarget } from "../service-seed-file.js";
 
 /** The fixed words a failed start of the eval's services is told in. Never Docker's text and never a repository's. */
 export const EVAL_SERVICES_FAILURE_SENTENCE = "Rovara could not start the test services for this eval";
@@ -32,6 +33,8 @@ export interface EvalServicesStarted {
   readonly secrets: readonly string[];
   /** Which services are up, by the plan's own ids, with their address and ports. */
   readonly started: readonly Pick<StartedHelper, "id" | "address" | "ports">[];
+  /** L4-EINT (E3): where a seed can be loaded, by the plan's ids: the helper's container and the family, user and database the loader needs (a service whose family has no file loader is simply absent from the seed step). */
+  readonly targets: ReadonlyArray<SeedFileTarget & { readonly id: string }>;
   /** Plan ids this eval round does not serve yet (an emulator, a fake, a company image): the eval runs without them. */
   readonly unsupported: readonly string[];
   /** Removes every service container and the run's files. Idempotent; never throws. */
@@ -105,6 +108,7 @@ async function startOnce(config: TestServicesConfig, dependencies: readonly Task
       env: environment.entries,
       secrets: [...new Set([...environment.secretValues, ...helperSecretValues(resolved.map((item) => item.request))])],
       started: helpers.helpers.map(({ id, address, ports }) => ({ id, address, ports })),
+      targets: helpers.helpers.flatMap((helper) => { const item = resolved.find((candidate) => candidate.request.id === helper.id); return item === undefined ? [] : [{ id: helper.id, container: helper.container, family: item.plan.family, user: item.request.credentials?.user, database: item.request.credentials?.database }]; }),
       unsupported,
     };
     await seed?.(started, net, signal);

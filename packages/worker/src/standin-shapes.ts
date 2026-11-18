@@ -4,18 +4,19 @@
 import { buildStandInRequest, type StandInOperationSeam, type StandInTableSeam, type StandInWriterInput } from "@agentx/contracts";
 import type { TrackedPaths } from "./setup-citations.js";
 import type { SetupAgentRepository } from "./setup-agent.js";
+import { readOperationSeams, readTableSeams } from "./standin-readers.js";
 
 export interface StandInShapes { tables: readonly StandInTableSeam[]; operations: readonly StandInOperationSeam[] }
 /** One reader of the repositories' shapes. Throwing is the same as finding nothing. */
 export type StandInShapeReader = (repositories: ReadonlyArray<SetupAgentRepository>, tracked: TrackedPaths) => Promise<StandInShapes>;
 
 /**
- * The readers the worker uses. Until lanes E3 (tables) and E6 (outside answers) are merged they read nothing, so a setup run's writer step says it found nothing to write; it never guesses a table. Each lane replaces its own
- * line here with its reader.
+ * The readers the worker uses (L4-EINT: E3's tables from the repository's SQL, E6's operations from its OpenAPI descriptions). A repository with neither gives nothing, so the writer step says it found nothing to write; it never guesses a table.
  */
 export const STANDIN_SHAPE_READERS: { tables: (...args: Parameters<StandInShapeReader>) => Promise<readonly StandInTableSeam[]>; operations: (...args: Parameters<StandInShapeReader>) => Promise<readonly StandInOperationSeam[]> } = {
-  tables: () => Promise.resolve([]),
-  operations: () => Promise.resolve([]),
+  // L4-EINT: the repository's own SQL (tables) and OpenAPI descriptions (outside operations), tracked files only, names and shapes only.
+  tables: readTableSeams,
+  operations: readOperationSeams,
 };
 
 /** The writer's request for these repositories: shapes only, bounded, or undefined when there is nothing to write. */

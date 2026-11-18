@@ -32,6 +32,8 @@ export interface EvalPlanSourceDeps {
    * answered with no environment (the bare worker image, as before).
    */
   readonly environment?: EvalEnvironmentSource | undefined;
+  /** L4-EINT: what the project's evals reach, for the run's own company and project (`createEvalStandInDescriptorSource`: present only when the operator's switch `AGENTX_EVAL_STAND_INS` is "1"). Absent: the answer has no stand-in field. */
+  readonly standIns?: ((scope: EvalPlanScope) => Promise<unknown>) | undefined;
 }
 
 /** The base commit of the plan's repository in the run's own pin, or undefined: the plan's named repository, else the run's only one. */
@@ -58,8 +60,12 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
       // L4-EVS2: the environment of THIS company's project and the plan's own repository. Any fault is "no environment" (never a reason to withhold the plan).
       let environment: Awaited<ReturnType<EvalEnvironmentSource>>;
       try { environment = await deps.environment?.(scope, found.plan.repository); } catch { environment = undefined; }
+      // L4-EINT: the stand-in descriptor of THIS company's project. Any fault is "none".
+      let standIns: unknown;
+      try { standIns = await deps.standIns?.(scope); } catch { standIns = undefined; }
       return {
         ...(environment === undefined ? {} : { environment }),
+        ...(standIns === undefined ? {} : { standIns }),
         plan: {
           company: deps.companyId, project: scope.project, ...body,
           key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },

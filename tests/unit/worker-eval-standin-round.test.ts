@@ -63,7 +63,9 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     const output = await runEvalRound(input);
     if (output.status !== "done") throw new Error("done");
     expect(output.result.label).toBe("Not run");
-    expect(output.result.notRun?.reason).toBe("too_few_questions");
+    // DEC 254zzz71: every failing question was dropped: not a near-empty comparison but "Not run: outside calls were made up".
+    expect(output.result.notRun?.reason).toBe("outside_calls_made_up");
+    expect(output.result.notRun?.sentence).toBe("Not run: outside calls were made up");
     expect(output.result.excluded).toEqual([{ id: "q0", reason: "stand_in_gap" }, { id: "q1", reason: "stand_in_gap" }, { id: "q2", reason: "stand_in_gap" }]);
     expect(output.result.standIns).toEqual({ recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, notCompared: 3, saturated: false });
     expect(output.result.summary).toContain("3 questions not compared");
@@ -79,14 +81,14 @@ describe("a gap can never make a question 'Worse on eval'", () => {
     expect(output.result.excluded.filter((q) => q.reason === "stand_in_gap")).toEqual([]);
     expect(output.result.standIns).toMatchObject({ notCompared: 0 });
   });
-  it("drops only the questions that failed: one failing question in a gap run is not compared, the passing ones are, and the verdict is not 'Worse'", async () => {
+  it("drops only the questions that failed: one failing question in a gap run is not compared, and because it was the only failure (most failures dropped) the eval is 'Not run: outside calls were made up', never 'Worse'", async () => {
     const { input } = await setup({ n: 3, failing: ["q1"], gapOf: () => true });
     const output = await runEvalRound(input);
     if (output.status !== "done") throw new Error("done");
     expect(output.result.excluded).toEqual([{ id: "q1", reason: "stand_in_gap" }]);
-    expect(output.result.label).toBe("No regression measured (eval)");
-    expect(output.result.casesRun).toBe(2);
-    expect(output.result.casesTotal).toBe(3);
+    expect(output.result.label).toBe("Not run");
+    expect(output.result.notRun?.reason).toBe("outside_calls_made_up");
+    expect(output.result.label).not.toBe("Worse on eval");
     expect(output.result.standIns).toMatchObject({ notCompared: 1 });
     expect(output.result.questions.map((q) => q.id)).not.toContain("q1");
   });
@@ -118,19 +120,22 @@ describe("a gap can never make a question 'Worse on eval'", () => {
 
 describe("the counts travel in the evidence and survive the artifact", () => {
   it("puts the numbers in the evidence, and a re-derived result carries them, with the not-compared sentence and the made-up-answers line, and no host or path", async () => {
-    const { input } = await setup({ n: 3, failing: ["q1"], gapOf: () => true });
+    // No run hit a gap here (so the round itself drops nothing); one question is then listed as dropped for a gap, to see the words the artifact derives.
+    const { input } = await setup({ n: 3, failing: ["q1"], gapOf: () => false });
     const output = await runEvalRound(input);
     if (output.status !== "done" || output.evidence === undefined) throw new Error("done");
-    expect(output.evidence.standIns).toEqual({ recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, notCompared: 1, saturated: false });
-    expect(output.evidence.excluded).toEqual([{ id: "q1", reason: "stand_in_gap" }]);
-    const artifact = { schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: 1, outcome: "done", ...output.evidence, usage: { calls: 9, costMicros: 900 }, cache: "hit", evalConfigured: true };
+    expect(output.evidence.standIns).toEqual({ recorded: 0, generated: 1, generatedNoContract: 1, newConnections: 0, notCompared: 0, saturated: false });
+    const evidence = { ...output.evidence, excluded: [{ id: "q9", reason: "stand_in_gap" }], standIns: { ...output.evidence.standIns!, notCompared: 1 } };
+    const artifact = { schemaVersion: 1, candidateDigest: "a".repeat(64), roundKind: "check_unsealed", evalPass: 1, outcome: "done", ...evidence, usage: { calls: 9, costMicros: 900 }, cache: "hit", evalConfigured: true };
     expect(EvalRoundArtifactSchema.safeParse(artifact).success).toBe(true);
     const result = evalResultFromArtifact(artifact);
-    expect(result.label).toBe("No regression measured (eval)");
     expect(result.standIns).toMatchObject({ notCompared: 1 });
-    expect(result.excluded).toEqual([{ id: "q1", reason: "stand_in_gap" }]);
+    expect(result.excluded).toContainEqual({ id: "q9", reason: "stand_in_gap" });
     expect(result.summary).toContain("1 question not compared: an outside service's answer was made up by Rovara.");
-    expect(result.notices.join(" ")).toContain("Made-up answers never count as change proof");
+    // E9 words: counted answers, "were made up", "not compared"; no host, path or secret.
+    const words = result.notices.join(" ");
+    expect(words).toContain("2 answers were made up");
+    expect(words).toContain("1 question was not compared");
     expect(JSON.stringify(result)).not.toMatch(/https?:|tiktok|\/v2/u);
   });
   it("refuses a forged standIns block (a count past its limit, an unknown field)", async () => {

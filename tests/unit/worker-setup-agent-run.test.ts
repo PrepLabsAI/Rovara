@@ -833,6 +833,32 @@ describe("L4-E12: the free dry run of the drafted eval goes through the same cal
     expect(result.setupProposal).toBeDefined();
   });
 
+  it("L4-E12-STOP: a person's Stop reaches the dry run (its signal aborts, a run that waits for it ends at once) and no list is sent for a stopped run", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let sawAborted = false;
+    // A dry run that would go on for ten minutes: it ends only when its signal says Stop.
+    const t = await evalWorld((_report, signal) => new Promise((resolve) => { (signal as AbortSignal).addEventListener("abort", () => { sawAborted = true; resolve(LIST); }, { once: true }); setTimeout(() => { void control?.abort(); }, 20); }) as never);
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); } };
+    const started = Date.now();
+    await runSetupAgent(t.input);
+    expect(sawAborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    // The dry run's answer arrived after the Stop: it is not sent (a stopped run reports nothing new).
+    expect(kinds(t)).not.toContain("eval_dry_run");
+  });
+
+  it("L4-E12-STOP: a Stop before the dry run starts means it never starts (mutant: the cancelled gate)", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let calls = 0;
+    const t = await evalWorld(async () => { calls += 1; return LIST; });
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); }, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") await control?.abort(); return ports.callback(body); } };
+    await runSetupAgent(t.input);
+    expect(calls).toBe(0);
+    expect(kinds(t)).not.toContain("eval_dry_run");
+  });
+
   it("without a dry-run host nothing changes: the callbacks are exactly the report's (a host that cannot run one sends nothing)", async () => {
     const t = await evalWorld();
     await runSetupAgent(t.input);

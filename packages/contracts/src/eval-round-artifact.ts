@@ -4,7 +4,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { EvalRunDiagnosticSchema } from "./eval-run-diagnostic.js";
 import { EVAL_NOT_RUN_REASONS, EVAL_QUESTION_LIMIT, evalCheckResult, evalNotRunResult, type EvalCheckInput, type EvalCheckResult, type EvalQuestionComparison } from "./eval-check.js";
 import { EVAL_ROUND_KINDS } from "./eval-hidden-set.js";
-import { EvalStandInResultSchema, evalStandInLine, type EvalStandInResult } from "./eval-standin-set.js";
+import { EvalStandInResultSchema, evalStandInHasWords, evalStandInLine, type EvalStandInResult } from "./eval-standin-set.js";
 
 export const EVAL_ROUND_ARTIFACT = "eval-round.json";
 export const EVAL_ROUND_ARTIFACT_MAX_BYTES = 1_048_576;
@@ -171,8 +171,7 @@ function addContext(result: EvalCheckResult, a: EvalRoundArtifact): EvalCheckRes
   const excluded = a.excluded ?? []; const count = excluded.length;
   const gaps = excluded.filter(q => q.reason === "stand_in_gap").length; const others = count - gaps;
   const notices = (a.notices ?? []).map(n => n.code === "stage_estimate" ? `Eval ${n.stage} estimate: ${n.calls} calls, ${n.costMicros} microdollars.` : n.code === "baseline_measuring" ? "baseline still being measured" : noEvalNotice);
-  const made = a.standIns === undefined ? 0 : a.standIns.generated + a.standIns.generatedNoContract + a.standIns.newConnections + a.standIns.notCompared;
-  return { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...notices, ...(a.standIns === undefined || made === 0 ? [] : [evalStandInLine(a.standIns)])],
+  return { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...notices, ...(a.standIns === undefined || !evalStandInHasWords(a.standIns) ? [] : [evalStandInLine(a.standIns)])],
     ...(a.standIns === undefined ? {} : { standIns: a.standIns }),
     summary: result.summary + (others === 0 ? "" : ` ${others} question${others === 1 ? "" : "s"} added, removed or edited: not compared.`) + (gaps === 0 ? "" : ` ${gaps} question${gaps === 1 ? "" : "s"} not compared: an outside service's answer was made up by Rovara.`) };
 }

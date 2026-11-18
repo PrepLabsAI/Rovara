@@ -80,9 +80,9 @@ export async function runSetupAgentInvocation(
     rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price,
     repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
     // L4-E12 (E2): the free dry run of the drafted eval, started without asking, never spending (scripted model replies, no bridge). It needs the worker's own pinned image and the fresh eval sandbox's walls; otherwise it gives nothing.
-    evalDryRun: (report) => runSetupEvalDryRun({
+    evalDryRun: (report, signal) => runSetupEvalDryRun({
       docker, environment, taskId: invocation.operationId, workspaceKey: () => setupWorkspaceKey(canonicalRoot), commits: setup.commits, servicesOff: testServicesConfigFromEnvironment(environment, docker) === undefined,
-      repositories: manifest.repositories.map((repository) => ({ name: repository.name, directory: join(canonicalRoot, repository.path) })),
+      repositories: manifest.repositories.map((repository) => ({ name: repository.name, directory: join(canonicalRoot, repository.path) })), signal,
     }, report),
     ...(manifest.meta === undefined ? {} : { metaRepo: manifest.meta.name }),
     ports: {

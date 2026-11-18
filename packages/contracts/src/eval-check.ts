@@ -7,7 +7,7 @@ import { EvalRunDiagnosticSchema, evalRunFailureSentence, type EvalRunDiagnostic
 import type { EvalStandInResult } from "./eval-standin-set.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "provider_not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed", "eval_run_failed",
+  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "provider_not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed", "eval_run_failed", "outside_calls_made_up",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
@@ -48,6 +48,8 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   eval_set_changed: "not run: the eval set changed, so main's score is not comparable",
   eval_set_unknown: "not run: the eval did not say which eval set it ran",
   eval_run_failed: "not run: the eval could not run",
+  /** L4-EINT (DEC 254zzz71): most of the failing questions had to be dropped because an outside answer was made up, so what is left would not be a comparison. */
+  outside_calls_made_up: "Not run: outside calls were made up",
 };
 
 

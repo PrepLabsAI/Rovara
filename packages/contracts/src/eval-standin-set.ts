@@ -6,6 +6,7 @@
 //     into the eval box);
 //   - the summary repeats all three binding values, carries the counts, the answers made during the run (for the worker's book) and the names of the new connections, and the worker refuses a summary that does not match.
 // Pure, no network. The helper imports this file through the narrow entry `eval-standin-helper-entry.ts`.
+import { EVAL_TELEMETRY_NAMES_MAX, isEvalTelemetryId } from "./eval-telemetry-hosts.js";
 import { z } from "zod";
 import { sha256HexOfBytes } from "./general-fakes-set.js";
 import {
@@ -104,6 +105,8 @@ export const EvalStandInSummarySchema = z.discriminatedUnion("trusted", [
     additions: z.array(BookEntrySchema).max(EVAL_STAND_IN_BOOK_MAX_ENTRIES),
     gaps: z.array(GapName).max(EVAL_STAND_IN_GAP_NAMES_MAX),
     newHosts: z.array(z.string().min(1).max(253)).max(EVAL_STAND_IN_NEW_HOSTS_MAX),
+    /** L4-EINT: the entries of the FIXED telemetry list the helper answered `OK` (names from that list only; a call to one is never a gap). */
+    telemetry: z.array(z.string().refine(isEvalTelemetryId)).max(EVAL_TELEMETRY_NAMES_MAX).optional(),
   }).strict(),
 ]);
 export type EvalStandInSummary = z.infer<typeof EvalStandInSummarySchema>;
@@ -129,21 +132,62 @@ export function evalStandInPathName(path: string): string {
 // ---- the result's counts (what the eval check carries: numbers only)
 
 /** What the eval result and its evidence carry for stand-ins: numbers and one flag, no host, path or body. `notCompared` are the questions dropped from both sides because of a gap. */
+export const EVAL_STAND_IN_RAN_AGAINST_ENGINES = ["Postgres", "MySQL", "Redis", "MongoDB"] as const;
+const RanHost = z.string().regex(/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/u);
 export const EvalStandInResultSchema = z.object({
   recorded: Count, generated: Count, generatedNoContract: Count, newConnections: Count, notCompared: Count, saturated: z.boolean(),
+  /** L4-EINT (DEC 254zzz71): the fixed telemetry list's entries answered `OK` (names from that list only). */
+  telemetry: z.array(z.string().refine(isEvalTelemetryId)).max(EVAL_TELEMETRY_NAMES_MAX).optional(),
+  /** L4-EINT (E9): what the round ran against stand-ins: databases by engine name (a fixed list) and outside hosts by name (planned, in the strict host shape). */
+  ranAgainst: z.object({ databases: z.array(z.enum(EVAL_STAND_IN_RAN_AGAINST_ENGINES)).max(8), hosts: z.array(RanHost).max(16) }).strict().optional(),
 }).strict();
 export type EvalStandInResult = z.infer<typeof EvalStandInResultSchema>;
 
-export function evalStandInResultOf(counts: EvalStandInCounts, notCompared: number): EvalStandInResult {
-  const bound = (value: number): number => Math.max(0, Math.min(EVAL_STAND_IN_COUNT_MAX, Math.trunc(Number.isFinite(value) ? value : 0)));
-  return { recorded: bound(counts.recorded), generated: bound(counts.generated), generatedNoContract: bound(counts.generatedNoContract), newConnections: bound(counts.newConnections), notCompared: bound(notCompared), saturated: counts.saturated };
+/** What one sandbox run reports of its stand-ins (the worker's own, never the repository's): whether it hit a gap, the round's counts, the fixed telemetry entries answered, the planned outside hosts and the databases stood in (by engine). */
+export interface EvalStandInRunReport {
+  readonly hitGap: boolean;
+  readonly counts: EvalStandInCounts;
+  readonly telemetry?: readonly string[] | undefined;
+  readonly hosts?: readonly string[] | undefined;
+  readonly databases?: readonly (typeof EVAL_STAND_IN_RAN_AGAINST_ENGINES)[number][] | undefined;
 }
 
-/** The fixed words beside the eval line, numbers only (lane E9 owns the final PR text; this is the one sentence the result itself carries). Nothing about a host or path. */
-export function evalStandInLine(result: EvalStandInResult): string {
+/** The engine a started service's port belongs to (the same ports the dry run reads). */
+export function evalStandInEngineOfPort(port: number): (typeof EVAL_STAND_IN_RAN_AGAINST_ENGINES)[number] | undefined {
+  return port === 5432 ? "Postgres" : port === 3306 ? "MySQL" : port === 6379 ? "Redis" : port === 27017 ? "MongoDB" : undefined;
+}
+
+export function evalStandInResultOf(counts: EvalStandInCounts, notCompared: number, extras: { telemetry?: readonly string[]; ranAgainst?: { databases: readonly (typeof EVAL_STAND_IN_RAN_AGAINST_ENGINES)[number][]; hosts: readonly string[] } } = {}): EvalStandInResult {
+  const bound = (value: number): number => Math.max(0, Math.min(EVAL_STAND_IN_COUNT_MAX, Math.trunc(Number.isFinite(value) ? value : 0)));
+  const telemetry = [...new Set((extras.telemetry ?? []).filter(isEvalTelemetryId))].sort();
+  const ranAgainst = extras.ranAgainst === undefined ? undefined : { databases: [...new Set(extras.ranAgainst.databases)].slice(0, 8), hosts: [...new Set(extras.ranAgainst.hosts.filter((host) => RanHost.safeParse(host).success))].slice(0, 16) };
+  return { recorded: bound(counts.recorded), generated: bound(counts.generated), generatedNoContract: bound(counts.generatedNoContract), newConnections: bound(counts.newConnections), notCompared: bound(notCompared), saturated: counts.saturated,
+    ...(telemetry.length === 0 ? {} : { telemetry }), ...(ranAgainst === undefined || ranAgainst.databases.length + ranAgainst.hosts.length === 0 ? {} : { ranAgainst }) };
+}
+
+/** Whether a result has anything worth a line on the PR. */
+export const evalStandInHasWords = (result: EvalStandInResult): boolean => result.generated + result.generatedNoContract + result.newConnections + result.notCompared + result.recorded > 0 || (result.telemetry?.length ?? 0) > 0 || result.ranAgainst !== undefined;
+
+const joinNames = (names: readonly string[]): string => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]!}`);
+/**
+ * L4-EINT (E9, DEC 254zzz71): the fixed words beside the eval line. "Ran against stand-ins for Postgres and api.tiktok.com." / "3 answers were made up; both runs got the same answers." / "2 questions were not compared: ..." /
+ * "Telemetry calls answered with OK: sentry.io." Names are the fixed engine words, planned host names in the strict shape and entries of the fixed telemetry list; numbers are bounded. A line is absent when it has nothing to say.
+ */
+export function evalStandInLines(result: EvalStandInResult): string[] {
+  const lines: string[] = [];
+  const ran = [...(result.ranAgainst?.databases ?? []), ...(result.ranAgainst?.hosts ?? [])];
+  if (ran.length > 0) lines.push(`Ran against stand-ins for ${joinNames(ran)}.`);
   const made = result.generated + result.generatedNoContract + result.newConnections;
-  const parts = [`Outside calls: ${String(made)} ${made === 1 ? "answer" : "answers"} made by Rovara (${String(result.generated)} from a contract, ${String(result.generatedNoContract)} with none, ${String(result.newConnections)} new ${result.newConnections === 1 ? "connection" : "connections"})`];
-  if (result.recorded > 0) parts.push(`${String(result.recorded)} from your own recordings`);
-  parts.push(`${String(result.notCompared)} ${result.notCompared === 1 ? "question" : "questions"} not compared because of them`);
-  return `${parts.join("; ")}.${result.saturated ? " Counts are lower bounds." : ""} Made-up answers never count as change proof.`;
+  if (made > 0) lines.push(`${String(made)} ${made === 1 ? "answer was" : "answers were"} made up (${String(result.generated)} from a contract, ${String(result.generatedNoContract)} with none, ${String(result.newConnections)} new ${result.newConnections === 1 ? "connection" : "connections"}). Both runs got the same answers.`);
+  if (result.recorded > 0) lines.push(`${String(result.recorded)} ${result.recorded === 1 ? "answer" : "answers"} came from your own recordings.`);
+  if (result.notCompared > 0) lines.push(`${String(result.notCompared)} ${result.notCompared === 1 ? "question was" : "questions were"} not compared: ${result.notCompared === 1 ? "it" : "they"} needed an answer the stand-ins had to make up.`);
+  const telemetry = (result.telemetry ?? []).filter(isEvalTelemetryId);
+  if (telemetry.length > 0) lines.push(`Telemetry calls answered with OK: ${[...telemetry].sort().join(", ")}.`);
+  if (result.saturated) lines.push("Counts are lower bounds.");
+  return lines;
+}
+
+/** The one sentence form of `evalStandInLines` (the result's own notice). */
+export function evalStandInLine(result: EvalStandInResult): string {
+  return evalStandInLines(result).join(" ");
 }

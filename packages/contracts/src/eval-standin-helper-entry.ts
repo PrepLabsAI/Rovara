@@ -9,3 +9,4 @@ export {
   EVAL_STAND_IN_SUMMARY_PATH, EVAL_STAND_IN_TLS_PORT, UNTRUSTED_EVAL_STAND_IN_SUMMARY, evalStandInPathName, parseEvalStandInSetBytes, parseEvalStandInSummaryText,
   type EvalStandInGapName, type EvalStandInSummary, type ParsedEvalStandInSet, type TrustedEvalStandInSummary,
 } from "./eval-standin-set.js";
+export { EVAL_TELEMETRY_ANSWER, EVAL_TELEMETRY_CLASS, evalTelemetryEntryOf } from "./eval-telemetry-hosts.js";

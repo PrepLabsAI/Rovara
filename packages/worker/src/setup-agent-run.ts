@@ -95,7 +95,8 @@ export interface SetupRunInput {
    * L4-E12 (E2, DEC 254zzz55 N6): the FREE dry run of the eval the run just drafted: runs it once on main in the sealed box with scripted model replies (no model, no spend, a few machine minutes) and answers the dependency list, or
    * undefined when it could not run. Started without asking; sent once through the run's own setup callback (`eval_dry_run`). Absent (a host that cannot run one): nothing is sent. A failure never changes the run's result.
    */
-  evalDryRun?: ((report: SetupEvalDiscoveryReport) => Promise<EvalDependencyList | undefined>) | undefined;
+  /** `signal` aborts when a person presses Stop: the dry run ends at once (L4-EINT, closes L4-E12-STOP). */
+  evalDryRun?: ((report: SetupEvalDiscoveryReport, signal: AbortSignal) => Promise<EvalDependencyList | undefined>) | undefined;
 }
 
 export interface SetupRunResult {
@@ -215,6 +216,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   let personSeq: number | undefined;
   /** Set when the run was aborted from outside (a person's Stop): the end is then bounded (`SETUP_STOP_FINISH_MS`). */
   let cancelled = false;
+  /** L4-EINT (L4-E12-STOP): the free dry run's own stop: aborted by a person's Stop, so a run that is cancelled does not go on for up to ten minutes. */
+  const dryRunStop = new AbortController();
   /** Why the gateway paused nightly upkeep under this run, when its fixed sentence was what refused a call (L4-SR2). */
   let upkeepPause: UpkeepPauseReason | undefined;
   /** The command place of each journal entry a person's command wrote (so a website it hit is asked for with the command's place, from which the broker finds who typed it). */
@@ -284,7 +287,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       governorSessionListener(governor)(event);
     });
     unregister = ports.register({
-      abort: async () => { cancelled = true; governor.stop("infrastructure"); await session?.abort(); await abortWriter?.().catch(() => undefined); },
+      abort: async () => { cancelled = true; dryRunStop.abort(); governor.stop("infrastructure"); await session?.abort(); await abortWriter?.().catch(() => undefined); },
       steer: async (text) => (session?.steer === undefined || session.isStreaming?.() !== true ? false : (await session.steer(text), true)),
       streaming: () => session?.isStreaming?.() === true,
     });
@@ -473,8 +476,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
       const reported = await ports.callback({ kind: "eval_discovery", report: evalReport }).then(() => true, () => false);
       // The free dry run (L4-E12): only for a report the broker took, so a list never sits beside an eval nobody can confirm. Whatever it does, the run's own result is already made.
       if (reported && input.evalDryRun !== undefined && !cancelled) {
-        const list = await input.evalDryRun(evalReport).catch(() => undefined);
-        if (list !== undefined) await ports.callback({ kind: "eval_dry_run", list }).catch(() => undefined);
+        const list = await input.evalDryRun(evalReport, dryRunStop.signal).catch(() => undefined);
+        if (list !== undefined && !cancelled) await ports.callback({ kind: "eval_dry_run", list }).catch(() => undefined);
       }
     }
     return { workflowMode: "SETUP_AGENT", ...(proposal === undefined ? {} : { setupProposal: proposal }), setupRunSummary: summary };
