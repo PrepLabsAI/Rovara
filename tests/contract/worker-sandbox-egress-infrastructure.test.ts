@@ -95,3 +95,15 @@ describe("the session steps handler", () => {
     expect(readFileSync(new URL("../../packages/broker/src/aws/session-steps.ts", import.meta.url), "utf8")).toContain("sandboxEgressGateway: workerSandboxEgressGateway(process.env),");
   });
 });
+
+describe("the project's S3 lift reaches the worker through the existing prepare payload (DEC 254zzz90)", () => {
+  it("the broker sends the exact S3 hosts of the project's allowed websites in a prepare invocation, only to a worker that lists the feature and only when there are some; no new route, role or permission is added", () => {
+    const dispatch = readFileSync(new URL("../../packages/broker/src/core/task-flow/dispatch.ts", import.meta.url), "utf8");
+    expect(dispatch).toContain("const s3Hosts = features.includes(PREPARE_EGRESS_S3_FEATURE) ? projectAllowedS3Hosts(project.definition.network?.allowedDomains) : [];");
+    expect(dispatch).toContain("...(s3Hosts.length === 0 ? {} : { egressS3Allow: s3Hosts }),");
+    const worker = readFileSync(new URL("../../packages/worker/src/main.ts", import.meta.url), "utf8");
+    expect(worker.indexOf("await publishEgressS3Allow(invocation.payload.egressS3Allow);")).toBeGreaterThan(-1);
+    expect(worker.indexOf("await publishEgressS3Allow(")).toBeLessThan(worker.indexOf("await prepareWorkspace({"));
+    expect(readFileSync(new URL("../../packages/worker/src/implemented-features.ts", import.meta.url), "utf8")).toContain('"prepare.egressS3.v1"');
+  });
+});

@@ -28,6 +28,13 @@ const ALLOWED = (config.allowed || []).map(function (entry) { return String(entr
 const SANDBOX_DENIED = (config.sandboxDenied || []).map(function (entry) { return String(entry).toLowerCase(); });
 // EC2 host mode (see the header): the allow decision is the host resolver's answer, and the deny list is the only static rule.
 const HOST_MODE = config.mode === "host";
+// Host mode, lane L4-NETG follow-up: the S3 names are denied to the sandbox side too, but, unlike the registries, a project can lift ONE exact S3 host at a time. The lift is a file the worker (not a sandbox: no sandbox mounts its folder)
+// writes from the project's allowed websites; it is read at most once a second, only exact plain names are taken, and any problem with it is an empty list (the S3 stays denied).
+const SANDBOX_DENIED_S3 = HOST_MODE ? (config.sandboxDeniedS3 || []).map(function (entry) { return String(entry).toLowerCase(); }) : [];
+const PROJECT_ALLOW_FILE = HOST_MODE && typeof config.projectAllowFile === "string" ? config.projectAllowFile : "";
+const PROJECT_ALLOW_MAX_HOSTS = 50;
+const PROJECT_ALLOW_MAX_BYTES = 16384;
+const projectAllow = { checkedAt: 0, mtimeMs: -1, size: -1, ino: -1, hosts: new Set() };
 const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const stats = { dnsAllowed: 0, dnsRefused: 0, webAllowed: 0, webRefused: 0 };
 
@@ -60,6 +67,11 @@ function validName(host) {
   return /[a-z]/.test(labels[labels.length - 1]);
 }
 // A deny entry is an exact name, "*.suffix" (any name under it, never the bare suffix), or a pattern with "*" labels: a leading "*" is one or more labels and an inner "*" is exactly one label ("*.dkr.ecr.*.amazonaws.com").
+function labelMatches(pattern, label) {
+  // A label that ends in "*" and has a prefix ("s3-*") is any one label with that prefix.
+  if (pattern.length > 1 && pattern.charAt(pattern.length - 1) === "*") return label.length >= pattern.length && label.slice(0, pattern.length - 1) === pattern.slice(0, pattern.length - 1);
+  return pattern === label;
+}
 function patternCovers(entry, host) {
   const e = entry.split(".");
   const h = host.split(".");
@@ -69,7 +81,7 @@ function patternCovers(entry, host) {
     if (e[ei] === "*") {
       if (ei === 0) return hi >= 0;
       if (hi < 0) return false;
-    } else if (hi < 0 || e[ei] !== h[hi]) return false;
+    } else if (hi < 0 || !labelMatches(e[ei], h[hi])) return false;
     ei -= 1;
     hi -= 1;
   }
@@ -84,10 +96,42 @@ function listCovers(list, host) {
   }
   return false;
 }
+function projectAllowedHosts() {
+  if (PROJECT_ALLOW_FILE === "") return projectAllow.hosts;
+  const now = Date.now();
+  if (now - projectAllow.checkedAt < 1000) return projectAllow.hosts;
+  projectAllow.checkedAt = now;
+  let hosts = new Set();
+  try {
+    const fs = require("fs");
+    const info = fs.lstatSync(PROJECT_ALLOW_FILE);
+    if (!info.isFile() || info.size > PROJECT_ALLOW_MAX_BYTES) throw new Error("not a small plain file");
+    if (info.mtimeMs === projectAllow.mtimeMs && info.size === projectAllow.size && info.ino === projectAllow.ino) return projectAllow.hosts;
+    projectAllow.mtimeMs = info.mtimeMs;
+    projectAllow.size = info.size;
+    projectAllow.ino = info.ino;
+    const parsed = JSON.parse(fs.readFileSync(PROJECT_ALLOW_FILE, "utf8"));
+    const list = parsed && Array.isArray(parsed.hosts) ? parsed.hosts : [];
+    for (let i = 0; i < list.length && hosts.size < PROJECT_ALLOW_MAX_HOSTS; i++) {
+      const entry = list[i];
+      // Exact, lower-case, plain names only: no wildcard, no address, no odd character.
+      if (typeof entry === "string" && entry === entry.toLowerCase() && entry.indexOf("*") === -1 && validName(entry)) hosts.add(entry);
+    }
+  } catch (error) {
+    hosts = new Set();
+    projectAllow.mtimeMs = -1;
+    projectAllow.size = -1;
+    projectAllow.ino = -1;
+  }
+  projectAllow.hosts = hosts;
+  return hosts;
+}
 function hostAllowed(host, role) {
   if (!validName(host)) return false;
   // Fail closed: only a caller that says exactly "worker" is exempt from the sandbox deny, so a missing or odd role is a sandbox.
   if (role !== "worker" && listCovers(SANDBOX_DENIED, host)) return false;
+  // The S3 names: denied to a sandbox unless the project lifted exactly this host. The hard (registry) deny above is never lifted.
+  if (HOST_MODE && role !== "worker" && listCovers(SANDBOX_DENIED_S3, host) && !projectAllowedHosts().has(host)) return false;
   // Host mode: no static list; the caller (the name server, the forwarders) asks the host resolver next (resolvePublic), and a name it does not answer with public addresses is refused there.
   if (HOST_MODE) return true;
   for (let i = 0; i < ALLOWED.length; i++) {
@@ -571,7 +615,7 @@ function main() {
 }
 
 if (process.env.ROVARA_GW_LIBRARY === "1") {
-  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, main: main, validName: validName, publicAddress: publicAddress, patternCovers: patternCovers, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
+  module.exports = { callbackRoute: callbackRoute, startCallbackRelay: startCallbackRelay, hostAllowed: hostAllowed, startTlsForwarder: startTlsForwarder, startPlainForwarder: startPlainForwarder, main: main, validName: validName, publicAddress: publicAddress, patternCovers: patternCovers, projectAllowedHosts: projectAllowedHosts, serverNameOf: serverNameOf, answerFor: answerFor, peerIn: peerIn, parseQuestion: parseQuestion, inCidr: inCidr, stats: stats };
 } else {
   main();
 }

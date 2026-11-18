@@ -4,6 +4,7 @@ import type { WorkerInvocation } from "@agentx/contracts";
 import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
+import { publishEgressS3Allow } from "./sandbox-egress-allow.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { createRegistryCredentialProvider } from "./registry-credentials.js";
@@ -125,6 +126,8 @@ const state = createWorkerServerState(
         const cloneCredentials = rememberCredentials(createRepositoryCredentialProvider({ controlPlaneUrl, invocation }));
         // Test services (Prove): a candidate check that carries a dependency plan reports its usage record in the result, under the contract's key `testServicesUsage`.
         const testServicesUsage = collectTestServicesUsage();
+        // L4-NETG follow-up: the project's exact S3 hosts for the host's egress gateway (gateway-mode workers only), before any setup command runs in a sandbox.
+        await publishEgressS3Allow(invocation.payload.egressS3Allow);
         const manifest = await prepareWorkspace({
           rootPath,
           project: invocation.payload.project,

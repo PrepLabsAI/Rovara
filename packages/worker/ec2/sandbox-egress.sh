@@ -30,6 +30,10 @@ readonly SE_OUTER_BRIDGE=rvx0
 readonly SE_OUTER_SUBNET=172.28.251.0/24
 readonly SE_OUTER_IP=172.28.251.2
 readonly SE_NODE=/usr/local/bin/node
+# Where the worker (never a sandbox: no sandbox mounts this folder, and it is not under the workspace) publishes the exact S3 hosts the project's allowed websites lifted from the sandbox S3 deny, at every prepare. Owned by the worker's user,
+# read-only in the gateway. On the root volume, so a stop and start keeps it; the restore unit makes the folder again before the gateway starts. A missing or unreadable file means no lift (the S3 stays denied).
+readonly SE_ALLOW_DIR=/var/lib/rovara-egress
+readonly SE_ALLOW_FILE=/var/lib/rovara-egress/project-allow.json
 readonly SE_PROGRAM_BYTES_MIN=20000
 
 # One rule, once: -C finds it, else -I puts it at the top.
@@ -86,18 +90,29 @@ se_program() {
 se_denied_names() {
   se_image_node "import { SANDBOX_REGISTRY_DENY as d } from '@agentx/contracts'; process.stdout.write(d.join('\n'))"
 }
-# The gateway's configuration: host mode, its two networks, and the deny list (each name checked here too: lower-case letters, digits, dots, hyphens and a `*` label).
-se_config() {
-  local names=() name list=""
-  # The list has no newline after its last name (`|| [[ -n $name ]]` keeps that last line).
+se_denied_s3_names() {
+  se_image_node "import { SANDBOX_S3_DENY as d } from '@agentx/contracts'; process.stdout.write(d.join('\n'))"
+}
+# Each name is checked here too (lower-case letters, digits, dots, hyphens and `*` labels), and a list that is too short to be the list refuses.
+se_name_list() {
+  local min=$1 name list="" count=0
   while IFS= read -r name || [[ -n "$name" ]]; do
     [[ "$name" =~ ^(\*\.)?[a-z0-9*]([a-z0-9*.-]{0,250}[a-z0-9*])?$ ]] || return 1
-    names+=("$name")
-  done < <(se_denied_names)
-  ((${#names[@]} >= 10)) || return 1
-  for name in "${names[@]}"; do list+="${list:+,}\"$name\""; done
-  printf '{"mode":"host","sandboxDenied":[%s],"nets":{"sandbox":"%s","external":"%s"}}' "$list" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
+    list+="${list:+,}\"$name\""
+    count=$((count + 1))
+  done
+  ((count >= min)) || return 1
+  printf '%s' "$list"
 }
+# The gateway's configuration: host mode, its two networks, the hard deny list (registries), the S3 deny list (lifted host by host from the project file) and where that file is.
+se_config() {
+  local hard soft
+  hard=$(se_denied_names | se_name_list 10) || return 1
+  soft=$(se_denied_s3_names | se_name_list 10) || return 1
+  printf '{"mode":"host","sandboxDenied":[%s],"sandboxDeniedS3":[%s],"projectAllowFile":"%s","nets":{"sandbox":"%s","external":"%s"}}' "$hard" "$soft" "$SE_ALLOW_FILE" "$SE_INNER_SUBNET" "$SE_OUTER_SUBNET"
+}
+# The folder for the project file: the worker's user owns it (the worker container writes it), nothing else can.
+se_allow_dir() { install -d -o 1000 -g 1000 -m 0700 "$SE_ALLOW_DIR"; }
 
 # The gateway container: no capability (it binds 53, 80 and 443 only because the namespace's unprivileged port start is 53), read-only, bounded, no forwarding, restarted by Docker if it dies. Created on the outer network, joined to the
 # inner one at a fixed address, then started (so the program finds both its addresses).
@@ -105,9 +120,10 @@ se_gateway() {
   local program config
   program=$(se_program) && ((${#program} >= SE_PROGRAM_BYTES_MIN)) && [[ "$program" == '"use strict";'* ]] || return 1
   config=$(se_config) || return 1
+  se_allow_dir || return 1
   docker rm --force "$SE_GATEWAY" >/dev/null 2>&1 || true
   docker create --name "$SE_GATEWAY" --label rovara.sandbox-egress=gateway --restart unless-stopped \
-    --network "$SE_OUTER_NET" --ip "$SE_OUTER_IP" --user 1000:1000 \
+    --network "$SE_OUTER_NET" --ip "$SE_OUTER_IP" --user 1000:1000 --volume "$SE_ALLOW_DIR:$SE_ALLOW_DIR:ro" \
     --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     --sysctl net.ipv4.ip_forward=0 --sysctl net.ipv4.ip_unprivileged_port_start=53 --pids-limit 512 --memory 512m \
     --env "ROVARA_GW_CONFIG=$config" --entrypoint "$SE_NODE" "$AGENTX_WORKER_IMAGE" -e "$program" >/dev/null || return 1
@@ -142,8 +158,9 @@ se_probe() {
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
 se_install_restore_unit() {
   { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET"
-    declare -f se_rule se_walls se_gateway_running
-    printf 'se_walls || exit 1\n'
+    declare -f se_rule se_walls se_gateway_running se_allow_dir
+    printf 'readonly SE_ALLOW_DIR=%s\n' "$SE_ALLOW_DIR"
+    printf 'se_walls || exit 1\nse_allow_dir || exit 1\n'
     printf 'se_gateway_running || { docker start "$SE_GATEWAY" >/dev/null 2>&1; sleep 3; }\n'
     printf 'se_gateway_running || exit 1\n'
   } >"$SE_RESTORE" || return 1
