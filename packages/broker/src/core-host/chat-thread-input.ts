@@ -4,7 +4,7 @@
 //   - it waits for answers to Understand's questions (`POST /v1/dev/tasks/{id}/answers`): the message, when it MENTIONS Rovara, answers them (one question: the whole reply; more: one numbered line each, `your call` is an answer).
 //     The move is `answerTaskOnRequest`, the web's own: the task's owner by the company's owner rule, the round checked, one request id one answer. A plain reply (no mention) never answers: a person talking in the thread must not
 //     answer for the task by accident.
-//   - its plan waits for review: the message is a NOTE for the plan (`kind: "plan_note"`). A chat reply decides nothing: a decision on a hosted install is the task page's, with a fresh sign-in
+//   - its plan waits for review: the message is an ordinary NOTE (only the words said back differ: "for the plan"). A chat reply decides nothing: a decision on a hosted install is the task page's, with a fresh sign-in
 //     (`hosted-approvers.ts`: the one method is `rovara-step-up`), so "Request changes" stays there and the note is what the revised plan reads.
 //   - otherwise: a follow-up NOTE the task's next step reads (`core/sessions/notes.ts`, the web's "message to the agent": `createSessionControlHost().planMessage`, with its hourly limit, the task's note cap and its refusal of an
 //     ended task). Nothing is handed to a running step live from here: the note is read by the next step.
@@ -80,7 +80,7 @@ const noteMessageIdOf = (digest: string): string => `msg_${digest.slice(0, 20)}`
 
 /** The reply as text for a model and a note: credentials redacted, control and format characters gone (line breaks and tabs stay), chat mentions made neutral, no more than the web's message holds. */
 export function cleanedReplyText(raw: string): string {
-  return [...redactText(neutralizeSlackMentions(raw)).replace(/(?![\t\n\r])[\p{Cc}\p{Cf}]/gu, "").trim()].slice(0, SESSION_MESSAGE_MAX_CHARS).join("").trim();
+  return [...redactText(neutralizeSlackMentions(raw).replace(/<[!#][^>]*>/gu, "@member")).replace(/(?![\t\n\r])[\p{Cc}\p{Cf}]/gu, "").trim()].slice(0, SESSION_MESSAGE_MAX_CHARS).join("").trim();
 }
 
 const NUMBERED = /^\s*(?:q|question\s*)?([1-9])\s*[.):-]\s*(.*)$/iu;
@@ -150,7 +150,8 @@ export async function addChatThreadInput(deps: ChatThreadInputDeps, deployed: De
 
   if (task.closedAt !== undefined || workflow === undefined) {
     // Closed tasks and tasks with no workflow take no notes; who asked is not told which.
-    return (await acting(flow, deployed, task)) === undefined ? NOT_ALLOWED : NOT_SAVED;
+    if ((await acting(flow, deployed, task)) === undefined) return input.smallTalk ? { outcome: "small_talk" } : NOT_ALLOWED;
+    return NOT_SAVED;
   }
 
   // This very reply already answered the task's questions (a Slack retry, or the plain copy of the mention that answered): the task has moved on and is not waiting now, so it must not become a note as well.
@@ -159,7 +160,9 @@ export async function addChatThreadInput(deps: ChatThreadInputDeps, deployed: De
 
   // ---- Understand's questions are waiting: a mention answers them, the web's own move.
   if (waitingForAnswers(workflow)) {
-    if ((await acting(flow, deployed, task)) === undefined) return NOT_ALLOWED;
+    if ((await acting(flow, deployed, task)) === undefined) return input.smallTalk ? { outcome: "small_talk" } : NOT_ALLOWED;
+    // This very reply was saved as a note while the task was still working (its plain copy, or a delivery that failed and is retried): it is not also an answer.
+    if ((await flow.store.get(noteKey(task.taskId, noteMessageIdOf(digest)))) !== undefined) return { outcome: "duplicate" };
     if (!input.mention || text === "") return NOT_SAVED;
     const asked = workflow.intent?.assessment;
     if (asked?.kind !== "questions" || workflow.intent === undefined) return NOT_SAVED;

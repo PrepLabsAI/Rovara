@@ -209,6 +209,24 @@ describe("the reply goes by what the task waits for", () => {
       expect(await t.notes()).toEqual([]);
     });
 
+    it("a reply saved as a note while the task was working is not also an answer once the questions wait", async () => {
+      const t = await world({ state: "running", questions: ONE_QUESTION });
+      const messageId = "1700000009.000005";
+      expect(await t.send(t.owner, { text: "/healthz", messageId, mention: false })).toEqual({ outcome: "captured", notice: "note_saved" });
+      // Understand now asks its question.
+      const record = (await readTask(t.deps, t.task.taskId))!;
+      let current = record;
+      if (current.workflow?.state === "READY") {
+        expect(await commitWorkflow(t.deps, current, startWorkflowUnderstand(current.workflow, new Date(t.w.clock.now).toISOString()))).toBe(true);
+        current = (await readTask(t.deps, t.task.taskId))!;
+      }
+      const asked = recordIntentAssessment(current.workflow, { expectedRevision: current.workflow!.revision, assessment: { kind: "questions", restatement: "Add a health endpoint.", questions: ONE_QUESTION }, now: new Date(t.w.clock.now).toISOString() });
+      expect(await commitWorkflow(t.deps, current, asked)).toBe(true);
+      expect(await t.send(t.owner, { text: "/healthz", messageId })).toEqual({ outcome: "duplicate" });
+      expect((await t.workflow()).intent?.answers).toHaveLength(0);
+      expect(await t.notes()).toHaveLength(1);
+    });
+
     it("two deliveries of the same message at once answer once", async () => {
       const t = await world({ state: "questions" });
       const messageId = "1700000009.000002";
@@ -323,8 +341,10 @@ describe("the reply goes by what the task waits for", () => {
 describe("the text is information, never an instruction", () => {
   it("redacts credentials, drops control characters, makes every chat mention the neutral word and cuts to the web's message length", () => {
     const fake = ["sk", "ant", "a".repeat(40)].join("-");
-    const cleaned = cleanedReplyText(`<@U0123456789> hello \u0000‮ ${fake} <@W0ABCDEFG|name>`);
+    const cleaned = cleanedReplyText(`<!channel> <#C0123456789|general> <@U0123456789> hello \u0000‮ ${fake} <@W0ABCDEFG|name>`);
     expect(cleaned).not.toContain("U0123456789");
+    expect(cleaned).not.toContain("<!channel>");
+    expect(cleaned).not.toContain("C0123456789");
     expect(cleaned).not.toContain("name>");
     expect(cleaned).not.toContain(fake);
     expect(cleaned.includes(String.fromCharCode(0))).toBe(false);
@@ -406,6 +426,16 @@ describe("who may add input: the web's rule", () => {
     expect(checkStart).toHaveBeenCalledWith(expect.objectContaining({ personId: OWNER_ID }), "payments");
     expect(await t.rows()).toBe(before);
     if (kind === "answer") expect((await t.workflow()).intent?.answers).toHaveLength(0);
+  });
+
+  it("a stranger's small talk gets the same answer whether the task is working, waiting or closed", async () => {
+    for (const state of ["running", "questions"] as const) {
+      const t = await world({ state });
+      expect(await t.send(t.person("person-stranger-0000000001"), { text: "thanks", smallTalk: true })).toEqual({ outcome: "small_talk" });
+    }
+    const closed = await world({ state: "running" });
+    await closed.w.store.update({ key: taskKey(closed.task.taskId), ops: [change.set("closedAt", new Date(closed.w.clock.now).toISOString())] });
+    expect(await closed.send(closed.person("person-stranger-0000000001"), { text: "thanks", smallTalk: true })).toEqual({ outcome: "small_talk" });
   });
 
   it("a small-talk reply from anyone is small talk and writes nothing (it is told apart before anything is asked of who they are)", async () => {
