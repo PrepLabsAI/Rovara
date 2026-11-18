@@ -9,7 +9,8 @@ vi.mock("../../packages/broker/src/core-host/app.js", () => ({ createCoreHostApp
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const inputs = (extra: Partial<BrokerCoreRootInputs> = {}): BrokerCoreRootInputs => ({ env: {}, documentClient: { send: async () => { throw new Error("unused"); } }, stateTableName: "state", signInTableName: undefined, callbackSigningKey: "a".repeat(32), repositoryGrantKey: Buffer.alloc(32), repositoryCredential: async () => { throw new Error("unused"); }, codeModules: () => { throw new Error("unused"); }, origin: () => "", log: () => undefined, ...extra });
 // The registry is only asked for its store by the money stop (core-money-stop, merged with L3 in the batch of 2026-11-16); nothing here reads it.
-const registry = { require: () => ({}) } as unknown as AdapterRegistry;
+// L4-HW3 also asks it which points are registered (the standing-instructions seam looks for a code host and the company-instructions point): none here.
+const registry = { require: () => ({}), names: () => [] } as unknown as AdapterRegistry;
 const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime(registry, A, {} as never);
 const task = (orgId: string) => ({ orgId, project: "web" }) as never;
 
