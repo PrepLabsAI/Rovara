@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import {
   IMPLICIT_COMPANY_ID, codeRepositoriesOf, companyScoped, orgProjectCatalogKey,
-  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type KnowledgeContext, type LearnedContext, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
+  type Admission, type IdentityProvider, type ApprovalProof, type ApprovalRequest, type Approvers, type AuditSink, type KnowledgeContext, type LearnedContext, type RovaraSkillFile, type LearningAdapter, type Metering, type ModelKeyStore, type ObjectStorage, type OrgId, type Principal, type RegistryView,
 } from "@agentx/contracts";
 import type { ModelProviderBook } from "../model-proxy/types.js";
 import type { LocalModelChoice } from "../model-choice.js";
@@ -35,14 +35,17 @@ import { buildLessonsView } from "../../lessons/view.js";
 import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../../lessons/local-tools-setting.js";
 import type { RepositoryVisibility } from "../../lessons/used-in-pr.js";
 import { localLessonsEnabled } from "../../lessons/switch.js";
-import { createLessonsHost, pumpReflectQueue, type RevertedChange } from "../../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanFacts, type RevertedChange } from "../../lessons/host-glue.js";
+import { RECENT_PLAN_BYTES_MAX, cachedRecentTasks } from "../../lessons/recent-tasks.js";
 import { createLessonsRevertWatch } from "../../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../../lessons/area-check-hosts.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { KnowledgeSources } from "../../lessons/knowledge-brief.js";
 import { createLocalPipelineModel, createLocalLearningSpend } from "./lessons-model.js";
 import { createLessonRepositories, type LessonRepositories } from "./lessons-repos.js";
-import { createLocalLessonSources } from "./lessons-sources.js";
+import { createLocalLessonSources, type LessonTicketWiring } from "./lessons-sources.js";
+import { ticketSourcePaused } from "../../lessons/ticket-comments.js";
+import { slackThreadSource } from "../../lessons/slack-wiring.js";
 import type { CodeFactsReader } from "../../lessons/code-facts.js";
 import type { LessonsUsedSection } from "../../core/proof/pull-request-body.js";
 import type { PrCommandWorld } from "../../core/pr-commands/handler.js";
@@ -100,8 +103,10 @@ export interface LocalLessons {
   localToolsSwitches(): Promise<LessonLocalToolsView | undefined>;
   /** One local coding tools switch from the lessons page: the project's own, or the company's "lessons stay in Rovara". Audited before it is made. */
   localToolsSwitch(input: { scope: "project"; project: string; enabled: boolean } | { scope: "company"; stays: boolean }): Promise<LocalActionResult>;
+  /** The team knowledge briefing for an answer about one project (lead 4 L4-AK2b); see `LessonsHost.answerBriefing`. */
+  answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   /** What the dispatch of a step asks: the lessons to give it (ids are the library's; the worker gets text). `features` are the worker's. */
-  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
+  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; rovaraSkills?: RovaraSkillFile[] }>;
   /** What the callbacks tell after a batch of a worker's events: the load report of a step, applied to the manifest its dispatch recorded. Never throws. */
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   /** The "Lessons used" section of a task's pull request description. `undefined` for no section. Never throws. */
@@ -157,7 +162,19 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
 
   const model = createLocalPipelineModel({ choice: options.model.choice, keys: options.model.keys, companyId, providers: options.model.providers, endpoints: options.model.endpoints, fetch: options.model.fetch, now, metering: options.metering });
   const spend = createLocalLearningSpend(options.admission, companyId);
-  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields) });
+  // L4-SRC-TK: the ticket source. The trackers are the ones intake and the ticket thread use; a tracker account counts only when the identity point links it to the owner (the one person here). Paused: read live from the lessons' own flags.
+  const tickets: LessonTicketWiring = {
+    trackerFor: (system) => registry.get("tracker", system), scope: { orgId: companyId },
+    async personOfAccount(tracker, tenant, accountId) {
+      const principal = await options.identity.resolveExternalAccount(companyId, { provider: tracker, tenant, accountId }).catch(() => undefined);
+      return principal !== undefined && principal.companyId === companyId && principal.personId === ownerId ? ownerId : undefined;
+    },
+    paused: (project) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
+  };
+  // L4-SRC-SL: the owner's own replies in the task's Slack thread, read once at task end (the adapter must declare `history`; any other adapter or none: no span). The lessons store is built just below and asked at each read.
+  const sourcesRuntime: { current?: LessonsRuntime } = {};
+  const slack = slackThreadSource({ store: flow.store, companyId, registry, now, lessonStore: () => { if (sourcesRuntime.current === undefined) throw new Error("the lessons runtime is not built yet"); return sourcesRuntime.current.store; } });
+  const sources = createLocalLessonSources({ flow, companyId, ownerId, repos: repositories, readObject: (key, max) => readText(key, max), now, log: (event, fields) => log(event, fields), tickets, slack });
 
   const runtime = createLessonsRuntime({
     store: flow.store, companyId, now, log: (event, fields) => log(event, fields), audit: options.audit, reader,
@@ -168,7 +185,17 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
     owner: { id: ownerId, name: owner.displayName }, taskProject, projectRepoScopes: repositories.scopes(), model, spend, learning: options.learning,
     // A reason that was recorded is cleared when it is read once its cause is gone (a provider was connected).
     pauseStillApplies: async (_workspaceId, _project, code) => (code === "no_provider" ? (await options.model.choice()) === undefined : true),
+    // "Would have applied to N tasks last month" (the weekly list's tie-break): the project's tasks of the last 30 days from its own load rows, each read from its own record and plan, as the loader reads them.
+    recentTasks: cachedRecentTasks({
+      documents: flow.store, companyId, now,
+      ports: {
+        task: async (taskId) => { const task = await readTask(flow, taskId); return task === undefined || task.companyId !== companyId ? undefined : { project: task.project, files: (await taskPlanFacts((objectKey, max) => readText(objectKey, Math.min(max, RECENT_PLAN_BYTES_MAX)), task))?.files ?? [] }; },
+        repositories: async (project) => { const latest = await flow.projects.latest(project); return latest === undefined ? undefined : codeRepositoriesOf(latest.definition).map((repository) => repository.name); },
+      },
+    }),
   });
+
+  sourcesRuntime.current = runtime;
 
   // ---- capture, loading, the pull request and the upkeep: the same for every host (`lessons/host-glue.ts`)
 
@@ -329,6 +356,7 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   }
 
   const learnedFor: LocalLessons["learnedFor"] = (input) => host.learnedFor(input);
+  const answerBriefing: LocalLessons["answerBriefing"] = (input) => host.answerBriefing(input);
   const onEvents: LocalLessons["onEvents"] = (operation, events) => host.onEvents(operation, events);
   const usedInPullRequest: LocalLessons["usedInPullRequest"] = (task, repositoryId) => host.usedInPullRequest(task, repositoryId);
   const listKey = (taskId: string, repositoryId: string) => host.listKey(taskId, repositoryId);
@@ -399,5 +427,5 @@ export function createLocalLessons(options: LocalLessonsOptions): LocalLessons {
   const noteSentBack: LocalLessons["noteSentBack"] = (taskId) => host.noteSentBack(taskId);
 
   const noteHumanEdit: LocalLessons["noteHumanEdit"] = (push) => host.noteHumanEdit(push);
-  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, localToolsSwitches, localToolsSwitch, learnedFor, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
+  return { runtime, owner: { id: ownerId, name: owner.displayName }, repositories, enabled, list, act, localToolsSwitches, localToolsSwitch, learnedFor, answerBriefing, onEvents, usedInPullRequest, command, tick, noteReverted, noteHumanEdit, noteSentBack };
 }

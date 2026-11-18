@@ -45,8 +45,9 @@ export async function recordEndedTask(input: {
   projectOf?: (taskId: string) => Promise<string | undefined>;
 }): Promise<{ written: number }> {
   if (input.record.companyId !== input.companyId) throw new TeamRecordCompanyError();
+  // The Team record never keeps a chat reply, so it never asks for the thread (Slack is read once, by the lessons, at the task's end).
   const early = input.paused === undefined || input.projectOf === undefined ? undefined : await (async () => { const known = await input.projectOf!(input.taskId); return known === undefined ? undefined : input.paused!(known, "unknown"); })();
-  const given = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+  const given = await input.source.read({ workspaceId: input.companyId, taskId: input.taskId, withoutSlack: true, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
   if (given === undefined) return { written: 0 };
   const stopped = input.paused === undefined ? undefined : await input.paused(given.facts.project, given.lifetime ?? "unknown");
   const subject = stopped === undefined ? given : withoutPausedEvidence(given, stopped);

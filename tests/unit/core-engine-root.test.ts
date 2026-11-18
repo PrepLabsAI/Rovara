@@ -1,5 +1,6 @@
 // Engine host (lane E2, step 6): the core engine's composition root on the deployed broker. Off (the default) builds and reads nothing and gives the routes no core entry; the caller's
 // company is membership, never a claim; the task access re-reads live membership and keeps the broker's project grant rule; the stream hook finds only outbox inserts.
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { GitHubFixtureProvider } from "../support/ports/github-fixture-provider.js";
@@ -180,6 +181,11 @@ describe("the broker's core root, switch on", () => {
     const mapped = await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-a", sessionId: "s", name: "Ada", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" }, clientId: "web-app" });
     expect(mapped).toEqual({ principal: { companyId: ORG, personId: "dev-a", displayName: "Ada", roles: ["admin"], provider: HOSTED_IDENTITY_PROVIDER }, client: "web-app", stepUp: { at: "2026-11-15T10:00:00.000Z", method: "passkey" } });
     expect(await deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN))({ developerId: "dev-gone", sessionId: "s", name: "Gone" })).toBeUndefined();
+    // DEC 254zzz39 (6): the web app's own client marker rides along only as the broker's sign-in set it (exactly true), never otherwise.
+    const map = deployedCallerFromMembership(membershipWithRoleFromDynamo(tables.client, SIGN_IN));
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "web-app", webApp: true })).toMatchObject({ webApp: true });
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "tool" })).not.toHaveProperty("webApp");
+    expect(await map({ developerId: "dev-a", sessionId: "s", name: "Ada", clientId: "tool", webApp: "yes" as never })).not.toHaveProperty("webApp");
     const standing = personStandingFromDynamo(tables.client, SIGN_IN);
     expect(await standing(ORG, "dev-a")).toBe("member");
     expect(await standing(ORG, "dev-gone")).toBe("former");
@@ -350,6 +356,15 @@ describe("the lessons API for the developer routes (lane LM8)", () => {
     const root = createBrokerCoreRoot(rootInputs({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" }, tables.client, { lessonsPeople: people }));
     expect(root.lessons).toBeDefined();
     await expect(root.lessons!.answer({ method: "GET", path: "/v1/dev/projects/payments/lessons", query: new URLSearchParams() }, { personId: "dev-nobody" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
+
+  it("one pilot list serves the weekly summary's sender and its settings API: a host may give it, else the lessons switch names it (L4-WK)", () => {
+    const tables = fakeTables();
+    const pilot = vi.fn((companyId: string) => companyId === ORG);
+    const env = { ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ALLOWED_COMPANIES: ORG, ROVARA_CORE_LESSONS: "on" };
+    expect(createBrokerCoreRoot(rootInputs(env, tables.client, { lessonsPeople: people, lessonsDigestPilot: pilot })).lessons).toBeDefined();
+    expect(createBrokerCoreRoot(rootInputs({ ...env, ROVARA_CORE_LESSONS: `on:${ORG}` }, tables.client, { lessonsPeople: people })).lessons).toBeDefined();
+    expect(tables.reads).toEqual([]);
   });
 
   it("reads a project role from the broker's own grant: administrator is a maintainer, developer a contributor, anything else none", () => {
@@ -532,4 +547,13 @@ it("shares one resolved hosted-hook setting with the developer API and never fal
   const refused = withCoreRoutes({}, invalid) as { policyHook: NonNullable<typeof invalid.policyHook> };
   expect(refused.policyHook).toBeDefined();
   expect(() => refused.policyHook.settings).toThrow("the policy hook settings are not readable");
+});
+
+describe("the hosted answers' briefing join (lead 4 L4-AK2g)", () => {
+  it("the root's `answers` wiring passes the briefing, made by answersBriefingOf over THIS runtime's company and the lessons hosts by company (deleting the line, or a merge dropping it, turns the briefing off silently)", () => {
+    const text = readFileSync("packages/broker/src/aws/core-engine-root.ts", "utf8");
+    const block = /answers: \{\n([\s\S]*?)\n\s{10}\},\n\s{10}auditFor/u.exec(text)?.[1] ?? "";
+    expect(block).toContain("model: answersModel(),");
+    expect(block).toContain("briefing: answersBriefingOf(runtime.companyId, (id) => lessonsByCompany.get(id)?.host),");
+  });
 });

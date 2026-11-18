@@ -10,7 +10,7 @@ import {
   AGENTX_PROTOCOL_VERSION,
   IMPLICIT_COMPANY_ID,
   OrgIdSchema,
-  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE,
+  EVAL_GATEWAY_FEATURE, EVAL_PLAN_DELIVERY_ACTION, EVAL_PROMPT_LOCATIONS_FEATURE, EvalGatewayOriginSchema, EVAL_ROUND_FEATURE, KNOWLEDGE_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE,
   AGENT_WORKER_OUTDATED,
   AgentXError,
   MachineError,
@@ -162,6 +162,7 @@ async function handleDispatch(deps: TaskFlowDeps, queue: Queue, message: Receive
     try {
       standing = await deps.standingInstructions.forOperation({
         project: workspace.projectName, mode: operation.dispatch.payload["workflowMode"] as PlaybookMode | undefined, ...(workspace.playbookCommit === undefined ? {} : { playbookCommit: workspace.playbookCommit }),
+        ...(workspace.standingPin === undefined ? {} : { pinned: workspace.standingPin }),
       });
     } catch (error) {
       const sentence = error instanceof AgentXError ? error.message.replace(/^[A-Z_]+: /u, "") : undefined;
@@ -317,11 +318,13 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   const secret = Buffer.from(deps.callbackSigningKey);
   // The step's own model when the install's rule chose one (its thinking level goes with it), else the install's one model.
   const modelRoute = stepModel !== undefined ? stepModel.choice.route : spec.kind === "task" ? await deps.modelAccess?.route() : undefined;
+  // L4-EVH: an opt-in eval health run's own preparation (no task) may ask for model access: the broker describes its token from the run's claim (core/model-gateway/health.ts). Only where the install has a model route; the payload gets no route.
+  const healthAccess = spec.kind === "prepare" && spec.payload["evalHealth"] !== undefined && await deps.modelAccess?.route() !== undefined;
   // A worker that cannot run the eval is sent no `evalRequest` (below), so its capability does not name the eval plan's action either.
   const evalDropped = spec.kind === "task" && spec.payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE);
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
-    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
+    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined && !healthAccess ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
@@ -336,6 +339,8 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     delete payload["evalPromptLocations"];
     log(deps, { event: "eval_prompt_locations_dropped_unsupported_worker" });
   }
+  // L4-EVH: the same for the opt-in health run's preparation, which has no eval request but the run itself.
+  if (spec.kind === "prepare" && payload["evalHealth"] !== undefined && features.includes(EVAL_GATEWAY_FEATURE) && EvalGatewayOriginSchema.safeParse(deps.evalGatewayUrl).success) payload["evalGatewayUrl"] = deps.evalGatewayUrl;
   // The lessons the step is given are chosen now, from the lessons as they are at this moment (a lesson retired since the step was queued is not sent). A worker that does not list the feature gets none.
   if (spec.kind === "task" && deps.learned !== undefined) {
     // A fix round (a build with `workflowFix`) hands the correction's words over so the lessons are picked again by them; the text only ranks and is never stored.
@@ -344,6 +349,8 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     if (learned?.learnedContext !== undefined) payload = { ...payload, learnedContext: learned.learnedContext };
     // The knowledge briefing and look-up go only to a worker that lists the feature (an older worker is sent the lessons alone), whatever a reader answered.
     if (learned?.knowledgeContext !== undefined && features.includes(KNOWLEDGE_CONTEXT_FEATURE)) payload = { ...payload, knowledgeContext: learned.knowledgeContext };
+    // Rovara skills (L4-AK3): only for a worker that lists the feature (the loader asks for it by the same list), never replacing a payload field a step already has.
+    if (learned?.rovaraSkills !== undefined && learned.rovaraSkills.length > 0 && features.includes(ROVARA_SKILLS_FEATURE)) payload = { ...payload, rovaraSkills: learned.rovaraSkills };
   }
   // The project's wiki, when its switch is on (lead 4 A1): built now from the task's own project, for a worker that lists the feature; none otherwise.
   const wikiContext = await wikiContextForStep(deps, workspace, operation, features);
@@ -434,9 +441,9 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     const retriedKnowledge = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutKnowledgeOnly });
     if (retriedKnowledge.success) return retriedKnowledge.data;
   }
-  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined) {
-    const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, ...withoutMemory } = draft.payload;
-    void _dropped; void _droppedWiki; void _droppedKnowledge;
+  if (draft.payload["learnedContext"] !== undefined || draft.payload["wikiContext"] !== undefined || draft.payload["knowledgeContext"] !== undefined || draft.payload["rovaraSkills"] !== undefined) {
+    const { learnedContext: _dropped, wikiContext: _droppedWiki, knowledgeContext: _droppedKnowledge, rovaraSkills: _droppedSkills, ...withoutMemory } = draft.payload;
+    void _dropped; void _droppedWiki; void _droppedKnowledge; void _droppedSkills;
     const retried = WorkerInvocationSchema.safeParse({ ...draft, payload: withoutMemory });
     if (retried.success) return retried.data;
   }

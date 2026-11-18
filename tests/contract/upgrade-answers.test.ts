@@ -10,6 +10,7 @@ const stacks = (parameters: Record<string, Record<string, string>>) => ({
     return parameters[name] === undefined ? undefined : { status: "UPDATE_COMPLETE", outputs: {}, parameters: parameters[name] };
   },
 });
+const INSIDE = "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging";
 const noOperator = { "agentx-staging-access": { OperatorPrincipalArn: "" } };
 const controlPlane = { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: KEY_ARN, GitHubAppCredentialRef: "github-agentx-sdlc", CallbackSigningKey: "****", AdminClaim: "cognito:groups", AdminValues: "[\"agentx-admin\"]" };
 
@@ -31,10 +32,20 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
     expect(answers.identity).toEqual({ mode: "oidc", issuer: "https://idp.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["eng-admins"] });
   });
 
+  // L4-IAM: the worker role reads only agentx-<env>/, so a worker image elsewhere is refused here, before any stack is touched.
+  it("refuses a --worker-image outside the environment's image prefix, with fixed words and nothing echoed", async () => {
+    const refused = "--worker-image: the worker image override must be in this account's ECR, in this region, in a repository under the environment's image prefix (agentx-<env>/): the worker role reads only that prefix";
+    for (const uri of [`w@sha256:${"b".repeat(64)}`, `${INSIDE.replace("/agentx-staging", "")}/agentx-worker-production@sha256:${"b".repeat(64)}`, `${INSIDE}-2/w@sha256:${"b".repeat(64)}`]) {
+      const result = upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }), images: { worker: uri } });
+      await expect(result).rejects.toThrow(refused);
+      await expect(result).rejects.not.toThrow(uri);
+    }
+  });
+
   it("passes the testing-only image overrides, and the permission boundary from the settings", async () => {
     const settings = { ...SETTINGS, access: { artifactBucket: "b", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/cfn", operatorRoleArn: "arn:aws:iam::123456789012:role/op", pullThroughPrefix: "agentx-staging", permissionsBoundaryArn: "arn:aws:iam::123456789012:policy/company-boundary" } };
-    const answers = await upgradeAnswers({ settings, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }), images: { worker: `w@sha256:${"b".repeat(64)}` } });
-    expect(answers.images).toEqual({ worker: `w@sha256:${"b".repeat(64)}` });
+    const answers = await upgradeAnswers({ settings, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": controlPlane }), images: { worker: `${INSIDE}/w@sha256:${"b".repeat(64)}` } });
+    expect(answers.images).toEqual({ worker: `${INSIDE}/w@sha256:${"b".repeat(64)}` });
     expect(answers.permissionsBoundaryArn).toBe("arn:aws:iam::123456789012:policy/company-boundary");
   });
 

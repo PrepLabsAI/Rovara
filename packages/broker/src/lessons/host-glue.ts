@@ -11,8 +11,8 @@ import { markLessonsUnderQuestion } from "./revert-question.js";
 // Nothing here makes a model call by itself: the reflection worker does, through the runtime's model, which the library gates on the switch.
 import { randomUUID } from "node:crypto";
 import {
-  KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, LESSONS_WORKER_DEADLINE_SECONDS, codeRepositoriesOf, companyScoped, knowledgeUseReportOfProgress, learnedLoadReportOfProgress,
-  type KnowledgeContext, type LearnedContext, type ObjectStorage, type OrgId, type QueueService,
+  KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, LESSONS_WORKER_DEADLINE_SECONDS, ROVARA_SKILLS_FEATURE, codeRepositoriesOf, companyScoped, knowledgeProposalsOfProgress, knowledgeUseReportOfProgress, learnedLoadReportOfProgress,
+  type KnowledgeContext, type LearnedContext, type ObjectStorage, type OrgId, type QueueService, type RovaraSkillFile,
 } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 
@@ -28,10 +28,14 @@ import type { FadePorts } from "./expiry.js";
 import { runAreaChecks, type AreaCheckPorts } from "./area-check.js";
 import { logTaskCorrections } from "./correction-log.js";
 import type { Lesson } from "./types.js";
+import { loadAnswerBriefing } from "./answer-briefing.js";
 import { learnedContextForDispatch, lessonsAndPickedForDispatch, loadPullForStage } from "./load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pathsNamedIn, type KnowledgeSources } from "./knowledge-brief.js";
-import { recordKnowledgeUseReport } from "./knowledge-use.js";
+import { knowledgeGivenItem, recordKnowledgeUseReport } from "./knowledge-use.js";
 import { modeAllows, resolveLearning } from "./policy.js";
+import { proposeLimits } from "./knowledge-limits.js";
+import { proposeKnowledge } from "./propose.js";
+import { liveSkillsForStep } from "./skills.js";
 import type { LessonsRuntime } from "./runtime.js";
 import { documentReflectClaims } from "./reflect-claims.js";
 import { SEND_BACK_REFLECTIONS_MAX, reflectQueueOf, queueReflectQueue, queueReflectVisibility, sendBackRequestId } from "./reflect-queue.js";
@@ -65,6 +69,17 @@ const STAGES: Readonly<Record<string, "UNDERSTAND" | "PLAN" | "IMPLEMENT" | "PLA
 const KNOWLEDGE_EXTRAS_MS = 900;
 /** The correction text of a fix round is used only to rank lessons: this many characters of it. */
 const FIX_TEXT_CHARS = 2_000;
+
+/** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names (the same read for the loader and for "would have applied", `recent-tasks.ts`). */
+export async function taskPlanFacts(readText: ReturnType<typeof textReaderOf>, task: Pick<TaskRecord, "workflow">): Promise<{ summary: string; files: string[] } | undefined> {
+  const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
+  if (artifact === undefined) return undefined;
+  const loaded = await loadWorkflowDocument(readText, artifact, {});
+  if (loaded === undefined) return undefined;
+  if (loaded.format === "structured") return planLoadFacts(loaded.plan);
+  // A Markdown plan: its first words are the summary, and the files it names in words are the files.
+  return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
+}
 
 export interface LessonsHostInput {
   flow: TaskFlowDeps;
@@ -103,7 +118,9 @@ export interface LessonsHostInput {
 export interface RevertedChange { via: string; files: readonly string[] | undefined }
 
 export interface LessonsHost {
-  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }>;
+  learnedFor(input: { workspaceId: string; operationId: string; workflowMode: string | undefined; features: readonly string[]; fix?: { text: string } | undefined }): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; rovaraSkills?: RovaraSkillFile[] }>;
+  /** Lead 4 L4-AK2b: the team knowledge briefing for the answer a person asks of one project (the same lessons read path, facts and "more" line as a coding step; whole-project readers only). Undefined when learning is off here, nothing fits, or anything cannot be read in time. Never throws, never writes. It takes no person: the caller (the answer service) has already checked the asker's role on this project. */
+  answerBriefing(input: { project: string; question: string; repos: readonly string[] }): Promise<string | undefined>;
   onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void>;
   usedInPullRequest(task: Pick<TaskRecord, "taskId" | "project" | "startingRevision">, repositoryId: string): Promise<LessonsUsedSection | undefined>;
   /** The numbered list written into a pull request's description (a comment's number refers to it). */
@@ -147,15 +164,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   // ---- loading
 
   /** What the loader is told about a task besides its title: a summary of its latest plan and the files the plan names. */
-  async function planFactsOf(task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> {
-    const artifact = task.workflow?.artifacts.filter((entry) => entry.type === "plan").sort((a, b) => a.version - b.version).at(-1);
-    if (artifact === undefined) return undefined;
-    const loaded = await loadWorkflowDocument(readText, artifact, {});
-    if (loaded === undefined) return undefined;
-    if (loaded.format === "structured") return planLoadFacts(loaded.plan);
-    // A Markdown plan: its first words are the summary, and the files it names in words are the files.
-    return planLoadFacts({ title: loaded.markdown.split("\n", 1)[0] ?? "", claims: [{ text: loaded.markdown.slice(0, 20_000) }] } as unknown as Parameters<typeof planLoadFacts>[0]);
-  }
+  const planFactsOf = (task: TaskRecord): Promise<{ summary: string; files: string[] } | undefined> => taskPlanFacts(readText, task);
 
   /** An answer or "undefined" when the time passes: the extras never hold up the lessons. */
   const within = async <T>(work: Promise<T>, ms: number): Promise<T | undefined> => {
@@ -164,7 +173,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     finally { if (timer !== undefined) clearTimeout(timer); }
   };
 
-  async function learnedFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }> {
+  async function learnedLessonsFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext }> {
     const stage = request.workflowMode === undefined || !Object.hasOwn(STAGES, request.workflowMode) ? undefined : STAGES[request.workflowMode];
     if (stage === undefined || !enabled() || !request.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
     // The knowledge briefing rides only to a worker that lists its feature; an older worker is sent the lessons alone.
@@ -220,7 +229,7 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
         // The ids this delivery gave (never text), so the worker's use report can only speak about this operation's own delivery.
         if (knowledgeContext !== undefined && !abandoned) {
           const record = deliveryRecordOf({ taskId: task.taskId, project: task.project, learnedLessonIds: (loaded.learnedContext?.lessons ?? []).map((lesson) => lesson.id), knowledge: knowledgeContext });
-          await flow.store.put({ item: { pk: companyScoped(companyId, "KNOWLEDGE_GIVEN"), sk: request.operationId, entityType: "KNOWLEDGE_GIVEN", ...record, ...ttl(LOAD_RECORD_KEEP_SECONDS) } }).catch(() => undefined);
+          await flow.store.put({ item: knowledgeGivenItem({ companyId, operationId: request.operationId, record, now, ttlAttribute: flow.store.ttlAttribute }) }).catch(() => undefined);
         }
         return { ...(loaded.learnedContext === undefined ? {} : { learnedContext: loaded.learnedContext }), ...(knowledgeContext === undefined ? {} : { knowledgeContext }) };
       })();
@@ -234,8 +243,57 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     }
   }
 
+  /**
+   * The project's live Rovara skills for a plan or build step (L4-AK3), for a worker that lists the feature: read with `get` only from the step's OWN task's company and project, behind the same switches as lessons (the install's
+   * lessons switch and the project's learning mode). A slow or failed read is none: a step never waits on a skill. Skills left out for their limits are counted in the log, never named.
+   */
+  async function skillsFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<RovaraSkillFile[]> {
+    if ((request.workflowMode !== "PLAN" && request.workflowMode !== "IMPLEMENT") || !enabled() || !request.features.includes(ROVARA_SKILLS_FEATURE)) return [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, request.workspaceId)).taskPointerKey()));
+      const task = pointer === undefined ? undefined : await ownTask(pointer.taskId);
+      if (task === undefined) return [];
+      const run = (async () => {
+        const resolved = await resolveLearning(runtime.settings, companyId, task.project);
+        if (!modeAllows(resolved.chosenMode, "load")) return [];
+        const live = await liveSkillsForStep(flow.store, { workspaceId: companyId, project: task.project });
+        if (live.left > 0) log("skills_left_out", { left: live.left });
+        return live.skills;
+      })();
+      return await Promise.race([run, new Promise<RovaraSkillFile[]>((resolve) => { timer = setTimeout(() => resolve([]), LESSON_LOAD_DEADLINE_MS); timer.unref?.(); })]);
+    } catch { return []; }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+
+  async function learnedFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<{ learnedContext?: LearnedContext; knowledgeContext?: KnowledgeContext; rovaraSkills?: RovaraSkillFile[] }> {
+    const [lessons, skills] = await Promise.all([learnedLessonsFor(request), skillsFor(request)]);
+    return { ...lessons, ...(skills.length === 0 ? {} : { rovaraSkills: skills }) };
+  }
+
+  /**
+   * The suggestions one of Rovara's own agents made in a step (L4-AK3): taken from the worker's progress events and handed to `proposeKnowledge` for the step's OWN task and project (read from the workspace's task
+   * pointer, never from the event). The company switch "Knowledge stays in Rovara" is about tools outside Rovara and does not stop this. Each is checked, limited (3 a task) and audited by `proposeKnowledge`; a
+   * fault loses only a suggestion.
+   */
+  async function onAgentProposals(operation: { workspaceId: string; id: string }, proposals: readonly unknown[]): Promise<void> {
+    try {
+      const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, operation.workspaceId)).taskPointerKey()));
+      const task = pointer === undefined ? undefined : await ownTask(pointer.taskId);
+
+      if (task === undefined) return;
+      const limits = proposeLimits(flow.store, now);
+      for (const proposal of proposals.slice(0, 10)) {
+        await proposeKnowledge({ process: runtime.process, limits }, { companyId, project: task.project, proposer: { kind: "agent", taskId: task.taskId }, requesterId: task.developerId, proposal });
+      }
+    } catch { /* information only: a lost suggestion costs nothing */ }
+  }
+
   async function onEvents(operation: { workspaceId: string; id: string }, events: ReadonlyArray<{ type: string; payload: unknown }>): Promise<void> {
     if (!enabled()) return;
+    const proposed = events.slice(0, 500).flatMap((event) => (event.type === "progress" ? (knowledgeProposalsOfProgress(event.payload) ?? []) : []));
+    
+    if (proposed.length > 0) await onAgentProposals(operation, proposed);
     try {
       const slice = events.slice(0, 500);
       // Lead 4 L4-AK2: the worker's use report (ids only) is checked against what this operation was delivered and kept as the operation's latest. Information only; it moves no counter yet (the 1/k credit is its own lane).
@@ -416,7 +474,14 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
     } catch { log("send_back_not_queued"); }
   }
 
-  return { learnedFor, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, noteHumanEdit, noteSentBack, ownTask };
+  async function answerBriefing(request: Parameters<LessonsHost["answerBriefing"]>[0]): Promise<string | undefined> {
+    if (!enabled()) return undefined;
+    try {
+      return await loadAnswerBriefing({ ...runtime.load, ...(input.knowledge?.facts === undefined ? {} : { facts: input.knowledge.facts }) }, { workspaceId: companyId, project: request.project, question: request.question, repos: request.repos });
+    } catch { return undefined; }
+  }
+
+  return { learnedFor, answerBriefing, onEvents, usedInPullRequest, listKey, milestone, reflectOne, nightly, noteReverted, noteHumanEdit, noteSentBack, ownTask };
 }
 
 export type ReflectOutcome = Awaited<ReturnType<typeof runReflectMessage>> | { result: "failed"; retry: true };

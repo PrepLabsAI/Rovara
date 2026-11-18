@@ -9,7 +9,7 @@
 // Only `name` and `description` sit in the prompt until the model calls `read_skill`. At most 32 skills a stage; skills in code repositories
 // are not read (Q8).
 import { createHash } from "node:crypto";
-import { MAX_META_SKILLS, type MetaSkillPin, type MetaSkillSkipReason, type MetaSkillSnapshot } from "@agentx/contracts";
+import { MAX_META_SKILLS, RovaraSkillsPayloadSchema, type MetaSkillPin, type MetaSkillSkipReason, type MetaSkillSnapshot } from "@agentx/contracts";
 import { inertContextText } from "../context-text.js";
 import type { AgentSkillFile } from "../agent-step.js";
 import { parseFrontMatter } from "./frontmatter.js";
@@ -93,9 +93,38 @@ export async function loadMetaSkills(input: {
   return { skills, snapshots, skipped };
 }
 
-/** The skills a session gets: the step's own first, then the meta repo's, a name already taken by the step's skill being left out. */
-export function mergeSkills(own: readonly AgentSkillFile[] | undefined, meta: readonly AgentSkillFile[]): AgentSkillFile[] | undefined {
-  if (own === undefined && meta.length === 0) return undefined;
+/**
+ * The skills a session gets: the step's own first, then the meta repo's, then Rovara's own (L4-AK3). A name already taken by an earlier source leaves the later one out, so the meta repo's skill wins over a Rovara skill
+ * of the same name; `onClash` is told each Rovara skill that was left out for that reason (the session says so in its diagnostics).
+ */
+export function mergeSkills(own: readonly AgentSkillFile[] | undefined, meta: readonly AgentSkillFile[], rovara: readonly AgentSkillFile[] = [], onClash?: (name: string) => void): AgentSkillFile[] | undefined {
+  if (own === undefined && meta.length === 0 && rovara.length === 0) return undefined;
   const taken = new Set((own ?? []).map((skill) => skill.name));
-  return [...(own ?? []), ...meta.filter((skill) => !taken.has(skill.name))];
+  const metaKept = meta.filter((skill) => !taken.has(skill.name));
+  for (const skill of metaKept) taken.add(skill.name);
+  const rovaraKept = rovara.filter((skill) => {
+    if (!taken.has(skill.name)) { taken.add(skill.name); return true; }
+    onClash?.(skill.name);
+    return false;
+  });
+  return [...(own ?? []), ...metaKept, ...rovaraKept];
+}
+
+/**
+ * The Rovara skills a step was sent (`payload.rovaraSkills`, L4-AK3), as skill files for the same `read_skill` path: each checked against the digest the broker sent (a text that does not match is left out), its pre-run
+ * lines and tool grant removed and its hidden characters stripped as for a meta-repo skill, and its digest taken again over the text the session is given (`read_skill` checks that one). Only for the modes that read skills (plan and
+ * build). Anything that does not parse leaves out the whole set: never a part. A skill grants nothing.
+ */
+export function rovaraSkillFiles(raw: unknown, mode: string | undefined): AgentSkillFile[] {
+  if (raw === undefined || (mode !== "PLAN" && mode !== "IMPLEMENT")) return [];
+  const parsed = RovaraSkillsPayloadSchema.safeParse(raw);
+  if (!parsed.success) return [];
+  const files: AgentSkillFile[] = [];
+  for (const skill of parsed.data) {
+    if (sha256(skill.content) !== skill.digest) continue;
+    const text = stripSkillExecution(inertContextText(skill.content).text);
+    if (text.trim() === "" || Buffer.byteLength(text, "utf8") > SKILL_TEXT_MAX_BYTES) continue;
+    files.push({ name: skill.name, description: inertContextText(skill.description).text.replace(/\s*\n\s*/gu, " ").trim() || skill.name, digest: sha256(text), content: text });
+  }
+  return files;
 }

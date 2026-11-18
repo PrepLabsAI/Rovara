@@ -234,7 +234,7 @@ describe("where Rovara learns from", () => {
     const answer = await call(target, "a-maint", "GET", SOURCES);
     expect(answer.ok && answer.body["windowDays"]).toBe(30);
     const rows = rowsOf(answer);
-    expect(rows.map((r) => r.key)).toEqual(["task_decisions", "review_comments", "pr_edits", "remember", "after_merge", "ci"]);
+    expect(rows.map((r) => r.key)).toEqual(["task_decisions", "review_comments", "pr_edits", "remember", "after_merge", "ci", "tickets"]);
     expect(rows.find((r) => r.key === "task_decisions")).toMatchObject({ seen: 4, suggested: 3, kept: 1, paused: false });
     expect(rows.find((r) => r.key === "pr_edits")).toMatchObject({ seen: 1, suggested: 1, kept: 1 });
     expect(rows.find((r) => r.key === "ci")).toMatchObject({ seen: 0, suggested: 0, kept: 0 });

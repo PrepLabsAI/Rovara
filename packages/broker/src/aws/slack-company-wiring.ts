@@ -35,6 +35,12 @@ export interface SlackCompanyClients {
   linkOrigin?: string;
   /** Replaces the store's writes for a consumer with no State write (the Slack Lambda: #126): the broker issues the notice. */
   linkNotice?: (teamId: string, userId: string) => Promise<string | undefined>;
+  /**
+   * DEC 254zzz35: the install's own workspace has no company secret, so a consumer that posts for it through this wiring (the broker's hosted Slack task threads,
+   * slack-thread-channel.ts) reads the install's bot token from the install's Slack app secret, agentx/<env>/slack (control-plane.ts SlackSecret; the broker's read is
+   * granted under the switch's condition). Only for the built-in company's binding of the install's own team (slack-workspace-tokens.ts). Absent: no install token, as before.
+   */
+  installToken?: true;
 }
 
 /** Whether this process's environment asks for company mode at all (the two switches). */
@@ -52,7 +58,17 @@ export function slackCompanyDependenciesFromEnvironment(env: NodeJS.ProcessEnv, 
   const bindings = createSlackWorkspaceBindings({ client: clients.documentClient, tableName, legacyTeamId });
   const tokens = createSlackWorkspaceTokens({
     bindings, environment, legacyTeamId,
-    // The install's team never reaches a company token read (the split keeps it legacy), so there is no install-token fallback here.
+    // The install's team never reaches a company token read in a consumer with the legacy split, so only a consumer that asks (installToken) gets the install-token fallback.
+    ...(clients.installToken === true ? {
+      async legacyToken() {
+        const answer = await clients.secrets.send(new GetSecretValueCommand({ SecretId: `agentx/${environment}/slack` }) as never) as { SecretString?: string };
+        const raw = answer.SecretString;
+        if (typeof raw !== "string" || Buffer.byteLength(raw) > 8192) return undefined;
+        const value: unknown = JSON.parse(raw);
+        const token = value !== null && typeof value === "object" && !Array.isArray(value) ? (value as { botToken?: unknown }).botToken : undefined;
+        return typeof token === "string" ? token : undefined;
+      },
+    } : {}),
     async readSecret(name) {
       try {
         const answer = await clients.secrets.send(new GetSecretValueCommand({ SecretId: name }) as never) as { SecretString?: string };

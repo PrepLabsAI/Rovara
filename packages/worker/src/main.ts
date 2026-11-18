@@ -25,6 +25,7 @@ import { agentSkillsSource } from "./agent-step.js";
 import { brokerContextCall, contextToolsCatalogSource } from "./context-sources/bridge.js";
 import { piMcpEnabled } from "./context-sources/pi-mcp.js";
 import { designReviewBindingOf, designReviewDependencies, operationModelProxy } from "./design-review-sessions.js";
+import { lazyModelProxy, modelAccessSource } from "./model-access.js";
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
@@ -36,6 +37,7 @@ import { removeLeftoverTaskSandboxes, taskShellSelection } from "./task-sandbox.
 import { removeLeftoverSetupRuns, setupWorkspaceKey } from "./setup-network.js";
 import { createSavedEnvFallbackReporter, createSavedEnvLoginProvider } from "./saved-env/login.js";
 import { runSetupProveJob } from "./setup-prove.js";
+import { runEvalHealthRider } from "./eval-health-run.js";
 import { rememberCredentials, runSavedEnvRebuild } from "./saved-env/rebuild.js";
 import { savedEnvOptionsOf } from "./saved-env/use.js";
 import { createDockerCli } from "./swebench/containers.js";
@@ -162,6 +164,12 @@ const state = createWorkerServerState(
             });
           } finally { unregister(); }
         }
+        // L4-EVH: an opt-in eval health run measures the project's evals on this read-only, pinned preparation of main and posts the one result to the broker (eval-health-run.ts).
+        if (invocation.payload.evalHealth !== undefined) {
+          const stop = new AbortController();
+          const unregister = cancellationController.register(invocation.operationId, { abort: async () => { stop.abort(); } });
+          try { await runEvalHealthRider({ rootPath, controlPlaneUrl, invocation, manifest, docker: createDockerCli(), signal: stop.signal }); } finally { unregister(); }
+        }
         return {
           manifestPath: ".agentx/preparation-manifest.json",
           projectName: manifest.projectName,
@@ -193,7 +201,7 @@ const state = createWorkerServerState(
           model: session.model,
           ...(evalFinalCheck === undefined ? {} : { evalFinalCheck }),
           // SR-1: the second reviewer's models, each with its own session (and proxy route).
-          ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),
+          ...(invocation.payload.workflowSecondReviewer === undefined ? {} : { secondReviewer: { candidates: secondReviewerRuntimes(invocation.payload, proxy, process.env, (slot) => lazyModelProxy({ baseUrl: process.env.AGENTX_MODEL_PROXY_URL || controlPlaneUrl, source: modelAccessSource({ controlPlaneUrl, capability: invocation.callbackCapability, slot }) })) ?? [], ...(invocation.payload.workflowSecondReviewer.context === undefined ? {} : { context: invocation.payload.workflowSecondReviewer.context }) } }),
           // DR5: a design review's packet source and per-reviewer model keys (only an operation that carries the binding).
           ...(designReviewBindingOf(invocation.payload) === undefined ? {} : { designReview: designReviewDependencies({ controlPlaneUrl, capability: invocation.callbackCapability, proxyUrl: process.env.AGENTX_MODEL_PROXY_URL }) }),
           // MODEL3: a missing provider key that sent the task to the chosen fallback model is told to the task page, once, as a progress event.

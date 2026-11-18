@@ -68,9 +68,9 @@ describe("the NAT gateways' Elastic IPs are Rovara's outbound addresses", () => 
 
   it("accepts nothing but an empty value or up to four comma-separated addresses", () => {
     const pattern = new RegExp(controlPlane.Parameters!.NatEgressAddresses!.AllowedPattern!, "u");
-    for (const good of ["", "44.235.136.195", "44.235.136.195,44.226.134.187", "1.2.3.4,5.6.7.8,9.10.11.12,13.14.15.16"]) expect(pattern.test(good), good).toBe(true);
-    for (const bad of [" ", "44.235.136.195, 44.226.134.187", "44.235.136", "44.235.136.256", "44.235.136.195,", ",44.235.136.195", "44.235.136.195;44.226.134.187", "a.b.c.d", "44.235.136.195\n", "1.2.3.4,5.6.7.8,9.10.11.12,13.14.15.16,17.18.19.20",
-      "\"44.235.136.195\"", "044.235.136.195", "44.235.136.195/32", "::1", "2001:db8::1"]) expect(pattern.test(bad), JSON.stringify(bad)).toBe(false);
+    for (const good of ["", "203.0.113.195", "203.0.113.195,198.51.100.187", "1.2.3.4,5.6.7.8,9.10.11.12,13.14.15.16"]) expect(pattern.test(good), good).toBe(true);
+    for (const bad of [" ", "203.0.113.195, 198.51.100.187", "203.0.113", "203.0.113.256", "203.0.113.195,", ",203.0.113.195", "203.0.113.195;198.51.100.187", "a.b.c.d", "203.0.113.195\n", "1.2.3.4,5.6.7.8,9.10.11.12,13.14.15.16,17.18.19.20",
+      "\"203.0.113.195\"", "0203.0.113.195", "203.0.113.195/32", "::1", "2001:db8::1"]) expect(pattern.test(bad), JSON.stringify(bad)).toBe(false);
     expect(controlPlane.Parameters!.NatEgressAddresses!.MaxLength).toBeGreaterThanOrEqual(4 * 15 + 3);
   });
 

@@ -1,7 +1,7 @@
 import { slackCompanyPerson, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
 import { createRovaraFront, type RovaraHandOff } from "./slack-rovara-front.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
-import { slackActionClass, SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js";
+import { slackActionClass, SLACK_WEB_SIGNIN_NOTICE } from "./slack-action-classes.js"; import { corePlanDepsFrom, corePlanPressHandler, corePlanSubmission } from "./slack-core-plan-press.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
@@ -128,7 +128,7 @@ export interface SlackInteractivityDependencies extends SlackCompanyDependencies
   secrets: () => Promise<SlackSecrets>;
   /** Guided onboarding PR 5 (slack-rovara-front.ts): `/rovara` and its Link / Unlink presses, given the raw body only after Slack's signature verified. Undefined: not ours. */
   rovara?: (rawBody: string) => Promise<HttpResponse | undefined>;
-  handlers: readonly SlackActionHandler[];
+  handlers: readonly SlackActionHandler[]; /** HW5b (slack-core-plan-press.ts): the box Request changes opens on a core task's plan card; undefined for any other form. */ coreSubmission?: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | undefined>;
   /** Answers the clicking member privately when no handler matches the button (an old button after a rollback). */
   respondEphemeral?: (responseUrl: string, text: string) => Promise<void>;
   now?: () => number;
@@ -570,10 +570,10 @@ export function createSlackPressDispatcher(dependencies: Pick<SlackInteractivity
  * A submitted modal, answered as Slack's response to it: closed, errors on its inputs, or the modal replaced. Spec 062
  * Phase 7c3b: the channel API runs this same handler for the forms the Slack adapter hands it.
  */
-export function createSlackSubmissionHandler(dependencies: Pick<SlackInteractivityDependencies, "workflow" | "chatgptSubmission" | "log">): (payload: Record<string, unknown>) => Promise<Record<string, unknown>> {
+export function createSlackSubmissionHandler(dependencies: Pick<SlackInteractivityDependencies, "workflow" | "chatgptSubmission" | "coreSubmission" | "log">): (payload: Record<string, unknown>) => Promise<Record<string, unknown>> {
   const log: SlackIngressLog = dependencies.log ?? (() => undefined);
   return async (payload) => {
-    const callbackId = asRecord(payload.view).callback_id;
+    const callbackId = asRecord(payload.view).callback_id; if (dependencies.coreSubmission !== undefined) { const taken = await dependencies.coreSubmission(payload); if (taken !== undefined) return taken; }
     if (callbackId === CHATGPT_PASTE_SUBMISSION) {
       if (dependencies.chatgptSubmission === undefined) return { response_action: "clear" };
       return await dependencies.chatgptSubmission(payload);
@@ -1100,7 +1100,7 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
     await handOffAction(channelAction);
     return true;
   };
-  const interactivity = createSlackInteractivityHandler({
+  const corePlan = company.workspaces === undefined || brokerFunctionName === undefined ? undefined : corePlanDepsFrom({ invokeBroker, api: async (method, body, timeoutMs) => slackApi(await slackCompanyToken(company, async () => (await secrets()).botToken), method, body, fetch, timeoutMs), respondEphemeral, log }); const interactivity = createSlackInteractivityHandler({
     ...company,
     secrets,
     log,
@@ -1111,10 +1111,10 @@ export function createAwsSlackInteractivityHandler(company: SlackCompanyDependen
       chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
     }),
     ...(adminChange === undefined ? {} : { adminChange }),
-    ...(workflow === undefined ? {} : { workflow }),
+    ...(workflow === undefined ? {} : { workflow }), ...(corePlan === undefined ? {} : { coreSubmission: corePlanSubmission(corePlan) }),
     // The module's own respondEphemeral, for a button no handler knows.
     respondEphemeral,
-    handlers: [chatGptActionHandler({ openView, respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text) }), confirmationActionHandler({
+    handlers: [...(corePlan === undefined ? [] : [corePlanPressHandler(corePlan)]), chatGptActionHandler({ openView, respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text) }), confirmationActionHandler({
       async loadConfirmation(subject) {
         const response = await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: confirmationKey(subject), ConsistentRead: true }));
         return pendingConfirmationFromItem(response.Item);

@@ -80,6 +80,8 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.digest_switched": { action: "lesson.digest_switched", facts: (e) => ({ enabled: e.facts["enabled"] === true }) },
   // A project or company admin paused or resumed one source of learning on "Where Rovara learns from" (`learning-sources.ts`): which row (a fixed key) and whether it is now paused. Written BEFORE the change.
   "lesson.learning_source_switched": { action: "lesson.learning_source_switched", facts: (e) => ({ source: word(e.facts["source"], "unknown"), paused: e.facts["paused"] === true }) },
+  // A person who decides lessons answered "Keep it?" on a lesson nobody had needed for a long time: it is renewed for a window (the lesson and the person; no words).
+  "lesson.kept": { action: "lesson.kept", facts: () => ({}) },
   "lesson.preset_proposed": { action: "lesson.preset_proposed", facts: (e) => ({ scope: word(e.facts["scope"], "project"), fromPreset: word(e.facts["from"], "unknown"), toPreset: word(e.facts["to"], "unknown") }) },
   // Erasing a commenter took back the harmful mark that retired a lesson, and the rest no longer justify it: the lesson goes back to a person as a pending card (never live by itself), recorded as a proposal.
   "lesson.harm_reversed": { action: "lesson.proposed", facts: (e) => ({ lessonType: word(e.facts["type"], "unknown"), tier: num(e.facts["tier"]) }) },
@@ -92,6 +94,14 @@ const MAP: Partial<Record<LessonAuditEvent["action"], Mapped>> = {
   "lesson.knowledge_read": { action: "lesson.knowledge_read", facts: (e) => ({ tool: word(e.facts["tool"], "unknown"), via: word(e.facts["via"], "person"), units: num(e.facts["units"]), ...tokenFact(e), ...unitFacts(e) }) },
   // One person's tools were served more than the line of distinct units in a day: written once a day, numbers only.
   "lesson.knowledge_read_alert": { action: "lesson.knowledge_read_alert", facts: (e) => ({ distinct: num(e.facts["distinct"]), line: num(e.facts["line"]) }) },
+  // A team suggestion from an AI tool outside Rovara or from one of Rovara's own agents (L4-AK3): written BEFORE it is stored. Who proposed (tool or agent) and the lesson type, never the text.
+  "lesson.knowledge_proposed": { action: "lesson.knowledge_proposed", facts: (e) => ({ by: word(e.facts["by"], "tool"), lessonType: word(e.facts["type"], "unknown") }) },
+  // Skills made from a proven procedure lesson (L4-AK3): the skill's name and version and fixed words, never its text. An activation is the second person's approval going live, so it is on the ledger with who approved.
+  "lesson.skill_drafted": { action: "lesson.skill_drafted", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
+  "lesson.skill_edited": { action: "lesson.skill_edited", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
+  "lesson.skill_approved": { action: "lesson.skill_approved", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]), approvals: num(e.facts["approvals"]) }) },
+  "lesson.skill_activated": { action: "lesson.skill_activated", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]), approvals: num(e.facts["approvals"]) }) },
+  "lesson.skill_retired": { action: "lesson.skill_retired", facts: (e) => ({ skill: modelWord(e.facts["skill"]), version: num(e.facts["version"]) }) },
   // Stable is what lets a lesson leave Rovara (to a local coding tool), so it is on the ledger.
   "lesson.trial_stable": { action: "lesson.trial_stable", facts: (e) => ({ tier: num(e.facts["tier"]) }) },
   "lesson.sole_owner_switch_proposed": { action: "lesson.sole_owner_switch_proposed", facts: (e) => ({ fromEnabled: e.facts["from"] === true, toEnabled: e.facts["to"] === true }) },

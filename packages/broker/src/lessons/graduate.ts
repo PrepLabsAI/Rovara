@@ -6,7 +6,7 @@
 //
 // The rules, for every target:
 //   - a person who may decide lessons for the project, read live; a lesson from a place only some people can read, or from a task that is narrower than the project, is never made permanent (it would be read by everyone);
-//   - only a PROVEN lesson (`ProvenReader`, `proven.ts`), counted now;
+//   - only a PROVEN lesson (`provenLesson`, `proven.ts`: the research band on phase 2's computed signals, nothing against it and not under question), counted and read now;
 //   - a tier-2 lesson (tests, checks, reviews, security) needs TWO people, whatever the target (`secondPersonStep`); the first waits, the second finishes. A skill's own two approvals stand in for it;
 //   - the ledger is written BEFORE anything is changed (no record, no change);
 //   - the lesson is then retired with a `became` link (`became.ts`): it is not handed to a step as a lesson again, and it stays in the archive with that link and its history;
@@ -19,7 +19,8 @@ import { graduationBlock, secondPersonStep, ruleParagraph, type PromoteDeps, typ
 import { recordBecame, type Became } from "./became.js";
 import { DAY_MS, CARD_SNOOZE_MS, GraduationUnreadable, claimGraduation, closeCard, draftIdFor, releaseClaim, openCard, putCheckDraft, readCard, snooze, snoozedNow, weekOf, DRAFT_REQUEST_MAX } from "./graduation-store.js";
 import { emitAudit, modeAllows, requireAudit, resolveLearning } from "./policy.js";
-import { provenLesson, PROVEN, type ProvenReader } from "./proven.js";
+import { provenLesson, provenSignalsOf, PROVEN, type ProvenReader } from "./proven.js";
+import type { SignalsReader } from "./signals.js";
 import { readVisible } from "./read-visible.js";
 import type { ScopeKey } from "./store.js";
 import { countLessonUses } from "./use-count.js";
@@ -51,7 +52,9 @@ export interface SkillGraduation {
 export interface GraduateDeps extends PromoteDeps {
   documents: DocumentStore;
   access: AccessCheckPort;
-  /** The computed "proven" band. Absent: `provenLesson` (the same rule, until the shared band is merged). */
+  /** Phase 2's computed signals (evidence against a lesson, lessons under question) that the "proven" band reads. No reader here is a missing wire, not a weaker rule: there is no default. */
+  signals: SignalsReader;
+  /** A different "proven" rule, for a test of a rule's edge. Absent: `provenLesson`. */
   proven?: ProvenReader | undefined;
   skills?: SkillGraduation | undefined;
   log?: (event: string, fields: Record<string, unknown>) => void;
@@ -106,10 +109,11 @@ export async function graduationCandidates(deps: GraduateDeps, key: ScopeKey, vi
   if (visible.length === 0) return [];
   const used = await countLessonUses(deps.documents, { companyId: orgOf(key), project: key.project, lessonIds: visible.map((lesson) => lesson.id), now });
   const proven = deps.proven ?? provenLesson;
+  const signalOf = await provenSignalsOf(deps.signals, key);
   const offers: GraduationOffer[] = [];
   for (const lesson of visible) {
     const tasks = used.counts.get(lesson.id)?.tasks;
-    if (tasks === undefined || !proven({ lesson, tasks, now })) continue;
+    if (tasks === undefined || !proven({ lesson, tasks, now, signal: signalOf(lesson.id) })) continue;
     if (await graduationBlock(deps, key, lesson) !== undefined) continue;
     const offer = offerOf(lesson, tasks, now, viewer.developerId);
     if (offer !== undefined) offers.push(offer);
@@ -199,7 +203,8 @@ export async function graduateLesson(deps: GraduateDeps, input: { workspaceId: s
   // Proven, counted now (never from a number the caller sent).
   const used = await countLessonUses(deps.documents, { companyId: orgOf(key), project: key.project, lessonIds: [lesson.id], now: deps.now() });
   const tasks = used.counts.get(lesson.id)?.tasks;
-  if (!(deps.proven ?? provenLesson)({ lesson, tasks, now: deps.now() })) return { ok: false, code: "not_proven" };
+  const signalOf = await provenSignalsOf(deps.signals, key);
+  if (!(deps.proven ?? provenLesson)({ lesson, tasks, now: deps.now(), signal: signalOf(lesson.id) })) return { ok: false, code: "not_proven" };
 
   // Where it would apply decides how many people it needs: a place that touches what protects the project (tests, CI, secrets, deploys) is a tier-2 matter whatever the lesson's own tier, and the second person must ask for
   // the same target and the same place as the first.

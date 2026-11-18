@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, change, evalCommandFingerprint, evalQuestionHash, orgProjectCatalogKey, projectRevisionKey,
+  EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, TestEnvironmentBodySchema, change, evalCommandFingerprint, evalQuestionHash, orgProjectCatalogKey, projectRevisionKey, testEnvDigest,
   type EvalPlanBody, type EvalSpendPlan, type OrgId, type StoredDocument, type WorkerInvocation, type WorkerMachines,
 } from "@agentx/contracts";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -20,11 +20,15 @@ import { EVAL_AUTHORITY_PATH } from "../../packages/broker/src/core-host/eval-au
 import { evalSpendKey, proposeEvalSpendApproval } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { evalSettingsFingerprint } from "../../packages/worker/src/verification/eval-round.js";
+import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
+import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { makeKey, signerOf } from "./policy-hook-fixture.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
+// Batch b18 (#1041 HW3c): no company rules service on this install (the company-instructions point stays empty, as before #1041); this file is not about company rules.
+vi.mock("../../packages/broker/src/core-host/company-instructions-http.js", async (original) => ({ ...await original<object>(), companyInstructionsModules: () => [] }));
 afterEach(() => { vi.unstubAllGlobals(); });
 
 const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
@@ -179,4 +183,39 @@ it("two companies: B's run never gets A's plan or grant, and each company's ask 
   expect(ready).toMatchObject({ status: "ready", plan: { company: B }, approval: { company: B, role: "owner" } });
   expect(JSON.stringify(ready)).not.toContain(A);
   expect(h.authorityAsks.map((ask) => ask.company)).toEqual([A, B]);
+});
+
+/** An approved test environment (the revision row and the pointer, as an approval writes them) of `companyId`'s project whose one repository `demo` has these install steps. */
+async function approveInstallSteps(h: Awaited<ReturnType<typeof world>>, companyId: OrgId, steps: Array<{ executable: string; args: string[] }>) {
+  const command = (executable: string, args: string[]) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });
+  const environment = TestEnvironmentBodySchema.parse({
+    tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: steps.map((step) => command(step.executable, step.args)), checks: [{ id: "unit", label: "Unit", command: command("pytest", []), kind: "test" }] }],
+    roundBudgetMin: 30, selection: { method: "coverage_map", alwaysRun: ["unit"], fullSuiteOn: ["requirements.txt"] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [],
+    data: { seeds: [], generator: "faker_seeded", seed: 1 }, accounts: [], prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false },
+  });
+  const digest = testEnvDigest(environment);
+  await h.w.store.put({ item: documentOf({ ...testEnvRevisionKey(companyId, PROJECT, 1), entityType: "TEST_ENV_REVISION", orgId: companyId, project: PROJECT, revision: 1, approvedAt: "2026-11-09T09:00:00.000Z", approvedBy: "owner", digest, requestId: "r".repeat(12), lessSafe: [], environment }) });
+  await h.w.store.put({ item: { ...testEnvLatestKey(companyId, PROJECT), entityType: "TEST_ENV_LATEST", orgId: companyId, project: PROJECT, revision: 1, digest } });
+}
+
+it("L4-EVS2: the answer carries the project's own approved install steps as the environment, per company (a company with none gets none)", async () => {
+  const h = await world();
+  const a = await h.checksRun(A, personA);
+  const b = await h.checksRun(B, personB);
+  await h.approved(A, personA);
+  await h.approved(B, personB);
+  // Neither has an approved environment: the plan alone, as before.
+  expect((await a.ask()).answer).not.toHaveProperty("environment");
+  await approveInstallSteps(h, A, [{ executable: "pip", args: ["install", "-r", "requirements.txt"] }]);
+  const withSteps = (await a.ask()).answer;
+  expect(withSteps).toMatchObject({ status: "ready", environment: { kind: "install", commands: [{ executable: "pip", args: ["install", "-r", "requirements.txt"], cwd: "." }] } });
+  // B has none of its own: it never gets A's steps, and its plan is still delivered.
+  const fromB = await b.ask();
+  expect(fromB.answer).toMatchObject({ status: "ready", plan: { company: B } });
+  expect(fromB.answer).not.toHaveProperty("environment");
+  expect(fromB.text).not.toContain("requirements.txt");
+  // B's own approval gives B its own steps, and A's stay A's.
+  await approveInstallSteps(h, B, [{ executable: "npm", args: ["ci"] }]);
+  expect((await b.ask()).answer).toMatchObject({ environment: { kind: "install", commands: [{ executable: "npm", args: ["ci"], cwd: "." }] } });
+  expect((await a.ask()).answer).toMatchObject({ environment: { commands: [{ executable: "pip" }] } });
 });

@@ -19,6 +19,8 @@ import { GraduationUnreadable, getCheckDraft, isDraftId, listCheckDrafts, moveCh
 import { retireTidy, tidyCard, tidyLater } from "../lessons/tidy.js";
 import { createTeamRulePublisher, liveRules, readTeamRules, retireTeamRule, TEAM_RULE_GLOB_MAX, TEAM_RULE_PATHS_MAX } from "../lessons/team-rules.js";
 import { requireAudit } from "../lessons/policy.js";
+import { skillDepsOf, skillGraduationOf } from "../lessons/skill-graduation.js";
+import { freshSignalsReader } from "../lessons/signals.js";
 import { idIn } from "../lessons/types.js";
 import type { CoreLessons } from "./lessons.js";
 import type { LessonsApiRequest } from "./lessons-api.js";
@@ -90,12 +92,15 @@ export interface GraduationContext {
   log: (event: string, fields?: Record<string, unknown>) => void;
 }
 
-function depsOf(ctx: GraduationContext): GraduateDeps {
+/**
+ * A page read ("graduation" GET) uses the shared cached signals; every decision (a POST) reads them fresh. The skills library is the company's own (`skillDepsOf`) unless a test hands another.
+ */
+function depsOf(ctx: GraduationContext, fresh: boolean): GraduateDeps {
   const runtime = ctx.lessons.runtime;
   return {
     now: ctx.now, audit: runtime.audit, store: runtime.store, directory: runtime.directory, settings: runtime.settings, vectors: runtime.vectors,
     publisher: createTeamRulePublisher({ store: runtime.documents, companyId: ctx.companyId, now: ctx.now }),
-    taskVisibility: runtime.access.taskVisibility, documents: runtime.documents, access: runtime.access, skills: ctx.skills,
+    taskVisibility: runtime.access.taskVisibility, documents: runtime.documents, access: runtime.access, signals: fresh ? freshSignalsReader(runtime.documents, ctx.companyId, ctx.now) : runtime.signals, skills: ctx.skills ?? skillGraduationOf(skillDepsOf(runtime, { companyId: ctx.companyId, now: ctx.now, log: (event, fields) => ctx.log(event, fields) })),
     log: (event, fields) => ctx.log(event, fields),
   };
 }
@@ -105,7 +110,7 @@ export async function answerGraduation(request: LessonsApiRequest, match: RegExp
   if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", "A script token cannot do that.");
   const [, , graduation, tidyAction, draftId, draftAction, ruleId, , rawLesson, lessonAction] = match;
   const { project, personId, companyId } = ctx;
-  const deps = depsOf(ctx);
+  const deps = depsOf(ctx, request.method !== "GET");
   const where = { workspaceId: companyId, project };
   const method = request.method;
   const need = (expected: "GET" | "POST"): void => { if (method !== expected) throw agentXError("NOT_FOUND", "route not found"); };

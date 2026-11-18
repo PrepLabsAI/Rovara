@@ -76,7 +76,7 @@ export interface UnderQuestion { lessonId: string; /** Distinct tasks whose reve
  * The lessons of a project that are under question now: one entry per lesson, with the number of distinct reverted tasks behind it. Reads only this company's partition for this project and checks every row again
  * (its type, project and company key); rows past their `keepUntil` are not counted. The weekly review reads this; nothing in Code changes a lesson because of it.
  */
-export async function readUnderQuestion(docs: Pick<DocumentStore, "query">, companyId: OrgId, project: string, nowMs: number): Promise<UnderQuestion[]> {
+export async function readUnderQuestion(docs: Pick<DocumentStore, "query">, companyId: OrgId, project: string, nowMs: number, report?: { truncated: boolean }): Promise<UnderQuestion[]> {
   if (!NAME.test(project)) return [];
   const pk = questionPk(companyId, project);
   // One TOTAL bound on rows read: a project with more evidence than that is read from its first rows only (the review shows the lessons with the most recent evidence it reached; nothing is changed by it).
@@ -86,6 +86,7 @@ export async function readUnderQuestion(docs: Pick<DocumentStore, "query">, comp
     rows.push(...page.items);
     cursor = page.cursor;
     if (cursor === undefined) break;
+    if (rows.length >= QUESTION_ROWS_MAX && report !== undefined) report.truncated = true;
   }
   const byLesson = new Map<string, { tasks: Set<string>; lastAt: number }>();
   for (const row of rows.slice(0, QUESTION_ROWS_MAX)) {

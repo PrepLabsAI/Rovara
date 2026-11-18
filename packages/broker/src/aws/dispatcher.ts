@@ -23,7 +23,7 @@ import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonRevis
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
-import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, NO_PEOPLE_HERE, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
+import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
@@ -756,12 +756,12 @@ export const handler = withCoreDispatch(workflowHandler, {
         changeVisibility: async (receiptHandle, seconds) => { await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl, ReceiptHandle: receiptHandle, VisibilityTimeout: seconds })); },
         // Resolve lessons separately for each runtime. The reader rechecks ownership from the workspace record, never the dispatch payload.
         flow: (registry, companyId) => {
-          // This dispatcher has no live company-membership reader. Audience comparisons that need it must refuse;
-          // the existing hosted audience rules can still prove same-project, same-owner sources from State alone.
-          const unavailable = async (): Promise<never> => { throw agentXError("RUNTIME_UNAVAILABLE", NO_PEOPLE_HERE); };
+          // L4-HW8: the company's roster, read live and read-only (worker-machines/dispatcher-people.ts): projected GetItems of exactly the keys the dispatcher's role may read.
+          // No member list and no merge record are read here (the role has no Query and no `mergedInto`): those two points refuse or are absent, never guessed.
+          const people = createDispatcherLessonsPeople({ documentClient, stateTableName: requiredEnvironment("STATE_TABLE_NAME"), signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME, now: Date.now })(companyId, { store: async () => registry.require("storage") });
+          // One port per company runtime, never shared between companies (it is bound to `companyId` and throws for any other).
           return hostedDispatcherFlow(process.env, {
-            companyId, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), store: registry.require("storage"),
-            people: { approvers: unavailable, onProjectRoster: unavailable, linkedAccounts: unavailable, displayName: unavailable, isErased: unavailable },
+            companyId, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), store: registry.require("storage"), people,
           });
         },
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.

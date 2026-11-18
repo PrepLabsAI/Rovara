@@ -92,11 +92,11 @@ async function world(options: { planSummary?: boolean } = {}) {
     const itemId = intakeItemIdOf("linear", key);
     let sessionId: string;
     if (origin === "intake" || origin === "raced") {
-      const extras = ticketSessionStartExtras(company)({ taskId, project, title: "Refunds fail", principal, client: "tracker", receivedAt: at(), ticket: { system: "linear", id: key, url } });
+      const extras = ticketSessionStartExtras(company)({ taskId, workspaceId: `ws-${taskId}`, project, title: "Refunds fail", principal, client: "tracker", receivedAt: at(), ticket: { system: "linear", id: key, url } });
       await store.transact([...extras.items]);
       sessionId = extras.sessionId!;
     } else {
-      const extras = createSessionStartExtras(company)({ taskId, project, title: "Refunds fail", principal, client: "web", receivedAt: at() });
+      const extras = createSessionStartExtras(company)({ taskId, workspaceId: `ws-${taskId}`, project, title: "Refunds fail", principal, client: "web", receivedAt: at() });
       await store.transact([...extras.items]);
       sessionId = extras.sessionId!;
       if (origin === "hand_linked") await bindSessionSurface(table, { orgId: company, sessionId, binding: { kind: "tracker_item", system: "linear", id: key, url } });

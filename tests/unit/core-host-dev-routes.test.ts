@@ -898,3 +898,54 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
     expect(await consentOf(OTHER)).toBe(true);
   });
 });
+
+// L4-EVCI2: the setup card's "Eval check from your CI" on the deployed API. The company's own runtime and store, the caller's live standing (read inside), the request's audit sink; a script token is refused before the
+// standing is read; unwired is "not on the core yet". Mutants are listed in the PR body with the test that kills each.
+describe("the eval check card on the deployed API (L4-EVCI2)", () => {
+  const CARD = "/v1/app/projects/payments/ci-eval-check";
+  const put = (path: string, body: unknown) => ({ method: "PUT", path, headers: {}, body: JSON.stringify(body) });
+  const workflow = ["name: ci", "on: pull_request", "jobs:", "  evals:", "    runs-on: ubuntu-latest", "    steps:", "      - run: npx promptfoo eval"].join("\n");
+  const reader = { list: async (path: string) => (path === ".github/workflows" ? { entries: [{ name: "ci.yml", path: ".github/workflows/ci.yml", type: "file" }], truncated: false } : undefined), read: async () => ({ text: workflow }) };
+  const answerOf = (answer: { body: string } | undefined) => JSON.parse(answer!.body) as { error?: { code: string; message: string }; confirmed?: { name: string } | null; proposals?: { verdict: string } | null };
+
+  it("unwired is 'not on the core yet'; a script token is refused 403 before the standing is read; a caller with no company is 401", async () => {
+    const { app, companyOf, remember } = await world2();
+    const standing = vi.fn(async () => ({ access: "manage" as const, basis: "company-owner" as const }));
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, evalCheck: { standing, readerFor: async () => reader } }) });
+    for (const request of [get(CARD), put(CARD, { requestId: randomUUID(), check: null })]) {
+      const token = await routes.route(request, { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+      expect(token?.statusCode, request.method).toBe(403);
+      expect(answerOf(token).error?.message).toBe(NOT_FOR_SCRIPT_TOKENS);
+      const stranger = callerOf(FAKE_COMPANY);
+      expect((await routes.route(request, { ...stranger, principal: { ...stranger.principal, personId: "no-membership" } }))?.statusCode, request.method).toBe(401);
+    }
+    expect(standing).not.toHaveBeenCalled();
+    const unwired = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    for (const request of [get(CARD), put(CARD, { requestId: randomUUID(), check: null })]) {
+      const answer = await unwired.route(request, remember(FAKE_COMPANY));
+      expect(answer?.statusCode, request.method).toBe(404);
+      expect(answerOf(answer).error?.message).toBe(NOT_ON_THE_CORE_YET);
+    }
+  });
+
+  it("propose, confirm, stored, in the company's own store: the proposals come from the workflow reader, the confirm is audited with the person, and another company's caller reads nothing of it", async () => {
+    const { app, companyOf, remember } = await world2();
+    const readFor: string[] = [];
+    const read = async (companyId: string) => { readFor.push(companyId); return reader; };
+    const standing = async () => ({ access: "manage" as const, basis: "company-owner" as const });
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, evalCheck: { standing, readerFor: read } }) });
+    const owner = remember(FAKE_COMPANY);
+    const proposed = await routes.route(get(CARD), owner);
+    expect(proposed?.statusCode).toBe(200);
+    expect(answerOf(proposed)).toMatchObject({ confirmed: null, proposals: { verdict: "proposals" } });
+    expect(readFor).toContain(FAKE_COMPANY);
+    const done = await routes.route(put(CARD, { requestId: randomUUID(), check: { name: "evals", source: "15368" } }), owner);
+    expect(done?.statusCode).toBe(200);
+    expect(answerOf(done).confirmed).toMatchObject({ name: "evals" });
+    const store = (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store;
+    expect(await store.get({ pk: `ORG#${FAKE_COMPANY}#CIEVAL#payments`, sk: "CHECK" })).toMatchObject({ orgId: FAKE_COMPANY, project: "payments", check: { name: "evals", source: "15368" } });
+    // The other company reads its own project of the same name: nothing is confirmed there.
+    expect(answerOf(await routes.route(get(CARD), remember(OTHER))).confirmed).toBeNull();
+    expect(await (await app.runtimeFor(OTHER)).flow.deps.store.get({ pk: `ORG#${OTHER}#CIEVAL#payments`, sk: "CHECK" })).toBeUndefined();
+  });
+});

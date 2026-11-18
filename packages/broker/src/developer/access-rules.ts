@@ -44,6 +44,8 @@ export async function applyAccessRules(rules: readonly AccessCheckRule[] | undef
     ...(original.companyName === undefined ? {} : { companyName: original.companyName }),
     // DEC 254b (f): Code's own record of this sign-in; a rule can neither set nor clear it.
     ...(original.joinedByInvite === undefined ? {} : { joinedByInvite: original.joinedByInvite }),
+    // L4-SIGNIN: the person's own Slack workspace id, Code's record; a rule can neither set nor clear it.
+    ...(original.slackTeamId === undefined ? {} : { slackTeamId: original.slackTeamId }),
   });
   for (const rule of rules ?? []) {
     try {

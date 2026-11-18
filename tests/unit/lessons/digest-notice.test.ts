@@ -8,7 +8,8 @@ import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-d
 import { prefsKey } from "../../../packages/broker/src/core/notify/prefs.js";
 import { buildCoreRegistry, createCoreRuntime, readCoreEngineFlags } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
-import { DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestSetting, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
+import { digestPilotOf, switchNames } from "../../../packages/broker/src/core-host/flags.js";
+import { DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestChoiceStrict, readDigestSetting, resolveDigestSettingStrict, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
@@ -37,11 +38,19 @@ function people(): HostedLessonPeople {
 }
 
 interface World { world: FakeWorld; lessons: Map<OrgId, CoreLessons> }
-async function setUp(): Promise<World> {
+async function setUp(setup: { env?: NodeJS.ProcessEnv; chat?: ChannelAdapter; digestPilot?: (companyId: OrgId) => boolean } = {}): Promise<World> {
   const world = createFakeWorld();
-  const env = { [CORE_LESSONS_VARIABLE]: "on" };
+  const env = setup.env ?? { [CORE_LESSONS_VARIABLE]: "on" };
   setCoreLessonsGate(env);
-  const registry = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+  const built0 = await buildCoreRegistry({ modules: world.modules, context: world.context(), areas: ["flow", "build", "merge"] });
+  // With a chat adapter given, the registry answers for the "chat" channel (the service pass asks it for the places people chose).
+  const registry = setup.chat === undefined ? built0 : new Proxy(built0, {
+    get(target, prop) {
+      if (prop === "get") return (kind: string, id: string) => (kind === "channel" && id === "chat" ? setup.chat : (target.get as unknown as (k: string, i: string) => unknown)(kind, id));
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
   const lessons = new Map<OrgId, CoreLessons>();
   for (const companyId of [A, B]) {
     await world.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
@@ -50,8 +59,8 @@ async function setUp(): Promise<World> {
       registry, companyId, flags: readCoreEngineFlags({ ROVARA_CORE_ENGINE: "on" }), callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
-    const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch: readCoreLessonsSwitch(env).value, people: people(), hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now });
-    lessons.set(companyId, built!);
+    const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch: readCoreLessonsSwitch(env).value, people: people(), hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now, ...(setup.digestPilot === undefined ? {} : { digestPilot: setup.digestPilot }), channelCompanyOf: async ({ tenant }) => (tenant === "TA" ? A : tenant === "TB" ? B : undefined) });
+    if (built !== undefined) lessons.set(companyId, built);
     await runtime.flow.start({ principal: localOwnerPrincipal({ companyId }), client: "test", origin: "app" as const }, { requestId: randomUUID(), project: "payments", instructions: "x", workflow: true, workflowPath: "QUICK" });
   }
   return { world, lessons };
@@ -320,5 +329,147 @@ describe("the weekly lessons summary", () => {
     const small = digestNoticeText("payments", { waiting: 3, wentLive: 0, retired: 0, expiring: [{ title: "x".repeat(70) }], fading: [] }, 60)!;
     expect([...small].length).toBeLessThanOrEqual(60);
     expect(small).not.toContain("Open the project");
+  });
+});
+
+describe("the pilot default (lane L4-WK): on for a pilot company's projects that never chose, off for every other, the project's own choice always wins", () => {
+  const pilotA = (companyId: OrgId): boolean => companyId === A;
+
+  it("a pilot company's project that never chose gets the summary on: the people who decide are told, once, with the same words", async () => {
+    const w = await busyWorld();
+    await w.world.store.delete({ key: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING" } });
+    expect(await readDigestChoiceStrict(w.world.store, A, "payments")).toBeUndefined();
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, A, "a-maint");
+    const slack = adapter();
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ projects: 1, sent: 2, failed: 0 });
+    const text = (slack.events[0] as { data: { text: string } }).data.text;
+    expect(text).toContain("Lessons this week in payments:");
+    expect(text).toContain("- 2 waiting for a decision");
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ sent: 0 });
+  });
+
+  it("a company that is not on the pilot list is unchanged: nothing is sent and nothing is written, whether no list is given, another company is listed, the list says no or the list reader throws", async () => {
+    const lists: Array<DigestNoticeDeps["pilot"]> = [undefined, (companyId) => companyId === B, () => false, () => undefined as unknown as boolean, () => { throw new Error("down"); }];
+    for (const pilot of lists) {
+      const w = await busyWorld();
+      await w.world.store.delete({ key: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING" } });
+      await chooseSlack(w, A, "a-admin");
+      const slack = adapter();
+      expect(await run(deps(w, A, slack, { pilot }))).toEqual({ projects: 0, sent: 0, held: 0, failed: 0 });
+      expect(slack.events).toEqual([]);
+      expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SENT#a-admin" })).toBeUndefined();
+      expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toBeUndefined();
+    }
+  });
+
+  it("the other company's summary stays off while the pilot company's is on (two companies, one project name)", async () => {
+    const w = await busyWorld();
+    await w.world.store.delete({ key: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING" } });
+    await put(w, B, lesson(B, "les_bwait001", { status: "pending", pendingExpiresAt: w.world.clock.now + DAY, title: "B only" }));
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, B, "b-admin");
+    const slack = adapter();
+    expect(await run(deps(w, B, slack, { pilot: pilotA }))).toEqual({ projects: 0, sent: 0, held: 0, failed: 0 });
+    expect(slack.events).toEqual([]);
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ projects: 1, sent: 1 });
+    expect((slack.events[0] as { conversation: { tenant: string } }).conversation.tenant).toBe("TA");
+    expect(JSON.stringify(slack.events)).not.toContain("B only");
+  });
+
+  it("a project's own choice wins over the pilot default: an admin who turned it off in a pilot company hears nothing; one who turned it on in another company still does", async () => {
+    const w = await busyWorld();
+    await chooseSlack(w, A, "a-admin");
+    await writeDigestSetting(w.world.store, A, "payments", false, w.world.clock.now);
+    const slack = adapter();
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toEqual({ projects: 0, sent: 0, held: 0, failed: 0 });
+    expect(slack.events).toEqual([]);
+    expect(await resolveDigestSettingStrict(w.world.store, A, "payments", pilotA)).toEqual({ on: false, source: "chosen" });
+    await writeDigestSetting(w.world.store, A, "payments", true, w.world.clock.now);
+    expect(await run(deps(w, A, slack, { pilot: () => false }))).toMatchObject({ projects: 1, sent: 1 });
+    // A stored row that is not shaped as a choice reads as chosen-off (fail closed), even in a pilot company.
+    const odd = await busyWorld();
+    await odd.world.store.put({ item: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING", entityType: "LESSON_DIGEST", on: "yes" } });
+    expect(await resolveDigestSettingStrict(odd.world.store, A, "payments", pilotA)).toEqual({ on: false, source: "chosen" });
+    // The same for a row of another entity type under the setting's key: present means chosen, and it does not say on.
+    const other = await busyWorld();
+    await other.world.store.put({ item: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING", entityType: "SOMETHING_ELSE", on: true } });
+    expect(await resolveDigestSettingStrict(other.world.store, A, "payments", pilotA)).toEqual({ on: false, source: "chosen" });
+    expect(await readDigestChoiceStrict(other.world.store, A, "payments")).toBe(false);
+  });
+
+  it("the source says why: chosen, the pilot default or the plain default", async () => {
+    const w = await setUp();
+    expect(await resolveDigestSettingStrict(w.world.store, A, "payments", pilotA)).toEqual({ on: true, source: "pilot_default" });
+    expect(await resolveDigestSettingStrict(w.world.store, B, "payments", pilotA)).toEqual({ on: false, source: "default" });
+    expect(await resolveDigestSettingStrict(w.world.store, A, "payments", undefined)).toEqual({ on: false, source: "default" });
+    // A list that throws or answers something that is not `true` is "not a pilot company".
+    expect(await resolveDigestSettingStrict(w.world.store, A, "payments", () => { throw new Error("down"); })).toEqual({ on: false, source: "default" });
+    expect(await resolveDigestSettingStrict(w.world.store, A, "payments", () => "yes" as unknown as boolean)).toEqual({ on: false, source: "default" });
+    await writeDigestSetting(w.world.store, B, "payments", true, w.world.clock.now);
+    expect(await resolveDigestSettingStrict(w.world.store, B, "payments", pilotA)).toEqual({ on: true, source: "chosen" });
+    // The stored choice alone (what `readDigestSetting` has always meant) does not see the default.
+    expect(await readDigestSetting(w.world.store, A, "payments")).toBe(false);
+  });
+
+  it("only the people who decide are told: a person with a chat place who is not an approver gets nothing", async () => {
+    const w = await busyWorld();
+    await w.world.store.delete({ key: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING" } });
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, A, "a-contrib");
+    const slack = adapter();
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ sent: 1 });
+    expect(slack.events.map((e) => (e as { conversation: { space: string } }).conversation.space)).toEqual(["D-a-admin"]);
+  });
+
+  it("nothing waiting, live, retired, expiring or fading: nothing is sent even in a pilot company (and the week is closed, so no retry spam)", async () => {
+    const w = await setUp();
+    await put(w, A, lesson(A, "les_healthy1", { status: "active", expiresAt: w.world.clock.now + 60 * DAY, title: "Healthy" }));
+    await chooseSlack(w, A, "a-admin");
+    await chooseSlack(w, A, "a-maint");
+    const slack = adapter();
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ projects: 1, sent: 0, failed: 0 });
+    expect(slack.events).toEqual([]);
+    expect(await w.world.store.get({ pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "WEEK" })).toMatchObject({ week: digestWeekOf(w.world.clock.now) });
+    expect(await run(deps(w, A, slack, { pilot: pilotA }))).toMatchObject({ projects: 0, sent: 0 });
+  });
+
+  it("the mode still gates the default: Off and Collect send nothing in a pilot company", async () => {
+    for (const mode of ["Off", "Collect"] as const) {
+      const w = await busyWorld();
+      await w.world.store.delete({ key: { pk: companyScoped(A, "LESSON_DIGEST#payments"), sk: "SETTING" } });
+      await chooseSlack(w, A, "a-admin");
+      await writeLearningMode(w.world.store, { workspaceId: A, project: "payments" }, mode, 1);
+      expect(await run(deps(w, A, adapter(), { pilot: pilotA }))).toMatchObject({ projects: 0, sent: 0 });
+    }
+  });
+
+  it("the install's pilot list is the companies the lessons switch NAMES: on:<ids> names them, on (everyone), off or a host list say otherwise", () => {
+    expect(digestPilotOf({ lessonsSwitch: { mode: "on-for", companies: [A] } })(A)).toBe(true);
+    expect(digestPilotOf({ lessonsSwitch: { mode: "on-for", companies: [A] } })(B)).toBe(false);
+    expect(digestPilotOf({ lessonsSwitch: { mode: "on" } })(A)).toBe(false);
+    expect(digestPilotOf({ lessonsSwitch: { mode: "off" } })(A)).toBe(false);
+    expect(digestPilotOf({ lessonsSwitch: { mode: "on" }, digestPilot: (id) => id === B })(B)).toBe(true);
+    expect(digestPilotOf({ lessonsSwitch: { mode: "on-for", companies: [A] }, digestPilot: () => false })(A)).toBe(false);
+    expect(switchNames({ mode: "on" }, A)).toBe(false);
+  });
+
+  it("through the company's own service pass: lessons on for only the pilot company send the summary by default; the same install with lessons on for everyone does not", async () => {
+    const slack = adapter();
+    const w = await setUp({ env: { [CORE_LESSONS_VARIABLE]: `on:${A}` }, chat: slack });
+    const now = w.world.clock.now;
+    await put(w, A, lesson(A, "les_expiring", { status: "pending", pendingExpiresAt: now + DAY, title: "Expiring soon" }));
+    await chooseSlack(w, A, "a-admin");
+    const outcome = await w.lessons.get(A)!.service.pass({ budgetMs: 60_000 });
+    expect(outcome).toMatchObject({ digests: 1 });
+    expect(slack.events).toHaveLength(1);
+    expect((slack.events[0] as { data: { text: string } }).data.text).toContain('"Expiring soon"');
+
+    const everyone = adapter();
+    const w2 = await setUp({ env: { [CORE_LESSONS_VARIABLE]: "on" }, chat: everyone });
+    await put(w2, A, lesson(A, "les_expiring", { status: "pending", pendingExpiresAt: w2.world.clock.now + DAY, title: "Expiring soon" }));
+    await chooseSlack(w2, A, "a-admin");
+    expect(await w2.lessons.get(A)!.service.pass({ budgetMs: 60_000 })).toMatchObject({ digests: 0 });
+    expect(everyone.events).toEqual([]);
   });
 });

@@ -30,6 +30,7 @@ import type { StartExtras, StartExtrasInput, TaskAccess } from "../core/task-flo
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { waitingViewOf } from "../local/app/intake.js";
 import { createSessionStartExtras } from "../local/app/session-start.js";
+import { isSystemPrincipal } from "../core/system-runs/access.js";
 import { linearAccountResolver } from "./linear-account-links.js";
 import { linearCompanyTracker } from "./linear-app-intake.js";
 import type { LinearConnections } from "./linear-connections.js";
@@ -81,12 +82,15 @@ export interface HostedIntake {
 }
 
 /**
- * The hosted flow's `startExtras` for intake: a start that carries a ticket (only intake sets one) writes the task's session and its ticket binding in the start's own transaction, exactly as
- * the laptop does (`createSessionStartExtras`), so the engine's one-session-per-ticket rule and the write-back find the ticket. A start without a ticket gets nothing added.
+ * The hosted flow's `startExtras`: every person's start (the web app, Slack, the API, or intake) writes the task's session in the start's own transaction, exactly as the laptop does
+ * (`createSessionStartExtras`), so the session controls (retry, close, the log) reach every hosted core task. A start that carries a ticket (only intake sets one) also writes its ticket
+ * binding there, so the engine's one-session-per-ticket rule and the write-back find the ticket. A start by a system owner (Rovara's own unattended runs) gets nothing added: it has no
+ * person to own a session. `_options` is accepted (and no longer needed) so a caller that still says where chat threads are served compiles unchanged.
  */
-export function ticketSessionStartExtras(companyId: OrgId): (input: StartExtrasInput) => StartExtras {
+export function ticketSessionStartExtras(companyId: OrgId, _options: { chatThreads?: boolean } = {}): (input: StartExtrasInput) => StartExtras {
+  void _options;
   const session = createSessionStartExtras(OrgIdSchema.parse(companyId));
-  return (input) => (input.ticket === undefined ? { items: [] } : session(input));
+  return (input) => (isSystemPrincipal(input.principal) ? { items: [] } : session(input));
 }
 
 /** The ticket fence key of a hosted install: derived from its callback signing key under its own label, so it is the install's own and never the key itself. */

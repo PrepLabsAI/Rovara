@@ -330,6 +330,19 @@ const prompt = (model: ScriptedModel, index: number): string => JSON.stringify(m
 const human = (requestId: string, reasonText: string): SendBackFact => ({ id: `task:task-1:sendback:${requestId}`, origin: "human", actorDeveloperId: "sam", actorTrust: "member", reasonText });
 
 describe("the reflection of a send-back", () => {
+  it("the task's chat thread is read once, when the task has really ended: a send-back's reflection and a revert's re-reflection never ask for it", async () => {
+    const asked: Array<{ withoutSlack?: true | undefined }> = [];
+    const w = reflection(new ScriptedModel([reply(), reply(), reply()]), ["req-1"]);
+    w.rows.sendBacks.set("req-1", human("req-1", "Use withRetry for HTTP retries, never a hand loop."));
+    const read = w.deps.source.read.bind(w.deps.source);
+    w.deps.source.read = async (input) => { asked.push({ withoutSlack: input.withoutSlack }); return read(input); };
+    await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "sent_back" });
+    await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "reverted" });
+    await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1" });
+    await learnFromEndedTaskTyped(w.deps, { workspaceId: WS, taskId: "task-1", outcome: "merged" });
+    expect(asked.map((one) => one.withoutSlack)).toEqual([true, true, undefined, undefined]);
+  });
+
   it("reflects the open task on the person's words, marks that send-back learned, and the task's merge reflection leaves it out", async () => {
     const model = new ScriptedModel([reply(candidateJson({ evidenceSpanIds: ["S1"] })), reply()]);
     const w = reflection(model, ["req-1"]);

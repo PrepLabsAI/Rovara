@@ -13,17 +13,21 @@
 //
 // Wiring (the deployment, per company, in the runtime's `services`): `const lessons = createCoreLessons({ flow, ... }); lessons?.attach(); return { ..., ...(lessons === undefined ? {} : { lessons: lessons.service }) }`.
 // The worker callbacks then hand a step's events to `lessons.host.onEvents`.
-import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type IdentityProvider, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView } from "@agentx/contracts";
+import { codeRepositoriesOf, companyScoped, orgProjectCatalogKey, queryAll, type AdapterRegistry, type AuditSink, type DocumentStore, type ExternalAccountRef, type IdentityProvider, type LearningAdapter, type LessonVectors, type OrgId, type RegistryView, type Tracker } from "@agentx/contracts";
 import { createDocumentMilestones, type DocumentMilestones } from "../core/milestones/milestones.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
-import { createLessonsHost, pumpReflectQueue, type LessonsHost } from "../lessons/host-glue.js";
+import { createLessonsHost, pumpReflectQueue, taskPlanFacts, type LessonsHost } from "../lessons/host-glue.js";
+import type { KnowledgeSources } from "../lessons/knowledge-brief.js";
+import { RECENT_PLAN_BYTES_MAX, cachedRecentTasks } from "../lessons/recent-tasks.js";
 import { sendLessonDigests } from "../lessons/digest-notice.js";
 import { createLessonsRevertWatch } from "../lessons/revert-watch-glue.js";
 import { codeHostAreaPorts } from "../lessons/area-check-hosts.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import type { ChannelCompanyOf } from "../core/channel/company.js";
+import type { ChannelCompanyOf, ChannelMemberRule } from "../core/channel/company.js";
+import { slackThreadSource } from "../lessons/slack-wiring.js";
+import { eraseSlackOptOut } from "../lessons/slack-switch.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { setLearnedLessonsGate, type Edition } from "../lessons/policy.js";
 import { gatedByLessonsSwitch } from "../lessons/model-gate.js";
@@ -40,8 +44,9 @@ import type { OutcomeRowReader } from "../lessons/task-outcome-rows.js";
 import type { RepositoryVisibility } from "../lessons/used-in-pr.js";
 import { createLessonRepositories } from "../local/app/lessons-repos.js";
 import { createLocalLessonSources } from "../local/app/lessons-sources.js";
+import { ticketSourcePaused } from "../lessons/ticket-comments.js";
 import type { CoreService } from "./core-runtime.js";
-import { parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
+import { digestPilotOf, parseCoreSwitch, switchCovers, type CoreSwitch } from "./flags.js";
 
 export const CORE_LESSONS_VARIABLE = "ROVARA_CORE_LESSONS";
 
@@ -70,6 +75,12 @@ export interface CoreLessonsOptions {
   companyId: OrgId;
   /** The switch (`readCoreLessonsSwitch`). Lessons are built only where it covers `companyId`. */
   lessonsSwitch: CoreSwitch;
+  /**
+   * The pilot list: companies whose projects have the weekly lessons summary ON until a project says otherwise. Absent: the companies `lessonsSwitch` names (`ROVARA_CORE_LESSONS=on:<ids>`), which is how an install
+   * lists its pilot companies today; `on` for every company names nobody, so no company is then a pilot. Cloud's own exempt list (`GATEWAY_ROVARA_AI_EXEMPT`) lives in the model gateway and is not visible here: a host that
+   * has a list passes it.
+   */
+  digestPilot?: ((companyId: OrgId) => boolean) | undefined;
   people: HostedLessonPeople;
   /** The person a code host account is linked to, for the review comments a task's pull requests got. Absent: the account's own name. */
   personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined>;
@@ -78,6 +89,11 @@ export interface CoreLessonsOptions {
    * cannot place (or one of another company) is nobody here, and an edit by it is not learned from.
    */
   identity?: Pick<IdentityProvider, "resolveExternalAccount"> | undefined;
+  /**
+   * The ticket source (L4-SRC-TK, weak): the trackers a company's tickets are read through, and who a tracker's own account is (the identity point's `resolveExternalAccount`; Linear's is the company's link rows).
+   * Absent: ticket comments are not read for this company. An account it cannot place (or one of another company) is nobody, and its comment is not learned from.
+   */
+  tickets?: { trackerFor(system: string): Tracker | undefined; resolveAccount(companyId: OrgId, account: ExternalAccountRef): Promise<{ companyId: string; personId: string } | undefined> } | undefined;
   /** The model-access port for learning calls (the gateway on the company's own account, with its learning cap). Absent: learning calls refuse and nothing is spent. */
   learning?: { model: PipelineModel; spend: LearningSpend } | undefined;
   /** How lessons are compared (an embedder and where vectors live). Absent: keywords and cited paths, the vectors beside the lessons. */
@@ -85,8 +101,14 @@ export interface CoreLessonsOptions {
   /** The lessons of another company, for a message of the shared reflection queue that names it. Undefined: lessons are off for that company (the message is removed). */
   hostFor: (companyId: string) => Promise<Pick<LessonsHost, "reflectOne"> | undefined>;
   edition?: Edition;
-  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places. Absent: one company, whose every tenant is. */
+  /** Where the knowledge briefing's measured facts and skill names come from (lead 4 L4-AK2b: the base's known-flaky tests, read from this company's own nightly baseline). Absent: the briefing carries lessons and the look-up only. */
+  knowledge?: KnowledgeSources | undefined;
+  /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places and the task's Slack thread. Absent: one company, whose every tenant is. */
   channelCompanyOf?: ChannelCompanyOf;
+  /** Whether a person is one the host serves now (owner decision 131's explicit-member rule), for the people whose replies in a task's Slack thread are read. Absent: every linked person. */
+  channelMemberRule?: ChannelMemberRule;
+  /** Sends the `thread_messages` command for a deployment whose Slack adapter is not in the registry (a signed webhook adapter). Absent: the registry's in-process `channel` adapter, and none means no Slack source. */
+  slackThreadCommand?: Parameters<typeof slackThreadSource>[0]["sendCommand"];
   now: () => number;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -139,6 +161,8 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
   // The model is gated on this company's switch as well as the install's: no learning call for a company the switch stopped covering.
   const model = options.learning === undefined ? undefined : gatedByLessonsSwitch(options.learning.model, enabled);
 
+  const blobs = registry.require("object-storage");
+  const readText = textReaderOf(blobs);
   const runtime = createLessonsRuntime({
     store: deps.store, companyId, now, log: (event, fields) => log(event, fields), audit: registry.require("audit-sink"), reader,
     repositoriesOf: async (workspaceId, project) => {
@@ -150,16 +174,36 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     projectRepoScopes: repositories.scopes(), learning: options.learningAdapter, edition: options.edition ?? "public",
     ...(model === undefined || options.learning === undefined ? {} : { model, spend: options.learning.spend }),
     hosted: { people: options.people, readTask: readOwnTask },
+    // "Would have applied to N tasks last month" (the weekly list's tie-break): the project's tasks of the last 30 days from its own load rows, each read from this company's own task record and plan, as the loader reads them.
+    recentTasks: cachedRecentTasks({
+      documents: deps.store, companyId, now,
+      ports: {
+        task: async (taskId) => { const task = await readTask(deps, taskId); return task === undefined || task.companyId !== companyId ? undefined : { project: task.project, files: (await taskPlanFacts((objectKey, max) => readText(objectKey, Math.min(max, RECENT_PLAN_BYTES_MAX)), task))?.files ?? [] }; },
+        repositories: async (project) => { const latest = await deps.projects.latest(project); return latest === undefined ? undefined : codeRepositoriesOf(latest.definition).map((repository) => repository.name); },
+      },
+    }),
   });
 
-  const blobs = registry.require("object-storage");
-  const readText = textReaderOf(blobs);
   const sources = createLocalLessonSources({
     flow: deps, companyId, ownerId: SYSTEM_ACTOR.id, repos: repositories, readObject: readText, now, log: (event, fields) => log(event, fields),
     hosted: { people: options.people, ...(options.personOfAccount === undefined ? {} : { personOfAccount: options.personOfAccount }) },
+    ...(options.tickets === undefined ? {} : {
+      tickets: {
+        trackerFor: (system: string) => options.tickets!.trackerFor(system), scope: { orgId: companyId },
+        async personOfAccount(tracker: string, tenant: string, accountId: string) {
+          const principal = await options.tickets!.resolveAccount(companyId, { provider: tracker, tenant, accountId }).catch(() => undefined);
+          if (principal === undefined || principal.companyId !== companyId) return undefined;
+          return (await options.people.resolveMember?.(companyId, principal.personId)) ?? principal.personId;
+        },
+        paused: (project: string) => ticketSourcePaused(runtime.store, { workspaceId: companyId, project }),
+      },
+    }),
+    // L4-SRC-SL: the task's own Slack thread, read once at task end. Only where the Slack adapter declares it can read a thread (`history`); everywhere else no span is made and nothing changes.
+    slack: slackThreadSource({ store: deps.store, companyId, registry, companyOf: options.channelCompanyOf, isMember: options.channelMemberRule, sendCommand: options.slackThreadCommand, now, lessonStore: () => runtime.store }),
   });
   const host = createLessonsHost({
     flow: deps, runtime, companyId, blobs, queues: registry.require("queue"), enabled, sources: { source: sources.source, rows: sources.rows },
+    ...(options.knowledge === undefined ? {} : { knowledge: options.knowledge }),
     visibility: async (project): Promise<RepositoryVisibility> => {
       const found = await repositories.ofProject(project);
       if (found.length === 0) return "unknown";
@@ -190,7 +234,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
     now, log,
   });
 
-  const milestones = createDocumentMilestones({ store: deps.store, now, log: (event, fields) => log(`milestones.${event}`, fields) });
+  const milestones = createDocumentMilestones({ store: deps.store, now, companyId, log: (event, fields) => log(`milestones.${event}`, fields) });
   milestones.register(host.milestone);
 
   async function projectNames(): Promise<string[]> {
@@ -234,9 +278,9 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
           try { await host.nightly(await projectNames()); } catch (error) { log("nightly_failed", { error: error instanceof Error ? error.name : "unknown" }); await releaseNightly(day); nightly = false; }
         }
       }
-      // The weekly lessons summary in the chats, for the projects that turned it on (off by default), in at most a quarter of the pass's time.
+      // The weekly lessons summary in the chats, for the projects that have it on (their own choice; else on for a pilot company, off for any other), in at most a quarter of the pass's time.
       const digests = await sendLessonDigests({
-        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, companyOf: options.channelCompanyOf, now,
+        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, pilot: digestPilotOf(options), companyOf: options.channelCompanyOf, now,
         log: (event, fields) => log(event, fields),
       }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.max(0, Math.min(Math.floor(budgetMs / 4), deadlineAt - now())) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
       const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {
@@ -286,7 +330,7 @@ export interface ErasePersonLessonsReport {
  */
 export async function erasePersonLessons(input: { store: DocumentStore; audit: AuditSink; companyId: OrgId; personId: string; now: () => number; vectors?: LessonVectors; log?: (entry: Record<string, unknown>) => void }): Promise<ErasePersonLessonsReport> {
   const { store, companyId, personId, now } = input;
-  const lessons = new DocumentLessonStore(store, now, (id) => id, () => undefined);
+  const lessons = new DocumentLessonStore(store, now, (id) => id, (event) => input.log?.({ component: "lessons-erase", event }));
   const deletion = lessonDeletionPort({ store: lessons, vectors: input.vectors ?? documentLessonVectors(store), audit: lessonAuditSink(input.audit, now, companyId), now, onGone: graduatedCleanup(store, now) });
   const projects = await companyProjects(store, companyId);
   let purged = 0;
@@ -312,6 +356,8 @@ export async function erasePersonLessons(input: { store: DocumentStore; audit: A
     // The weekly summary's "sent this week" row of the person.
     await removeAll(companyScoped(companyId, `LESSON_DIGEST#${project}`), (row) => row.sk !== `SENT#${personId}`);
   }
+  // The person's own "Don't learn from my Slack messages" row (one per person, in the company's partition, not under any project).
+  rows += await eraseSlackOptOut(store, companyId, personId);
   input.log?.({ component: "core-lessons", companyId, event: "person_erased", projects: projects.length, purged, scrubbed, rows });
   return { projects: projects.length, purged, scrubbed, rows };
 }

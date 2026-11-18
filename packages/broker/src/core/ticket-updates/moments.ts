@@ -20,13 +20,17 @@ export interface MomentTable {
    * counts. A failure is a failure of the best-effort write, which is logged and never thrown.
    */
   follows?: ((orgId: OrgId, sessionId: string) => Promise<boolean>) | undefined;
+  /** HW5: false = a ticket binding is no reason to write a moment (only `follows` is), for a host that wants the chat thread's moments and not the ticket's. Default true: a ticket counts, as before. */
+  ticketBindings?: boolean | undefined;
+  /** HW5: the company this table serves; a task of another company is never written for (defence in depth: the host's scan is already the company's). Absent: no check, as before. */
+  companyId?: OrgId | undefined;
 }
 
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
 const log = (table: MomentTable, event: string, fields: Record<string, unknown>): void => table.log?.(event, fields);
 
 async function followsTicket(table: MomentTable, orgId: OrgId, sessionId: string | undefined): Promise<boolean> {
-  if ((await sessionBindingsOf(table.store, orgId, sessionId)).some((binding) => binding.kind === "tracker_item")) return true;
+  if (table.ticketBindings !== false && (await sessionBindingsOf(table.store, orgId, sessionId)).some((binding) => binding.kind === "tracker_item")) return true;
   return sessionId !== undefined && table.follows !== undefined && (await table.follows(orgId, sessionId)) === true;
 }
 
@@ -55,6 +59,7 @@ export async function noteTicketPlanReady(table: MomentTable, taskId: string): P
     const task = await table.store.get(taskKey(taskId));
     const workflow = task?.["workflow"] as { stage?: unknown; state?: unknown; revision?: unknown; definitionVersion?: unknown } | undefined;
     const orgId = task?.["orgId"] ?? task?.["companyId"];
+    if (table.companyId !== undefined && orgId !== table.companyId) return;
     if (typeof orgId !== "string" || workflow?.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING" || typeof workflow.revision !== "number" || typeof workflow.definitionVersion !== "string" || task?.["closedAt"] !== undefined) return;
     if (!await followsTicket(table, orgId, typeof task?.["sessionId"] === "string" ? task["sessionId"] : undefined)) return;
     await writeMoment(table, { kind: "plan_ready", orgId: orgId, taskId, n: workflow.revision, text: "The plan is ready for review.", definitionVersion: workflow.definitionVersion });

@@ -4,8 +4,9 @@
 //   FADING    live lessons that fade within `FADE_WARN_DAYS` because they have not helped lately (the 90-day rule, `expiry.ts`).
 //
 // Rules:
-//   - Behind a per-project setting, OFF by default (`readDigestSetting`): a project that never chose it is told nothing. Behind the lessons switch (the caller runs this only for a company it covers) and the
-//     project's mode: Off and Collect send nothing.
+//   - Behind a per-project setting (`readDigestSetting`). A project that never chose follows its company's DEFAULT: ON for a company on the pilot list (`DigestNoticeDeps.pilot`; the host passes the companies the
+//     install's lessons switch names, `ROVARA_CORE_LESSONS=on:<ids>`), OFF for every other company. A project's own choice, on or off, always wins over the default: an admin turns the pilot default off with
+//     the same weekly-summary setting (`lesson.digest_switched`, audited). Behind the lessons switch (the caller runs this only for a company it covers) and the project's mode: Off and Collect send nothing.
 //   - Who: the directory's live list of the people who decide the project's lessons, read now (an incomplete answer is nobody, retried on a later pass). Each person's digest is built with THEIR identity, so a
 //     lesson from a source they cannot see is never named to them (`readVisible`, as the Lessons tab).
 //   - Where: only the chat places the person chose, on an adapter that may message first, whose tenant is this company's (`tenantIsCompanys`). Muted people and quiet hours hold it (quiet hours: until a later pass).
@@ -46,10 +47,34 @@ const TITLE_CHARS = 80;
 /** The week a time falls in: whole weeks since the first Monday after the epoch (weeks start on Monday 00:00 UTC; 1970-01-05 was a Monday). */
 export const digestWeekOf = (now: number): number => Math.floor((now - 4 * DAY) / WEEK);
 
-/** Whether the project's weekly summary is on. Absent or malformed: off. Throws when it cannot be read (`readDigestSetting` reads that as off; the API says it cannot read it). */
-export async function readDigestSettingStrict(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string): Promise<boolean> {
+/**
+ * What the project itself chose for its weekly summary: true or false, or undefined when it never chose. A stored row that is not shaped as a choice reads as OFF (chosen, fail closed).
+ * Throws when it cannot be read.
+ */
+export async function readDigestChoiceStrict(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string): Promise<boolean | undefined> {
   const row = await documents.get({ pk: companyScoped(companyId, `LESSON_DIGEST#${project}`), sk: "SETTING" });
-  return row?.["entityType"] === "LESSON_DIGEST" && row["on"] === true;
+  if (row === undefined) return undefined;
+  return row["entityType"] === "LESSON_DIGEST" && row["on"] === true;
+}
+
+/** Whether the project's weekly summary was turned on by the project itself. Absent or malformed: off. Throws when it cannot be read (`readDigestSetting` reads that as off; the API says it cannot read it). */
+export async function readDigestSettingStrict(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string): Promise<boolean> {
+  return (await readDigestChoiceStrict(documents, companyId, project)) === true;
+}
+
+/** Whether a company is on the pilot list (the company default of the weekly summary is on). A reader that throws, or says anything but true, is "not a pilot company" (the summary stays off by default). */
+export type DigestPilot = (companyId: OrgId) => boolean;
+const isPilot = (pilot: DigestPilot | undefined, companyId: OrgId): boolean => { try { return pilot?.(companyId) === true; } catch { return false; } };
+
+export type DigestSource = "chosen" | "pilot_default" | "default";
+/**
+ * Whether the project's weekly summary is on NOW and why: its own choice when it made one; else the company default (on for a pilot company, off for every other). Throws when the choice cannot be read
+ * (the sender reads that as off, the API says it cannot read it).
+ */
+export async function resolveDigestSettingStrict(documents: Pick<DocumentStore, "get">, companyId: OrgId, project: string, pilot: DigestPilot | undefined): Promise<{ on: boolean; source: DigestSource }> {
+  const choice = await readDigestChoiceStrict(documents, companyId, project);
+  if (choice !== undefined) return { on: choice, source: "chosen" };
+  return isPilot(pilot, companyId) ? { on: true, source: "pilot_default" } : { on: false, source: "default" };
 }
 
 /** Whether the project's weekly summary is on. Absent, malformed or unreadable: off. */
@@ -69,6 +94,8 @@ export interface DigestNoticeDeps {
   directory: ApproverDirectory;
   access: AccessCheckPort;
   settings: LearningSettingsReader;
+  /** The pilot list: a project of a company it names, which never chose, has the summary on. Absent: no company is a pilot (off unless the project chose). */
+  pilot?: DigestPilot | undefined;
   /** Where the channel adapters are (`registry.get("channel", id)`). */
   registry: Pick<RegistryView, "get">;
   /** Which company a chat tenant belongs to (owner decision 131); absent: one company, whose every tenant is. */
@@ -124,7 +151,9 @@ export async function sendLessonDigests(deps: DigestNoticeDeps, projects: readon
   for (const project of projects.slice(0, DIGEST_PROJECTS_SCAN_MAX)) {
     if (!timeLeft() || worked >= DIGEST_PROJECTS_PER_PASS) break;
     try {
-      if (!(await readDigestSetting(documents, companyId, project))) continue;
+      // The project's own choice, else the company's default (a pilot company: on). Unreadable: off, retried on a later pass.
+      const effective = await resolveDigestSettingStrict(documents, companyId, project, deps.pilot).catch(() => ({ on: false }));
+      if (!effective.on) continue;
       const resolved = await resolveLearning(deps.settings, companyId, project);
       if (!modeAllows(resolved.mode, "reflect")) continue;
       const now = deps.now();

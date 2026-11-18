@@ -244,16 +244,58 @@ describe("graduating over the API", () => {
     expect(await call(target, "a-admin", "POST", `${GP}/les_tier2001/graduate`, { target: "check" })).toMatchObject({ ok: true, body: { state: "done" } });
   });
 
-  it("the skill target answers 'not available' without a skills library and drafts through one when the deployment has it", async () => {
+  it("the skill target drafts through the company's own skills library (AK3) by default, a deployment can hand another, and a lesson that is not proven is refused", async () => {
     const w = await setUp();
-    await proven(w, A, "les_proc0001", { type: "procedure", body: "When adding a queue: 1. config 2. IAM" });
-    expect(await call(api(w).api, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill" })).toMatchObject({ ok: false, code: "FORBIDDEN", message: "Skills are not available for this project yet." });
+    await proven(w, A, "les_proc0001", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth." });
+    const { api: target } = api(w);
+    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill", name: "add-queue" })).toMatchObject({ ok: true, body: { state: "drafted", name: "add-queue", version: 1 } });
+    expect(await call(target, "a-maint", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { skills: [{ name: "add-queue", approvals: 0 }] } });
+    // Another deployment's library, when handed one, is the one asked.
     const seen: unknown[] = [];
-    const { api: withSkills } = api(w, { skillsOf: (companyId) => (companyId === A ? { draft: async (_key, input) => { seen.push(input); return { ok: true as const, name: "add-queue", version: 1 }; } } : undefined) });
-    expect(await call(withSkills, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill", name: "add-queue" })).toMatchObject({ ok: true, body: { state: "drafted", name: "add-queue", version: 1 } });
-    expect(seen).toEqual([{ lessonId: "les_proc0001", by: "a-maint", name: "add-queue" }]);
+    await proven(w, A, "les_proc0002", { type: "procedure", body: "When adding a queue: 1. config 2. IAM" });
+    const { api: withSkills } = api(w, { skillsOf: (companyId) => (companyId === A ? { draft: async (_key, input) => { seen.push(input); return { ok: true as const, name: "other-queue", version: 1 }; } } : undefined) });
+    expect(await call(withSkills, "a-maint", "POST", `${GP}/les_proc0002/graduate`, { target: "skill", name: "other-queue" })).toMatchObject({ ok: true, body: { state: "drafted", name: "other-queue", version: 1 } });
+    expect(seen).toEqual([{ lessonId: "les_proc0002", by: "a-maint", name: "other-queue" }]);
   });
-});
+
+  it("the skills door of the lessons API reads the same band, fresh: a lesson with a mark against it is refused as not proven", async () => {
+    const w = await setUp();
+    await proven(w, A, "les_proc0003", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue. 2. Register the handler. 3. Add an alarm." });
+    const { api: target } = api(w);
+    await w.lessons.get(A)!.runtime.evidence.note({ workspaceId: A, project: "payments", lessonId: "les_proc0003", kind: "against", weight: 1, at: w.world.clock.now, id: "mark-1" });
+    expect(await call(target, "a-maint", "POST", `${P}/lessons/les_proc0003/skill`, {})).toMatchObject({ ok: false, code: "FORBIDDEN", message: "That lesson has not proved itself yet, so it cannot become a skill." });
+    expect(await call(target, "a-maint", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+  });
+
+  it("the whole path over the API: the card, the draft, two people approve, and the lesson is retired with became -> skill; the card is gone", async () => {
+    const w = await setUp();
+    await proven(w, A, "les_proc0001", { type: "procedure", title: "Add a queue handler", body: "When adding a queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth." });
+    const { api: target } = api(w);
+    expect(await call(target, "a-maint", "GET", `${GP}/graduation`)).toMatchObject({ ok: true, body: { card: { lessonId: "les_proc0001", target: "skill" } } });
+    expect(await call(target, "a-maint", "POST", `${GP}/les_proc0001/graduate`, { target: "skill" })).toMatchObject({ ok: true, body: { state: "drafted", name: "add-a-queue-handler" } });
+    expect(await call(target, "a-maint", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: true, body: { approvals: 1, live: false } });
+    expect(await call(target, "a-maint", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    const store = w.lessons.get(A)!.runtime.store;
+    expect(await store.get({ workspaceId: A, project: "payments" }, "les_proc0001")).toMatchObject({ status: "active" });
+    expect(await call(target, "a-admin", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: true, body: { approvals: 2, live: true } });
+    expect(await store.get({ workspaceId: A, project: "payments" }, "les_proc0001")).toMatchObject({ status: "retired", became: { kind: "skill", ref: "add-a-queue-handler" } });
+    expect((await call(target, "a-maint", "GET", `${GP}/graduation`) as { body: { card?: unknown } }).body.card).toBeUndefined();
+    // Company B has nothing of it.
+    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+  });
+
+  it("the page reads the shared signals, but a decision reads them fresh: a mark made after the card was shown stops the graduation, and an old one does not count", async () => {
+    const w = await setUp();
+    await proven(w, A, "les_conv0001");
+    const { api: target } = api(w);
+    expect(await call(target, "a-maint", "GET", `${GP}/graduation`)).toMatchObject({ ok: true, body: { card: { lessonId: "les_conv0001" } } });
+    await w.lessons.get(A)!.runtime.evidence.note({ workspaceId: A, project: "payments", lessonId: "les_conv0001", kind: "against", weight: 1, at: w.world.clock.now, id: "mark-late" });
+    // The cached page may still show the card; the decision does not go through.
+    expect(await call(target, "a-maint", "POST", `${GP}/les_conv0001/graduate`, { target: "rule" })).toMatchObject({ ok: false, code: "FORBIDDEN", message: "That lesson has not proved itself yet." });
+    expect(await rulesOf(w, A)).toEqual([]);
+  });
+
+})
 
 describe("team rules over the API", () => {
   it("people who decide see the rules in use and retire one at once (audited first); a contributor sees none and cannot retire", async () => {

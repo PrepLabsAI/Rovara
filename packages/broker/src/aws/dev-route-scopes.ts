@@ -130,6 +130,7 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "GET", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/retire-requests", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/measure", requires: "full" },
+  { method: "GET", path: "/v1/dev/projects/{project}/lessons/tuning", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "PUT", path: "/v1/dev/projects/{project}/lessons/mode", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/mode/trial-offer", requires: "full" },
@@ -143,6 +144,8 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/reject", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/retire-request", requires: "full" },
+  // L4-LP12b: the answer to the weekly list's "Keep it?" card (a lesson no task had needed for a long time); the people who decide lessons, read live; full access only like the rows around it.
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/keep", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/decisions", requires: "full" },
   // Lessons phase 4 (core-host/lessons-graduation.ts): this week's cards, making a proven lesson permanent, "Not now", the third conflict answer, the Tidy card, and the draft check tasks. Full access only; live membership,
   // the project's roster and the approver directory still decide, and a script token is refused.
@@ -155,15 +158,26 @@ export const DEV_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/started", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/check-drafts/{draftId}/dismiss", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/lessons/rules/{ruleId}/retire", requires: "full" },
+  // L4-AK3: Rovara skills (core-host/lessons-api.ts): list, "Make this a skill?", edit, the two approvals and retire. Full access only; live membership, the project's roster and the approver directory still decide.
+  { method: "GET", path: "/v1/dev/projects/{project}/skills", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/lessons/{lessonId}/skill", requires: "full" },
+  { method: "PUT", path: "/v1/dev/projects/{project}/skills/{skill}", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/approve", requires: "full" },
+  { method: "POST", path: "/v1/dev/projects/{project}/skills/{skill}/retire", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful", requires: "full" },
   // L4-AK1H: team knowledge for a tool outside Rovara (core-host/knowledge-api.ts): a signed-in person's own token (full access, like the rows above) or a script token with the Team knowledge permission naming the project
   // (checked by the knowledge API; no sign-in client scope reaches it). At most 10 units and 2 KB an answer, 300 reads a day a person, no bulk mode.
   { method: "POST", path: "/v1/dev/projects/{project}/lessons", requires: "full" },
   { method: "POST", path: "/v1/dev/projects/{project}/knowledge/areas", requires: "full" },
+  // L4-AK3H: a team SUGGESTION from a tool outside Rovara (`team_propose`; core-host/knowledge-api.ts), the same two callers and the same Team knowledge permission. A weak-source lesson that waits for a second sighting and a person; at most 10 a person a UTC day.
+  { method: "POST", path: "/v1/dev/projects/{project}/knowledge/propose", requires: "full" },
   // The Home number "Corrections you had to repeat" (core-host/lessons-repeats-api.ts): one project (its roster), or the company (owners and admins). Full access only, live membership.
   { method: "GET", path: "/v1/dev/projects/{project}/lessons/repeats", requires: "full" },
   { method: "GET", path: "/v1/dev/lessons/repeats", requires: "full" },
+  // L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (core-host/lessons-slack-switch-api.ts). Full access only; the person is the signed-in caller, never a path or body.
+  { method: "GET", path: "/v1/dev/me/lessons-slack", requires: "full" },
+  { method: "PUT", path: "/v1/dev/me/lessons-slack", requires: "full" },
   // Lane W part 4: the company administrator's routes; full access only (DEC ANSWER-4), then a live admin or owner membership, and a fresh step-up to change anyone.
   { method: "GET", path: "/v1/dev/company/members", requires: "full" },
   { method: "GET", path: "/v1/dev/company/members/{personId}/removal-preview", requires: "full" },
@@ -337,6 +351,13 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // Lead 4 N1: the nightly upkeep switch (core-host/upkeep-routes.ts): full access only, then any live role on the project reads it; a live company owner or admin, or the project's administrator, switches it.
   { method: "GET", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/upkeep", requires: "full" },
+  // L4-EVCI2: the setup card's "Eval check from your CI" (core-host/eval-check-routes.ts): full access only, then any live role on the project reads the confirmed check; a live company owner or admin, or the project's administrator, reads the proposals and confirms one (or none).
+  { method: "GET", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
+  { method: "PUT", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
+  // Audit gap 11b: a project's ticket-sharing settings (core-host/ticket-updates-routes.ts, the laptop's local/app/intake.ts route): full access only, then any live role on the project reads; a live company
+  // owner or admin, or the project's administrator, changes them.
+  { method: "GET", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
+  { method: "PUT", path: "/v1/app/projects/{project}/intake/updates", requires: "full" },
   // Lead 4 PCF: the plan card's "Change" lists the open features to pick from; the same people as the filing above (the task's starter, a maintainer, an owner or admin).
   { method: "GET", path: "/v1/app/tasks/{taskId}/feature-choices", requires: "full" },
   // L4-P3: the company's one control over Rovara's automatic runs (core-host/system-runs-routes.ts): full access only, then only a live company owner or admin reads it, allows it (a fresh step-up) or withdraws it.
@@ -347,6 +368,11 @@ export const APP_ROUTES: readonly DevRoute[] = [
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-approve", requires: "full" },
   // L4-EVW2 (DEC 254zzz20 D2): "Try again" for Rovara's proposed wrapper file (a pull request on the repository that a person merges; Rovara never merges it): full access only, then the live owner/admin/maintainer rule.
   { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-wrapper", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-decide", requires: "full" },
+  { method: "POST", path: "/v1/app/projects/{project}/setup-agent/eval-health", requires: "full" },
+  // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
+  // web app's own client, a fresh step-up and the task's owner. Additive: no existing row changed.
+  { method: "POST", path: "/v1/app/tasks/{taskId}/review-findings", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a fresh step-up to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },

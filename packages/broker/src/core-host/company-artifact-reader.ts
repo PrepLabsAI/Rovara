@@ -21,6 +21,8 @@ export interface CompanyArtifactReaderOptions {
   /** The company's own store (the registry's `storage`): where the workspace record that binds a key to this company is read. */
   store: Pick<DocumentStore, "get">;
   companyId: OrgId;
+  /** The most bytes one read may ask for, whatever the caller says. Absent: `COMPANY_ARTIFACT_READ_MAX_BYTES`. The evidence store raises it to what its own readers ask for (the raw file's 2 MiB cap, the pack's 4 MiB). */
+  maxReadBytes?: number;
   /** Told, best effort, why a read gave nothing. Fixed words only; a fault in it never reaches the caller. */
   refused?: (reason: ArtifactReadRefusal) => void;
 }
@@ -28,7 +30,7 @@ export interface CompanyArtifactReaderOptions {
 /** A workspace id or owner key as the engine writes them: letters, digits, `_` and `-`, up to 200. */
 const COMPONENT = /^[A-Za-z0-9_-]{1,200}$/u;
 
-type KeyScope = { form: "owner"; ownerKey: string; workspaceId: string } | { form: "operation"; workspaceId: string; operationId: string; name: string };
+export type KeyScope = { form: "owner"; ownerKey: string; workspaceId: string } | { form: "operation"; workspaceId: string; operationId: string; name: string };
 
 /** Which workspace (and owner) a key says it belongs to, or undefined when it is not one of the flow's own shapes. Pure. */
 export function artifactKeyScopeOf(objectKey: unknown): KeyScope | undefined {
@@ -45,12 +47,29 @@ export function artifactKeyScopeOf(objectKey: unknown): KeyScope | undefined {
   return undefined;
 }
 
+/** The workspace a key's scope names, held to THIS company (a legacy record counts only for the install's own company) and, for an owner-keyed form, to the owner that workspace was started for; otherwise the fixed reason it is not. */
+export async function workspaceHoldingKey(options: Pick<CompanyArtifactReaderOptions, "store" | "companyId">, scope: KeyScope): Promise<NonNullable<Awaited<ReturnType<typeof locateWorkspace>>> | ArtifactReadRefusal> {
+  let workspace: Awaited<ReturnType<typeof locateWorkspace>>;
+  try {
+    // Read from THIS company's own partition (a workspace of another company is not found here, and a legacy workspace is only the install's own company's).
+    workspace = await locateWorkspace({ store: options.store, companyId: options.companyId }, scope.workspaceId);
+  } catch {
+    return "storage_unavailable";
+  }
+  // `locateWorkspace` has held the record to THIS company; the record must also be the workspace the key names.
+  if (workspace === undefined || workspace.workspace["id"] !== scope.workspaceId) return "workspace_not_company";
+  if (scope.form === "owner" && workspace.workspace["ownerKey"] !== scope.ownerKey) return "owner_mismatch";
+  return workspace;
+}
+
 /**
  * The flow's `artifacts` reader for one company. Fails closed everywhere: a request that is not well formed, a key outside the company's own workspaces, an owner that is not the workspace's,
  * a store that cannot answer, an object that is missing, unreadable or bigger than the (bounded) limit all give `undefined`. It never throws and never answers from a key it did not check.
  */
 export function createCompanyArtifactReader(options: CompanyArtifactReaderOptions): ArtifactReader {
   const { blobs, store, companyId } = options;
+  // A cap that is not a whole positive number of bytes is no cap: the default stands.
+  const cap = Number.isSafeInteger(options.maxReadBytes) && options.maxReadBytes! > 0 ? options.maxReadBytes! : COMPANY_ARTIFACT_READ_MAX_BYTES;
   const refuse = (reason: ArtifactReadRefusal): undefined => {
     try { options.refused?.(reason); } catch { /* a log never changes an answer */ }
     return undefined;
@@ -58,19 +77,12 @@ export function createCompanyArtifactReader(options: CompanyArtifactReaderOption
   return {
     async get(objectKey, maxBytes) {
       if (typeof maxBytes !== "number" || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) return refuse("bad_request");
-      const limit = Math.min(maxBytes, COMPANY_ARTIFACT_READ_MAX_BYTES);
+      const limit = Math.min(maxBytes, cap);
       const scope = artifactKeyScopeOf(objectKey);
       if (scope === undefined) return refuse("key_not_task_document");
-      let workspace: Awaited<ReturnType<typeof locateWorkspace>>;
-      try {
-        // Read from THIS company's own partition (a workspace of another company is not found here, and a legacy workspace is only the install's own company's).
-        workspace = await locateWorkspace({ store, companyId }, scope.workspaceId);
-      } catch {
-        return refuse("storage_unavailable");
-      }
-      // `locateWorkspace` has held the record to THIS company (a legacy record counts only for the install's own company); the record must also be the workspace the key names.
-      if (workspace === undefined || workspace.workspace["id"] !== scope.workspaceId) return refuse("workspace_not_company");
-      if (scope.form === "owner" && workspace.workspace["ownerKey"] !== scope.ownerKey) return refuse("owner_mismatch");
+      const held = await workspaceHoldingKey({ store, companyId }, scope);
+      if (typeof held === "string") return refuse(held);
+      const workspace = held;
       if (scope.form === "operation") {
         // S3 keys carry no company, so a callback-shaped key is also held to THIS company's own record of the artifact: the row of that operation and name must exist in this workspace and name exactly this key.
         // (A key that merely looks right, whatever its workspace id, is never read.)

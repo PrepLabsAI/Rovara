@@ -7,20 +7,23 @@
 // - A reviewer's comment on a pull request is a member's only when the code host says its author is a person with write or admin standing in that repository; every other comment keeps the class `outsider`, which the reflector
 // removes before any model call. A comment's place is the repository's, and its readers are that repository's readers (a restricted audience with no names, which the project's own repositories turn into "the project").
 // - A host that cannot list the comments, or whose standing cannot be read, gives no comment span. Nothing here guesses.
-import { OrgIdSchema, type ChangeRequestRef, type CodeHost, type HostAccount, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
+// - Ticket comments (L4-SRC-TK, weak, only with `tickets`): at the end of a task that a TICKET started (intake's strict rule), the comments on that one ticket, by the checks of `lessons/ticket-comments.ts`. Never for a paused source.
+import { OrgIdSchema, type ChangeRequestRef, type CodeHost, type HostAccount, type HostScope, type OrgId, type Tracker, type TrackerItemRef, type WorkflowSnapshot } from "@agentx/contracts";
 import { WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON, isRovareReplyComment } from "@agentx/contracts";
 import { PAGE_CHANGES_DEFAULT_REASON } from "../../developer/gate-default-reasons.js";
 import { taskOwnerKey } from "../../developer/task-records.js";
 import { providerOf } from "../../plugins/routing.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
-import { changeRequestRef } from "../../core/merge/host-port.js";
+import { changeRequestRef, readChangeRequestFiles } from "../../core/merge/host-port.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readOwnerFindingNotes } from "../../core/task-flow/owner-note.js";
 import { readTask } from "../../core/task-flow/reads.js";
+import { originTicketOf } from "../../core/ticket-updates/handler.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { looksLikeCorrection } from "../../lessons/correction-filter.js";
 import { isEvalRunMark } from "../../lessons/eval-run.js";
 import { isHumanSendBack } from "../../lessons/human-send-backs.js";
+import { ticketCommentSpans, type TicketCommentRow } from "../../lessons/ticket-comments.js";
 import { cleanForLearning } from "../../lessons/guards.js";
 import type { EvidenceSpan } from "../../lessons/reflect-input.js";
 import type { OutcomeRowReader, RevertedTasksReader } from "../../lessons/task-outcome-rows.js";
@@ -30,6 +33,7 @@ import type { Audience, TrustClass } from "../../lessons/types.js";
 import type { LessonRepositories, LessonRepository } from "./lessons-repos.js";
 import type { HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { queryAll } from "@agentx/contracts";
+import { slackReplySpans, type SlackLessonSourceOptions } from "../../lessons/slack-source.js";
 
 const PLAN_MAX_BYTES = 70_000;
 const MAX_FINDINGS = 20;
@@ -43,6 +47,10 @@ const MAX_PLAN_COMMENTS = 10;
  */
 const CODE_GATE_REASONS: ReadonlySet<string> = new Set(["Changes requested.", PAGE_CHANGES_DEFAULT_REASON, WORKFLOW_REVISE_PLAN_DECISION_REASON, WORKFLOW_REDIRECT_PLAN_DECISION_REASON, WORKFLOW_SPEC_REPLAN_DECISION_REASON]);
 const MAX_PULL_REQUESTS = 5;
+/** ONE total limit on the changed file names a merged task's credit reads (every pull request together, a renamed file under both names); a bigger change leaves the list "not known". */
+export const TOUCHED_PATHS_MAX = 2_000;
+/** ONE total time for reading every merged pull request's file list. */
+export const TOUCHED_READ_MS = 15_000;
 const MAX_PULL_REQUEST_COMMENTS = 40;
 const COMMENT_PATH_MAX = 200;
 /** A findings answer's notes, joined, are read up to this many characters (one total limit; each note is already the person's, redacted at write). */
@@ -57,6 +65,34 @@ function lifetimeOf(task: TaskRecord): { from: number; to?: number } | undefined
   if (!Number.isFinite(from)) return undefined;
   const to = task.closedAt === undefined ? undefined : Date.parse(task.closedAt);
   return to === undefined || !Number.isFinite(to) ? { from } : { from, to };
+}
+
+/** The most pages of an issue's comments one task end reads, and the longest the whole read may take. A ticket with more is not read at all (never a partial answer). */
+const TICKET_PAGES_MAX = 5;
+const TICKET_READ_MS = 20_000;
+
+/**
+ * What the ticket source needs of an install (L4-SRC-TK). `trackerFor` is the tracker registered under a system's name (the one intake and the ticket thread use); `personOfAccount` is the identity port's answer for a tracker's
+ * own account id (the lessons' developer id of the person it is, undefined for anyone it cannot place, another company's person included); `paused` is the project's Pause of this source, read live (a read that fails answers true).
+ */
+export interface LessonTicketWiring {
+  trackerFor(system: string): Tracker | undefined;
+  scope: HostScope;
+  personOfAccount(tracker: string, tenant: string, accountId: string): Promise<string | undefined>;
+  paused(project: string): Promise<boolean>;
+}
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timeout")), ms);
+    work.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error instanceof Error ? error : new Error("failed")); });
+  });
+}
+
+/** Jira accounts are per site: its host is the account's tenant. Any other tracker has none. */
+function tenantOf(tracker: string, url: string): string {
+  if (tracker !== "jira") return "";
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ""; }
 }
 
 const present = (value: string | undefined): value is string => value !== undefined && value.trim() !== "";
@@ -94,12 +130,19 @@ export interface LocalSubjectSourceOptions {
   readObject?: ((objectKey: string, maxBytes: number) => Promise<string | undefined>) | undefined;
   now: () => number;
   log?: ((event: string, fields: Record<string, string | number>) => void) | undefined;
+  /** The ticket source (weak). Absent: ticket comments are not read. */
+  tickets?: LessonTicketWiring | undefined;
   /**
    * An install of many people (the core engine on a deployed install). Each person's words are THEIRS: the request is the task's person's, a send-back's reason and a close reason are the deciding person's,
    * and each person's class is read NOW: a person on the project's roster is a member, anyone else an outsider (removed before any model call). An erased person's words are dropped, and a task whose person
    * is erased (or whose standing cannot be read) teaches nothing. A code host account is the person the port links it to, or a host account name. `ownerId` is then unused. Any read that fails throws.
    */
   hosted?: { people: HostedLessonPeople; personOfAccount?: (companyId: OrgId, provider: string, login: string) => Promise<string | undefined> } | undefined;
+  /**
+   * The task's own Slack thread as a source (L4-SRC-SL, `lessons/slack-source.ts`): the reader of the thread, the person's opt-out switch and the project's pause, read NOW at each task end. Absent: no Slack span, and the
+   * source is exactly what it was. The person's standing is this source's own (`standingOf` below), so the rules a hosted install and a laptop follow are the ones for every other person's words.
+   */
+  slack?: Pick<SlackLessonSourceOptions, "reader" | "optedOut" | "paused"> | undefined;
 }
 
 export interface LocalLessonSources { source: TaskSubjectSource; rows: OutcomeRowReader; reverts: RevertedTasksReader }
@@ -205,6 +248,91 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
     return spans;
   }
 
+  /**
+   * The files the task's merged pull requests changed, as the code host lists them (a renamed file under both names), and the project's names of the repositories they are in: for the area overlap of a clean merge's credit
+   * (`lessons/credit.ts`). Only a LIST THAT IS WHOLE is given: every pull request of the task must be merged or closed (one still open, or whose state is not known, may be part of the change), at most `MAX_PULL_REQUESTS`
+   * of them, each listed to its last page, within `TOUCHED_PATHS_MAX` names and `TOUCHED_READ_MS`. Anything else (a host that cannot list, a rate limit, a repository that cannot be placed, a cut list) is undefined, which
+   * credits exactly as before this read existed. The repositories are this company's own (`options.repos` is built for it) and the host is called in the company's own scope.
+   */
+  async function touchedByMerge(task: TaskRecord, workflow: WorkflowSnapshot | undefined): Promise<{ paths: string[]; repos: string[] } | undefined> {
+    const pullRequests = workflow?.pullRequests ?? [];
+    const merged = pullRequests.filter((pullRequest) => pullRequest.state === "MERGED");
+    if (merged.length === 0 || merged.length > MAX_PULL_REQUESTS || merged.length !== pullRequests.filter((pullRequest) => pullRequest.state !== "CLOSED").length) return undefined;
+    const stopAt = Date.now() + TOUCHED_READ_MS;
+    const beforeRequest = (): void => { if (Date.now() >= stopAt) throw new Error("touched paths: out of time"); };
+    const paths = new Set<string>();
+    const repos = new Set<string>();
+    try {
+      for (const pullRequest of merged) {
+        const repo = await options.repos.ofTask(task.project, task.startingRevision, pullRequest.repositoryId);
+        if (repo === undefined) return undefined;
+        const read = await readChangeRequestFiles(repo.codeHost, changeRequestRef(repo.url, pullRequest.number), repo.scope, beforeRequest);
+        if (!read.complete) return undefined;
+        for (const file of read.files) {
+          for (const path of [file.path, ...(file.previousPath === undefined ? [] : [file.previousPath])]) paths.add(path.replace(/^(?:\.\/|\/)+/u, ""));
+          if (paths.size > TOUCHED_PATHS_MAX) return undefined;
+        }
+        repos.add(pullRequest.repositoryId);
+      }
+    } catch { return undefined; }
+    return { paths: [...paths], repos: [...repos] };
+  }
+
+  /** The answer of `work`, or undefined when it fails or `ms` pass (a host that hangs is not waited for: the file list is then "not known"). */
+  const within = <T>(work: Promise<T | undefined>, ms: number): Promise<T | undefined> => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    timer.unref?.();
+    work.then((value) => { clearTimeout(timer); resolve(value); }, () => { clearTimeout(timer); resolve(undefined); });
+  });
+
+  /**
+   * The comments on the ticket that STARTED this task, as spans (see the top of the file). Only a task that ended; only the ticket intake started THIS task from (`originTicketOf` with `strict`); never a paused source; only
+   * comments created after the task started and before it ended. A tracker with no `comments`, a ticket with more comments than one read reaches, a read that fails or takes too long: no spans (never a partial answer, never a throw).
+   */
+  async function ticketComments(task: TaskRecord): Promise<EvidenceSpan[]> {
+    const tickets = options.tickets;
+    if (tickets === undefined) return [];
+    const skip = (code: string): EvidenceSpan[] => { options.log?.("lessons.ticket_comments_skipped", { code }); return []; };
+    try {
+      if (await tickets.paused(task.project)) return skip("paused");
+      const sessionId = (task as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string") return [];
+      const origin = await originTicketOf({ store: flow.store, now: options.now }, { orgId: options.companyId, project: task.project, taskId: task.taskId, sessionId }, { strict: true });
+      if (origin === undefined) return [];
+      // Without the ticket's own link the workspace (Linear) or site cannot be told, and a key repeats across workspaces: nothing is read.
+      if (origin.url === "") return skip("no_url");
+      const tracker = tickets.trackerFor(origin.tracker);
+      if (tracker?.comments === undefined) return skip("no_read");
+      const startedAt = Date.parse(task.createdAt);
+      const ended = [task.releasedAt, task.closedAt].flatMap((at) => (typeof at === "string" && Number.isFinite(Date.parse(at)) ? [Date.parse(at)] : []));
+      const endedAt = Math.min(options.now(), ...ended);
+      if (!Number.isFinite(startedAt) || !(endedAt > startedAt)) return [];
+      const ref = { tracker: origin.tracker, id: origin.id, ...(origin.url === "" ? {} : { url: origin.url }) } as TrackerItemRef;
+      const rows: TicketCommentRow[] = [];
+      const progress: { next: number | undefined } = { next: 1 };
+      const stop = { done: false };
+      await withTimeout((async () => {
+        for (let read = 0; progress.next !== undefined && read < TICKET_PAGES_MAX && !stop.done; read += 1) {
+          const got = await tracker.comments!(ref, { since: new Date(startedAt).toISOString(), page: progress.next }, tickets.scope);
+          for (const comment of got.comments) {
+            // A comment the adapter says is on another item is not this ticket's.
+            if (comment.subject.kind !== "item" || comment.subject.ref.tracker !== origin.tracker || comment.subject.ref.id.toLowerCase() !== origin.id.toLowerCase()) continue;
+            rows.push({ id: comment.id, ...(comment.author.hostUserId === undefined ? {} : { accountId: comment.author.hostUserId }), isBot: comment.author.isBot, body: comment.body, createdAt: comment.createdAt, updatedAt: comment.updatedAt });
+          }
+          progress.next = got.nextPage;
+        }
+      })(), TICKET_READ_MS).finally(() => { stop.done = true; });
+      // More comments than one read reaches: not read at all (a partial answer is no answer).
+      if (progress.next !== undefined) return skip("too_many");
+      const tenant = tenantOf(origin.tracker, origin.url);
+      return await ticketCommentSpans({
+        tracker: origin.tracker, ticket: origin.id, project: task.project, startedAt, endedAt, rows,
+        personOf: (accountId) => tickets.personOfAccount(origin.tracker, tenant, accountId),
+        standingOf: (person) => standingOf(person, task.project),
+      });
+    } catch { return skip("failed"); }
+  }
+
   const source: TaskSubjectSource = {
     async projectOf(input) {
       const task = await readTask(flow, input.taskId);
@@ -269,6 +397,14 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         }
       }
 
+      // L4-SRC-TK: only a task that ENDED teaches from its ticket's comments (a send-back reflection of an open task reads none), and never for the human-edit job.
+      if (input.context !== "human_edit" && outcomeOf(workflow) !== undefined) spans.push(...(await ticketComments(task)));
+
+      // The task's own Slack thread, read once now (never when a human edit's reflection is the one asking: it wants the task's own facts only). Every rule is in `slackReplySpans`.
+      if (options.slack !== undefined && input.context !== "human_edit" && input.withoutSlack !== true) {
+        spans.push(...(await slackReplySpans({ ...options.slack, standingOf: (person, forProject) => (hosted === undefined && person !== ownerId ? Promise.resolve(undefined) : standingOf(person, forProject)), now: options.now, log: options.log }, { companyId: options.companyId, project, taskId: task.taskId })));
+      }
+
       const outcome = outcomeOf(workflow);
       const links = (workflow?.pullRequests ?? []).map((pullRequest) => pullRequest.url).slice(0, 32);
       const sendBackRequestIds = skip.has("send_back") ? [] : (workflow?.decisions ?? []).filter(isHumanSendBack).map((decision) => decision.requestId).slice(0, MAX_SEND_BACK_IDS);
@@ -277,6 +413,8 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
         const merged = (workflow?.pullRequests ?? []).find((pullRequest) => pullRequest.repositoryId === base.repository && pullRequest.state === "MERGED");
         mergedCommit = merged?.headSha;
       }
+      // The merged change's own file list, for the credit of a clean merge (not for a human edit's read, and not for a task that did not merge).
+      const touched = outcome === "merged" && input.context !== "human_edit" ? await within(touchedByMerge(task, workflow), TOUCHED_READ_MS) : undefined;
       return {
         facts: {
           workspaceId, project, taskId: task.taskId, repositories,
@@ -289,7 +427,7 @@ export function createLocalLessonSources(options: LocalSubjectSourceOptions): Lo
             audience: { kind: "project" }, sharedTask: true, spans,
           },
         },
-        sendBackRequestIds,
+        sendBackRequestIds, ...(touched === undefined ? {} : { touchedPaths: touched.paths, touchedRepos: touched.repos }),
         // When the task was alive: a kind stopped at any time during it is not read after a resume (`lessons/paused-kinds.ts`).
         ...(lifetimeOf(task) === undefined ? {} : { lifetime: lifetimeOf(task)! }),
       };

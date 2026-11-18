@@ -17,6 +17,8 @@ import { makeKey, signerOf } from "../unit/policy-hook-fixture.js";
 
 const adapters = vi.hoisted(() => ({ modules: [] as unknown[] }));
 vi.mock("../../packages/broker/src/core-host/code-modules.js", async (original) => ({ ...await original<object>(), codeAdapterModules: () => adapters.modules }));
+// Batch b18 (#1041 HW3c): no company rules service on this install (the company-instructions point stays empty, as before #1041); this file is not about company rules.
+vi.mock("../../packages/broker/src/core-host/company-instructions-http.js", async (original) => ({ ...await original<object>(), companyInstructionsModules: () => [] }));
 const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbbb";
 /** Task owners in each company, an install administrator in each company, one revoked from B, and one whose membership read fails. */
 const ownerA = "a".repeat(64), ownerB = "b".repeat(64), adminA = "1".repeat(64), adminB = "2".repeat(64), revokedB = "3".repeat(64), unreadable = "4".repeat(64), nobody = "5".repeat(64);

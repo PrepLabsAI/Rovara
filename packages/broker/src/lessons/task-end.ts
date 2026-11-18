@@ -47,6 +47,8 @@ export interface TaskSubjectBase {
    * The files the task's merged change touched, whole, for the area overlap a clean merge's credit needs (`credit.ts`). Absent: not known (the credit then excludes no lesson for overlap). A source that cannot read the list whole leaves it out.
    */
   touchedPaths?: readonly string[];
+  /** The project's names of the repositories those files are in (with `touchedPaths`; both or neither). */
+  touchedRepos?: readonly string[];
 }
 export interface TaskSubjectSource {
   /**
@@ -55,7 +57,7 @@ export interface TaskSubjectSource {
    */
   projectOf?(input: { workspaceId: string; taskId: string }): Promise<string | undefined>;
   /** `context: "human_edit"`: only the task's own facts and steering are wanted (a human edit's reflection keeps the intent and plan); the pull request's comments are not read from the host. */
-  read(input: { workspaceId: string; taskId: string; context?: "human_edit"; /** Lead 4 L4-LP3Wc: kinds of evidence a person paused: the source reads none of them (no host call, nothing gathered). */ skip?: ReadonlySet<SpanKind> }): Promise<TaskSubjectBase | undefined>;
+  read(input: { workspaceId: string; taskId: string; context?: "human_edit"; /** Lead 4 L4-LP3Wc: kinds of evidence a person paused: the source reads none of them (no host call, nothing gathered). */ skip?: ReadonlySet<SpanKind>; /** The task's Slack thread is read only once, when the task has really ended: a send-back of an open task, a revert's re-reflection and the repo-only pass never read it. */ withoutSlack?: true }): Promise<TaskSubjectBase | undefined>;
 }
 
 export interface TaskLearningDeps {
@@ -149,7 +151,7 @@ async function subjectFrom(deps: TaskLearningDeps, given: TaskSubjectBase, works
 export async function subjectForTask(deps: TaskLearningDeps, input: { workspaceId: string; taskId: string; outcome?: ReflectSubject["outcome"] }): Promise<ReflectSubject | undefined> {
   const known = await deps.source.projectOf?.({ workspaceId: input.workspaceId, taskId: input.taskId });
   const early = known === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: known });
-  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+  const base = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}), ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
   if (base === undefined) return undefined;
   return subjectFrom(deps, base, input.workspaceId, input.outcome, await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: base.facts.project }, base.lifetime ?? "unknown"));
 }
@@ -236,7 +238,7 @@ async function countOutcome(deps: TaskLearningDeps, base: TaskSubjectBase, subje
     const judging = attempt === undefined || !needsJudge ? undefined : { deadlineAt: attempt.deadlineAt, ...(attempt.signal === undefined ? {} : { signal: attempt.signal }), ...(attempt.attemptId === undefined ? {} : { attemptId: `${attempt.attemptId}-outcome` }) };
     const run = () => recordTaskOutcome(counters, {
       workspaceId: subject.workspaceId, project: subject.project, taskId: input.taskId, outcome: ended, sendBacks: Math.max(subject.spans.filter((span) => span.kind === "send_back").length, base.sendBackRequestIds.length),
-      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}), ...(base.touchedPaths === undefined ? {} : { touchedPaths: base.touchedPaths }),
+      ...(subject.outcome === "merged" ? { mergedAt: deps.reflect.now() } : {}), corrections, ...(subject.evalRun === true ? { evalRun: true } : {}), ...(base.touchedPaths === undefined ? {} : { touchedPaths: base.touchedPaths, ...(base.touchedRepos === undefined ? {} : { touchedRepos: base.touchedRepos }) }),
       ...(noMarks ? { skipOutcomeMarks: true as const } : {}),
     });
     const result = await (judging === undefined ? run() : withLearningAttempt(judging, run));
@@ -292,7 +294,7 @@ export async function learnFromEndedTaskTyped(deps: TaskLearningDeps, input: { w
     }
     // Lead 4 L4-LP3Wc: the kinds a person paused are read live, BEFORE the source reads anything (the source reads none of them), and again for the project the facts name. A pause is a stop: what is paused is never gathered.
     const early = knownProject === undefined ? undefined : await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: knownProject });
-    const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
+    const given = await deps.source.read({ workspaceId: input.workspaceId, taskId: input.taskId, ...(input.outcome === "reverted" || input.outcome === "sent_back" ? { withoutSlack: true as const } : {}), ...(early === undefined || early.size === 0 ? {} : { skip: early }) });
     if (given === undefined || given.facts.workspaceId !== input.workspaceId) return final("no_facts");
     const paused = await pausedKindsFor(deps.process.store, { workspaceId: input.workspaceId, project: given.facts.project }, given.lifetime ?? "unknown");
     // "After merge" stopped (now, or at any time while the task lived): a revert is not read and no model is called for it, whether it was queued before the pause, retried, or found again after the resume.

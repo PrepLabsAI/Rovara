@@ -38,7 +38,7 @@ export const fitPk = (companyId: string, project: string): string => companyScop
 /** The partition of a project's merged and reverted task rows. */
 export const mergePk = (companyId: string, project: string): string => companyScoped(companyId, `LESSON_MERGE#${project}`);
 /** Times are written as 16 digits, so the sort key orders by time. */
-const timeSk = (at: number): string => String(Math.max(0, Math.floor(at))).padStart(16, "0");
+export const timeSk = (at: number): string => String(Math.max(0, Math.floor(at))).padStart(16, "0");
 
 export type FitSample = {
   id: string;
@@ -156,7 +156,7 @@ export interface LessonMeasure {
 }
 
 const numberOf = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
-function samplesFrom(value: unknown): FitSample[] | undefined {
+export function samplesFrom(value: unknown): FitSample[] | undefined {
   if (!Array.isArray(value) || value.length > LOADED_MAX) return undefined;
   const out: FitSample[] = [];
   for (const entry of value as unknown[]) {

@@ -65,6 +65,17 @@ export function parseTaskAnswers(value: unknown): TaskAnswersRequest {
 }
 
 /**
+ * Whether this request id already took an answer for the task (the repeat check of `answerTaskOnRequest`, asked on its own). For a caller that sends one chat reply to an answer or to a note
+ * by what the task waits for NOW, and must not do both for the same reply once the answer moved the task on. Reads only; a task of another company, or one with no workspace, is `false`.
+ */
+export async function answerRequestTaken(deps: TaskFlowDeps, task: Pick<TaskRecord, "companyId" | "workspaceId" | "ownerKey">, requestId: string): Promise<boolean> {
+  if (task.companyId !== deps.companyId) return false;
+  const workspace = await readWorkspace(deps, task.workspaceId);
+  const location = await workspaceKeys({ store: deps.store, companyId: task.companyId }, task.workspaceId);
+  return (await deps.store.get(location.operationRequestKey(workspace?.ownerKey ?? task.ownerKey, `${ANSWERS_REQUEST_NAMESPACE}${requestId}`))) !== undefined;
+}
+
+/**
  * Takes the owner's answers to the round of questions now asked, once per request id. `body` is read only after the caller was judged (a body that is not JSON throws there). Throws the
  * missing task's refusal for a caller who may not read the task, `FORBIDDEN` (fixed words) for a reader who is not its owner, the fixed body refusal, `INTENT_NOT_WAITING` for a task not
  * waiting for these answers (another round, or none), and `IDEMPOTENCY_CONFLICT` for a reused request id. Nothing is written on a refusal.

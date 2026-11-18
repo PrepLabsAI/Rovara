@@ -23,6 +23,8 @@ export const CODE_MILESTONE_RETRY_MS = 60_000;
 /** A milestone is kept this long after it happened (the store's expiry). */
 export const CODE_MILESTONE_RETENTION_SECONDS = 30 * 86_400;
 const SWEEP_LIMIT = 25;
+/** How many pages of other companies' rows a company's sweep reads past to find its own. */
+const SWEEP_PAGES_MAX = 8;
 const KEY_PREFIX = "CODE_MILESTONE#";
 
 /** The index the sweep reads. A store given to `createDocumentMilestones` must keep it (it is the dispatch rows' index; the milestone rows use a partition of their own in it). */
@@ -38,6 +40,11 @@ export interface DocumentMilestonesOptions {
   store: Pick<DocumentStore, "get" | "query" | "queryIndex" | "update">;
   now: () => number;
   log?: ((event: string, fields: Record<string, unknown>) => void) | undefined;
+  /**
+   * L4-HW7: a hosted install's one store holds every company's milestones under one due-time partition. With the company set, this service tells (and sweeps) only milestones that name that company: a row of another
+   * company is left exactly as it is for its own company's service, never told to this company's handlers and never marked heard. Absent (the laptop's one company): every row is this one's.
+   */
+  companyId?: string | undefined;
 }
 
 export interface DocumentMilestones extends CodeMilestones {
@@ -99,6 +106,7 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
   const { store, now } = options;
   const handlers: CodeMilestoneHandler[] = [];
   const log = (event: string, fields: Record<string, unknown>): void => (options.log ?? (() => undefined))(event, fields);
+  const isForeign = (item: StoredDocument): boolean => options.companyId !== undefined && typeof item["orgId"] === "string" && item["orgId"] !== options.companyId;
   const update = async (item: StoredDocument, input: { ops: readonly UpdateOp[]; condition: ReturnType<typeof when.and> }): Promise<boolean> =>
     (await store.update({ key: { pk: item.pk, sk: item.sk }, ops: input.ops, condition: input.condition })).applied;
 
@@ -112,6 +120,7 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
     const rows = await queryAll(store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: KEY_PREFIX } });
     for (const item of rows) {
       if (item["deliveredAt"] !== undefined) continue;
+      if (isForeign(item)) continue;
       const milestone = item["taskId"] === taskId ? milestoneOf(item) : undefined;
       const settle = (): Promise<boolean> => update(item, { ops: [change.set("deliveredAt", new Date(now()).toISOString()), change.remove("dispatchDuePk"), change.remove("dispatchDueSk")], condition: when.and(when.present(), when.notExists("deliveredAt")) });
       if (milestone === undefined) {
@@ -170,8 +179,17 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
     },
     async deliverDue() {
       // ":" sorts after the "#" that follows each due time, so `${due(now)}:` includes every row due at or before now.
-      const page = await store.queryIndex({ index: CODE_MILESTONE_INDEX.name, partition: CODE_MILESTONE_DUE_PK, sort: { op: "lte", value: `${dueKey(now())}:` }, limit: SWEEP_LIMIT });
-      const tasks = new Set(page.items.map((row) => row["taskId"]).filter((id): id is string => typeof id === "string"));
+      // The partition is every company's: with a company set, rows of other companies at the head (a company with no sweeper of its own, a backlog after an outage) are read past, a bounded number of pages, so they
+      // never hide this company's due rows. Without a company (the laptop) it is the one page as before.
+      const own: StoredDocument[] = [];
+      let cursor: string | undefined;
+      for (let pages = 0; pages < (options.companyId === undefined ? 1 : SWEEP_PAGES_MAX) && own.length < SWEEP_LIMIT; pages += 1) {
+        const page = await store.queryIndex({ index: CODE_MILESTONE_INDEX.name, partition: CODE_MILESTONE_DUE_PK, sort: { op: "lte", value: `${dueKey(now())}:` }, limit: SWEEP_LIMIT, ...(cursor === undefined ? {} : { cursor }) });
+        own.push(...page.items.filter((row) => !isForeign(row)));
+        cursor = page.cursor;
+        if (cursor === undefined) break;
+      }
+      const tasks = new Set(own.map((row) => row["taskId"]).filter((id): id is string => typeof id === "string"));
       for (const taskId of tasks) {
         try {
           await deliver(taskId);
@@ -179,7 +197,7 @@ export function createDocumentMilestones(options: DocumentMilestonesOptions): Do
           log("code_milestone.sweep_failed", { taskId, error: error instanceof Error ? error.name : "unknown" });
         }
       }
-      return { attempted: page.items.length };
+      return { attempted: own.length };
     },
   };
 }

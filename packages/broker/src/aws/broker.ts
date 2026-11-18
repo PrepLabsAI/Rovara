@@ -1,8 +1,8 @@
 import "./broker-environment-init.js"; import { companyMembershipFromDynamo, resolveCompany } from "./company-check.js"; // ENV-ROOM: the init first (broker-environment-init.ts; kept first by tests/contract/broker-environment-first.test.ts)
-import { createHostedBrokerCoreServices } from "./core-job-services.js";
+import { createHostedBrokerCoreServices } from "./core-job-services.js"; import { codeSettingsReader, companyCodeSettingsReader } from "./project-code-settings.js"; import { hostedPolicySource } from "./core-policy-source.js";
 import { guardCoreProjectSource, planCoreProjectWrites } from "./core-project-backfill.js"; import { coreCopyRefusalWords } from "./core-copy-refusal.js";
 import { listSlackWorkspaceScopes } from "./slack-workspace-binding.js";
-import { createSlackLinkCodes, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
+import { createSlackLinkCodes, createSlackPersonResolver, slackCompanyPerson, slackCompanyProject, type SlackWorkspaceAccess } from "./slack-person.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes, splitBySlackTeam, withoutSlackCompanyMode } from "./slack-company-split.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { askSlackAnswerForIdentity } from "./slack-answers.js";
@@ -288,7 +288,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
-import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
+import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js"; import { coreThreadNote } from "./slack-core-thread-input.js"; import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js"; import type { ThreadInputNotice } from "./slack-thread-input-words.js"; import { isOwnSlackStart, startSlackWorkflowOnCore } from "./slack-core-start.js"; import { hostedSlackThreads } from "./slack-thread-channel.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
@@ -336,7 +336,8 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { CORE_OFFERED_MODELS_NOT_SET_UP, OFFERED_MODELS_READ_FAILED, adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
 import { installEngineModel } from "../core-host/company-engine-model.js";
-import { createHostedLessonsPeople } from "./hosted-lessons-people.js";
+import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import { hostedLessonsSlack } from "./hosted-slack-thread.js";
+import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, outboxCompaniesOf, taskTokensFromEnvironment, withCoreRoutes, type BrokerCoreRoot } from "./core-engine-root.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import type { DeveloperRecord } from "../developer/store.js";
@@ -383,7 +384,7 @@ import {
   groundingRoundLapsed, E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, groundingStartFailureReason, groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
   verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason,
 } from "./workflow-e2e-grounding.js";
-import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts";
+import { CORE_OFFERED_MODELS_ADMIN_PATH, EGRESS_ADDRESSES_VARIABLE, IMPLICIT_COMPANY_ID, SLACK_ANSWER_SERVICE_PATH, OrgIdSchema, companyLog, type OfferedAgentModels, QuickAutoStartRequestSchema, REQUEST_ROUTE_MESSAGE_MAX, SLACK_INTAKE_RECORD_SECONDS, planQualityFinding, type QuickAutoStartResult } from "@agentx/contracts"; import { EVIDENCE_RETENTION_TAGS } from "../core-host/hosted-evidence.js";
 import { quickAutoStartRefusal } from "../core/intake/quick-auto-start.js";
 import { groundingFindingsOf, plannedExpectation } from "../developer/plan-grounding-findings.js";
 import { handleE2EModelBudgetCallback } from "../e2e/model-budget-endpoint.js";
@@ -1240,7 +1241,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
-    if (isSlackThreadNoteEvent(event)) {
+    if (isSlackCorePressEvent(event)) return await answerSlackCorePress(dependencies.developer?.coreTasks, event, (thread, userId) => companySlackCaller(dependencies, thread, userId)); if (isSlackThreadNoteEvent(event)) {
       try {
         const result = await recordSlackThreadNote(dependencies, tasks, event);
         // Never the note's text: only who and where.
@@ -1275,7 +1276,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
           return await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url) as { statusCode: number; headers: Record<string, string>; body: string };
         }
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
-        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -1474,7 +1475,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer && dependencies.linking) return json(await routeLinkingRequest(linkingRouteDependencies(dependencies, dependencies.linking), request, url), request.requestId);
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+        return json(await routeDeveloperRequest({ ...(dependencies.developer.companies === undefined ? {} : { companies: dependencies.developer.companies }), ...(core?.lessons === undefined ? {} : { lessons: core.lessons }), ...(core?.lessonsSlackSwitch === undefined ? {} : { lessonsSlackSwitch: core.lessonsSlackSwitch }), ...(core?.knowledge === undefined ? {} : { knowledge: core.knowledge }), documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...channelLinkRouteDependencies(dependencies),
           ...clientProjectRouteDependencies(dependencies),
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
@@ -6304,15 +6305,15 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (!await slackWorkspaceEnabled(dependencies, thread)) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (binding === undefined) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  const existingWorkflowThread = await getItem(dependencies, sharedTaskKey(thread));
+  const existingWorkflowThread = await getItem<Record<string, unknown>>(dependencies, sharedTaskKey(thread));
   const threadOwnerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
   const existingThreadTask = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(threadOwnerKey));
-  if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
-    throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
-  }
+  // L4-U5c: in company mode, this company's own guard row for THIS request id is Slack's retry of the same event (it goes on to the core, whose idempotency answers the first task); any other row is a thread that already has a task.
+  const company = dependencies.workspaces === undefined ? undefined : await dependencies.workspaces.requireCompany(thread.teamId);
+  if ((existingWorkflowThread !== undefined && !isOwnSlackStart(existingWorkflowThread, { companyId: company, requestId })) || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   // L4-U5b: a company the core serves starts the task on the core (no channel share: the core has none) and remembers this Slack thread, so the task's pause at Build, its pull request and its end are told here too.
   // Only where Slack runs in company mode (the thread can then be remembered and told); the single-workspace install keeps the start it always had.
-  const onCore = dependencies.workspaces === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
+  const onCore = dependencies.workspaces === undefined || company === undefined ? undefined : await startSlackWorkflowOnCore(dependencies.developer.coreTasks, { caller, companyId: company, thread, userId, requestId, project: binding.projectName, instructions, workflowPath: event.workflowPath },
     brokerLogLine);
   if (onCore !== undefined) return { task: { taskId: onCore.taskId } };
   const developer = dependencies.workspaces === undefined ? dependencies.developer : { ...dependencies.developer, slackTeamId: thread.teamId };
@@ -6887,7 +6888,7 @@ async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependenc
 
 export interface SlackThreadNoteEvent {
   source: "agentx.slack-ingress"; action: "thread-note"; taskId: string; userId: string; thread: SlackThread;
-  eventId: string; messageTs: string; text: string;
+  eventId: string; messageTs: string; text: string; /** L4-U5d: the reply is an @mention of Rovara (as against a plain reply); only a mention answers a core task's questions. */ mention?: true;
   /** Decision 134: the ingress read the reply as small talk; it is saved only when the task waits on this person. */
   smallTalk?: true;
 }
@@ -6907,16 +6908,16 @@ export function isSlackThreadNoteEvent(event: unknown): event is SlackThreadNote
  * Every expected answer (saved, already saved, or not saved because the thread or task no longer takes notes)
  * is a 200 with its outcome, so Slack is never asked to retry it.
  */
-async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk" }> {
+async function recordSlackThreadNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackThreadNoteEvent): Promise<{ outcome: "captured" | "duplicate" | "refused" | "small_talk"; notice?: ThreadInputNotice; core?: true }> {
   if (dependencies.developer === undefined) return { outcome: "refused" };
   const thread = SlackThreadSchema.safeParse(event.thread);
   const userId = SlackRequesterSchema.shape.userId.safeParse(event.userId);
   const taskId = event.taskId;
   const messageTs = SlackMessageTimestampSchema.safeParse(event.messageTs);
   if (!thread.success || !userId.success || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId) || !messageTs.success || !await slackWorkspaceEnabled(dependencies, thread.data)) return { outcome: "refused" };
-  const shared = await getItem<{ taskId?: string; workflowThread?: unknown; closedAt?: string }>(dependencies, sharedTaskKey(thread.data));
+  const shared = await getItem<{ taskId?: string; workflowThread?: unknown; closedAt?: string; companyId?: unknown }>(dependencies, sharedTaskKey(thread.data));
   if (shared === undefined || shared.taskId !== taskId || shared.workflowThread !== true || shared.closedAt !== undefined) return { outcome: "refused" };
-  let access: TaskAccess;
+  const forCore = await coreThreadNote(dependencies, dependencies.developer.coreTasks, { shared: { taskId, companyId: shared.companyId }, thread: thread.data, userId: userId.data, messageTs: messageTs.data, text: event.text, mention: event.mention === true, smallTalk: event.smallTalk === true, companyOf: async () => dependencies.workspaces?.requireCompany(thread.data.teamId), caller: () => companySlackCaller(dependencies, thread.data, userId.data) }); if (forCore !== undefined) return forCore; /* L4-U5d: a task the core owns takes the reply as the core's own input (slack-core-thread-input.ts); anything else goes on as before. */ let access: TaskAccess;
   try { ({ access } = await slackTaskAccess(dependencies, tasks, taskId, userId.data, "comment", true, thread.data)); }
   catch { return { outcome: "refused" }; }
   if (access.task.share?.teamId !== thread.data.teamId || access.task.share.channelId !== thread.data.channelId
@@ -15589,7 +15590,8 @@ const cloudWatch = new CloudWatchClient(awsClientConfiguration);
 const sqs = new SQSClient(awsClientConfiguration);
 
 // L2-2 PR 18c: Slack company mode (both switches on, slack-company-wiring.ts); off, nothing is added and the broker is today's.
-const slackCompany = slackCompanyDependenciesFromEnvironment(process.env, { documentClient, dynamo: dynamoClient, secrets: secretsManager,
+// DEC 254zzz35: installToken, so the hosted core's Slack task threads post in the install's own workspace too (its bot token is the install's Slack app secret).
+const slackCompany = slackCompanyDependenciesFromEnvironment(process.env, { documentClient, dynamo: dynamoClient, secrets: secretsManager, installToken: true,
   ...(process.env.DEVELOPER_TOKEN_ISSUER ? { linkOrigin: process.env.DEVELOPER_TOKEN_ISSUER } : {}) });
 
 /**
@@ -15619,10 +15621,16 @@ function buildBrokerHandler(callbackSigningKey: string) {
         { developerId, sessionId: "core", name: "", amr: "oidc" }, undefined, null);
       return await deps.checkTaskPerson!(task, developerId, admission);
     },
+    // Cloud #188 item 3: a core task's People, readers, events and plan comments use the old task routes' own dependencies for this person (built as the People proof above is), in their live company.
+    taskRules: (person, companyId) => {
+      if (signIn === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "task people are unavailable in this deployment");
+      return { ...developerTaskRouteDependencies({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), developer: signIn, now: Date.now },
+        { developerId: person.developerId, sessionId: "core", name: person.name, amr: "oidc" }, undefined, null), companyId };
+    },
     // Lane L1b: the core's code host is the same GitHub App, company-scoped (aws/core-code-host.ts): a company's own projects' repositories only, its installation binding at every mint.
     codeModules: (core) => brokerCoreModuleDeps(process.env, {
       dynamo: dynamoClient,
-      objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3 },
+      objects: { bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), client: s3, retentionTags: EVIDENCE_RETENTION_TAGS },
       secrets: { namePrefix: process.env.CONNECTOR_SECRET_PREFIX ?? CONNECTOR_SECRET_PREFIX, clientFor: () => secretsManager },
       workerMachines: () => brokerCoreWorkerMachines({ sessions: ec2Sessions, documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
       codeHost: () => brokerCoreCodeHost({
@@ -15632,7 +15640,11 @@ function buildBrokerHandler(callbackSigningKey: string) {
         log: (entry) => console.log(JSON.stringify({ component: "core-engine", ...entry })),
       }),
     }),
-    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!, ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }),
+    // L4-HW3b: the project's own merge rules (the record the developer API's code-settings route saves), not Code's defaults: for how we work (every company's runtime) and for the merge
+    // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
+    codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
+    services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,
+      settings: companyCodeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, companyId), ...(wiring.humanEdit === undefined ? {} : { humanEdit: wiring.humanEdit }), ...(wiring.threadMoments === true ? { threadMoments: true } : {}),
       // The email seams travel with the upkeep notice's (#959); L4-AK1H: a queued admin notice (unusual team knowledge reading) is told only to someone who is an admin now (the core root answers once built; before that: no one).
       notification: { ...(wiring.notification ?? {}), ...(wiring.upkeep === undefined ? {} : { upkeep: wiring.upkeep }), adminNotice: async (orgId, developerId) => (await builtCoreRoot?.adminNotice?.(orgId, developerId)) === true },
     }),
@@ -15641,13 +15653,21 @@ function buildBrokerHandler(callbackSigningKey: string) {
     ...(process.env.DEVELOPER_SIGNIN_TABLE_NAME === undefined || process.env.DEVELOPER_SIGNIN_TABLE_NAME === "" ? {} : {
       lessonsPeople: createHostedLessonsPeople({ documentClient, stateTableName: requiredEnvironment("STATE_TABLE_NAME"), signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME, now: Date.now }),
     }),
+    // L4-HW2: the lessons' learning calls (the reflector, the curator's judge, the outcome judge) go through the model gateway's learning route on the COMPANY's own provider account and learning cap
+    // (core-host/hosted-learning.ts); asked only for a company the lessons switch names. No gateway settings or no task-token key: no port, so learning calls refuse and nothing is spent.
+    lessonsLearning: hostedLessonsLearning(process.env, () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration))),
+    // L4-HW8: the lessons' Slack source reads a task's own thread through the signed `thread_messages` command of the deployment's Slack adapter (aws/hosted-slack-thread.ts); no adapter env, no source.
+    ...((slack) => (slack === undefined ? {} : { lessonsSlack: slack }))(hostedLessonsSlack({ env: process.env, secretsManager, workspaces: slackCompany?.workspaces, legacyTeamId: process.env.SLACK_TEAM_ID || process.env.SLACK_ADAPTER_TEAM_ID })),
+    // L4-HW3d: the project's stored CI mode (real_check) and the company's rules lock decide merge tracking's CI mode, as on the settings page; cached per company and project, unreadable refuses.
+    // Same table and same rules service as the per-task limit reader (no new IAM, store or outside call). The dispatcher roots wire none (they track no merges).
+    hostedPolicySource: (hook) => hostedPolicySource({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: Date.now }, hook),
     policyHookInstall: () => policyHookInstallFromEnvironment(process.env, new KMSClient(awsClientConfiguration)), taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)),
     origin: () => process.env.DEVELOPER_TOKEN_ISSUER ?? "",
     log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "core-engine", ...entry })}\n`); },
     // L2-4: the tracker intake and ticket write-back over the company's own Linear connection, where Linear is wired.
     ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections } }),
     // L4-U5b: where Slack runs in company mode, a core task started from a Slack thread is told its milestones there, through its own company's workspace token only.
-    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine }) }),
+    ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine, ...(slackCompany.companies === undefined ? {} : { person: createSlackPersonResolver({ workspaces: slackCompany.workspaces, store: slackCompany.workspaces.store, companies: slackCompany.companies }) }) }) }),
   });
   builtCoreRoot = coreRoot;
   // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.

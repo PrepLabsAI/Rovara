@@ -27,3 +27,10 @@ export function flakyFactsPort(baseFlaky: (task: { orgId: OrgId; project: string
     }
   };
 }
+
+/** The one default branch every repository of a project revision names (the branch the base's nightly runs on), or undefined when they disagree or none is named: no branch, no facts. A pure read of a revision already loaded. */
+export function agreedDefaultBranch(definition: { repositories?: ReadonlyArray<{ defaultBranch?: unknown }> | undefined }): string | undefined {
+  const branches = (definition.repositories ?? []).map((repository) => repository.defaultBranch);
+  const first = branches[0];
+  return typeof first === "string" && first !== "" && branches.every((branch) => branch === first) ? first : undefined;
+}

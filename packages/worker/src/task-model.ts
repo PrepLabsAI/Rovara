@@ -33,14 +33,16 @@ function routedTaskModel(route: InvocationModelRoute, selected: ModelSelection |
  * SR-1: the models and sessions the second reviewer may try, in order. Each is called the way the broker checked it: through its own proxy route when it has one (never the task's model, and the proxy's model
  * fallback is not asked for). A routed candidate on a worker with no model proxy cannot be reached, so it is left out; with none left the second reviewer runs nothing and reports no answer.
  */
-export function secondReviewerRuntimes(payload: { workflowSecondReviewer?: SecondReviewerPayload | undefined }, baseProxy: ModelProxyOptions | undefined, environment: NodeJS.ProcessEnv = process.env): Array<{ model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter }> | undefined {
+export function secondReviewerRuntimes(payload: { workflowSecondReviewer?: SecondReviewerPayload | undefined }, baseProxy: ModelProxyOptions | undefined, environment: NodeJS.ProcessEnv = process.env, proxyForSlot?: (slot: string) => ModelProxyOptions): Array<{ model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter }> | undefined {
   if (payload.workflowSecondReviewer === undefined) return undefined;
   const runtimes: Array<{ model: WorkspaceModelConfiguration; piAdapter?: PiSessionAdapter }> = [];
   for (const candidate of payload.workflowSecondReviewer.candidates) {
+    const proxy = candidate.keySlot === undefined ? baseProxy : proxyForSlot?.(candidate.keySlot);
+    if (candidate.keySlot !== undefined && proxy === undefined) continue;
     if (candidate.modelRoute === undefined) {
-      runtimes.push({ model: resolveTaskModel(candidate.model, environment), ...(baseProxy === undefined ? {} : { piAdapter: createProxyPiSessionAdapter(baseProxy) }) });
-    } else if (baseProxy !== undefined) {
-      runtimes.push({ model: routedTaskModel(candidate.modelRoute, candidate.model, environment), piAdapter: createProxyPiSessionAdapter({ ...baseProxy, route: candidate.modelRoute }) });
+      runtimes.push({ model: resolveTaskModel(candidate.model, environment), ...(proxy === undefined ? {} : { piAdapter: createProxyPiSessionAdapter(proxy) }) });
+    } else if (proxy !== undefined) {
+      runtimes.push({ model: routedTaskModel(candidate.modelRoute, candidate.model, environment), piAdapter: createProxyPiSessionAdapter({ ...proxy, route: candidate.modelRoute }) });
     }
   }
   return runtimes;

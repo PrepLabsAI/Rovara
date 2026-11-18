@@ -635,7 +635,7 @@ export type PullLoginResult = { ok: true; auth: SavedEnvRegistryAuth } | { ok: f
  * operation, never one the worker names. It must still be an image of the row, `ready`, not past the max age, of a project that is live; the login is minted for that image's approved pin, which `mintPullSession`
  * holds against the project's newest approved environment. One repository, short lived.
  */
-export async function savedEnvPullLogin(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }, digest: string): Promise<PullLoginResult> {
+export async function savedEnvPullLogin(deps: Pick<SavedEnvDeps, "store" | "session" | "now">, ids: { orgId: string; projectId: string }, digest: string): Promise<PullLoginResult> {
   const off = disabled(deps);
   if (off !== undefined) return off;
   const state = await deps.store.get(ids.orgId, ids.projectId);

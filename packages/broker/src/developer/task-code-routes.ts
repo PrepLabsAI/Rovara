@@ -22,7 +22,7 @@ import { plainName } from "../aws/task-web.js";
 import { NOTE_KEEP_SECONDS, NOTE_SK_PREFIX, noteKey } from "../core/sessions/notes.js";
 import { rowCompany, rowInCompany } from "./company-rows.js";
 import { createTaskComment, currentStepDocument, listTaskComments, pageRefusal, takeRate, type PageActor } from "./page-comments.js";
-import { resolveTaskAccess, taskOpen, type TaskAccess } from "./task-access.js";
+import { resolveCoreTaskAccess, resolveTaskAccess, taskOpen, type TaskAccess } from "./task-access.js";
 import { taskAccessFence, } from "./task-people.js";
 import { taskKey } from "./task-records.js";
 
@@ -119,6 +119,16 @@ const liveComments = (comments: readonly TaskComment[]): TaskComment[] => commen
 export async function listPlanComments(deps: RouteDeps, caller: DeveloperCaller, taskId: string): Promise<PlanCommentsResponse> {
   const { task } = await accessFor(deps, caller, taskId, "read");
   return { comments: liveComments(await listTaskComments(deps, task.taskId)).map(planCommentView) };
+}
+
+/**
+ * Core task web routes (Cloud #188 item 3): `GET /v1/dev/tasks/{id}/comments` for a task the CORE owns, whose record the core has read and checked against the caller's live company. The very same rule as above (the
+ * company of the row, then the task routes' own `read` access, through `resolveCoreTaskAccess`) and the same answer.
+ */
+export async function listCorePlanComments(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"]): Promise<PlanCommentsResponse> {
+  if (!rowInCompany(task as unknown as Record<string, unknown>, deps.companyId)) throw agentXError("TASK_NOT_FOUND", NOT_FOUND_TASK);
+  const access = await resolveCoreTaskAccess(deps, caller, task, "read");
+  return { comments: liveComments(await listTaskComments(deps, access.task.taskId)).map(planCommentView) };
 }
 
 function latestVersionOf(task: TaskAccess["task"], document: CommentDocument): number {

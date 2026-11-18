@@ -10,12 +10,15 @@ import { mentionsRepoPlace } from "./project-repo-audience.js";
 import { attributableSources, clearSourcePause, coldSourcesOf, heldKeysOf, isHeldBySource, projectBrakeOn } from "./sources.js";
 import { lessonValue } from "./value.js";
 import { isCorroborated } from "./value.js";
+import { citesSlackReply, isWeakSlackOnly } from "./weak-source.js";
 import { isMeaningfulAnchor } from "@agentx/contracts";
 import type { LessonDraft } from "./reflect.js";
 import { nextVersion, type ScopeKey } from "./store.js";
 import { classifyTier, type TierContext } from "./tier.js";
 import { TRIAL_APPROVER, trialBlockers, type TrialContext } from "./trial.js";
 import { sameSource, type Lesson } from "./types.js";
+import { proposalSightings, proposedByOf } from "./proposal-mark.js";
+import { hasWeakKind, weakSourceWaits } from "./weak-source.js";
 
 export interface ProcessDeps extends CurateDeps {
   verifier: CitationVerifier; facts: CodeFacts; settings: LearningSettingsReader;
@@ -40,6 +43,11 @@ const VERIFY_TIMEOUT_MS = 3000;
  * corroborated tier-0 fact (a measured outcome behind it). A single-source fact waits as a candidate until something backs it up. Nothing is dropped.
  */
 export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: readonly string[] = []): boolean {
+  // L4-SRC-TK: a lesson that rests only on a weak source (a ticket comment) waits for its second sighting, whatever else is true of it (a contradiction, a measured outcome of the task): nothing is dropped, it stays a candidate.
+  if (weakSourceWaits(lesson.provenance)) return false;
+  // A lesson that rests only on a reply in a chat thread is a weak source: it is in front of people after a SECOND sighting (a second task) and for no other reason (the owner's decision names no measured-result exception) (not a contradiction, a duplicate
+  // or a capability request either: it stays a candidate, kept and not shown, until it is seen twice).
+  if (isWeakSlackOnly(lesson.provenance)) return new Set(lesson.provenance.supportTasks).size >= 2;
   if (lesson.contradictsWith !== undefined) return true;
   // A possible duplicate is in front of people at once: they decide whether it merges, stays beside the other lesson or is rejected.
   if (lesson.possibleDuplicateOf !== undefined) return true;
@@ -49,6 +57,8 @@ export function earnedAttention(lesson: Lesson, tier: Lesson["tier"], reasons: r
   if (reasons.includes("capability_request")) return true;
   if (new Set(lesson.provenance.supportTasks).size >= 2) return true;
   if (lesson.provenance.supportTasks.length >= 1 && lesson.provenance.memberSignal) return true;
+  // A team suggestion (a tool outside Rovara, or an agent) is a weak source: it waits as a candidate until a second, independent sighting (two tasks, two people, or one of each). It never gets by on a single one.
+  if (proposedByOf(lesson) !== undefined && proposalSightings(lesson) >= 2) return true;
   return tier === 0 && isCorroborated(lesson.provenance);
 }
 
@@ -128,7 +138,10 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
     });
     const trialWhy = trialBlockers({ ...verified, ...(decision.tier === 0 && decision.rendered !== undefined ? { title: decision.rendered.title, description: decision.rendered.description, body: decision.rendered.body } : {}) }, decision.tier, trialContext(resolved, brakeOn, held));
     const trial = trialWhy.length === 0;
-    const earned = trial || (earnedAttention(verified, decision.tier, decision.reasons) && (!held || current.status === "pending"));
+    // A team suggestion (a tool or an agent) with fewer than two independent sightings stays a candidate WHATEVER else routes it to a person (a contradiction, a possible duplicate or a rejected look-alike keep their link and
+    // go in front of people when the second sighting comes): one tool call never puts a card in front of reviewers or raises an alert.
+    const proposalHeld = proposedByOf(verified) !== undefined && proposalSightings(verified) < 2;
+    const earned = !proposalHeld && (trial || (earnedAttention(verified, decision.tier, decision.reasons) && (!held || current.status === "pending")));
     // The project brake: while the volume alert is fresh, a tier-0 lesson that WOULD have applied by itself is sent to a person instead, and stays with a person (no source is paused).
     const autoOn = decision.tier === 0 && approversRequired(0, resolved.approval) === 0 && modeAllows(resolved.mode, "auto_apply");
     const braked = autoOn && brakeOn;
@@ -172,7 +185,7 @@ export async function settleLesson(deps: ProcessDeps, key: ScopeKey, lessonId: s
     }
 
     // Auto-apply: tier 0, corroborated, not held, not a refinement of an existing lesson, and the policy and mode allow it.
-    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !held && next.possibleDuplicateOf === undefined
+    if (next.status === "pending" && next.tier === 0 && next.supersedes === undefined && isCorroborated(next.provenance) && !hasWeakKind(next.provenance) && !citesSlackReply(next.provenance) && !held && next.possibleDuplicateOf === undefined
       && options.noAutoApply !== true && next.reviewRequired !== true && approversRequired(0, resolved.approval) === 0 && modeAllows(resolved.mode, "auto_apply")) {
       // The policy is read AGAIN at the moment of go-live: a setting tightened while this settle ran wins.
       const now = await resolveLearning(deps.settings, key.workspaceId, key.project);

@@ -38,6 +38,7 @@ import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import { isWholeLimit, MAX_PER_PERSON, MAX_PER_ORGANIZATION, readWorkspaceLimits } from "../developer/limits.js";
 import { costUsdOf } from "../core/cost/ledger.js";
+import { estimatePathOf, recordRunCost, runCostInputOf } from "../core/cost/estimate.js";
 import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.js";
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
 import type { CiReporting } from "../core-host/switch-blockers.js";
@@ -45,14 +46,18 @@ import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
 import { createHostedTestEnvironmentApproval } from "../core-host/test-environment-approval.js";
+import { createCompanyTaskSpend } from "../core-host/company-task-spend.js";
 import { createSetupRegistryMirror } from "./setup-registry-mirror.js";
+import { hostedStandingInstructions } from "../core-host/standing-instructions.js";
 import { lifecycleAccess } from "./project-lifecycle-routes.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import { deployedDevWiringParts, deployedSessionMembers, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { deployedDevWiringParts, deployedSessionMembers, hostedChatApproval, hostedDecisionService, stepUpDecisionProofs, type DeployedPeople } from "../core-host/deployed-decisions.js";
+import { decideFromChat } from "../core-host/chat-decision.js";
 import { createEvalPlanSources } from "../core/setup-agent/eval-plan-source.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
 import { boundEvalMonthlyCap } from "../core/setup-agent/eval-reservation.js";
 import { createEvalWrapperTargets } from "../core/setup-agent/eval-wrapper-targets.js";
+import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf, type EvalEnvironmentSource } from "../core/setup-agent/eval-environment-source.js";
 import type { EvalPlanSources } from "../core/proof/eval-plan-delivery.js";
 import { stepUpApprovalKeyOf } from "../core-host/hosted-approvers.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
@@ -61,14 +66,19 @@ import {
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
+import { createLessonsSlackSwitchApi, type LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { createHostedSystemRuns, effectiveSystemRunsGateOf, hostedSystemRunsFor, hostedUpkeepOn, readSystemRunsSwitch, upkeepAvailableFor } from "../core-host/system-runs.js";
 import { createHostedAutomationStop, createHostedWikiRefresh } from "../core-host/wiki-refresh.js";
 import { createHostedSetupRepair } from "../core-host/setup-repair.js";
 import { createUpkeepAdministers, createUpkeepRecipients } from "../core-host/upkeep-recipients.js";
 import { queueSetupBroken } from "../core/notify/attention.js";
 import type { ChatThreads } from "../core-host/chat-threads.js";
-import { channelThreadHandler } from "../core/channel/thread-notices.js";
+import { projectPageUrl } from "../core/decisions/open-path.js";
+import { createCoreTaskRuleRoutes } from "./core-task-rule-routes.js";
+import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import { recordChatThread } from "../core-host/chat-thread-record.js";
+import { hostedThreadHandler, hostedThreadNotification } from "../core-host/thread-notification.js";
+import { addChatThreadInput } from "../core-host/chat-thread-input.js";
 import { readSetupBrokenNotice } from "../core/setup-agent/repair-view.js";
 import { admissionEnforcesCost } from "../core/automation/run-seam.js";
 import { upkeepPauseHooks } from "../core/upkeep/wiring.js";
@@ -86,9 +96,19 @@ import { WORKSPACE_NOT_FOUND, stopWorkspaceAsAdministrator } from "../core/task-
 import type { RegistryTaskFlowOptions, TaskFlow } from "../core/task-flow/flow.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { createCompanyArtifactReader } from "../core-host/company-artifact-reader.js";
+import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
+import { sessionBindingsOf } from "../core/sessions/bindings.js";
+import { createLocalAfterMerge } from "../local/app/after-merge.js";
+import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
+import { createHostedReviewers } from "../core-host/hosted-reviewers.js";
+import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
+import type { HostedAnswersWiring } from "../core-host/answer-routes.js";
+import type { LessonsHost } from "../lessons/host-glue.js";
+import { wikiToolsGate } from "../lessons/local-tools.js";
+import { DocumentLocalToolsSettings } from "../lessons/document-settings.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
@@ -99,17 +119,21 @@ import { auditSinkForDeployedCaller, hostedSessionCapSeconds } from "./hosted-wi
 import { hostedServiceCatalog } from "./hosted-test-services.js";
 import { createTaskTestEnvironment } from "../core/test-env/seam.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { baseFlakyTests } from "../core/test-env/base-flaky.js";
+import { flakyFactsPort } from "../lessons/knowledge-facts.js";
 import { isCoreJobEvent } from "../core-host/jobs.js";
 import { attachCoreTeamRecord, hostedEraseLearning, type CoreTeamRecord } from "../core-host/team-record.js";
 import { hostedEraseWiki } from "../core-host/wiki-routes.js";
 import { proposeLessonFromNote, type WikiNoteLessonInput, type WikiNoteLessonResult } from "../core/wiki/note-lesson.js";
 import type { HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
+import { ciDefinitionReaderOf } from "../core/ci-evidence/eval-check-card.js";
 import { createWikiBuildStarter } from "../core/wiki-build/starter.js";
 import { projectCitationReader, wikiBuildCallbackWiring, wikiBuildEndedHook } from "../core/wiki-build/wiring.js";
 import { createPersonEraseRoute, type PersonEraseCaller } from "../core-host/person-erase-route.js";
 import { resumePersonErases, type PersonEraseDeps, type PersonEraseObjects } from "../core/people/erase.js";
 import { createCallbackService, type CallbackServiceOptions } from "../services/index.js";
 import { createTaskTokenDescriber } from "../core/model-gateway/describer.js";
+import { evalHealthRunDeps, evalHealthRunsAvailable, kickEvalHealth } from "../core-host/eval-health-wiring.js";
 import { MODEL_ACCESS_PATH } from "../core/model-gateway/route.js";
 import { CallbackCapabilities } from "../callbacks.js";
 import type { TokenSigner } from "../developer/tokens.js";
@@ -119,17 +143,19 @@ import { hostedStartRoute } from "../core/answers/model-start-router.js";
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, adminOfferedModelsFromEnvironment, offeredModelsReaderFromEnvironment } from "../core-host/offered-models-http.js";
 import { companyEngineModelRoute, companyEngineModelStartCheck, type EngineModelOfferedReader } from "../core-host/company-engine-model.js";
 import { evalReservationModules } from "../core-host/eval-authority-http.js";
+import { companyInstructionsModules } from "../core-host/company-instructions-http.js";
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { ownerOfWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
-import { CORE_ENGINE_VARIABLE, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
+import { CORE_ENGINE_VARIABLE, digestPilotOf, parseCoreSwitch, switchCovers } from "../core-host/flags.js";
 
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
 import { hostedPlanSummaryOf } from "../core-host/plan-summary.js";
-import { createHostedIntake, hostedTicketUpdates, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import { createHostedIntake, hostedTicketUpdates, hostedTrackerFor, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
+import { linearAccountResolver } from "./linear-account-links.js";
 import type { LinearConnections } from "./linear-connections.js";
 import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
@@ -147,6 +173,11 @@ export interface BrokerCoreModuleContext {
 export interface BrokerCoreRootInputs {
   env: NodeJS.ProcessEnv;
   checkTaskPerson?: CheckTaskPerson;
+  /**
+   * Core task web routes (Cloud #188 item 3): for one signed-in person and their live company, exactly the dependencies the developer routes build for the old task routes (`developerTaskRouteDependencies`), so a core
+   * task's People, readers, events and plan comments are answered with the old routes' own rules (aws/core-task-rule-routes.ts). Absent: those routes are not the core's here.
+   */
+  taskRules?: (person: { developerId: string; name: string }, companyId: OrgId) => DeveloperTaskRouteDependencies;
   /** The State table and the sign-in table, as the broker's document client reads them (membership, project grants, the person's name). */
   documentClient: DynamoSender;
   stateTableName: string;
@@ -173,8 +204,18 @@ export interface BrokerCoreRootInputs {
    * Absent: lessons are not built even where ROVARA_CORE_LESSONS covers a company (reported once).
    */
   lessonsPeople?: (companyId: OrgId, context: { store: () => Promise<DocumentStore> }) => HostedLessonPeople;
-  /** The learning model port for lessons (the gateway, with its learning cap). Absent: learning calls refuse and nothing is spent. */
-  lessonsLearning?: CoreLessonsOptions["learning"];
+  /** The pilot companies, whose projects have the weekly lessons summary ON until a project chooses otherwise. Absent: the companies ROVARA_CORE_LESSONS names (`on:<ids>`). One list for the sender and the API. */
+  lessonsDigestPilot?: (companyId: OrgId) => boolean;
+  /**
+   * The learning model port for one company's lessons (`hostedLessonsLearning`: the gateway's learning route, on the company's own provider account and inside its learning cap). Asked only for a company
+   * the lessons switch names. Absent, or undefined for a company (or a throw): learning calls refuse and nothing is spent.
+   */
+  lessonsLearning?: (companyId: OrgId) => CoreLessonsOptions["learning"];
+  /**
+   * The lessons' Slack source for one company (`hostedLessonsSlack`, aws/hosted-slack-thread.ts, L4-HW8): which company a Slack workspace is (the reader never takes "every tenant is yours" on an install of many
+   * companies) and the one signed `thread_messages` command to the deployment's Slack adapter. Absent: no Slack source, as before.
+   */
+  lessonsSlack?: (companyId: OrgId) => { companyOf: NonNullable<CoreLessonsOptions["channelCompanyOf"]>; command: NonNullable<CoreLessonsOptions["slackThreadCommand"]> };
   /**
    * Optional explicit CI reader. Otherwise the root adapts policySource (D1 today when no source was supplied).
    * The runtime validates this reader and passes the same checked function to merge tracking.
@@ -184,6 +225,11 @@ export interface BrokerCoreRootInputs {
   codeSettings?: CodeSettingsReader;
   /** D1 policy resolved per company/project. Absent: D1 today (their_ci_fix); never default on a failed read. */
   policySource?: PolicySource;
+  /**
+   * L4-HW3d: builds the deployed policy source over the root's own company rules service (the same one the per-task limit reader asks; `hostedPolicySource`, core-policy-source.ts), once
+   * per root. Used only when no `policySource` was given. Absent as well: D1 today.
+   */
+  hostedPolicySource?: (hook: () => ProjectSettingsHook | undefined) => PolicySource;
   /** The job services the deployment builds for a company (merge tracking, the session sweep, notices, the admission hold sweep). */
   services?: (companyId: OrgId, flow: TaskFlow, registry: AdapterRegistry, wiring: CoreServiceWiring) => Partial<Record<CoreServiceName, CoreService>>;
   /**
@@ -203,6 +249,11 @@ export interface BrokerCoreRootInputs {
    * read from this same reader (`upkeepRoomCentsOf`, core/upkeep/cap.ts), fresh each time: there is no second source of the project's remaining room.
    */
   upkeepCap?: (companyId: OrgId) => UpkeepCapReader | undefined;
+  /**
+   * L4-HW1: whether a workflow task starts on workflow 1.1.0 (Understand first, the plan check, the Rovara Code program), as on a laptop (local/app/app.ts). Default: true. Only a test or a
+   * deliberate rollback gives false; a task keeps the version it started on either way (the version is stored with its workflow, and nothing reads this input after the start).
+   */
+  understandFirst?: boolean;
   /** The API's own address (a session's link). */
   origin: () => string;
   log: (entry: Record<string, unknown>) => void;
@@ -241,6 +292,8 @@ export interface BrokerCoreRoot {
   readonly knowledge: KnowledgeApi | undefined;
   /** L4-AK1H: whether a person may be told an admin notice now (they are one of the company's admins, read live). Handed to the notice delivery (`notification.adminNotice`). Undefined with `knowledge`. */
   readonly adminNotice: ((orgId: string, developerId: string) => Promise<boolean>) | undefined;
+  /** L4-SRC-SL: the person's own "Don't learn from my Slack messages" switch (`core-host/lessons-slack-switch-api.ts`), whenever the core serves. */
+  readonly lessonsSlackSwitch?: LessonsSlackSwitchApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
@@ -277,9 +330,9 @@ const CORE_SETTINGS_REFUSAL_WORDS = "The core engine settings are not readable."
  * approval through the install's bound `eval-reservation` adapter only, and the company's base-score cache. The approver's CURRENT role is the hosted members reader
  * (`deployedSessionMembers`: live `COMPANY_MEMBER#` membership in THIS company, the broker's project grant), never the role stored at approval or a role the gateway names.
  */
-export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void): EvalPlanSources {
+export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "get" | "require">, companyId: OrgId, people: DeployedPeople, log?: (entry: { event: string }) => void, environment?: EvalEnvironmentSource): EvalPlanSources {
   return createEvalPlanSources({
-    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people),
+    store: registry.require("storage"), companyId, registry, members: deployedSessionMembers(companyId, people), ...(environment === undefined ? {} : { environment }),
     ...(log === undefined ? {} : { log: (event) => { log({ event: `core_engine.${event}` }); } }),
   });
 }
@@ -328,11 +381,21 @@ export function projectGrantFromDynamo(client: DynamoSender, tableName: string):
   return async (personId, project) => (await role(personId, project)) !== undefined;
 }
 
+/**
+ * Lead 4 L4-AK2g: the hosted answers' team knowledge briefing. A company's answer is briefed by THAT company's own lessons host, and only on the runtime that is that company's (the engine builds one runtime per
+ * company); another company's id, or a company the lessons switch does not cover, has none and the answer is made as before. The seam is asked only after the answer service checked the person's role.
+ */
+export function answersBriefingOf(runtimeCompanyId: OrgId, hostOf: (companyId: OrgId) => Pick<LessonsHost, "answerBriefing"> | undefined): NonNullable<HostedAnswersWiring["briefing"]> {
+  return (companyId) => { const host = companyId === runtimeCompanyId ? hostOf(companyId) : undefined; return host === undefined ? undefined : (input) => host.answerBriefing(input); };
+}
+
 /** The project role the lessons API reads, from the broker's grant: a project administrator is a `maintainer`, a developer a `contributor`; anything else none. */
 export function projectRoleOf(grant: "developer" | "administrator" | undefined): ProjectRole | undefined {
   return grant === "administrator" ? "maintainer" : grant === "developer" ? "contributor" : undefined;
 }
 
+/** Audit gap 11b: the trackers a hosted company's tickets are written back to (Linear only, over the company's own OAuth connection; hosted-intake.ts). */
+export const HOSTED_TICKET_TRACKERS: readonly string[] = ["linear"];
 export const NOT_A_MEMBER_HERE = "You are not a member of this company.";
 export const NO_PROJECT_GRANT = "You do not have access to this project.";
 
@@ -491,7 +554,7 @@ export function deployedCallerFromMembership(membershipOf: (personId: string) =>
     const membership = await membershipOf(caller.developerId);
     if (membership === undefined) return undefined;
     const principal: Principal = { companyId: membership.companyId, personId: caller.developerId, displayName: caller.name, roles: [membership.role], provider: HOSTED_IDENTITY_PROVIDER };
-    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }) };
+    return { principal, ...(caller.clientId === undefined ? {} : { client: caller.clientId }), ...(caller.stepUp === undefined ? {} : { stepUp: caller.stepUp }), ...(caller.webApp === true ? { webApp: true as const } : {}) };
   };
 }
 
@@ -537,6 +600,27 @@ export async function hostedRoundCap(registry: Pick<AdapterRegistry, "require">,
   return { limitUsd: cap.micros / 1_000_000, spentUsd: costUsdOf(await ledger.taskCost(companyId, task.taskId)) };
 }
 
+/** The most admins one notice names (a company with more is told through its first ones, by the port's sorted list). */
+export const ADMIN_NOTICE_PEOPLE_MAX = 20;
+
+/**
+ * Who is told an admin notice (L4-MCPA): the company's owners AND admins, read live. The people port is asked company-wide (no project), whose `eligibleIds` are the live owners and admins and never a project's
+ * maintainers (`ownerIds` alone would leave out every non-owner admin). They are given as the ids notices are addressed by (`developerIdOf`); a person the identity no longer names is left out. A list the port could
+ * not complete tells nobody. Queueing and delivery both ask this one function, so a person removed or demoted since a notice was queued is not told.
+ */
+export async function adminNoticeIdsOf(
+  people: Pick<HostedLessonPeople, "approvers">, identity: { getPrincipal(companyId: string, personId: string): Promise<Pick<Principal, "provider" | "personId"> | undefined> }, companyId: OrgId,
+): Promise<string[]> {
+  const listed = await people.approvers(companyId, undefined);
+  if (!listed.complete) return [];
+  const ids: string[] = [];
+  for (const personId of listed.eligibleIds.slice(0, ADMIN_NOTICE_PEOPLE_MAX)) {
+    const principal = await identity.getPrincipal(companyId, personId);
+    if (principal !== undefined) ids.push(developerIdOf(principal));
+  }
+  return ids;
+}
+
 /**
  * The deployed identity's display name for a person: read live from their sign-in record, never for a revoked or unknown person. The name goes through the one display helper
  * (`profileDisplayName`, DEC 254p (a)): a GitHub person's is clean, cut text with no markup, address or placeholder shape; any other person's is exactly as stored.
@@ -568,19 +652,26 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   }
   if (settingsBlocked) log({ event: "core_engine.settings_blocked" });
   const now = inputs.now ?? (() => new Date());
+  /** HW5: the web app's own origin for an address in a chat message (a plain https origin, else none: the message then carries no link). A throwing origin reads as none. */
+  const originOf = (): string | undefined => { try { return inputs.origin(); } catch { return undefined; } };
   const membershipOf = inputs.signInTableName === undefined || inputs.signInTableName === ""
     ? async () => undefined
     : membershipWithRoleFromDynamo(inputs.documentClient, inputs.signInTableName);
   const projectGrantRole = projectGrantRoleFromDynamo(inputs.documentClient, inputs.stateTableName);
   // L2-5 (b): each task's cap is lowered to its project's own per-task limit (model_budget_usd) when one is set.
   // The company's rules service, when the install has one, as the settings page reads it (read each time: unreadable settings or no install signer refuse).
-  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall, inputs.policyHookFetch));
+  const engineHook = () => enginePolicyHook(hookSettings, hookProblem, inputs.policyHookInstall, inputs.policyHookFetch);
+  const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, engineHook);
+  // L4-HW3d: one cached, company-scoped source for every company's CI mode (its cache is per company and project).
+  const policySource = inputs.policySource ?? inputs.hostedPolicySource?.(engineHook);
   const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const wikiProjectRole = wikiProjectRoleFrom({ membershipOf, projectGrantRole });
   const displayNameOf = hostedDisplayNameOf(inputs.documentClient, inputs.signInTableName);
   const identity: HostedIdentityOptions = { membershipOf, displayNameOf };
+  // HW5b: where the deployment serves ONE chat that can name a person (`ChatThreads.personOf`), a press in it may approve a low or medium risk plan (`hosted-approvers.ts` `chat`).
+  const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, inputs.callbackSigningKey === undefined ? undefined : stepUpApprovalKeyOf(inputs.callbackSigningKey));
   const coreSwitch = parseCoreSwitch(env[CORE_ENGINE_VARIABLE]);
   const coreActive = coreSwitch.value.mode !== "off" || coreSwitch.drain === true; 
   // Web task channel C8 (option b): the attention email, OFF unless ROVARA_ATTENTION_EMAIL is `on` (attention-email.ts). One attempt per invoke: a send whose answer was lost is never sent again.
@@ -606,6 +697,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   };
   // Switch off (and not draining): the core settings are never read, so an install without the core reads exactly what it read before (CORE_ENGINE_BROKER_WIRED).
   const lessonsSwitch: ReturnType<typeof readCoreLessonsSwitch> = coreActive ? readCoreLessonsSwitch(env) : { value: { mode: "off" } };
+  // The weekly lessons summary's pilot list, resolved ONCE so the sender (createCoreLessons) and the settings API (createLessonsApi) can never disagree about which companies default to on.
+  const lessonsDigestPilot = digestPilotOf({ lessonsSwitch: lessonsSwitch.value, ...(inputs.lessonsDigestPilot === undefined ? {} : { digestPilot: inputs.lessonsDigestPilot }) });
   // The caps the per-run stop reads (the admission module refuses to build without them, so the registry is refused then too).
   const readSettings = coreActive ? readHostedAdmissionSettings(env) : undefined;
   const admissionSettings = readSettings !== undefined && "settings" in readSettings ? readSettings.settings : undefined;
@@ -653,6 +746,16 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     if (found === undefined) { found = createEvalWrapperTargets({ flow, registry, companyId, now: () => now().getTime() }); wrapperTargetsByCompany.set(companyId, found); }
     return found;
   };
+  // L4-HW2: the company's learning port, asked for only where the lessons switch names the company (nothing is made, no token minted, for any other), and never allowed to break the runtime: a throw is "no port".
+  const learningOf = (companyId: OrgId): CoreLessonsOptions["learning"] => {
+    if (inputs.lessonsLearning === undefined || !switchCovers(lessonsSwitch.value, companyId)) return undefined;
+    try {
+      const port = inputs.lessonsLearning(companyId);
+      // Said once per company build: a covered company with no port (no gateway settings, no task-token key, a non-Claude agent model) learns nothing, and that is never silent.
+      if (port === undefined) log({ event: "core_engine.lessons_learning_not_set_up", companyId });
+      return port;
+    } catch { log({ event: "core_engine.lessons_learning_unavailable", companyId }); return undefined; }
+  };
   const teamRecords = new Map<string, CoreTeamRecord>();
 
   // One People rule for every core act on a task: the owner moves, the reads and the decision cards (the approvers point's own re-check uses it too, through `taskOwner`).
@@ -665,7 +768,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const app = createCoreHostApp({
     env,
     log,
-    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
+    modules: () => [...codeAdapterModules(inputs.codeModules({ storage: async () => (await app.registry()).require("storage") })), ...hostedSecurityModules({ env, identity, callbackSigningKey: inputs.callbackSigningKey, runStopWired: runStopWiredFrom(env), projectTaskCap, taskOwner, ...(chatApproval === undefined ? {} : { chat: chatApproval }) }), ...gatewayModelKeysModules(env), ...(attention === undefined ? [] : [attentionEmailModule(attention.sender)]), ...evalReservationModules(env, inputs.taskTokens), ...companyInstructionsModules(env, inputs.taskTokens), ...(inputs.extraModules?.() ?? [])],
     context: () => ({ installCompanyId: IMPLICIT_COMPANY_ID, now, env, clients: {}, log }),
     ...(inputs.wrapStorage === undefined ? {} : { wrapStorage: inputs.wrapStorage }),
     beforeSeal: (registry) => {
@@ -678,17 +781,39 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { limits: async () => {
+      flowOptions: { understandFirst: inputs.understandFirst ?? true, limits: async () => {
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
       }, ...(modelGateway() === undefined ? {} : modelFlowOptions(registry, companyId)),
-      // L2-4: a task started from a ticket (intake only) gets its session and the ticket binding in its own start transaction, as on a laptop; every other start is unchanged.
-      ...(inputs.linearIntake === undefined ? {} : { startExtras: ticketSessionStartExtras(companyId) }),
+      // L4-TSU: what a task has cost, for automatic fixing's per-task dollar cap: the settled figure in THIS company's cost ledger, read fresh each time; anything not known to be complete throws (an ask, never "nothing spent").
+      taskSpendUsd: createCompanyTaskSpend({ store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.task_spend_refused", companyId, reason }) }),
+      // L2-4 + core-task-web-routes (#1045): every person's start (web, Slack, API, intake) gets its session in its own start transaction, as on a laptop, so Retry, Close and the log reach it;
+      // a task started from a ticket also gets the ticket binding there. A system owner's start gets nothing added.
+      startExtras: ticketSessionStartExtras(companyId, { chatThreads: inputs.chatThreads !== undefined }),
       moneyStop: createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: admissionSettings, now }),
+      // L6a: a finished task teaches this company's estimate from the same company-scoped usage ledger as hosted spend.
+      onTaskClosed: async (task, closedAt) => {
+        const store = registry.require("storage");
+        const ledger = createHostedLedger({ store, metering: registry.require("metering"), now });
+        const outcome = await recordRunCost({ store }, {
+          orgId: companyId, project: task.project, taskId: task.taskId, path: estimatePathOf(task), endedAt: closedAt,
+          ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
+        });
+        log({ component: "cost", event: "cost.run_recorded", outcome });
+      },
+      // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
+      sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
       // L4-ART: the flow's reader of the documents workers and the engine saved (the approved plan, a diff, the eval rounds): the registry's object storage held to THIS company's own workspaces (an
       // outside key, another company's workspace or another owner's key reads as "not there"). Without it each reader of the flow gives its "no reader" answer (core/proof/eval-round-reader.ts: no eval request).
       artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => log({ event: "core_engine.artifact_read_refused", companyId, reason }) }),
+      // L4-HW3: a starting task copies the project's How we work and the company's rules onto its workspace (the broker has the code host and the company-instructions point; the dispatcher has neither and
+      // builds every step's block from that copy).
+      standingInstructions: hostedStandingInstructions({ registry, companyId, now }),
+      // L4-HW4 (the laptop's `evidence.keepAfterChecks`): when a run's checks are recorded for a candidate, the evidence of that run (per-check output, the failing tests with the change that most likely broke each, the baseline words) is
+      // kept for the Proof route, in the company-bound object store (only this company's own workspaces; the same data guard and caps as the laptop). A rerun of the checks also asks the worker to save the raw parts (`evidenceCapture`).
+      keepEvidence: hostedKeepEvidence({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, env, now: () => now().getTime(), log, refused: (reason) => log({ event: "core_engine.evidence_refused", companyId, reason }) }),
+      autonomy: hostedAutonomy({ store: registry.require("storage"), companyId }),
       // DEC 254zm: a starting task pins the project's newest usable approved test environment (the company's own records), as on a laptop.
       testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, audit: registry.require("audit-sink"), serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
         // Lead 4 W4: told when a wiki build's task ended, so the wiki's build record says how it ended.
@@ -700,8 +825,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       repositoryGrantKey: inputs.repositoryGrantKey,
       now,
       log,
-      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(inputs.policySource) : inputs.ciReporting,
+      ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
+        flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
+        createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task), env, blobs: registry.require("object-storage") });
         const choice = modelChoices.choiceFor(companyId);
         if (choice !== undefined) {
           // Validate immediately before broker-side dispatch handoff, including start, callbacks and scheduled relays.
@@ -716,8 +843,18 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
         } else {
           lessons = createCoreLessons({
-            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
-            ...(inputs.lessonsLearning === undefined ? {} : { learning: inputs.lessonsLearning }),
+            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
+            // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
+            knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
+            ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId)),
+            // L4-SRC-TK: ticket comments as a (weak) lessons source, through the company's own Linear connection and its own account links only.
+            ...(inputs.linearIntake === undefined ? {} : {
+              tickets: {
+                trackerFor: hostedTrackerFor(companyId, inputs.linearIntake.connections, inputs.linearIntake.fetch),
+                resolveAccount: linearAccountResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
+              },
+            }),
+            ...((slack) => (slack === undefined ? {} : { channelCompanyOf: slack.companyOf, slackThreadCommand: slack.command }))(inputs.lessonsSlack?.(companyId)),
             hostFor: async (other) => {
               if (other === companyId) return lessonsByCompany.get(other)?.host;
               try { await app.runtimeFor(other); } catch { return undefined; }
@@ -740,9 +877,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
             if (inputs.chatThreads !== undefined) {
               const threads = inputs.chatThreads;
-              lessons.milestones.register(channelThreadHandler({
-                store: registry.require("storage"), registry: { get: ((point: string, name: string) => (point === "channel" ? threads.adapterFor(companyId, name) : undefined)) as never },
-                now: () => now().getTime(), companyOf: threads.companyOf,
+              lessons.milestones.register(hostedThreadHandler({
+                threads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
                 isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
                 log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
               }));
@@ -784,9 +920,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           enforcesDollars: admissionEnforcesCost(flow.deps.admission), paused: (input) => upkeep.pauses.paused(input), cap: upkeepCapFor(companyId),
           refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
+        const afterMerge = createLocalAfterMerge({ flow: flow.deps, registry, companyId, now: () => now().getTime(), log });
         // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
         return {
-          ...(inputs.services?.(companyId, flow, registry, { ...wiring, ...(attention === undefined ? {} : { notification: { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) } }), ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          ...(inputs.services?.(companyId, flow, registry, { ...wiring,
+            ...(attention === undefined && inputs.chatThreads === undefined ? {} : { notification: {
+              // HW5: the chat thread's notices (the company's chats, the thread, the task link, the already-told reads), and the attention email's seams beside them.
+              ...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: lessons !== undefined })),
+              ...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),
+            } }),
+            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined }),
+            ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+          // L6a: the project setting is off by default; the service is bound to this runtime's company.
+          "after-merge": afterMerge,
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
           ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log, repairs: repair }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
@@ -835,12 +981,25 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           standing: setupRunStanding,
           hostFor: (repository) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }),
         };
+        // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants (also the live members the eval health run reads).
+        const setupApproval = createHostedSetupApproval({
+          flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
+          people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
+          // L4-SF (c): an approval keeps the old broker's project registry in step with the core's, in the same decision.
+          registryMirror: createSetupRegistryMirror({ store: runtime.flow.deps.store, companyId: runtime.companyId }),
+        });
+        // L4-EVH (DEC 254zzz20 D5): the opt-in eval health run is offered only where a run can really happen (the model gateway, a bound reservation adapter and its cap source), and a person's yes starts it.
+        const modelGatewayConfigured = (() => { try { return modelGateway() !== undefined; } catch { return false; } })();
+        const healthRuns = evalHealthRunsAvailable({ registry, modelGatewayConfigured });
+        const healthDeps = healthRuns ? evalHealthRunDeps({ registry, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),
           taskActions: { roundCap: async (task) => hostedRoundCap(registry, runtime.companyId, now, admissionSettings, projectTaskCap, task) },
+          // Cloud #188 item 3: a core task's People, readers, events and plan comments, with the old task routes' own rules.
+          ...(inputs.taskRules === undefined ? {} : { taskRules: createCoreTaskRuleRoutes(inputs.taskRules) }),
           canReadProject: (personId, project) => projectGrant(personId, project),
           // DEC 254z-amend3: the project's test environment state, with the install's switches (and the host's "not available here" marker, broker-environment-init.ts) and the owner starter list as the catalog.
           testEnvironment: { env, serviceCatalog: hostedServiceCatalog(env), catalogName: "owner-starter-list" },
@@ -866,14 +1025,10 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               readFile: (repository, path, commit, readOptions) => codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } })
                 .fileAtRevision({ url: repository.url }, path, commit, { orgId: runtime.companyId }, { timeoutMs: readOptions.timeoutMs, maxBytes: readOptions.maxBytes }),
               wrapperTargets: (project) => wrapperTargetsOf(runtime.companyId, runtime.flow.deps, registry)(project),
+              ...(healthDeps === undefined ? {} : { healthRuns: true, healthRun: (project: string) => kickEvalHealth(healthDeps, project) }),
             },
             // L4-D (DEC 254z b): "Use this setup" with the risk-based approval, over the company's approvers point and its people's live membership and grants.
-            approval: createHostedSetupApproval({
-              flow: runtime.flow.deps, store: runtime.flow.deps.store, approvers: registry.require("approvers"), audit: runtime.flow.deps.audit, identity: registry.require("identity"),
-              people: { membershipOf, projectGrantRole }, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now,
-              // L4-SF (c): an approval keeps the old broker's project registry in step with the core's, in the same decision.
-              registryMirror: createSetupRegistryMirror({ store: runtime.flow.deps.store, companyId: runtime.companyId }),
-            }),
+            approval: setupApproval,
           },
           // Wiki W0: the free file map reads the company's own code host (company-bound, listings only) and uses the setup run's live standing; no model key is involved.
           wikiMap: wikiMapWiring,
@@ -894,7 +1049,14 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           projectNotices: {
             administers: upkeepPartsFor(registry, runtime.companyId).administers,
             setupRead: (orgId, project) => (orgId === runtime.companyId ? readSetupBrokenNotice({ flow: runtime.flow.deps, store: runtime.flow.deps.store, companyId: runtime.companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)),
+            },
+          // L4-EVCI2: the setup card's eval check from the customer's CI. The same live standing; the workflow files are read through the company's own code host (company-bound, listings and one file at a time).
+          evalCheck: {
+            standing: setupRunStanding,
+            readerFor: async (companyId, repository) => companyId !== runtime.companyId ? undefined : ciDefinitionReaderOf(codeHostForRecord(registry, repository.host === undefined ? {} : { host: { kind: repository.host.kind } }), repository, { orgId: companyId }),
           },
+          // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
+          ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },
           // Lead 4 W2: the project wiki's reads. Any live role on the project reads (the setup run's standing); the project must be in the company's catalog.
           wiki: {
             standing: setupRunStanding,
@@ -902,6 +1064,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             displayName: displayNameOf,
             // Lead 4 L4-LP3W: "Team lessons for this area" reads this company's own lessons library, and no other company's.
             lessonsOf: (companyId) => (companyId === runtime.companyId ? lessonsByCompany.get(companyId)?.runtime.load : undefined),
+            // L4-WKS: the company's "Knowledge stays in Rovara" for the MCP wiki tools (any caller but the web app). The company's own switch is read from its own store even where lessons are not on for it (no lessons runtime);
+            // the Regulated preset needs the lessons settings, so it applies where they exist.
+            toolGate: async (companyId: OrgId, project: string) => {
+              if (companyId !== runtime.companyId) throw new Error("wiki gate: another company");
+              return await wikiToolsGate(companyLessons === undefined ? { localTools: new DocumentLocalToolsSettings(registry.require("storage")) } : { localTools: companyLessons.runtime.localTools, settings: companyLessons.runtime.settings }, { workspaceId: runtime.companyId, project });
+            },
           },
           // Lead 4 C1: the wiki's corrections. The role is read live from membership; "Suggest as a lesson" exists only where lessons are on for the company (it writes one PENDING lesson, never approves).
           wikiCorrections: {
@@ -925,6 +1093,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           // every answer is the fixed "answers are not set up here yet" outcome.
           answers: {
             model: answersModel(),
+            // Lead 4 L4-AK2g: this company's own lessons host answers its briefing (never another company's); absent where the lessons switch does not cover it.
+            briefing: answersBriefingOf(runtime.companyId, (id) => lessonsByCompany.get(id)?.host),
             standing: setupRunStanding,
             repositories: async (companyId, project) => {
               if (companyId !== runtime.companyId) return undefined;
@@ -946,7 +1116,19 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     });
     const deployedCallerOf = deployedCallerFromMembership(membershipOf);
     const chatThreads = inputs.chatThreads;
-    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input));
+    coreTasks = coreTaskEntryFrom(routes, deployedCallerOf, chatThreads === undefined ? undefined : (deployed, input) => recordChatThread({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
+      // L4-U5d: a later message in that thread is input for the task (one line here; the rule and the routing are core-host/chat-thread-input.ts).
+      chatThreads === undefined ? undefined : (deployed, input) => addChatThreadInput({ chatThreads, runtimeFor: (companyId) => app.runtimeFor(companyId), now: () => now().getTime() }, deployed, input),
+      // HW5b: a press of Approve, or the words for Request changes, on the plan card (one line here; the rule is core-host/chat-decision.ts and the approvers' `chat-<channel>` method).
+      chatApproval === undefined || chatThreads?.personOf === undefined ? undefined : (deployed, press) => decideFromChat({
+        chatThreads, proofKey: stepUpApprovalKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log: (entry) => log({ ...entry, companyId: deployed.principal.companyId }),
+        companyFor: async (companyId) => {
+          const runtime = await app.runtimeFor(companyId);
+          const registry = await app.registry();
+          // The same gate as the web's decision cards (the company's approvers point, with the policy hook's wrapper); it is rebuilt per press, as the card routes' is per company.
+          return { store: runtime.flow.deps.store, gate: hostedDecisionService({ deps: runtime.flow.deps, registry, companyId, now }).gate };
+        },
+      }, deployed, press));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
     coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
@@ -956,6 +1138,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     if (lessonsSwitch.value.mode !== "off" && lessonsPeople !== undefined) {
       lessons = createLessonsApi({
         lessonsSwitch: lessonsSwitch.value,
+        digestPilot: lessonsDigestPilot,
         companyOf: async (caller) => await membershipOf(caller.personId),
         lessonsOf: async (companyId) => {
           try { await app.runtimeFor(companyId); } catch { return undefined; }
@@ -979,18 +1162,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // L4-AK1H: the same company, people and lessons, for the reads a tool outside Rovara makes. A script token is checked against its own company's token store and identity (never the caller's word), and only for a company the
       // lessons switch covers; its creator is read live (a removed member, or one whose role changed, is nobody).
       const switchValue = lessonsSwitch.value;
-      // Who is told about an unusual amount of reading: the company's owners (the people port's list) now, by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
-      const adminsOf = async (companyId: OrgId): Promise<string[]> => {
-        const listed = await lessonsPeople(companyId).approvers(companyId, undefined);
-        if (!listed.complete) return [];
-        const identity = (await app.registry()).require("identity");
-        const ids: string[] = [];
-        for (const personId of listed.ownerIds.slice(0, 20)) {
-          const principal = await identity.getPrincipal(companyId, personId);
-          if (principal !== undefined) ids.push(developerIdOf(principal));
-        }
-        return ids;
-      };
+      // Who is told about an unusual amount of reading: the company's owners and admins now (`adminNoticeIdsOf`; a list that cannot be completed tells nobody, the audit record still says it).
+      const adminsOf = async (companyId: OrgId): Promise<string[]> => await adminNoticeIdsOf(lessonsPeople(companyId), (await app.registry()).require("identity"), companyId);
       // Delivery's own check, read now: a queued admin notice is told only to a person who is one of the company's admins at that moment (fail closed on any fault).
       adminNotice = async (orgId, developerId) => (await adminsOf(orgId)).includes(developerId);
       knowledge = createKnowledgeApi({
@@ -1054,6 +1227,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     const entry = coreTasks;
     coreTasks = {
       route: (request, caller) => entry.route(request, caller),
+      // L4-U5d: the chat thread's own methods are the entry's (this wrapper once dropped them, so a hosted start never remembered its thread and a later message had nowhere to go).
+      ...(entry.recordThread === undefined ? {} : { recordThread: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["recordThread"]>>[1]) => entry.recordThread!(caller, input) }),
+      ...(entry.threadInput === undefined ? {} : { threadInput: (caller: CoreEntryCaller, input: Parameters<NonNullable<CoreTaskEntry["threadInput"]>>[1]) => entry.threadInput!(caller, input) }),
+      // Cloud #188 item 5: the task list's money read for a core task (the caller's own, in their live company).
+      ...(entry.taskMoney === undefined ? {} : { taskMoney: entry.taskMoney.bind(entry) }),
+      ...(entry.chatDecision === undefined ? {} : { chatDecision: (caller: CoreEntryCaller, press: Parameters<NonNullable<CoreTaskEntry["chatDecision"]>>[1]) => entry.chatDecision!(caller, press) }),
       stopWorkspaceForAdmin: async (workspaceId, administrator, authorize) => {
         const companyId = await companyOfWorkspace(workspaceId);
         if (companyId === undefined) throw agentXError("NOT_FOUND", WORKSPACE_NOT_FOUND);
@@ -1081,7 +1260,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const wikiOnEvents = createWikiOnEvents({ store: registry.require("storage"), companyId, now: () => now().getTime() });
         // L2b: a worker's model-access request gets a task token for the gateway (its own operation, company, task and model only).
         const wiring = modelGateway();
-        const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps));
+        const gateway = wiring?.callbackGateway(createTaskTokenDescriber(runtime.flow.deps, createHostedReviewers({ flow: runtime.flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).grants));
         return createCallbackService({
           ...(gateway === undefined ? {} : { modelGateway: gateway }),
           flow: runtime.flow.deps,
@@ -1092,7 +1271,15 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           onEvents: async (operation, events) => { await Promise.all([lessons?.host.onEvents(operation, events), wikiOnEvents(operation, events)]); },
           bookUsage: money.bookUsage,
           // DEC 253c/253j(1): the trusted eval plan, approval and baseline cache for this company's CHECKS runs, with the approver's live role from the hosted members reader.
-          evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log),
+          // L4-EVS2: and the environment the sealed eval runs in, for this company's project only: its saved image (a cloud registry's login only; none without an image registry that can serve a pull), else its approved
+          // install steps, else none.
+          evalPlan: coreEvalPlanSources(registry, companyId, { membershipOf, projectGrantRole }, log, createEvalEnvironmentSource({
+            store: registry.require("storage"), companyId, now: () => now().getTime(), env, repositoryPaths: repositoryPathsOf(runtime.flow.deps.projects),
+            savedEnv: () => evalSavedEnvDepsOf({ store: registry.require("storage"), registry: () => registry.require("image-registry"), envName: env["AGENTX_ENV"] ?? "", now: () => now().getTime(), env, hosted: true }),
+            log: (event) => { log({ event: `core_engine.${event}` }); },
+          })),
+          // L4-EVH: the opt-in eval health run's own preparation asks for its plan and posts its one result here (only where a run can really happen).
+          ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
           setupAgent: { mayStillRun: async () => false },
@@ -1152,6 +1339,12 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     lessons,
     knowledge,
     adminNotice,
+    // The person's own switch: company from live membership, rows in the company's partition of the registry's store. Only where the core serves (no company's data is read otherwise).
+    ...(settingsBlocked || !app.serving ? {} : { lessonsSlackSwitch: createLessonsSlackSwitchApi({
+      companyOf: async (caller) => await membershipOf(caller.personId),
+      store: async () => (await app.registry()).require("storage"),
+      now: () => now().getTime(),
+    }) }),
     intake,
     ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
     ...(hookSettings === undefined && !hookProblem ? {} : { policyHook: {

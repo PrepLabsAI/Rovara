@@ -46,6 +46,8 @@ it("allows only the authorized M4a settings adapter outside contracts/testing", 
   expect(policyCallers(process.cwd())).toEqual([
     // L3 (#752): D1 policy read for CI mode and policy-backed jobs; Opus-reviewed; default when no source = their_ci_fix.
     join(process.cwd(), "packages/broker/src/aws/core-engine-root.ts"), join(process.cwd(), "packages/broker/src/aws/core-job-services.ts"),
+    // L4-HW3d (#1042), owner DEC 254zzz44 (2): the hosted merge tracker's CI-mode source reads the project's stored CI mode and the company's rules lock through the same table and rules service as project-settings.ts.
+    join(process.cwd(), "packages/broker/src/aws/core-policy-source.ts"),
     join(process.cwd(), "packages/broker/src/aws/project-settings.ts"),
   ]);
 });

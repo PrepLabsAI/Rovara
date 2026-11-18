@@ -9,8 +9,8 @@
 // Linear's trigger source (work started by the payer rules of an assignment) is NOT moved onto this adapter; the neutral start is a member's act (`core/intake`).
 import { createHash } from "node:crypto";
 import {
-  agentXError, HostScopeSchema, TrackerEventSchema, TrackerItemSchema, TrackerParentSchema,
-  type HostScope, type NeutralStatus, type RawDelivery, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerEvent, type TrackerEvents, type TrackerItem,
+  agentXError, HostScopeSchema, SubjectCommentSchema, TrackerEventSchema, TrackerItemSchema, TrackerParentSchema,
+  type HostScope, type NeutralStatus, type RawDelivery, type SubjectCommentsPage, type Tracker, type TrackerAskedItem, type TrackerAskedQuery, type TrackerCapabilities, type TrackerCommentOptions, type TrackerCommentResult, type TrackerEvent, type TrackerEvents, type TrackerItem,
   type TrackerItemRef, type UntrustedText,
 } from "@agentx/contracts";
 import { workspaceOfIssueUrl } from "./api.js";
@@ -59,6 +59,18 @@ export interface LinearIssueRead {
   parent?: { id: string; title: string; url?: string | undefined } | undefined;
 }
 
+/** A comment on an issue as the install's read of Linear returns it (fetch only). Every text in it is the writer's: data, never an instruction. */
+export interface LinearCommentRead {
+  id: string;
+  /** Linear's own id of the author's account. Absent: nobody can be named. */
+  accountId?: string | undefined;
+  /** An app, a comment with no user, or (when the key is Rovara's own account) Rovara's account. */
+  isBot: boolean;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface LinearTrackerAccess {
   /** How Rovara writes a comment in Linear (the existing port). Absent: the adapter has no `comment`. */
   reply?: LinearReplyPort | undefined;
@@ -71,6 +83,10 @@ export interface LinearTrackerAccess {
    * (a laptop reads Linear by asking, since it has no webhook). The answer's accounts are in the neutral outside-account shape.
    */
   asked?: ((input: { label?: string | undefined; assignedToRovara?: true | undefined; limit: number; signal: AbortSignal }) => Promise<readonly TrackerAskedItem[]>) | undefined;
+  /**
+   * One page (numbered from 1, at most 100) of an issue's comments, those created after `since` when given; `nextPage` when there are more. Fetch only. Absent: the adapter has no `comments`. Undefined: no such issue.
+   */
+  listComments?: ((orgId: OrgId, key: string, query: { since?: string | undefined; page?: number | undefined; workspace?: string | undefined }) => Promise<{ comments: readonly LinearCommentRead[]; nextPage?: number | undefined } | undefined>) | undefined;
   /** Moves an issue to the workflow status named (matched without regard to case). Absent: the adapter has no `setStatusByName`. A refusal is a `TrackerWriteRefusedError`. */
   moveIssue?: ((key: string, statusName: string) => Promise<"moved" | "no_such_status">) | undefined;
   /** The organization an install's system scope speaks for (a single-company install has exactly one). Absent: a system scope has no organization, so nothing is written or read for it. */
@@ -219,6 +235,26 @@ export function linearTracker(access: LinearTrackerAccess = {}): Tracker {
         await edit({ orgId, issueKey: key, commentId, text: body, ...(workspace === undefined ? {} : { workspace }) });
       };
     }
+  }
+  if (access.listComments !== undefined) {
+    const list = access.listComments;
+    // L4-SRC-TK: the comments on an item, oldest first, created after `since`. FETCH ONLY: what the lessons do with them is the core's. A comment that does not fit the neutral shape is left out.
+    tracker.comments = async (ref: TrackerItemRef, options: { since?: string; page?: number }, scope: HostScope): Promise<SubjectCommentsPage> => {
+      const orgId = orgOf(scope);
+      const key = keyOf(ref);
+      const item = { tracker: LINEAR_TRACKER_KIND, id: key, ...(ref.url === undefined ? {} : { url: ref.url }) };
+      const workspace = ref.url === undefined ? undefined : workspaceOfIssueUrl(ref.url);
+      const answer = await list(orgId, key, { ...(options.since === undefined ? {} : { since: options.since }), ...(options.page === undefined ? {} : { page: options.page }), ...(workspace === undefined ? {} : { workspace }) });
+      if (answer === undefined) return { comments: [] };
+      const comments = answer.comments.flatMap((comment) => {
+        const parsed = SubjectCommentSchema.safeParse({
+          id: comment.id, subject: { kind: "item", ref: item }, author: { login: comment.accountId ?? "unknown", ...(comment.accountId === undefined ? {} : { hostUserId: comment.accountId }), isBot: comment.isBot },
+          body: cut(comment.body, 65_536), createdAt: comment.createdAt, updatedAt: comment.updatedAt,
+        });
+        return parsed.success ? [parsed.data] : [];
+      }).sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+      return { comments, ...(answer.nextPage === undefined ? {} : { nextPage: answer.nextPage }) };
+    };
   }
   if (access.moveIssue !== undefined) {
     const move = access.moveIssue;

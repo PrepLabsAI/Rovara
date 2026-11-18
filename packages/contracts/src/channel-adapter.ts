@@ -45,6 +45,8 @@ export const ChannelCapabilitiesSchema = z.object({
   directory: z.boolean().optional(),
   /** `start_conversation` commands. */
   startConversations: z.boolean().optional(),
+  /** `thread_messages` commands: one read of a thread's replies (Lead 4, the lessons' Slack source). */
+  history: z.boolean().optional(),
 }).strict();
 export type ChannelCapabilities = z.infer<typeof ChannelCapabilitiesSchema>;
 
@@ -89,10 +91,10 @@ export type ChannelAdapterRecord = z.infer<typeof ChannelAdapterRecordSchema>;
 
 /**
  * FR-073: what the built-in adapter can show and do: threads, buttons, edits, private and direct messages, documents
- * and the directory (Phase 7c).
+ * and the directory (Phase 7c), and one read of a thread's replies (`history`, Lead 4's lessons source).
  */
 export const BUILT_IN_ADAPTER_CAPABILITIES: ChannelCapabilities = {
-  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true, forms: true,
+  threads: true, buttons: 5, edits: true, maxTextLength: 40_000, proactive: true, ephemeral: true, direct: true, documents: true, directory: true, forms: true, history: true,
 };
 
 /** FR-073: the built-in adapter's record, made from the deployment's settings rather than read from the registry. */
@@ -436,6 +438,7 @@ export const COMMAND_CAPABILITY = {
   space: "directory",
   spaces: "directory",
   check: "directory",
+  thread_messages: "history",
 } as const;
 export type ChannelCommandKind = keyof typeof COMMAND_CAPABILITY;
 
@@ -477,6 +480,11 @@ export const ChannelCommandSchema = z.discriminatedUnion("kind", [
   z.object({ ...commandBase, kind: z.literal("spaces"), tenant: ChannelOpaqueIdSchema.optional(), cursor: z.string().min(1).max(500).optional() }).strict(),
   /** Whether the adapter can reach its surface, and the tenant it serves (Rovara's health check). */
   z.object({ ...commandBase, kind: z.literal("check"), tenant: ChannelOpaqueIdSchema.optional() }).strict(),
+  /**
+   * One read of the replies in one thread (the first message is not one of them), oldest first, at most one page. The adapter answers the facts the core needs to decide what may be learned from them: whether the space is
+   * private, shared with another organisation or a direct message, and for each reply who wrote it, whether that was an app or a person of another organisation, and the words. Nothing is stored by the adapter.
+   */
+  z.object({ ...commandBase, kind: z.literal("thread_messages"), tenant: ChannelOpaqueIdSchema, space: ChannelOpaqueIdSchema, thread: ChannelOpaqueIdSchema }).strict(),
 ]);
 export type ChannelCommand = z.infer<typeof ChannelCommandSchema>;
 
@@ -498,6 +506,22 @@ export const DirectoryUserSchema = z.object({
 }).strict();
 export type DirectoryUser = z.infer<typeof DirectoryUserSchema>;
 
+/** The most replies one `thread_messages` answer carries. */
+export const THREAD_MESSAGES_MAX = 200;
+/** One reply of a thread as `thread_messages` answers it. `userId` is absent for a message no person wrote. */
+export const ThreadMessageSchema = z.object({
+  id: ChannelOpaqueIdSchema,
+  userId: ChannelOpaqueIdSchema.optional(),
+  /** An app or a bot wrote it. */
+  bot: z.boolean(),
+  /** A person of another organisation wrote it (a shared space). */
+  external: z.boolean(),
+  /** The message is a plain message (no join, topic or file notice, and not an edit notice). */
+  plain: z.boolean(),
+  text: z.string().max(4_000),
+}).strict();
+export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;
+
 /** What each command answers on success. */
 export const ChannelCommandResultSchemas = {
   start_conversation: z.object({ thread: ChannelOpaqueIdSchema }).strict(),
@@ -518,6 +542,12 @@ export const ChannelCommandResultSchemas = {
     nextCursor: z.string().min(1).max(500).optional(),
   }).strict(),
   check: z.object({ tenant: ChannelOpaqueIdSchema }).strict(),
+  thread_messages: z.object({
+    space: z.object({ private: z.boolean(), shared: z.boolean(), direct: z.boolean() }).strict(),
+    messages: z.array(ThreadMessageSchema).max(THREAD_MESSAGES_MAX),
+    /** The thread has more replies than one page: these are the first ones. */
+    truncated: z.boolean(),
+  }).strict(),
 } as const;
 export type ChannelCommandResult<K extends ChannelCommandKind> = z.infer<(typeof ChannelCommandResultSchemas)[K]>;
 

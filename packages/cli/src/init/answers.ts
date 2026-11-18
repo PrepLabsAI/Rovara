@@ -5,6 +5,7 @@ import { DEFAULT_BEDROCK_MODELS, DEFAULT_DIRECT_MODELS, PROVIDER_KEY_MIN_LENGTH,
 import { agentXError, ImageDigest, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, keyedProviderSecretName, type KeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 import { DIRECT_PROVIDERS, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema, providerSecretArn, type DirectProvider } from "../deploy/answer-schemas.js";
 import type { BundleAnswers } from "../deploy/export-bundle.js";
+import { workerImageProblem } from "../deploy/parameters.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { budgetWhy, estimateMonthlyCost, suggestedBudgetUsd } from "./cost.js";
@@ -170,6 +171,9 @@ export async function collectInitAnswers(input: {
   const typed = (name: SettingsFieldName): string | undefined => (values[name] === undefined || values[name] === "" ? undefined : values[name]);
   const env = input.fixed?.env ?? typed(SETTINGS_FIELD.installName) ?? input.env;
   const email = input.adminEmail ?? typed(SETTINGS_FIELD.email) ?? flags.alertEmail;
+  // L4-IAM: a worker image outside this environment's image prefix would deploy and then fail every instance boot; refused before anything is deployed.
+  const workerProblem = workerImage === undefined ? undefined : workerImageProblem(workerImage, { env, account: input.account, region: input.region });
+  if (workerProblem !== undefined) throw agentXError("CONFIG_INVALID", `--worker-image: ${workerProblem}`);
 
   let platform: PlatformAnswers;
   let openRouterKey: string | undefined;

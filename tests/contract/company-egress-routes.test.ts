@@ -11,7 +11,7 @@ import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src
 
 const PERSON_B = "e".repeat(64);
 const PATH = "/v1/dev/company/egress-addresses";
-const ADDRESSES = "44.235.136.195,44.226.134.187";
+const ADDRESSES = "203.0.113.195,198.51.100.187";
 type Answer = Record<string, unknown> & { error: { code: string; message: string } };
 
 function world(options: { value?: string | undefined; wired?: boolean; throws?: boolean } = {}) {
@@ -39,13 +39,13 @@ describe("GET /v1/dev/company/egress-addresses", () => {
     const w = world();
     const read = await w.call();
     expect(read.status).toBe(200);
-    expect(viewOf(read.body)).toEqual({ addresses: ["44.235.136.195", "44.226.134.187"] });
+    expect(viewOf(read.body)).toEqual({ addresses: ["203.0.113.195", "198.51.100.187"] });
   });
 
   it("an admin reads them too", async () => {
     const w = world();
     w.as(PERSON_B, A, "admin");
-    expect(viewOf((await w.call()).body)).toEqual({ addresses: ["44.235.136.195", "44.226.134.187"] });
+    expect(viewOf((await w.call()).body)).toEqual({ addresses: ["203.0.113.195", "198.51.100.187"] });
   });
 
   it("two companies on one install read the SAME addresses (they belong to the install, not to a company)", async () => {
@@ -87,11 +87,11 @@ describe("GET /v1/dev/company/egress-addresses", () => {
   });
 
   it("a malformed value is never shown in part: a fixed 503 (a bad address, a private one, a duplicate, a space, too many)", async () => {
-    for (const value of ["44.235.136.195,nope", "10.0.0.5", "44.235.136.195,44.235.136.195", "44.235.136.195, 44.226.134.187", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "44.235.136.195,", "::1", "<script>"]) {
+    for (const value of ["203.0.113.195,nope", "10.0.0.5", "203.0.113.195,203.0.113.195", "203.0.113.195, 198.51.100.187", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5", "203.0.113.195,", "::1", "<script>"]) {
       const answer = await world({ value }).call();
       expect([value, answer.status]).toEqual([value, 503]);
       expect(answer.body.error.message).toBe(EGRESS_ADDRESSES_UNAVAILABLE);
-      expect(answer.raw).not.toContain("44.235");
+      expect(answer.raw).not.toContain("203.0.113");
     }
     const threw = await world({ throws: true }).call();
     expect(threw.status).toBe(503);
@@ -111,7 +111,7 @@ describe("GET /v1/dev/company/egress-addresses", () => {
       return routeCompanyEgress({ documentClient: w.h.db, signInTableName: "SignIn", wiring: { addresses: () => ADDRESSES } }, { developerId: PERSON_B } as never, asked, { method: "GET", headers: {}, path: PATH } as never);
     };
     // The control: an owner of A asking for A reads the list.
-    expect(await send({ personId: PERSON_B, companyId: A, role: "owner" })).toEqual({ addresses: ["44.235.136.195", "44.226.134.187"] });
+    expect(await send({ personId: PERSON_B, companyId: A, role: "owner" })).toEqual({ addresses: ["203.0.113.195", "198.51.100.187"] });
     // The caller's membership is company B's but the dispatcher said A: refused.
     await expect(send({ personId: PERSON_B, companyId: B, role: "owner" })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
     // A membership row that names another person.

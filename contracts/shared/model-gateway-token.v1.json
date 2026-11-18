@@ -87,6 +87,11 @@
       "name": "mdl",
       "type": "string[]",
       "required": true
+    },
+    {
+      "name": "reviewer",
+      "type": "ReviewerGrant",
+      "required": false
     }
   ],
   "testVector": {
