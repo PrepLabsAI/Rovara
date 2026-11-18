@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_PARAMETER, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PARAMETER, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PARAMETER, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PARAMETER, CORE_ENGINE_BROKER_WIRED, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PARAMETER, CORE_MODEL_GATEWAY_HOST_PATTERN, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_PATTERN, ChatGptModelIdSchema, MODEL_FALLBACK_NONE, isClaudeAgentModel, isCoreAgentModelId, isCoreAnswersModelId, isCoreLearningModelId, MODEL_FALLBACK_PATTERN, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
@@ -246,6 +246,9 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   // DEC 254zk: per-company Slack bots (Slack company mode, #845), set by a deploy or here: the control plane's SlackCompanyWorkspaces and the Slack service's copy.
   { key: "slack.companyWorkspaces", description: "enabled: Slack workspaces other than the install's own use their company's own bot token and company checks, only while company.signIn is enabled too; disabled (the default): only the install's workspace is served, as before (named environments only)",
     target: { kind: "stack-parameter", part: "control-plane", parameter: "SlackCompanyWorkspaces", also: [{ part: "slack", parameter: "SlackCompanyWorkspacesState" }] }, defaultValue: "disabled", parse: oneOf("slack.companyWorkspaces", ["enabled", "disabled"]) },
+  // Live switches check 2026-11-18: a switch the broker read that nothing in infra set (DEC 254n(1)).
+  { key: "coreEngine.agentModelChoice", description: "on: each company picks its core engine model from the models the gateway offers it (setup's AI and spending step), coreEngine.agentModel being the default; off (the default): every company runs coreEngine.agentModel (named environments only)",
+    target: parameter("control-plane", CORE_AGENT_MODEL_CHOICE_PARAMETER), defaultValue: CORE_AGENT_MODEL_CHOICE_DEFAULT, parse: oneOf("coreEngine.agentModelChoice", CORE_AGENT_MODEL_CHOICE_VALUES) },
 ];
 
 export function configKey(name: string): ConfigKey {

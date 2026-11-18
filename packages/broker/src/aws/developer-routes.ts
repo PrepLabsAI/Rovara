@@ -212,11 +212,11 @@ export interface DeveloperApiConfiguration {
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
-  /**
-   * Spec 065: a registered service's `/v1/dev/client/*` routes (project read, members, create). OFF unless the host sets it: they lack
-   * step-up, and project creation registers with preflight off and keys the project by name without its company (DEFERRED-CHECKS).
+  /*
+   * DEC 254zzz81: spec 065's `clientRoutes` switch was here. It is gone: the `/v1/dev/client/*` routes are always on, and each one checks the client's token, its route scope and the
+   * person's live company and role (routeClientRequest). Five lines, as the switch's were, so the line-keyed company inventory sites below do not move.
    */
-  clientRoutes?: true;
+
   /** Spec 025 E12: a public channel by its name, through DeveloperIdentity. */
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
@@ -1583,7 +1583,7 @@ async function companyManagesProject(deps: DeveloperRouteDependencies, caller: {
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (deps.developer.clientRoutes !== true) throw agentXError("NOT_FOUND", "route not found");
+  // DEC 254zzz81: always on (the SIGN_IN_CLIENT_ROUTES switch is gone). Every row checks the client's token, its route scope and the person's live company and role below.
   // Plan v3.2 lane ID: only a route in the table, and only with its scope.
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
@@ -1678,13 +1678,17 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const actions = memberActions(deps);
   // FR-004: as the person: they administer the project, they are a Rovara administrator, or (DEC 254n item 3, the rule of `lifecycleAccess`) they are a LIVE owner or admin of the company
   // the project belongs to, grant or not.
-  const own = await projectGrant(actions, project, caller.developerId);
-  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
+  // DEC 254zzz81 (the routes are always on): with a company, the project must be the caller's company's, read before any grant counts, so a grant on another company's project (or the
+  // implicit company's) changes nothing and that project answers like a missing one.
   const registered = await deps.documentClient.send(new QueryCommand({
     TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false,
+    ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false, ConsistentRead: true,
   })) as { Items?: unknown[] };
-  if ((registered.Items ?? []).length === 0) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
+  const latest = registered.Items?.[0];
+  if (caller.companyId !== undefined && (latest === undefined || !recordInCompany(latest, caller.companyId))) throw agentXError("NOT_FOUND", "project not found");
+  const own = await projectGrant(actions, project, caller.developerId);
+  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
   const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
   if (request.method === "GET" && members[2] === undefined) {
     const listed = await listProjectMembers(actions, project);

@@ -100,7 +100,9 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
     "CompanySignIn", "CompanySelfServe",
     // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
-    "SlackCompanyWorkspaces"],
+    "SlackCompanyWorkspaces",
+    // Live switches check 2026-11-18: the per-company model choice (agentx config set coreEngine.agentModelChoice).
+    "CoreAgentModelChoice"],
   // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
   slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
 };

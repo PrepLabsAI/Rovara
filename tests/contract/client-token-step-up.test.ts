@@ -31,7 +31,7 @@ function client(access: { fullAccess?: true; scopes?: string[] }) {
 beforeEach(() => {
   db = new FakeDynamoDb();
   const developer: DeveloperApiConfiguration = {
-    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
+    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => T0 }),
   };
   deps = { documentClient: db, tableName: "state", developer, now: () => T0 };

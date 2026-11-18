@@ -216,7 +216,7 @@ async function setUp(mode: "linking" | "developer") {
     // DEC 254zzz63: the company learning model route, the same way.
     companyLearningModel: { offered: async () => { throw new Error("none"); }, installModel: () => undefined, log: () => undefined },
     companyEgress: { addresses: () => "203.0.113.195,198.51.100.187" },
-    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(), clientRoutes: true,
+    issuer: ISSUER, env: "production", methods: { slack: false, oidc: true }, signInTableName: "signin", channelMembers: vi.fn(),
     verifyAccessToken: developerTokenVerifier({ issuer: ISSUER, keys: async () => [await signer.publicJwk()], now: () => Date.now() }),
   };
   ({ db, handler } = await createAdminBroker(mode === "linking" ? { linking: config, channelAdapters: true } : { developer: config, channelAdapters: true }));

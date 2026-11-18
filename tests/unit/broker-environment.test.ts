@@ -40,7 +40,7 @@ const SETTINGS = {
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreAllowedCompanies: "none", coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
   coreEngine: "off", coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
-  coreAnswersModel: "claude-haiku-5-5",
+  coreAnswersModel: "claude-haiku-5-5", coreAgentModelChoice: "on",
   coreLearningModel: "claude-haiku-5-5",
 } as const satisfies Record<BrokerSettingKey, string>;
 

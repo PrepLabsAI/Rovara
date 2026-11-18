@@ -32,7 +32,7 @@ function harness(options: { companies?: boolean; fullAccess?: boolean } = {}) {
     documentClient: db, tableName: "State", now: () => NOW,
     ...(options.companies === false ? {} : { companies: companyMembershipFromDynamo(db, "State") }),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn",
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
     },
   };

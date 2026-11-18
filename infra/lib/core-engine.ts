@@ -14,6 +14,7 @@
 //   - an alarm on the dead-letter queue;
 //   - (web task channel C8, option b) the attention email: CoreAttentionEmail (default off), CoreAttentionEmailHost and CoreAttentionEmailSender, and the small sender function the broker invokes,
 //     which with its role and invoke permission exists only while CoreAttentionEmail is on (attention-email.ts);
+//   - the `CoreAgentModelChoice` parameter (DEC 254n(1), default off; broker only, packed `mx`, ROVARA_CORE_AGENT_MODEL_CHOICE, the per-company model picker)
 //   - the `CoreAnswersModel` parameter (L4-AM, default empty = the agent model; broker only, packed `aa`, ROVARA_CORE_ANSWERS_MODEL, hosted answers and classifier only)
 //   - the `CoreLearningModel` parameter (DEC 254zzz58/63, default empty = claude-haiku-5-5; a company may choose its own; broker only, packed `lm`, ROVARA_CORE_LEARNING_MODEL, lessons learning only)
 //   - the `CoreModelGatewayHost` and `CoreAgentModel` parameters (default empty), packed for the broker and the dispatcher, which read them as ROVARA_CORE_MODEL_GATEWAY_URL
@@ -27,7 +28,7 @@
 import { CfnCondition, CfnParameter, Duration, Fn, Stack, Token, aws_cloudwatch as cloudwatch, aws_iam as iam, aws_lambda as lambda, aws_scheduler as scheduler, aws_sqs as sqs, type aws_cloudwatch_actions as cloudwatchActions } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
+  CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, SAVED_ENVIRONMENTS_PARAMETER, SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, SAVED_ENVIRONMENTS_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_DEFAULT, CORE_ENGINE_PARAMETER_MAX_LENGTH, CORE_ENGINE_PARAMETER_PATTERN, CORE_ENGINE_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
   coreDispatchDeadLetterName, coreDispatchQueueName, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
@@ -158,6 +159,12 @@ export class CoreEngine extends Construct {
     // Anthropic account). No IAM, no secret: the broker already mints learning tokens with its task key.
     this.learningModel = new CfnParameter(stack, "CoreLearningModel", { type: "String", default: "", maxLength: CORE_LEARNING_MODEL_MAX_LENGTH, allowedPattern: CORE_LEARNING_MODEL_PATTERN, description: "Core engine hosted lessons learning model, a Claude model id such as claude-haiku-4-5 used for lessons learning only; empty (the default) uses claude-haiku-5-5, unless a company chose its own" });
     addBrokerSetting(broker, props.naming, "coreLearningModel", this.learningModel.valueAsString);
+    // Live switches check 2026-11-18 (DEC 254n(1), 243c): the per-company agent model choice, for the BROKER only (only it reads the offered list and validates a company's choice; the
+    // dispatcher reads the broker's stored validation and no setting). Nothing set ROVARA_CORE_AGENT_MODEL_CHOICE before (the runbook's overlay was dropped by every upgrade): a stack
+    // parameter now (written out: tests/contract/config-keys.test.ts reads the declaration), kept across upgrades (OPERATOR_PARAMETERS), packed (`mx`). Off (the default): no choice is
+    // offered and every company runs coreEngine.agentModel, as before. No IAM, no secret.
+    const agentModelChoice = new CfnParameter(stack, "CoreAgentModelChoice", { type: "String", default: CORE_AGENT_MODEL_CHOICE_DEFAULT, allowedValues: [...CORE_AGENT_MODEL_CHOICE_VALUES], description: "Core engine per-company agent model choice (setup's AI and spending model picker): off (the default; every company runs the agent model) or on" });
+    addBrokerSetting(broker, props.naming, "coreAgentModelChoice", agentModelChoice.valueAsString);
 
     // #663 review: only the core dispatch queue may send its dead letters here (RedriveAllowPolicy). Its ARN is built from its fixed name, not referenced, because the queue's own redrive
     // policy already references this queue (a reference back would be a cycle).

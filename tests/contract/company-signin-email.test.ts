@@ -39,7 +39,6 @@ it.each(["grant_project_access", "revoke_project_access", "revoke_signin"] as co
 
 it("the client's member-change route also fences the target using the caller's membership", async () => {
   const h = companyRouteHarness(); h.project();
-  h.deps.developer.clientRoutes = true;
   h.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#shared-project", projectName: "shared-project", role: "administrator" });
   h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web", audience: "web-app", redirectUris: [], loopback: true, scopes: ["projects:members"], createdAt: TIME, updatedAt: TIME, updatedBy: "operator" });
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app" });
