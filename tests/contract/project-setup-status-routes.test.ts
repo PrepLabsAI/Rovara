@@ -535,6 +535,22 @@ describe("Done means approved (L4-T2)", () => {
       expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
     });
 
+    it("a row naming another project or company carries no approval, and a stored revision that is not the one named is no approval", async () => {
+      for (const over of [{ project: "beta" }, { orgId: B }]) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        rejected(h, "rejected", { ...earlierApproval(h, A, "alpha", "ready"), ...over } as never);
+        expect((await h.ok()).setupRun, JSON.stringify(over)).toMatchObject({ state: "needs_you", approval: "none" });
+      }
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      const earlier = earlierApproval(h, A, "alpha", "ready");
+      const stored = h.db.get(projectRevisionKey(A, "alpha", 2).pk, projectRevisionKey(A, "alpha", 2).sk) as { definition: Record<string, unknown> };
+      h.db.set({ ...projectRevisionKey(A, "alpha", 2), entityType: "PROJECT", definition: { ...stored.definition, revision: 9 } });
+      rejected(h, "rejected", earlier);
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    });
+
     it("a malformed earlier approval is ignored, never guessed", async () => {
       for (const bad of [{ revision: "2", at: "x" }, { revision: 2 }, { revision: -1, at: "x" }, { revision: 1.5, at: "x" }, { revision: 2, at: "" }, "approved", null]) {
         const h = companyA();
