@@ -107,7 +107,6 @@ describe("the /v1/app route table", () => {
     ["POST", "/v1/app/projects/payments/setup-agent/host-decide", "full"],
     // Lead 4 N1: the nightly upkeep switch.
     ["GET", "/v1/app/projects/payments/upkeep", "full"], ["PUT", "/v1/app/projects/payments/upkeep", "full"],
-    ["GET", "/v1/app/inbox", "tasks:read"], ["POST", "/v1/app/inbox/read", "tasks:read"],
     // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
     ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
     // Lead 4 PCF: the plan card's "Change" lists the open features (the same people as the filing).

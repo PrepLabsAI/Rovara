@@ -650,7 +650,8 @@ describe("task-token key and membership IAM", () => {
     // parameter in ResolveWorkerAmi, the provisioner state machine definition); the IAM tuples they cause are pinned exactly in beforeTuples below.
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack + the attention email, whose resources are asserted and taken out by withoutCoreEngine); the named synth differs from
     // batch 13's head only in the machine size changes and the attention email's conditional resources, parameters, rule and `ae` setting.
-    expect(createHash("sha256").update(text).digest("hex")).toBe("4773516b2efa589cbc7b59635ad8e457d9514de584662cc10994877882eb1ca6");
+    // Batch 14 combined (DEC 254zzl-amend3, 254zzn(2)): and for the CoreSystemRuns/CoreAnswersModel parameters, the system-runs condition and upkeep-night schedule, and `aa`/`sy` packed (nothing else).
+    expect(createHash("sha256").update(text).digest("hex")).toBe("ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {

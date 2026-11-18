@@ -239,18 +239,21 @@ describe("the named TEST proof-only installation gate", () => {
     // foreign) against batch 13's head 84be8d7b7 differs ONLY in: the provisioner's ec2:InstanceType allow-list (10 types), the x86_64 AL2023 AMI parameter in ResolveWorkerAmi, the provisioner
     // state machine definition (#877/#887/#901); the attention email's 3 parameters, condition, rule and 5 conditional resources plus `ae` in AGENTX_SETTINGS (#907, off by default); and, in the
     // proof install, the dispatcher's one GetItem COMPANY_MEMBER#* statement (#875, DEC 254u) and the proof function's CurrentVersion id (its code changed). Nothing else moved.
+    // Batch 14 combined (DEC 254zzl-amend3, DEC 254zzn(2)): named and foreign re-pinned again; legacy unchanged. Against the first batch-14 synth the templates differ ONLY in the
+    // CoreSystemRuns parameter (default off) and its condition, the hourly upkeep-night schedule (existing invoke role, DISABLED unless that condition holds), the CoreAnswersModel
+    // parameter (default empty), `aa`/`sy` in the broker's and `sy` in the dispatcher's AGENTX_SETTINGS, and the proof function's CurrentVersion id (its code changed).
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "0a875559c892825e45000fa600a1ee1a40492677a55a59e057a587a40fee5f1e",
-        withoutRoute: "d1b4ac5798cbd980a7e98fbcbb18f1baf7b146e653d14103e55485e68ad216ef",
+        withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce",
+        withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990",
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "97be2a5fc8d7b81bb3fa198546f38f43acea16c4241f7d3837991e0fbeda5bd6",
-        withoutRoute: "bbac71e6236364b80bc27996e85799d56b1960b66b5a79aee949103325a5fa8d",
+        withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc",
+        withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7",
       },
       {
         label: "legacy",
