@@ -123,6 +123,8 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", `${P}/lessons/decisions`, { decisions: [{ lessonId: "les_aaaa1111", version: 1, decision: "keep" }] }], ["POST", `${P}/tasks/${randomUUID()}/lessons/les_aaaa1111/not-helpful`, {}],
   ["POST", `${P}/lessons/mode/trial-offer`, { decision: "accept" }],
   ["GET", `${P}/lessons/weekly-summary`], ["PUT", `${P}/lessons/weekly-summary`, { on: true }], ["GET", `${P}/lessons/measure`],
+  ["GET", `${P}/skills`], ["POST", `${P}/lessons/les_aaaa1111/skill`, {}], ["PUT", `${P}/skills/add-a-queue`, { expectedVersion: 1, description: "d", when: "w", steps: ["one"] }],
+  ["POST", `${P}/skills/add-a-queue/approve`, { version: 1 }], ["POST", `${P}/skills/add-a-queue/retire`, {}],
 ];
 
 describe("the paths", () => {
@@ -133,6 +135,7 @@ describe("the paths", () => {
     expect(rows.map((route) => `${route.method} ${route.path}`).sort()).toEqual([...[
       "GET /v1/dev/projects/{project}/lessons", "GET /v1/dev/projects/{project}/lessons/mode", "GET /v1/dev/projects/{project}/lessons/retire-requests", "GET /v1/dev/projects/{project}/tasks/{taskId}/lessons",
       "POST /v1/dev/projects/{project}/lessons/{lessonId}/approve", "POST /v1/dev/projects/{project}/lessons/{lessonId}/reject", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire", "POST /v1/dev/projects/{project}/lessons/{lessonId}/retire-request",
+      "POST /v1/dev/projects/{project}/lessons/{lessonId}/skill",
       "POST /v1/dev/projects/{project}/lessons/decisions", "POST /v1/dev/projects/{project}/tasks/{taskId}/lessons/{lessonId}/not-helpful",
       "PUT /v1/dev/projects/{project}/lessons/mode", "POST /v1/dev/projects/{project}/lessons/mode/trial-offer", "GET /v1/dev/projects/{project}/lessons/weekly-summary", "PUT /v1/dev/projects/{project}/lessons/weekly-summary", "GET /v1/dev/projects/{project}/lessons/measure",
     ]].sort());
@@ -140,6 +143,11 @@ describe("the paths", () => {
     const samples = [...rows.map((route) => route.path.replace(/\{[A-Za-z]+\}/g, "x1")), "/v1/dev/projects/x1", "/v1/dev/projects/x1/lessons/", "/v1/dev/projects/x1/lessons/a/b", "/v1/dev/projects/x1/lessons/a/approve/b", "/v1/dev/projects/x1/tasks/t1", "/v1/dev/projects/x1/lessonsx"];
     for (const path of samples) expect(isLessonsApiPath(path), path).toBe(LESSONS_API_ROUTES.test(path));
     expect(rows.every((route) => isLessonsApiPath(route.path.replace(/\{[A-Za-z]+\}/g, "x1")))).toBe(true);
+    // The skills rows (L4-AK3): the same paths in the router and the API, full access only.
+    const skillRows = DEV_ROUTES.filter((route) => route.path.includes("/skills"));
+    expect(skillRows.map((route) => `${route.method} ${route.path}`).sort()).toEqual(["GET /v1/dev/projects/{project}/skills", "POST /v1/dev/projects/{project}/skills/{skill}/approve", "POST /v1/dev/projects/{project}/skills/{skill}/retire", "PUT /v1/dev/projects/{project}/skills/{skill}"].sort());
+    expect(skillRows.every((route) => route.requires === "full" && isLessonsApiPath(route.path.replace(/\{[A-Za-z]+\}/g, "x1")))).toBe(true);
+    for (const path of [`${P}/skills`, `${P}/skills/a-b`, `${P}/skills/a-b/approve`, `${P}/skills/a-b/retire`, `${P}/skills/Bad`, `${P}/skills/a-b/x`, `${P}/skills/`, `${P}/skills/a-b/approve/c`, `${P}/lessons/x1/skill`, `${P}/lessons/x1/skill/y`]) expect(isLessonsApiPath(path), path).toBe(LESSONS_API_ROUTES.test(path));
   });
 });
 
@@ -926,5 +934,68 @@ describe("revert detection (lane L4-LM1b): the host puts the lessons a reverted 
     const w = await setUp();
     const report = await w.lessons.get(A)!.service.pass({ budgetMs: 30_000 });
     expect(report).toMatchObject({ reverts: { repositories: 0, found: 0 } });
+  });
+});
+
+describe("Rovara skills (L4-AK3)", () => {
+  const DAY = 86_400_000;
+  const BODY = "When adding a new queue: 1. Create the queue and its dead-letter queue. 2. Register the handler. 3. Add an alarm on the dead-letter depth.";
+  async function proven(w: World, companyId: OrgId = A): Promise<void> {
+    const now = w.world.clock.now;
+    await put(w, companyId, lesson(companyId, "les_proc0001", {
+      type: "procedure", title: "Add a queue handler", description: "A new queue needs a dead-letter queue.", body: BODY, approvals: [{ approvalId: "a1", by: "a-admin", at: 1, mode: "one" }],
+      provenance: { ...draft().provenance, authors: ["ann", "bob"], supportTasks: [], measured: false, audience: { kind: "project" } }, createdAt: now - 40 * DAY, updatedAt: now - 40 * DAY, expiresAt: now + 90 * DAY,
+    }));
+    const documents = w.lessons.get(companyId)!.runtime.documents;
+    for (let n = 0; n < 10; n += 1) await documents.put({ item: { pk: companyScoped(companyId, "LESSON_USE#payments#les_proc0001"), sk: `task-${String(n)}`, entityType: "LESSON_USE", taskId: `task-${String(n)}`, at: now } });
+  }
+  it("the full path: a person who decides drafts, two different people approve, the skill is in use; everyone else is refused with fixed words", async () => {
+    const w = await setUp();
+    await proven(w);
+    const { api: target } = api(w);
+    // Who may and who may not.
+    expect(await call(target, "a-contrib", "POST", `${P}/lessons/les_proc0001/skill`, {})).toMatchObject({ ok: false, code: "FORBIDDEN", message: "Only a maintainer of this project, or an admin, can decide skills." });
+    expect(await call(target, "a-out", "POST", `${P}/lessons/les_proc0001/skill`, {})).toMatchObject({ ok: false, status: 404, message: NO_SUCH_PROJECT });
+    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {}, undefined, { scriptToken: { tokenId: "stk_x" } })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, { name: "Bad Name" })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, { tools: ["bash"] })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_nope0001/skill`, {})).toMatchObject({ ok: false, status: 404 });
+    // Draft.
+    expect(await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {})).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 1 } });
+    expect(await call(target, "a-maint", "POST", `${P}/lessons/les_proc0001/skill`, {})).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    // Two approvals by two different people.
+    expect(await call(target, "a-admin", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 1, approvals: 1, live: false } });
+    expect(await call(target, "a-admin", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT", message: "You already approved this version." });
+    expect(await call(target, "a-contrib", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    const listed = await call(target, "a-contrib", "GET", `${P}/skills`);
+    expect(listed).toMatchObject({ ok: true, body: { project: "payments", skills: [{ name: "add-a-queue-handler", approvals: 1, approvedByYou: false }] } });
+    expect(JSON.stringify(listed)).not.toContain("a-admin");
+    expect(await call(target, "a-maint", "POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 })).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 1, approvals: 2, live: true } });
+    expect(await call(target, "a-admin", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { skills: [{ activeVersion: 1, approvals: 2, approvedByYou: true }] } });
+    // An edit is a new version; a stale one is a conflict; the audit has each step with the name and version only.
+    expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, description: "Add a queue handler", when: "adding a queue", steps: ["Create the queue", "Wire the handler"] })).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", version: 2 } });
+    expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, description: "Add a queue handler", when: "adding a queue", steps: ["Create the queue"] })).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+    expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 2, description: "d", when: "w", steps: Array.from({ length: 13 }, (_, n) => `s${String(n)}`) })).toMatchObject({ ok: false, code: "CONFIG_INVALID" });
+    expect(await call(target, "a-maint", "PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 2, description: "d", when: "w", steps: ["Run !`rm -rf /`"] })).toMatchObject({ ok: false, code: "CONFIG_INVALID", message: "A skill is text only: it cannot hold a command line to run or a list of tools." });
+    const audited = lessonEvents(w).filter((event) => event.action.startsWith("lesson.skill_"));
+    expect(audited.map((event) => event.action)).toEqual(["lesson.skill_drafted", "lesson.skill_approved", "lesson.skill_approved", "lesson.skill_activated", "lesson.skill_edited"]);
+    expect(JSON.stringify(audited)).not.toContain("dead-letter");
+    // Retire.
+    expect(await call(target, "a-contrib", "POST", `${P}/skills/add-a-queue-handler/retire`, {})).toMatchObject({ ok: false, code: "FORBIDDEN" });
+    expect(await call(target, "a-admin", "POST", `${P}/skills/add-a-queue-handler/retire`, {})).toEqual({ ok: true, body: { project: "payments", name: "add-a-queue-handler", retired: true } });
+    expect(await call(target, "a-admin", "GET", `${P}/skills`)).toMatchObject({ ok: true, body: { skills: [{ retired: true }] } });
+  });
+
+  it("two companies with the same project name never see or change each other's skills", async () => {
+    const w = await setUp();
+    await proven(w);
+    const { api: target } = api(w);
+    await call(target, "a-admin", "POST", `${P}/lessons/les_proc0001/skill`, {});
+    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+    for (const [method, path, body] of [["POST", `${P}/skills/add-a-queue-handler/approve`, { version: 1 }], ["POST", `${P}/skills/add-a-queue-handler/retire`, {}], ["PUT", `${P}/skills/add-a-queue-handler`, { expectedVersion: 1, description: "d", when: "w", steps: ["x"] }]] as const) {
+      expect(await call(target, "b-admin", method, path, body), `${method} ${path}`).toMatchObject({ ok: false, status: 404 });
+    }
+    expect(await call(target, "b-admin", "POST", `${P}/lessons/les_proc0001/skill`, {})).toMatchObject({ ok: false, status: 404 });
+    expect(await call(target, "a-admin", "GET", `${P}/skills`)).toMatchObject({ body: { skills: [{ name: "add-a-queue-handler", approvals: 0 }] } });
   });
 });

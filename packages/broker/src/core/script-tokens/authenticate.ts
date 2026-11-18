@@ -30,6 +30,11 @@ const TASK_ID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const TASK_READ = new RegExp(`^/v1/dev/tasks/(${TASK_ID})(?:/events)?$`, "u");
 /** Decision 46b: a local coding tool reads the project-wide lessons of one project (`local/app/lessons-routes.ts`). The project is the path's. */
 const LESSONS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/lessons$/u;
+/** The table of contents of a project's team knowledge (names and counts, no text): the same permission as the lessons read, so one "Team knowledge" permission covers both. */
+const KNOWLEDGE_AREAS_READ = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/areas$/u;
+
+/** A team SUGGESTION from a tool (L4-AK3): the one write a "Team knowledge" token may make. It only adds a weak-source lesson that waits for a second sighting and then for a person; it never changes anything live. */
+const KNOWLEDGE_PROPOSE_WRITE = /^\/v1\/dev\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/knowledge\/propose$/u;
 
 /** What one allowed request is: the permission it needs and how its project is found. */
 export type AllowedRoute =
@@ -47,7 +52,7 @@ export function scriptTokenRoute(method: string, pathname: string): AllowedRoute
   }
   const wiki = method === "GET" ? WIKI_READ.exec(pathname) : null;
   if (wiki !== null && WikiProjectSchema.safeParse(wiki[1]).success && (wiki[2] === undefined || WikiPageIdSchema.safeParse(wiki[2]).success)) return { permission: "wiki", project: "path", name: wiki[1]! };
-  const lessons = method === "POST" ? LESSONS_READ.exec(pathname) : null;
+  const lessons = method === "POST" ? (LESSONS_READ.exec(pathname) ?? KNOWLEDGE_AREAS_READ.exec(pathname) ?? KNOWLEDGE_PROPOSE_WRITE.exec(pathname)) : null;
   if (lessons !== null) return { permission: "lessons", project: "path", name: lessons[1]! };
   const read = method === "GET" ? TASK_READ.exec(pathname) : null;
   return read === null ? undefined : { permission: "read", project: "task", taskId: read[1]! };

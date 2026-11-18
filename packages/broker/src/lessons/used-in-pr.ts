@@ -26,7 +26,7 @@ export function visibilityOfRepositories(answers: ReadonlyArray<{ private?: bool
   if (answers.some((a) => a?.private === false)) return "public";
   return answers.every((a) => a?.private === true) ? "private" : "unknown";
 }
-export interface LessonUsed { id: string; title: string; /** The link that opens the task page ready to mark the lesson not helpful. Empty where the install has no page a pull request can link to. */ notHelpfulUrl: string }
+export interface LessonUsed { id: string; title: string; /** The lesson's reason (its description), one line, where it has one: a lesson reads as a statement and why (agent knowledge, the unit shape). */ why?: string; /** The link that opens the task page ready to mark the lesson not helpful. Empty where the install has no page a pull request can link to. */ notHelpfulUrl: string }
 /**
  * What the description says: how many lessons the task used and ONE link to the task page (titles are behind sign-in), and, only for a repository known to be private, the lessons themselves.
  * `items` is empty for a public repository and for one whose visibility is unknown.
@@ -51,8 +51,8 @@ export async function lessonsUsedForTask(input: LessonsUsedInput): Promise<Lesso
 }
 
 /** The description's section for a summary (the shape `PullRequestBodyContext.lessonsUsed` takes). */
-export const lessonsUsedSection = (summary: LessonsUsedSummary | undefined): { count: number; taskUrl: string; entries: ReadonlyArray<{ title: string; notHelpfulUrl: string; number?: number }> } | undefined =>
-  summary === undefined || summary.count <= 0 ? undefined : { count: summary.count, taskUrl: summary.taskUrl, entries: summary.items.map((l, index) => ({ title: l.title, notHelpfulUrl: l.notHelpfulUrl, ...(l.notHelpfulUrl === "" ? { number: index + 1 } : {}) })) };
+export const lessonsUsedSection = (summary: LessonsUsedSummary | undefined): { count: number; taskUrl: string; entries: ReadonlyArray<{ title: string; why?: string; notHelpfulUrl: string; number?: number }> } | undefined =>
+  summary === undefined || summary.count <= 0 ? undefined : { count: summary.count, taskUrl: summary.taskUrl, entries: summary.items.map((l, index) => ({ title: l.title, ...(l.why === undefined ? {} : { why: l.why }), notHelpfulUrl: l.notHelpfulUrl, ...(l.notHelpfulUrl === "" ? { number: index + 1 } : {}) })) };
 
 const REACHED = new Set(["valid", "moved", "none"]);
 /** The task page's address as an https link with nothing else on it (no query, no fragment), or undefined. */
@@ -123,7 +123,8 @@ export function lessonsUsedReaderOver(deps: LessonsUsedReaderDeps): LessonsUsedR
         // Named only when every source task is open to the whole project (no People denial), read now.
         if ((await wide.keep(undefined, [lesson])).length !== 1) continue;
         const url = input.pageUrl === undefined ? "" : notHelpfulUrl(input.pageUrl, lesson.id);
-        if (url !== undefined) items.push({ id: lesson.id, title: lesson.title, notHelpfulUrl: url });
+        const why = lesson.description.replace(/\s+/gu, " ").trim();
+        if (url !== undefined) items.push({ id: lesson.id, title: lesson.title, ...(why === "" ? {} : { why }), notHelpfulUrl: url });
       }
     }
     return { count: used.length, taskUrl, items };
