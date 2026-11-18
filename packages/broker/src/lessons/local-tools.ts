@@ -15,7 +15,7 @@
 // Lessons that are repo-file eligible live in the merged `.rovara/lessons.md` (decision 50a). A tool that reads that file asks with `skipRepoFile` and gets only the lessons NOT already merged into that repository's file;
 // without it the lessons in the file are returned and marked `inRepoFile`, so a tool that reads both can drop the duplicates. A failed read of the file's state leaves the lesson in (a repeat is harmless; a gap is not).
 
-import { KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse } from "@agentx/contracts";
+import { KNOWLEDGE_STAYS_SENTENCE, LOCAL_KNOWLEDGE_ANSWER_BYTES_MAX, LOCAL_KNOWLEDGE_ANY_REPO, LOCAL_KNOWLEDGE_AREAS_MAX, LOCAL_KNOWLEDGE_UNITS_MAX, LOCAL_LESSONS_NOTES_LINE, LOCAL_LESSONS_UNAVAILABLE_LINE, OrgIdSchema, cleanLessonText, redactText, type LearnedLesson, type LessonStage, type LocalKnowledgeAreasResponse, type WikiToolsOff } from "@agentx/contracts";
 import { hasStaleCitation, selectLessons, type LoadDeps } from "./load.js";
 import { learnedLessonsSwitchOn, modeAllows, resolveLearning, resolveLoadBudget, type LearningSettingsReader, type LoadBudget } from "./policy.js";
 import { mayNameInRepository, projectRepoScopesOf } from "./project-repo-audience.js";
@@ -201,6 +201,20 @@ export async function localToolsGate(deps: Pick<LocalLessonsDeps, "localTools" |
   if (resolved.preset === "regulated") return { kind: "off", reason: "regulated" };
   if (local.projectOn === false) return { kind: "off", reason: "project_setting" };
   return { kind: "on", resolved };
+}
+
+/**
+ * The company switch for the MCP WIKI tools (`wiki_list`, `wiki_read`; owner decision 2026-11-17), through the same gate as the knowledge tools (`localToolsGate`, so the order and the settings are the same). A wiki is not a
+ * lesson, so only the company-level reasons close it: "Knowledge stays in Rovara" (`company_stays`) and the Regulated preset (`regulated`, also when the project's learning is Off, which the gate reports first). The install's lessons
+ * switch, a project in learning Off and the project's own local-tools setting are about lessons and leave the wiki as it was. Throws `LocalLessonsUnavailable` when a setting cannot be read (the caller fails closed).
+ */
+export async function wikiToolsGate(deps: Pick<LocalLessonsDeps, "localTools" | "settings">, key: ScopeKey): Promise<WikiToolsOff | undefined> {
+  const gate = await localToolsGate(deps, key);
+  if (gate.kind === "on") return undefined;
+  let regulated = gate.reason === "regulated";
+  if (gate.reason === "learning_off") regulated = (await resolveLearning(deps.settings, key.workspaceId, key.project)).preset === "regulated";
+  if (gate.reason !== "company_stays" && !regulated) return undefined;
+  return { status: "off", reason: gate.reason === "company_stays" ? "company_stays" : "regulated", message: KNOWLEDGE_STAYS_SENTENCE };
 }
 
 /** What the shared read found: the picked lessons (each checked again as for nobody in particular), or why there is nothing to give. */

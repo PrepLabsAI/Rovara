@@ -182,6 +182,8 @@ export interface CoreEntryCaller {
   name: string;
   stepUp?: { at: string; method: string } | undefined;
   clientId?: string | undefined;
+  /** Set only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`, DEC 236h); everything else that reads the wiki is a tool outside Rovara. */
+  webApp?: true | undefined;
 }
 
 /** The developer start route's path: a start is the core's only where the core's routes say so (`undefined` keeps the old start). */
