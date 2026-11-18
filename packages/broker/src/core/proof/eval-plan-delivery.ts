@@ -9,7 +9,7 @@
 // the company's own (`cache(companyId)`) and read at the plan's own key. Any fault, a missing source, or an answer over `EVAL_PLAN_DELIVERY_MAX_BYTES` is "not_available": the worker then reads
 // "not connected" and spends nothing. A refusal is one fixed sentence that names no company, project or source.
 import {
-  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor,
+  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor,
   type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalPlanDelivery, type EvalSpendApproval,
 } from "@agentx/contracts";
 import { isLiveOperation } from "../e2e/uploads-chunks.js";
@@ -62,6 +62,11 @@ export interface EvalPlanDeliveryDeps {
   readonly companyId: string;
   /** The project of the task this operation belongs to, read from the company's own store; undefined when it cannot be read or is another company's. */
   projectOf(operation: EvalPlanDeliveryOperation): Promise<string | undefined>;
+  /**
+   * L4-EVH: the plan of an opt-in health run's own preparation (a prepare operation whose stored dispatch carries `evalHealth`). Asked with the run's own request and claim (never the request's body); the reader
+   * re-checks the claim and everything the yes rested on (deliverEvalHealthPlan). Absent: a health run is not served here.
+   */
+  readonly health?: { read(lease: { requestId: string; claimId: string }, scope: EvalPlanScope): Promise<EvalPlanRead | undefined> } | undefined;
   /** One fixed event name per fail-closed answer (no value of the request, the plan or the sources). */
   readonly log?: (event: "eval_plan_scope_mismatch" | "eval_plan_unavailable" | "eval_plan_oversize" | "eval_environment_invalid" | "eval_environment_scope_mismatch") => void;
 }
@@ -88,16 +93,19 @@ async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string
 /** The sources of this run's own company and project, or `not_available`. Throws only the fixed refusal, for a caller that is not this run. */
 export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operation: EvalPlanDeliveryOperation): Promise<EvalPlanDelivery> {
   const payload = record(operation.dispatch?.payload);
-  if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || !isLiveOperation(operation.status) || operation.companyId !== deps.companyId
-    || payload === undefined || !EvalRequestSchema.safeParse(payload["evalRequest"]).success) throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
+  // L4-EVH: a health run's own preparation (read only, pinned, carrying `evalHealth`) is the other operation that asks; its lease is the stored dispatch's, never the request's.
+  const healthLease = operation.kind === "prepare" && deps.health !== undefined && isLiveOperation(operation.status) && operation.companyId === deps.companyId && payload !== undefined ? PrepareEvalHealthSchema.safeParse(payload["evalHealth"]) : undefined;
+  const healthJob = healthLease?.success === true ? healthLease.data : undefined;
+  if (healthJob === undefined && (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || !isLiveOperation(operation.status) || operation.companyId !== deps.companyId
+    || payload === undefined || !EvalRequestSchema.safeParse(payload["evalRequest"]).success)) throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
   const project = await deps.projectOf(operation);
   if (typeof project !== "string" || project === "") throw agentXError("CALLBACK_FORBIDDEN", EVAL_PLAN_DELIVERY_FORBIDDEN);
   const scope: EvalPlanScope = Object.freeze({ companyId: deps.companyId, project });
   const log = (event: Parameters<NonNullable<EvalPlanDeliveryDeps["log"]>>[0]): void => { try { deps.log?.(event); } catch { /* logging never changes the answer */ } };
   try {
-    const base = WorkflowReviewBaseSchema.safeParse(payload["workflowBase"]);
+    const base = WorkflowReviewBaseSchema.safeParse(payload?.["workflowBase"]);
     // One read: the plan and the approval of the same approved item (never two reads a re-approval could fall between).
-    const found = await deps.sources.read(scope, Object.freeze({ bases: base.success ? base.data : undefined }));
+    const found = healthJob !== undefined ? await deps.health!.read({ requestId: healthJob.requestId, claimId: healthJob.claimId }, scope) : await deps.sources.read(scope, Object.freeze({ bases: base.success ? base.data : undefined }));
     const plan = record(found?.plan);
     if (found === undefined || plan === undefined) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
     const key = record(plan["key"]);
