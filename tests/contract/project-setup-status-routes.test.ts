@@ -1245,8 +1245,11 @@ describe("what did not change", () => {
     const added = ["GET /v1/dev/client/projects/{project}/setup-status", "PUT /v1/dev/client/projects/{project}/setup-status/skips", "PUT /v1/dev/client/projects/{project}/setup-status/eval-none", "POST /v1/dev/projects/{project}/lessons/{lessonId}/keep"];
     const rows = DEV_ROUTES.map((route) => `${route.method} ${route.path} ${route.requires}`);
     for (const row of added) expect(rows).toContain(`${row} full`);
-    const existing = rows.filter((row) => !added.some((path) => row === `${path} full`));
-    expect(existing).toHaveLength(DEV_ROUTES.length - 4);
+    const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
+    expect(rows.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
+    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`));
+    const existing = withPreview.filter((row) => row !== preview);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 5);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.

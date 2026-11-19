@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { callsOfEntries } from "../../packages/worker/src/usage-calls.js";
 import { createTaskUsageTelemetry, TaskUsageTelemetrySchema } from "../../packages/contracts/src/usage.js";
-import { statsSince } from "../../packages/worker/src/usage.js";
+import { statsSince, usageForControlPlane } from "../../packages/worker/src/usage.js";
 it("collects real assistant call boundaries with actual models and explicit missing prices", () => {
   const calls = callsOfEntries([{ id: "a", type: "message", message: { role: "assistant", provider: "anthropic", model: "actual", usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5 } } }, { id: "b", type: "message", message: { role: "assistant", provider: "anthropic", model: "fallback" } }, { id: "c", type: "message", message: { role: "toolResult" } }]);
   expect(calls).toHaveLength(2);
@@ -47,4 +47,16 @@ it("keeps closed and cap-stopped work censored, and makes a broken start quote u
   }
   const quote = await captureStartQuote({ store: { query: async () => { throw new Error("unreadable"); } } }, { companyId, taskId: "task", project: "web" }, at);
   expect(quote.range).toEqual({ state: "unavailable", reason: "unreadable" });
+});
+
+it("keeps accounting when optional call history exceeds the worker event bound", () => {
+  const calls = callsOfEntries(Array.from({ length: 202 }, (_, id) => ({ id: String(id), type: "message", message: { role: "assistant", provider: "anthropic", model: "actual", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } } })));
+  const telemetry = createTaskUsageTelemetry({ tokens: { input: 202, output: 202, cacheRead: 0, cacheWrite: 0, total: 404 }, cost: 0.02, calls }, { provider: "anthropic", modelId: "actual", thinkingLevel: "off" }, "FAILED");
+  const report = TaskUsageTelemetrySchema.parse(usageForControlPlane(telemetry, {}));
+  expect(report.calls).toBeUndefined();
+  expect(report).toMatchObject({ outcome: "FAILED", costUsd: 0.02, tokens: telemetry.tokens });
+  expect(report).not.toHaveProperty("thinkingLevel");
+  expect(telemetry.calls).toHaveLength(202);
+  const small = { ...telemetry, calls: calls.slice(0, 1) };
+  expect(TaskUsageTelemetrySchema.parse(usageForControlPlane(small, {})).calls).toEqual(small.calls);
 });

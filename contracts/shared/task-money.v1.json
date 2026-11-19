@@ -1198,7 +1198,7 @@
     "finality"
   ],
   "additionalProperties": false,
-  "$id": "https://rovara.dev/contracts/task-money.v1.json",
+  "$id": "https://rovara.ai/contracts/task-money.v1.json",
   "examples": [
     {
       "version": 1,

@@ -906,6 +906,11 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
 
 
 describe("read-only start-estimates", () => {
+ it("registers only the approved read scope on the dev boundary", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")?.requires).toBe("tasks:read");
+  for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
+ });
  it("serves the negotiated comparison with live company/project checks and never creates a hold or task", async () => {
   const { world, app, companyOf, remember } = await world2();
   const caller = remember(FAKE_COMPANY);
