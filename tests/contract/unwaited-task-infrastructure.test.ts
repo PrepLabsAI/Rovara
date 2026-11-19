@@ -1,6 +1,6 @@
 // Issue 173: the reconciler backstop's grants are exact (read thread waiters, read the Slack secret),
-// and they, its environment and its alarm exist only in named environments. The legacy templates
-// are proven byte-identical by legacy-templates.test.ts.
+// and they, its environment and its alarm exist in every deployment (#1131: production, the legacy
+// template, too).
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -92,11 +92,21 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     expect(expression).toMatch(/^FILL\(\w+, ?0\) \+ FILL\(\w+, ?0\)$/);
   });
 
-  it("adds none of it to the legacy deployment", () => {
+  // #1131: production (the legacy template) has the backstop too, with the same exact grants, under production's names.
+  it("gives the legacy (production) reconciler the same backstop: threads read by key, the Slack secret, production's callback key, and the alarm", () => {
     const { environment, statements } = reconciler(legacy);
-    for (const name of ["BROKER_FUNCTION_NAME", "SLACK_SECRET_ARN", "SLACK_THREADS_TABLE_NAME", "CALLBACK_SIGNING_KEY", "CALLBACK_SIGNING_KEY_SECRET_ID"]) expect(environment).not.toHaveProperty(name);
-    expect(JSON.stringify(statements)).not.toContain("SlackThreads");
-    expect(actionsOf(statements).filter((action) => action.startsWith("lambda:") || action.startsWith("secretsmanager:"))).toEqual([]);
-    expect(backstopAlarms(legacy)).toEqual([]);
+    expect(environment).toMatchObject({
+      SLACK_THREADS_TABLE_NAME: { Ref: threadsTableId(legacy) },
+      SLACK_SECRET_ARN: { Ref: slackSecretId(legacy) },
+      CALLBACK_SIGNING_KEY_SECRET_ID: "agentx/production/callback-key",
+    });
+    expect(environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
+    expect(statements.filter((statement) => statement.Sid === "ReadThreadWaiters")).toHaveLength(1);
+    expect(statements.filter((statement) => statement.Sid === "PostUnwaitedTaskNote")).toEqual([
+      { Sid: "PostUnwaitedTaskNote", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecretId(legacy) } },
+    ]);
+    const alarms = backstopAlarms(legacy);
+    expect(alarms).toHaveLength(1);
+    expect(alarms[0]!.Properties).toMatchObject({ AlarmName: "AgentXUnwaitedTaskFailures", EvaluationPeriods: 2 });
   });
 });

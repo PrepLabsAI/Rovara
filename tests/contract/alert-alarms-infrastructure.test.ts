@@ -147,15 +147,20 @@ describe("issue #46: the dispatch dead-letter queue alarm (environment naming)",
   });
 });
 
-describe("the legacy stacks stay as they are", () => {
-  it("adds none of this without environment naming", () => {
-    const legacySlack = Template.fromStack(new SlackOrchestratorStack(new App(), "LegacySlack"));
-    expect(Object.keys(legacySlack.findParameters("OperatorAlertsTopicArn"))).toEqual([]);
-    expect(Object.keys(legacySlack.findResources("AWS::CloudWatch::Alarm"))).toEqual([]);
-    const legacyControlPlane = Template.fromStack(new ControlPlaneStack(new App(), "LegacyControlPlane"));
+// #1131: production (the legacy template) has the reliability alarms too; the budget stays named-only (it scopes costs by the agentx:env tag).
+describe("the legacy (production) stacks", () => {
+  const legacySlack = Template.fromStack(new SlackOrchestratorStack(new App(), "LegacySlack"));
+  const legacyControlPlane = Template.fromStack(new ControlPlaneStack(new App(), "LegacyControlPlane"));
+  it("have the Slack service's FR-045 alarms, sending to the topic the release passes", () => {
+    legacySlack.hasParameter("OperatorAlertsTopicArn", { Type: "String" });
+    for (const name of ["TurnErrors", "SlowTurns", "SlackDeliveryFailed", "CheckerFailures", "BedrockThrottling", "ClassifierThrottling", "TestAlarm"]) {
+      const found = Object.values(legacySlack.findResources("AWS::CloudWatch::Alarm", { Properties: { AlarmName: `AgentX${name}` } }))[0] as { Properties: Record<string, unknown> } | undefined;
+      expect(found, name).toBeDefined();
+      expect(found!.Properties.AlarmActions).toEqual([{ Ref: "OperatorAlertsTopicArn" }]);
+    }
+  });
+  it("have the dispatch dead-letter alarm (#46), and no budget", () => {
     expect(Object.keys(legacyControlPlane.findResources("AWS::Budgets::Budget"))).toEqual([]);
-    expect(Object.keys(legacyControlPlane.findResources("AWS::CloudWatch::Alarm", { Properties: { AlarmName: "AgentXDispatchDeadLetters" } }))).toEqual([]);
-    const legacyAlarmQueues = Object.values(legacyControlPlane.findResources("AWS::CloudWatch::Alarm")).map((resource) => JSON.stringify((resource as { Properties: { Dimensions?: unknown } }).Properties.Dimensions ?? []));
-    expect(legacyAlarmQueues.some((dimensions) => dimensions.includes("DispatchDeadLetterQueue"))).toBe(false);
+    expect(Object.keys(legacyControlPlane.findResources("AWS::CloudWatch::Alarm", { Properties: { AlarmName: "AgentXDispatchDeadLetters" } }))).toHaveLength(1);
   });
 });

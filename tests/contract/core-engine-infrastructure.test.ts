@@ -604,7 +604,9 @@ describe("L1a broker environment derivation", () => {
     // condition gains StringEquals ec2:InstanceType (ten types); (2) ResolveWorkerAmi's Resource becomes the arm64 parameter plus the public x86_64 AL2023 parameter; (3) the provisioner state
     // machine's definition (new states SizeChosen, the *Sized and X86 launches, SizedLaunchFailed, SizeUnavailable; Start, LaunchConfiguration, RunInstance*, RecordInstance carry the size).
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack); the legacy synth differs from batch 13's head only in the three machine size places above.
-    expect(digest(legacy.toJSON())).toBe("526f64287f2cb4fe8cdcc71b776e813fffb0ad4f9145a0234d8fd1500a552cf5");
+    // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
+    // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
+    expect(digest(legacy.toJSON())).toBe("4297570874bc81732f06704e9888f0c7c0d9f776813c3fc78d86f503e930e7a5");
   });
 });
 import { createHash } from "node:crypto";
