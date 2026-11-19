@@ -92,7 +92,6 @@ export const HOSTED_MODEL_WORDS = {
     NO_MODEL: "Rovara's AI has no model to run this step.",
   },
   unavailable: (label: string): string => `${label} is not offered to this company by Rovara's AI now, or the list of offered models could not be read just now.`,
-  reauth: "That change needs a recent sign-in. Confirm it's you on the sign-in page, then make the change within a few minutes.",
 } as const;
 
 /** What the deployed core hands the pages and the engine for one company. */

@@ -462,3 +462,27 @@ describe("the flow refuses to be built wrongly", () => {
     expect(AGENTX_PROTOCOL_VERSION).toBe(1);
   });
 });
+
+it("issues saved-image callback actions only to a preparation that carries an image", async () => {
+  const { PREPARE_SAVED_ENV_FEATURE, savedEnvRepositoryName } = await import("@agentx/contracts");
+  for (const withImage of [false, true]) {
+    const h = createHarness({ machines: { features: ["task.workflowMode", "task.structuredPlans", PREPARE_SAVED_ENV_FEATURE] } });
+    await h.registerProject();
+    const { task } = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "prepare" });
+    const [operation] = await operationsOf(h, task.workspaceId);
+    if (withImage) {
+      const row = (await h.store.get(operationKey(COMPANY, task.workspaceId, operation!.id)))!;
+      const dispatch = row["dispatch"] as { payload: Record<string, never> };
+      await h.store.put({ item: { ...row, dispatch: { ...dispatch, payload: { ...dispatch.payload, savedEnv: { repository: savedEnvRepositoryName({ env: "test", orgId: COMPANY, projectId: "payments" }), digest: `sha256:${"a".repeat(64)}`, environmentKey: "b".repeat(64), testEnvRevision: 1, taskTestEnvRevision: 1 } } } } });
+    }
+    await drain(h);
+    const workspace = (await h.store.get(workspaceKey(COMPANY, task.workspaceId))) as unknown as WorkspaceRecord;
+    const delivered = lastInvocation(h, workspace.machine!.machineId);
+    expect(delivered).toBeDefined();
+    const capabilities = new CallbackCapabilities(SIGNING_KEY);
+    for (const action of ["saved-env-login", "saved-env-fallback"] as const) {
+      if (withImage) expect(capabilities.verify(delivered.callbackCapability, action).operationId).toBe(delivered.operationId);
+      else expect(() => capabilities.verify(delivered.callbackCapability, action)).toThrow();
+    }
+  }
+});

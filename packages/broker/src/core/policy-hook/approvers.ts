@@ -1,24 +1,22 @@
-// Lane H: "may this person decide this? is the sign-in fresh enough? is a second person needed?" over the `approvers` point (approvals, Keep, sensitive
+// Lane H: "may this person decide this? is a second person needed?" over the `approvers` point (approvals, Keep, sensitive
 // settings: every caller of the point). Stricter only. Only a real decision asks (controller, 2026-11-15): `verify`, once per approved verdict of the install's
 // own approvers. `requirement` is also read by pages and probes, so it never asks. It answers from the last signed answer for this company, project, kind,
 // subject type, risk and asker while that answer is alive (its own expiry, at most 300 s); otherwise, or after a "no", the stricter default (a second person
 // needed). A caller that decides on `requirement` alone therefore never decides on an answer older than the service allowed.
-// `verify` enforces what one verdict can carry by itself (a "no", no answer, the sign-in age, the asker approving, the sole-approver mark) and checks the count
+// `verify` enforces what one verdict can carry by itself (a "no", no answer, the asker approving, the sole-approver mark) and checks the count
 // the caller counts with: the smallest `minApprovers` ever handed out for this exact request (company, id, kind, subject, revision, digest), or the install's
 // own count when none was (entries lapse after 10 minutes). When the fresh answer needs more, the verdict is refused (`company_rules_changed`); a new request reads the new rule.
 // A claim a refused verdict holds is given back.
 // A "second person needed" answer (owner row 11.5: loosening a setting needs a second admin) means: the person who asked may not approve, no sole-approver
 // exception, and at least two approvers when the request names no one who asked.
 import {
-  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalSignInRule, type ApprovalVerdict, type Approvers, type PolicyHookDecideAnswer, type PolicyHookDecideQuestion, type Principal,
+  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type PolicyHookDecideAnswer, type PolicyHookDecideQuestion, type Principal,
 } from "@agentx/contracts";
 import type { PolicyHookClient } from "./client.js";
 
 /** How long the smallest count handed out for a request is held against its verdicts. */
 const HANDED_OUT_LIFE_MS = 10 * 60_000;
 
-/** A sign-in time this far ahead of the clock is not believed. */
-const SIGN_IN_SKEW_MS = 30_000;
 
 export interface PolicyHookApproversOptions {
   now?: () => number;
@@ -51,22 +49,15 @@ function decideQuestion(request: ApprovalRequest, stage: "requirement" | "verdic
   };
 }
 
-function stricterSignIn(base: ApprovalSignInRule | undefined, seconds: number | undefined): ApprovalSignInRule | undefined {
-  if (seconds === undefined) return base;
-  if (base?.mode === "window") return { mode: "window", seconds: Math.min(base.seconds, seconds) };
-  return { mode: "window", seconds };
-}
-
 /** The install's requirement, made only stricter by the answer. */
 export function stricterRequirement(base: ApprovalRequirement, answer: PolicyHookDecideAnswer, request: Pick<ApprovalRequest, "requestedBy">): ApprovalRequirement {
   const floor = answer.secondPerson ? (request.requestedBy === undefined ? 2 : 1) : 1;
-  const { soleApproverAllowed, signIn, ...rest } = base;
-  const nextSignIn = stricterSignIn(signIn, answer.signInMaxAgeSeconds);
+  // DEC 254zzz73: an answer's `signInMaxAgeSeconds` (a re-sign-in window) is accepted on the wire and ignored: no answer asks for a step-up or a recent sign-in.
+  const { soleApproverAllowed, ...rest } = base;
   return {
     ...rest,
     minApprovers: Math.max(base.minApprovers, answer.minApprovers, floor),
     selfApprovalAllowed: base.selfApprovalAllowed && answer.selfApproval && !answer.secondPerson,
-    ...(nextSignIn === undefined ? {} : { signIn: nextSignIn }),
     // The sole-approver exception skips the count and the self check, so any answer that asks for more than the install keeps it off.
     ...(soleApproverAllowed === undefined || answer.secondPerson || !answer.selfApproval || answer.minApprovers > base.minApprovers ? {} : { soleApproverAllowed }),
   };
@@ -127,10 +118,6 @@ export function withPolicyHookApprovers(base: Approvers, hook: PolicyHookClient,
       // Every signed answer is the last known one for this kind until it expires; a "no" is kept as the stricter default, never as permission.
       remember(known, kindKey(request), { answer: answer.allow ? answer : STRICTER_DEFAULT_ANSWER, expiresAt: asked.expiresAt }, maxEntries);
       if (!answer.allow) return refuse(verdict, "company_rules_refused");
-      if (answer.signInMaxAgeSeconds !== undefined) {
-        const auth = verdict.approver.authTime === undefined ? Number.NaN : Date.parse(verdict.approver.authTime);
-        if (!Number.isFinite(auth) || now() - auth > answer.signInMaxAgeSeconds * 1000 || auth - now() > SIGN_IN_SKEW_MS) return refuse(verdict, "sign_in_not_fresh");
-      }
       const isRequester = request.requestedBy !== undefined && verdict.approver.provider === request.requestedBy.provider && verdict.approver.personId === request.requestedBy.personId;
       if ((answer.secondPerson || !answer.selfApproval) && isRequester) return refuse(verdict, "self_approval_not_allowed");
       // The count the caller counts with must be at least the fresh answer's. A caller that never read the requirement through here counts with the install's own.

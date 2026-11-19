@@ -9,7 +9,7 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { HostedSetupRunWiring, SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval, setupDecisionRequestId } from "../../packages/broker/src/core-host/setup-approval.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { createSetupRegistryMirror } from "../../packages/broker/src/aws/setup-registry-mirror.js";
 import { projectKey } from "../../packages/broker/src/aws/project-records.js";
@@ -17,7 +17,7 @@ import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "./core-host-fakes
 
 export { FAKE_COMPANY };
 export const OTHER = "org_corehost00000000000b" as OrgId;
-export const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+export const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 export const command = (executable: string, args: string[] = []) => ({ cwd: "repo/demo", executable, args, timeoutSeconds: 600 });
@@ -78,7 +78,7 @@ export interface SetupWorldOptions {
 
 export interface SetupWorld {
   world: FakeWorld;
-  person: (personId: string, companyId: OrgId, role: OrgRole, grants?: Person["grants"], stepUpAgoMs?: number | null) => DeployedCaller;
+  person: (personId: string, companyId: OrgId, role: OrgRole, grants?: Person["grants"]) => DeployedCaller;
   call: (request: { method: string; path: string; headers: Record<string, string>; body: string }, caller: DeployedCaller) => Promise<{ status: number; body: Record<string, unknown>; raw: string }>;
   routes: ReturnType<typeof createCoreDevRoutes>;
   audit: AuditEvent[];
@@ -93,11 +93,10 @@ export async function setupWorld(options: SetupWorldOptions = {}): Promise<Setup
   const people = new Map<string, Person>();
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => people.get(personId)?.grants[name];
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
     return {
       principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }),
     };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {

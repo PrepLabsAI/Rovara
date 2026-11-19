@@ -28,6 +28,19 @@ async function setup(overrides: Partial<Parameters<typeof createWebApiProbeRunne
 }
 
 describe("the production web/API probe runner", () => {
+  it("L4-NETG2: on a gateway-mode worker the probe's (trusted fixture) build commands keep their own build bridge and are given the host resolvers as --dns", async () => {
+    const { fake, runner } = await setup({ buildDns: ["10.42.0.2", "169.254.169.253"] });
+    fake.failOn("build", 7);
+    const run = await runner("build-imds-denial-v1");
+    expect(run.observation).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
+    const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") && !args[args.indexOf("--name") + 1]!.endsWith("-0"));
+    expect(builds.length).toBeGreaterThan(0);
+    for (const args of builds) {
+      expect(args[args.indexOf("--network") + 1]).toMatch(/^rovara-e2e-build-/u);
+      expect(args.filter((value, at) => args[at - 1] === "--dns")).toEqual(["10.42.0.2", "169.254.169.253"]);
+    }
+  });
+
   it("takes the build exit code from the host's structured result, not from anything the build printed", async () => {
     const { fake, runner } = await setup();
     // The build log claims exit code 3 and even a successful fetch; only the code docker returned counts.

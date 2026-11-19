@@ -45,7 +45,7 @@ export const POLICY_FIELDS: readonly PolicyField[] = Object.freeze([
 
 /**
  * M4a slice 2 (DEC 236j and the page-only rule): who may CHANGE each setting. A field that changes cost (model or machine spend, test or review work) or an approval (what
- * Rovara may push or run on its own) is changed only on the project's settings page, right after a fresh step-up; a script or assistant holding an ordinary API token cannot.
+ * Rovara may push or run on its own) is changed only from the Rovara website's own client (owner DEC 254zzz91; DEC 254zzz73 removed the step-up that came with it): the CLI's token or an AI tool's cannot.
  * `api_ok` is for a field that only decides what Rovara reports or offers a person to press. Every field in POLICY_FIELDS must be listed (a contract test pins that), and a field
  * nobody listed is page-only, so a new field is safe before anyone classifies it.
  */

@@ -2,7 +2,7 @@ import { DEFAULT_BEDROCK_MODELS, DEFAULT_DIRECT_MODELS, PROVIDER_KEY_MIN_LENGTH,
 // FR-016's questions, each with a flag (FR-020). Only flags the engineer typed arrive here, so a
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
-import { agentXError, ImageDigest, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, keyedProviderSecretName, type KeyedModelProvider, type ModelProvider } from "@agentx/contracts";
+import { agentXError, ImageDigest, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, keyedProviderSecretName, operatorTrustProblem, type KeyedModelProvider, type ModelProvider } from "@agentx/contracts";
 import { DIRECT_PROVIDERS, GITHUB_LOGIN_PATTERN, ModelsAnswersSchema, providerSecretArn, type DirectProvider } from "../deploy/answer-schemas.js";
 import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { workerImageProblem } from "../deploy/parameters.js";
@@ -62,6 +62,8 @@ export interface InitFlags {
   /** --anthropic-key-file / --anthropic-key-env and the --openai-… pair: never a flag value. */
   anthropicKey?: SecretSource; openaiKey?: SecretSource;
   permissionBoundary?: string; operatorPrincipal?: string;
+  /** --operator-external-id: what a principal of another account presents to assume the operator role (required for one). */
+  operatorExternalId?: string;
   alertEmail?: string;
   /** --alert-webhook-file / --alert-webhook-env: there is deliberately no flag that takes the address itself. */
   alertWebhook?: SecretSource;
@@ -131,7 +133,7 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
 
 /** The engine, identity, models, boundary and operator principal: what an export bundle already
  * knows (`fixed`), or read from the settings form. */
-type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
 type SettingsValues = Readonly<Record<string, string>>;
 
 /** Spec 048 FR-020 to FR-023 and FR-025: every setting comes from one form (settings-form.ts): four
@@ -184,11 +186,12 @@ export async function collectInitAnswers(input: {
   } else {
     // The export took no OpenRouter key (it stores no secret), so a bundle's OpenRouter secret, if
     // any, is one the team made itself: nothing is stored here.
-    const { engine, identity, models, permissionsBoundaryArn, operatorPrincipalArn } = input.fixed;
+    const { engine, identity, models, permissionsBoundaryArn, operatorPrincipalArn, operatorExternalId } = input.fixed;
     platform = {
       engine, identity, models,
       ...(permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn }),
       ...(operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn }),
+      ...(operatorExternalId === undefined ? {} : { operatorExternalId }),
     };
   }
   if (platform.models.orchestrator === GLM) notes.push(GLM_NOTE);
@@ -258,6 +261,7 @@ export async function collectInitAnswers(input: {
     models: platform.models,
     ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
     ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
+    ...(platform.operatorExternalId === undefined ? {} : { operatorExternalId: platform.operatorExternalId }),
     ...(workerImage === undefined && slackImage === undefined
       ? {}
       : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
@@ -386,12 +390,17 @@ async function platformFromSettings(
 
   const boundary = flags.permissionBoundary ?? values[SETTINGS_FIELD.permissionBoundary] ?? "";
   const operator = flags.operatorPrincipal ?? values[SETTINGS_FIELD.operatorPrincipal] ?? "";
+  const operatorExternalId = flags.operatorExternalId ?? "";
+  // Refused before anything is asked or deployed: a whole-account principal, or one of another account with no external id (contracts operatorTrustProblem).
+  const operatorProblem = operatorTrustProblem({ principal: operator, externalId: operatorExternalId, account: input.account });
+  if (operatorProblem !== undefined) throw agentXError("CONFIG_INVALID", `--operator-principal / --operator-external-id: ${operatorProblem}`);
 
   return {
     platform: {
       engine, identity, models,
       ...(boundary === "" ? {} : { permissionsBoundaryArn: boundary }),
       ...(operator === "" ? {} : { operatorPrincipalArn: operator }),
+      ...(operatorExternalId === "" ? {} : { operatorExternalId }),
     },
     ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
     ...(Object.keys(directKeys).length === 0 ? {} : { directKeys }),
@@ -455,6 +464,7 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--worker-model", key: "workerModel", stored: (a) => a.models.worker },
   { flag: "--permission-boundary", key: "permissionBoundary", stored: (a) => a.permissionsBoundaryArn ?? "" },
   { flag: "--operator-principal", key: "operatorPrincipal", stored: (a) => a.operatorPrincipalArn ?? "" },
+  { flag: "--operator-external-id", key: "operatorExternalId", stored: (a) => a.operatorExternalId ?? "" },
   { flag: "--alert-email", key: "alertEmail", kind: "email", stored: (a) => (a.alert.kind === "email" ? a.alert.address : undefined) },
   { flag: "--budget", key: "budget", stored: (a) => String(a.budget?.monthlyUsd ?? 0) },
   { flag: "--budget-scope", key: "budgetScope", stored: (a) => a.budget?.scope },

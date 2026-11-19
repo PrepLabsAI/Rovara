@@ -9,7 +9,7 @@ import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harn
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const NOW = Date.parse(TIME);
-const PAGE = "Changing the machine size needs the Rovara web page with a fresh sign-in";
+const PAGE = "Changing the machine size needs the Rovara web page";
 const ROLE = "Only a company owner or admin, or this project's administrator, may choose a machine size";
 const body = TestEnvironmentBodySchema.parse({ tier: "sandbox", repos: [{ repositoryId: "demo", setupCommands: [], checks: [{ id: "unit", label: "Unit", kind: "test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } }] }], roundBudgetMin: 30, selection: { method: "full", alwaysRun: [], fullSuiteOn: [] }, nightly: { enabled: false, cronUtc: "0 6 * * *", branch: "main" }, services: [], data: { seeds: [], generator: "faker_seeded", seed: 7 }, accounts: [], prodDeny: { accountIds: [], hosts: [], arnPrefixes: [] }, capture: { screenshots: "failed", video: false, traces: false } });
 const digest = testEnvDigest(body);
@@ -46,7 +46,6 @@ function world() {
     return `Bearer e30.${Buffer.from(JSON.stringify({ azp: id })).toString("base64url")}.sig`;
   };
   let authorization = client();
-  h.claims["step_up_at"] = NOW / 1000 - 30; h.claims["step_up_amr"] = "passkey";
   const call = (method = "POST", rowId: unknown = "arm64-4-16", project = "pa") => h.read(`/v1/dev/projects/${project}/machine-size`, { method, headers: { authorization }, body: JSON.stringify(rowId === undefined ? {} : { rowId }) });
   const stored = () => JSON.stringify(h.db.find(() => true));
   const refused = async (code: string, message: string, rowId: unknown = "arm64-4-16", project = "pa", statusCode = 403) => {
@@ -99,9 +98,7 @@ describe("hosted machine-size dispatcher", () => {
   // Batch 14 (rule F): a scoped client is refused by the shared scope check, whose words name what is missing (tests/contract/named-scopes.test.ts pins them for every route).
   it.each(["tasks:read", "profile:name"] as const)("refuses scoped client %s", async (scope) => { const w = world(); w.client("scoped", [scope]); await w.refused("FORBIDDEN", "Cloud needs full access for POST /v1/dev/projects/{project}/machine-size, which is off for it; an administrator can turn it on"); });
   it.each(["tool", "cli"] as const)("refuses non-page client %s", async (kind) => { const w = world(); w.client(kind); await w.refused("FORBIDDEN", PAGE); });
-  it.each(["absent", "old", "slack", "google"])("requires a fresh Code factor: %s", async (kind) => { const w = world(); if (kind === "absent") delete w.claims["step_up_at"]; else if (kind === "old") w.claims["step_up_at"] = NOW / 1000 - 660; else w.claims["step_up_amr"] = kind; await w.refused("REAUTH_REQUIRED", PAGE); });
-  it("honours a shorter company window", async () => { const w = world(); w.claims["step_up_at"] = NOW / 1000 - 120; w.deps.developer.stepUpWindowSeconds = vi.fn(async (company) => { expect(company).toBe(A); return 60; }); await w.refused("REAUTH_REQUIRED", PAGE); });
-  it("preserves a window service failure as 503", async () => { const w = world(); w.deps.developer.stepUpWindowSeconds = async () => { throw new Error("CANARY"); }; await w.refused("RUNTIME_UNAVAILABLE", "The company rules service did not answer, so nothing was done. Try again in a moment.", "arm64-4-16", "pa", 503); });
+  it.each(["none", "leftover"])("DEC 254zzz73: the web page changes the size with %s step-up claim", async (kind) => { const w = world(); if (kind === "leftover") { w.claims["step_up_at"] = 1; w.claims["step_up_amr"] = "slack"; } const r = await w.call(); expect(r.statusCode).toBe(200); expect(JSON.parse(r.body)).toMatchObject({ currentSize: "arm64-4-16" }); });
   it("refuses an ordinary member with developer grant", async () => { const w = world(); w.membership(A, "member"); await w.refused("FORBIDDEN", ROLE); });
   it.each(["owner", "admin", "project"])("allows %s", async (role) => { const w = world(); w.membership(A, role === "project" ? "member" : role); if (role === "project") w.grant("administrator"); const r = await w.call(); expect(r.statusCode).toBe(200); expect(JSON.parse(r.body)).toMatchObject({ currentSize: "arm64-4-16" }); });
   it("rejects a changed live role from another company", async () => { const w = world(); w.deps.companies!.membershipOf = async () => ({ companyId: B, role: "admin" }); await w.refused("FORBIDDEN", ROLE); });

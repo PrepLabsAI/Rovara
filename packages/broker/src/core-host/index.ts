@@ -9,7 +9,6 @@ export * from "./retention.js";
 export * from "./step-fence.js";
 export * from "./switch-blockers.js";
 export * from "./person-erase-route.js";
-export * from "./step-up.js";
 export * from "./lessons.js";
 export * from "./lessons-api.js";
 export * from "./lessons-repeats-api.js";

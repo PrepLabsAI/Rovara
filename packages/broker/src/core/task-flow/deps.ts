@@ -64,11 +64,6 @@ export interface TaskCaller {
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] } | undefined;
   /**
-   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
-   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
-   */
-  stepUp?: { at: string; method: string } | undefined;
-  /**
    * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
    * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
    */
@@ -323,6 +318,13 @@ export interface TaskFlowDeps {
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
+  /**
+   * L4-TA6: the cap this task is held to RIGHT NOW, in dollars: the very value the install's own money checks enforce (hosted: `taskCapOf`, the install's task cap lowered to the project's own per-task limit, the figure
+   * Admission, the per-run stop and the owner's round read; laptop: `taskLimitUsd`, the planning allowance plus the plan's run limit, the figure the round cap reads). Automatic fixing holds its rounds to
+   * this (`min(this, autofix.capUsd)`), never to a larger default, so it cannot keep sending work back until Admission stops the round with a spending-limit refusal. Throws, answers undefined or a number that is not a
+   * finite non-negative one: the cap is unknown, and the owner is asked (the same as an unknown spend). Absent: this install holds no per-task limit (a laptop with `ROVARA_RUN_LIMIT=0`), and `autofix.capUsd` (default 15) is the only cap.
+   */
+  taskCapUsd?: (task: TaskRecord) => Promise<number | undefined>;
   /**
    * Decision 70(c): how far Rovara may act on its own for this task NOW (the stricter of the task's frozen recipe and the company's limit), read again where a merged base's checks would be re-run by themselves and
    * before the reviews that follow. `suggest` asks the owner instead; `unreadable` and `noCompany` say why a `suggest` is not the owner's setting, so the ask is true. Absent: `suggest` (nothing is re-run by

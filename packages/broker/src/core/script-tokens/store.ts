@@ -4,7 +4,7 @@
 // look: the record decides.
 //
 // The keys and the record are Cloud's (decision 45.6). Differences, all additive or wider: a record also keeps `personId` (the identity port is asked for the creator by Rovara id; Cloud's reader strips
-// the field), `amr` may also be `local` (the sign-in method of a laptop's owner) or a step-up factor (`email_code`, `passkey`, `company_reauth`, with the step-up's time as `authTime`). Cloud also refuses to make or use a token without its audit ledger; here the audit sink is a port whose
+// the field), `amr` may also be `local` (the sign-in method of a laptop's owner) or, on a record made before DEC 254zzz73 removed the step-up, a step-up factor (`email_code`, `passkey`, `company_reauth`, with its time as `authTime`); new records never name one. Cloud also refuses to make or use a token without its audit ledger; here the audit sink is a port whose
 // default writes nothing, but `rovara up` registers the document audit sink (the events are kept in the install's own audit trail), and the audit steps are staged whatever the sink is.
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -77,13 +77,13 @@ const REQUEST_MEMORY_DAYS = 7;
 const REVOKE_TRIES = 3;
 
 /**
- * The sign-in methods a stored record may name: Cloud's, `local` for the owner of a laptop, and (ID-STEPUP-FOLLOWUPS d) the step-up factor a deployed install's maker proved it was them
- * with just before making the token (`email_code`, `passkey`, `company_reauth`).
+ * The sign-in methods a stored record may name: Cloud's, `local` for the owner of a laptop, and the sign-in method of a deployed install's maker. `email_code`, `passkey` and
+ * `company_reauth` are read only, from records made while Code had a step-up (DEC 254zzz73 removed it): no new record names them.
  */
-export const STEP_UP_METHODS = ["email_code", "passkey", "company_reauth"] as const;
-const METHODS = ["slack", "oidc", "cloud", "github", "saml", "local", ...STEP_UP_METHODS] as const satisfies readonly (DeveloperSignInMethod | "local" | (typeof STEP_UP_METHODS)[number])[];
-/** How the maker proved it was them just before making the token: the step-up's factor and time, which the record keeps as its `amr` and `authTime`. */
-export interface ScriptTokenSignIn { amr: (typeof STEP_UP_METHODS)[number]; authTime: string }
+const LEGACY_STEP_UP_AMRS = ["email_code", "passkey", "company_reauth"] as const;
+const METHODS = ["slack", "oidc", "cloud", "github", "saml", "local", ...LEGACY_STEP_UP_AMRS] as const satisfies readonly (DeveloperSignInMethod | "local" | (typeof LEGACY_STEP_UP_AMRS)[number])[];
+/** How the maker signed in, as the verified token said it: the record keeps it as its `amr`. */
+export interface ScriptTokenSignIn { amr: DeveloperSignInMethod }
 const Instant = z.string().datetime();
 
 /** A token as stored. `secretHash` is the SHA-256 hex of the token. `createdRole` is the creator's company role when they made it: the token works only while it is still theirs. */
@@ -249,7 +249,7 @@ export async function createScriptToken(deps: ScriptTokenDependencies, caller: S
   const record: ScriptTokenRecord = {
     orgId, tokenId, developerId, personId: caller.personId, name: input.name, projects, permissions, createdAt: isoOf(nowMs), expiresAt: isoOf(expiresMs), createdRole: caller.orgRole, secretHash: hash,
     // Absent (a laptop's owner on their own page): `local`, as before.
-    ...(options.signIn === undefined ? { amr: "local" as const } : { amr: options.signIn.amr, authTime: options.signIn.authTime }),
+    ...(options.signIn === undefined ? { amr: "local" as const } : { amr: options.signIn.amr }),
   };
   const event = auditEvent({
     orgId, at: record.createdAt, actor: { type: "person", id: developerId }, action: "script_token.created", key: occurrence(tokenId, "created"), tokenId,

@@ -15,9 +15,13 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
+import { withoutSavedEnvSwitch } from "../support/saved-env-switch-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutChatGptKeyDeny } from "../support/chatgpt-key-deny-template.js";
 import { withoutCompanyImportReads, withoutSignInCompanyGrants } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
+import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-template.js";
 import { withoutSlackCompanyMode } from "../support/slack-company-template.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -282,16 +286,15 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives DeveloperIdentity exactly the item operations its store uses on the sign-in table, nothing table-wide", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
-    expect(tableStatements).toHaveLength(3);
+    expect(tableStatements).toHaveLength(2);
     // TransactWriteItems is authorized per item as PutItem and UpdateItem; the store never condition-checks.
     expect(actionsOf(tableStatements[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]);
     expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
     // Spec 063: it lists and removes sign-in clients, and deletes or queries nothing else.
     expect(actionsOf(tableStatements[1]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
     expect(tableStatements[1]!.Condition).toEqual({ "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } });
-    // Lane ID part 2b (hosted wiring (b)): it lists and removes a person's passkeys, only in PASSKEYS# partitions (named environments only).
-    expect(actionsOf(tableStatements[2]!).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
-    expect(tableStatements[2]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } });
+    // DEC 254zzz73: the passkey statement (Query/DeleteItem on PASSKEYS#) is gone with the step-up; nothing reaches a PASSKEYS# partition.
+    expect(JSON.stringify(tableStatements)).not.toContain("PASSKEYS#");
   });
 
   it("throttles the public /v1/auth/*, /v1/dev/*, and /review/* routes on the default stage (burst 50, 20 requests a second)", () => {
@@ -675,6 +678,14 @@ describe("task-token key and membership IAM", () => {
     withoutDispatcherHookSigner(remainder);
     // L4-HW8b (DEC 254zzz42 (a)): the broker's Slack poster variables and the Slack adapter secret's policy are exactly what broker-slack-poster-infrastructure.test.ts asserts; taken out so the digest still pins everything else.
     withoutBrokerSlackPoster(remainder, "staging");
+    // L4-SE6: the saved environment images' roles, creation template, outputs and the broker's four variables are asserted exactly (tests/support/saved-env-images-template.ts) and taken out too.
+    withoutSavedEnvImages(remainder, "staging");
+    // L4-SE (#1081): the saved-environment switch parameter and its two packed settings are asserted exactly (tests/support/saved-env-switch-template.ts) and taken out too.
+    withoutSavedEnvSwitch(remainder);
+    // L4-HARD (c): the ChatGPT key's Deny (UseOnlyAsBroker) is asserted in full by chatgpt-key-deny-infrastructure.test.ts and taken out so the digest still pins everything else (rule D).
+    withoutChatGptKeyDeny(remainder);
+    // L4-NETG (DEC 254zzz77, rule D): the WorkerSandboxEgress parameter and the session steps' one variable, asserted and taken out so the pin stays the one recorded before.
+    withoutWorkerSandboxEgress(remainder);
     const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
@@ -694,7 +705,10 @@ describe("task-token key and membership IAM", () => {
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack + the attention email, whose resources are asserted and taken out by withoutCoreEngine); the named synth differs from
     // batch 13's head only in the machine size changes and the attention email's conditional resources, parameters, rule and `ae` setting.
     // Batch 14 combined (DEC 254zzl-amend3, 254zzn(2)): and for the CoreSystemRuns/CoreAnswersModel parameters, the system-runs condition and upkeep-night schedule, and `aa`/`sy` packed (nothing else).
-    expect(createHash("sha256").update(text).digest("hex")).toBe("ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668");
+    // Owner DEC 254zzz73 (rule D, a removal): re-pinned for the step-up's removal ONLY: the StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables,
+    // its ses:SendEmail statement and its PASSKEYS# Query/DeleteItem statement. The named-templates snapshot diff of the same change is those 68 lines deleted and nothing added, and the
+    // effective-tuple pin below drops exactly those three tuples. The old value was ed3d1dc0a51d0607302a7b61ad15bc4613a4fbe86e8031beadbcc58a2b125668.
+    expect(createHash("sha256").update(text).digest("hex")).toBe("c8615c4a5a67361e911f7e38383ef9f63ed2df3c18ea7390ecb0f4d635a2f86b");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -801,6 +815,8 @@ describe("task key deployment boundary coverage", () => {
       "AWS::ApiGatewayV2::Route": "apigateway", "AWS::ApiGatewayV2::Stage": "apigateway", "AWS::Scheduler::Schedule": "scheduler", "AWS::Scheduler::ScheduleGroup": "scheduler", "AWS::StepFunctions::StateMachine": "states",
       // ENV-ROOM 2: the broker names parameter.
       "AWS::SSM::Parameter": "ssm",
+      // L4-SE6: the saved environment images' repository creation template (ecr:* is in both the deploy role and the boundary).
+      "AWS::ECR::RepositoryCreationTemplate": "ecr",
     };
     for (const type of new Set(Object.values(named.Resources).map((r) => r.Type))) {
       let action: string;
@@ -1690,7 +1706,8 @@ const movedResources = ["bucket:Artifacts", "bucket:Artifacts/*", "queue:SlackRe
 
 // Core-engine grants are already pinned in beforeTuples (the stacked #666 fixture). Do not count them twice.
 /**
- * Hosted wiring: (a) SES SendEmail for the sign-in function on the StepUpEmailSender identity; (b) its passkey Query/DeleteItem on PASSKEYS#; (c) the policy hook's key (broker Sign,
+ * Hosted wiring: (a) SES SendEmail for the sign-in function and (b) its passkey Query/DeleteItem on PASSKEYS# were REMOVED by owner DEC 254zzz73 (no step-up; rule D: those three tuples
+ * are the only ones taken out here, and the effective-tuple test proves nothing else moved); (c) the policy hook's key (broker Sign,
  * public key to the broker and the sign-in function, key-policy Denies); (h) the company-secrets role; (i) the TLS-only Deny on both core dispatch queues. All additive.
  */
 const hostedWiringTuples: AccessTuple[] = [
@@ -1710,10 +1727,7 @@ const hostedWiringTuples: AccessTuple[] = [
   ["role:CompanySecretsRole","Allow","secretsmanager:GetSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-connectors/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
   ["role:CompanySecretsRole","Allow","secretsmanager:PutSecretValue","arn:parameter:AWS::Partition:secretsmanager:parameter:AWS::Region:parameter:AWS::AccountId:secret:agentx/staging/org-hooks/${aws:PrincipalTag/rovara:org}/*","{\"Null\":{\"aws:PrincipalTag/rovara:org\":[\"false\"]}}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:DeleteItem","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","dynamodb:Query","table:DeveloperSignInTable","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PASSKEYS#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
   ["role:DeveloperSignInFunctionServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
-  ["role:DeveloperSignInFunctionServiceRole","Allow","ses:SendEmail","arn:parameter:AWS::Partition:ses:parameter:AWS::Region:parameter:AWS::AccountId:identity/parameter:StepUpEmailSender","{\"StringEquals\":{\"ses:FromAddress\":[\"parameter:StepUpEmailSender\"]}}"],
 ];
 const byText = (left: AccessTuple, right: AccessTuple) => JSON.stringify(left).localeCompare(JSON.stringify(right));
 /** DEC 254h: the sign-in function reads the GitHub OAuth app's client secret, that one secret only. */
@@ -1764,18 +1778,37 @@ const dispatcherHookSignerTuples: AccessTuple[] = [
   ["role:DispatcherServiceRole","Allow","kms:GetPublicKey","key:DeveloperSignInPolicyHookKey","{}"],
   ["role:DispatcherServiceRole","Allow","kms:Sign","key:DeveloperSignInPolicyHookKey","{\"StringEquals\":{\"kms:MessageType\":[\"RAW\"],\"kms:SigningAlgorithm\":[\"RSASSA_PKCS1_V1_5_SHA_256\"]}}"],
 ];
-const pinnedTuples: AccessTuple[] = [...beforeTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
+/**
+ * L4-SQS (journey audit B3c; IAM-reviewed in briefs/lead4/l4-sqs/REVIEW-1.md and REVIEW-2.md): the lessons reflection queue and its dead letters (infra/lib/core-engine.ts), granted on the queues' own
+ * resource policies to the broker role alone. EXACTLY eight new tuples, written out: the TLS-only Deny on each queue, the broker's five actions on the queue (the producers' SendMessage, the pass's
+ * Receive, Delete and ChangeVisibility, the adapter's GetQueueAttributes) and GetQueueAttributes alone on the dead letters (the adapter reads their ARN and kind when it opens the queue). Nothing for the
+ * dispatcher or any other role, and no other tuple changes. BrokerServiceRole's semantic results change only on these two queue ARNs and these five actions (the delta test below proves it).
+ */
+const lessonsReflectTuples: AccessTuple[] = [
+  ["*","Deny","sqs:*","queue:CoreEngineJobsLessonsReflectDeadLetterQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["*","Deny","sqs:*","queue:CoreEngineJobsLessonsReflectQueue","{\"Bool\":{\"aws:SecureTransport\":[\"false\"]}}"],
+  ["role:BrokerServiceRole","Allow","sqs:ChangeMessageVisibility","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:DeleteMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsLessonsReflectDeadLetterQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:GetQueueAttributes","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:ReceiveMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+  ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsLessonsReflectQueue","{}"],
+];
+// L4-HARD (c): the ChatGPT key's Deny: the four actions, denied to every principal but the broker's role (the same shape as the sibling keys' Deny tuples in beforeTuples).
+const chatGptKeyDenyTuples: AccessTuple[] = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey*", "kms:ReEncrypt*"].map((action) => ["*", "Deny", action, "key:ChatGptConnectionKey", "{\"ArnNotEquals\":{\"aws:PrincipalArn\":[\"role:BrokerServiceRole\"]}}"] as AccessTuple);
+const pinnedTuples: AccessTuple[] = [...beforeTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...attentionEmailTuples, ...companyImportTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,
   // L4-IAMR (DEC 254zzz26): the dispatcher's company-bound artifact reader reads the artifacts bucket's private/* and workspaces/* (GetObject only; pinned with its widening mutants in dispatcher-artifacts-read.test.ts).
   ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/private/*", "{}"] as AccessTuple,
   ["role:DispatcherServiceRole", "Allow", "s3:GetObject", "bucket:Artifacts/workspaces/*", "{}"] as AccessTuple,
-].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples).sort(byText);
+].filter((tuple) => !envRoom2Removed.has(JSON.stringify(tuple)) && !dispatcherHookSignerReplaced.has(JSON.stringify(tuple))).concat(envRoom2Added, dispatcherHookSignerTuples, lessonsReflectTuples).sort(byText);
 
 describe("broker IAM headroom", () => {
   it("preserves every role's effective tuples exactly", () => {
-    expect([...accessTuples(named)].sort(byText)).toEqual(pinnedTuples);
+    // L4-SE6: the three saved environment image roles' tuples are asserted in saved-env-images-infrastructure.test.ts; taken out here so every other role's tuples are still pinned exactly.
+    expect([...accessTuples(withoutSavedEnvImages(structuredClone(named), "staging"))].sort(byText)).toEqual(pinnedTuples);
   });
 
   it("has the same semantic results for every role, resource, condition and sibling", () => {
@@ -1796,6 +1829,34 @@ describe("broker IAM headroom", () => {
       }
       expect(afterResults, role).toEqual(beforeResults);
     }
+  }, 120_000);
+
+  // L4-SQS: what the eight reflection tuples change, and nothing else. Against the same tuples without them, for EVERY role (an unknown role too), action, resource, condition and sibling the probe
+  // answers the same, except for the broker role on exactly the two reflection queue ARNs and exactly its five actions on the queue and GetQueueAttributes on the dead letters (and the TLS-only Deny, which only removes access on a plain-HTTP
+  // request, so it cannot show in a secure-transport probe).
+  it("L4-SQS: the reflection tuples change BrokerServiceRole's results on the two reflection queues and those actions only; no other role, resource or action moves", () => {
+    const without = pinnedTuples.filter((tuple) => !lessonsReflectTuples.some((own) => JSON.stringify(own) === JSON.stringify(tuple)));
+    expect(pinnedTuples.length - without.length).toBe(8);
+    const reflectResources = new Set(["queue:CoreEngineJobsLessonsReflectQueue", "queue:CoreEngineJobsLessonsReflectDeadLetterQueue"]);
+    const fiveActions = new Set(["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes"]);
+    const roles = [...new Set(pinnedTuples.map(([p]) => p).filter((p) => p !== "*")), "role:agentx-other-env"];
+    const actions = [...new Set(pinnedTuples.map(([, , a]) => a).concat(["sqs:PurgeQueue", "sqs:SetQueueAttributes", "sqs:DeleteQueue", "sqs:AddPermission", "sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "s3:GetObject"]))];
+    const resources = [...new Set(pinnedTuples.map(([, , , r]) => r).concat([...reflectResources], ["queue:Sibling", "queue:CoreEngineJobsQueue", "queue:CoreEngineJobsDeadLetterQueue"]))];
+    const moved: string[] = [];
+    for (const role of roles) {
+      const b = without.filter(([p]) => p === role || p === "*");
+      const a = pinnedTuples.filter(([p]) => p === role || p === "*");
+      for (const action of actions) for (const resource of resources) {
+        const context = { "aws:SecureTransport": ["true"] };
+        const before = probe(b, role, action, resource, context);
+        const after = probe(a, role, action, resource, context);
+        if (before !== after) moved.push(`${role} ${action} ${resource} ${String(before)}->${String(after)}`);
+        // The plain-HTTP request: every SQS action on a reflection queue is denied, for every role.
+        if (reflectResources.has(resource) && action.startsWith("sqs:")) expect(probe(a, role, action, resource, { "aws:SecureTransport": ["false"] }), `${role} ${action} ${resource} over HTTP`).toBe(false);
+      }
+    }
+    const expected = [...reflectResources].flatMap((resource) => [...fiveActions].filter((action) => resource.endsWith("DeadLetterQueue") ? action === "sqs:GetQueueAttributes" : true).map((action) => `role:BrokerServiceRole ${action} ${resource} false->true`)).sort();
+    expect(moved.sort()).toEqual(expected);
   }, 120_000);
 
   it("moves each exact grant to a broker-only resource policy with no duplicate identity grant", () => {

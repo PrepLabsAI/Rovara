@@ -43,6 +43,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   setupAgentLimits?: SetupAgentLimits;
   /** A setup run: who pressed Stop and when. Written before the cancel, so the end can tell a person's stop from any other cancel. */
   setupAgentStop?: { by: string; at: string };
+  /** L4-T5: when a setup run's worker last talked to the broker (noted at most once a minute). A run silent for 10 minutes reads as stopped. */
+  setupAgentSeenAt?: string;
   /** A setup run: how many commands the journal holds, for the live view. */
   setupAgentProgress?: { commands: number; at: string };
   /** A setup run's end: the proposal and summary the broker read again from the worker's answer, or the fixed sentence for why there is none. */

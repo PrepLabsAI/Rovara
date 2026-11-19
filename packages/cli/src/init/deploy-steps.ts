@@ -49,6 +49,7 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     github,
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
+    ...(answers.operatorExternalId === undefined ? {} : { operatorExternalId: answers.operatorExternalId }),
     ...(images === undefined ? {} : { images }),
     slackAppPostedMessages: answers.slack.appPostedMessages,
     ...(answers.budget === undefined ? {} : { budget: answers.budget }),

@@ -11,7 +11,7 @@
 import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
 import { createCoreRuntime, serviceGaps, type CoreRuntime, type CoreRuntimeOptions } from "./core-runtime.js";
 import { engineForNewTask, engineOfStoredTask, listCoreInUse, type Engine } from "./engine-stamp.js";
-import { CORE_AREAS, anyCoreAreaOn, coreAreaOn, coreCompanies, coreEngineServes, readCoreEngineFlags, type CoreArea, type CoreEngineFlags } from "./flags.js";
+import { CORE_AREAS, anyCoreAreaOn, coreAreaOn, coreCompanies, coreEngineServes, readCoreEngineFlags, type CoreArea, type CoreEngineFlags, type CoreSwitch } from "./flags.js";
 import { CORE_JOBS, isCoreJobEvent, runPerCompany, type CompanyRunReport, type CoreJob } from "./jobs.js";
 import { buildCoreRegistry, type CoreAdapterContext, type CoreAdapterModule } from "./registry.js";
 import { CoreSwitchBlockedError, switchBlockers } from "./switch-blockers.js";
@@ -32,6 +32,12 @@ export interface CoreHostAppOptions {
   wrapStorage?: (store: DocumentStore) => DocumentStore;
   /** Called on the complete registry just before its seal (the deployment's policy hook). */
   beforeSeal?: (registry: AdapterRegistry) => void;
+  /**
+   * Other switches (the lessons switch, the system-runs flag) whose NAMED companies (`on:<id>[:<id>]`) the scheduled jobs run for too, where the engine switch covers them (B5). Under `on` the jobs otherwise list only the install's
+   * own company and the companies holding an in-use mark, and the mark is written at a company's first core task: a company a flag names has work waiting before that (the lessons pass, the upkeep night, notice delivery,
+   * the sweeps of its first task). A flag that says `on` (every company) or `off` names nobody and adds nothing, and a company only the engine switch covers is still listed by the engine switch alone. Default: none.
+   */
+  alsoNamedBy?: readonly CoreSwitch[];
   /** The jobs this root runs. Default: CORE_JOBS. */
   jobs?: readonly CoreJob[];
   /** The time budget of one scheduled run. Default 50 s. Never more than the function's own time left (`handleScheduledJob`'s `remainingMs`) less `JOB_EXIT_MARGIN_MS`. */
@@ -138,8 +144,10 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
   const companiesFor = async (area: CoreArea): Promise<string[]> => {
     const covered = coreCompanies(flags);
     const switched = covered === "all" ? [contextOnce().installCompanyId] : covered.filter((companyId) => coreAreaOn(flags, area, companyId));
+    // A company a lessons/system-runs flag names counts as in use for the jobs, but only where the engine switch covers it for this area (a company the engine does not cover would be refused its runtime).
+    const named = (options.alsoNamedBy ?? []).flatMap((value) => (value.mode === "on-for" ? value.companies : [])).filter((companyId) => coreAreaOn(flags, area, companyId));
     // The core's tasks of a company the switch no longer names (drained, or narrowed) still need their sweeps.
-    return [...new Set([...switched, ...(await servedCompanies())])];
+    return [...new Set([...switched, ...named, ...(await servedCompanies())])];
   };
 
   return {

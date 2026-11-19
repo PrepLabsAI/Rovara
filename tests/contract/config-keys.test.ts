@@ -1,21 +1,57 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CONFIG_KEYS, configKey, whereText } from "../../packages/cli/src/config/keys.js";
+import { CONFIG_KEYS, configKey, savedEnvRegistryReadiness, whereText } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 
 const infraSource = readdirSync("infra/lib").filter((file) => file.endsWith(".ts")).map((file) => readFileSync(`infra/lib/${file}`, "utf8")).join("\n");
-const declaredInInfra = (parameter: string) => new RegExp(`CfnParameter\\((this|stack|scope), "${parameter}"`).test(infraSource);
+const declaredInInfra = (parameter: string) => new RegExp(`CfnParameter\\((this|stack|scope), (?:"${parameter}"|${parameter === "SavedEnvironments" ? "SAVED_ENVIRONMENTS_PARAMETER" : "(?!)"})`).test(infraSource);
 
 describe("config keys (FR-048)", () => {
+  it("requires every registry output and checks readiness, role ARNs, account and prefix", () => {
+    const valid = {
+      SavedEnvImgPushRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-push",
+      SavedEnvImgPullRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-pull",
+      SavedEnvImgManageRoleArn: "arn:aws:iam::123456789012:role/agentx/staging/agentx-staging-img-manage",
+      SavedEnvRepoPrefix: "rovara-env/staging", SavedEnvRegistryReady: "1",
+    };
+    expect(savedEnvRegistryReadiness(undefined, "staging", "123456789012")).toHaveLength(5);
+    for (const role of ["SavedEnvImgPushRoleArn", "SavedEnvImgPullRoleArn", "SavedEnvImgManageRoleArn"] as const) {
+      for (const bad of ["not-an-arn", valid[role].replace("123456789012", "999999999999"), valid[role].replace("staging", "other"), valid[role].replace("role/agentx/staging/", "role/")]) expect(savedEnvRegistryReadiness({ ...valid, [role]: bad }, "staging", "123456789012")).toEqual([role]);
+    }
+    for (const key of Object.keys(valid)) expect(savedEnvRegistryReadiness({ ...valid, [key]: "" }, "staging", "123456789012")).toContain(key);
+    expect(savedEnvRegistryReadiness({ ...valid, SavedEnvRegistryReady: "0" }, "staging", "123456789012")).toEqual(["SavedEnvRegistryReady"]);
+    expect(savedEnvRegistryReadiness({ ...valid, SavedEnvImgPushRoleArn: "arn:aws:iam::210987654321:role/agentx/staging/agentx-staging-img-push" }, "staging", "123456789012")).toEqual(["SavedEnvImgPushRoleArn"]);
+    expect(savedEnvRegistryReadiness({ ...valid, SavedEnvImgPullRoleArn: "arn:aws:iam::123456789012:role/agentx/other/agentx-other-img-pull" }, "staging", "123456789012")).toEqual(["SavedEnvImgPullRoleArn"]);
+    expect(savedEnvRegistryReadiness({ ...valid, SavedEnvRepoPrefix: "rovara-env/production" }, "staging", "123456789012")).toEqual(["SavedEnvRepoPrefix"]);
+  });
   it("has every key the spec names, plus the budget", () => {
     expect(CONFIG_KEYS.map((entry) => entry.key)).toEqual([
       "models.orchestrator", "models.classifier", "models.worker", "models.e2eAgent", "models.fallback", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
-      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "coreEngine.answersModel", "mcp.confirmElicitation",
+      "budget.monthlyUsd", "budget.scope", "channels.adapters", "slack.viaChannel", "coreEngine.switch", "coreEngine.modelGatewayUrl", "coreEngine.agentModel", "testServices.images", "savedEnvironments.switch", "workerSandboxEgress", "coreEngine.answersModel", "coreEngine.learningModel", "mcp.confirmElicitation",
       // DEC 254zg (a), 254zk: Code's company layer, self-serve create and per-company Slack bots.
       "company.signIn", "company.selfServe", "slack.companyWorkspaces",
+      // Live switches check 2026-11-18: the per-company model choice (DEC 254n(1)), which nothing set before.
+      "coreEngine.agentModelChoice",
     ]);
+  });
+
+  it("maps the saved-environment CLI words to the stack's 0/1 parameter", () => {
+    const key = configKey("savedEnvironments.switch");
+    expect(key.parse("on")).toBe("1");
+    expect(key.parse("off")).toBe("0");
+    expect(key.shown?.("0")).toBe("off");
+    expect(key.shown?.("1")).toBe("on");
+    expect(() => key.parse("1")).toThrow("savedEnvironments.switch must be on or off; nothing changed");
+  });
+
+  it("routes the per-company model choice to its control-plane parameter, off by default, off or on only (live switches check 2026-11-18)", () => {
+    const key = "coreEngine.agentModelChoice";
+    expect(configKey(key)).toMatchObject({ target: { kind: "stack-parameter", part: "control-plane", parameter: "CoreAgentModelChoice" }, defaultValue: "off" });
+    expect(configKey(key).parse(" on ")).toBe("on");
+    expect(configKey(key).parse("off")).toBe("off");
+    for (const bad of ["", "true", "1", "ON", "enabled", "on:org_aaaaaaaaaaaaaaaaaaaa"]) expect(() => configKey(key).parse(bad), bad).toThrow(`${key} must be one of`);
   });
 
   it("maps each key to exactly one place, and no two keys to the same place", () => {

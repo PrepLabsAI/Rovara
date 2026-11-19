@@ -20,6 +20,8 @@ import {
   change,
   when,
   workerProjectDefinition,
+  PREPARE_EGRESS_S3_FEATURE,
+  projectAllowedS3Hosts,
   workflowPublicationContext,
   workflowPublicationContextDigest,
   type JsonValue,
@@ -324,7 +326,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
   const evalDropped = spec.kind === "task" && spec.payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE);
   const capability = new CallbackCapabilities(secret).issue({
     workspaceId: workspace.id, operationId: operation.id, fence: operation.fence,
-    actions: [...BASE_ACCESS_ACTIONS, ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined && !healthAccess ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
+    actions: [...BASE_ACCESS_ACTIONS, ...(spec.kind === "prepare" && spec.payload["savedEnv"] !== undefined ? ["saved-env-login", "saved-env-fallback"] : []), ...(spec.extraActions ?? []).filter((action) => !evalDropped || action !== EVAL_PLAN_DELIVERY_ACTION), ...(modelRoute === undefined && !healthAccess ? [] : ["model-access"])] as CallbackAction[], expiresInSeconds: CAPABILITY_SECONDS,
   });
   let payload: Record<string, unknown> = { ...spec.payload, ...(spec.kind === "task" && deps.moneyStop !== undefined ? { usageCheckpoints: true } : {}), ...(modelRoute === undefined ? {} : { modelRoute }), ...(standing === undefined ? {} : { standingInstructions: standing }), ...(stepModel?.selection.thinkingLevel === undefined ? {} : { model: stepModel.selection }) };
   if (spec.kind === "task" && payload["evalRequest"] !== undefined && !features.includes(EVAL_ROUND_FEATURE)) {
@@ -378,9 +380,14 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     if (project === undefined) return "the project revision this task was started on is gone";
     const forWorker = toWorker(project.definition);
     if (typeof forWorker === "string") return forWorker;
+    // L4-NETG follow-up (DEC 254zzz90): the exact S3 hosts the project's allowed websites name, for a worker that lists the feature and only when there are some. The gateway-mode worker publishes them to its host's egress gateway; the allowed
+    // websites themselves were approved through the existing audited flow (customer role and company checks), so this adds no route and no permission. Scope, said plainly (owner DEC 254zzz90, review M1/M2): there is NO Rovara staff step on this lift
+    // (for the install's own region the VPC list already allows `*.s3.<region>`), and one lifted bucket host is region-wide S3 for that project's sandboxes (the gateway sees the TLS name; S3 routes by Host inside TLS).
+    const s3Hosts = features.includes(PREPARE_EGRESS_S3_FEATURE) ? projectAllowedS3Hosts(project.definition.network?.allowedDomains) : [];
     payload = {
       ...payload,
       project: forWorker,
+      ...(s3Hosts.length === 0 ? {} : { egressS3Allow: s3Hosts }),
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,
         repositories: project.definition.repositories.map((repository) => ({ credentialRef: repository.credentialRef, repositoryUrl: repository.url, access: "clone" as const })),

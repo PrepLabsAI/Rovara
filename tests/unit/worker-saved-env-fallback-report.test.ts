@@ -5,7 +5,7 @@ import { createSavedEnvFallbackReporter } from "../../packages/worker/src/saved-
 import { savedEnvOptionsOf } from "../../packages/worker/src/saved-env/use.js";
 
 afterEach(() => { vi.restoreAllMocks(); });
-const invocation = { kind: "prepare", workspaceId: "ws-1", operationId: "op-1", payload: { repositoryGrant: "grant-1" } } as never;
+const invocation = { kind: "prepare", workspaceId: "ws-1", operationId: "op-1", callbackCapability: "cap-1", payload: { repositoryGrant: "grant-1" } } as never;
 const payload = PrepareSavedEnvSchema.parse({ repository: savedEnvRepositoryName({ env: "test", orgId: "org-1", projectId: "proj-1" }), digest: `sha256:${"d".repeat(64)}`, testEnvRevision: 4, environmentKey: "a".repeat(64), taskTestEnvRevision: 4 });
 
 describe("the fallback report", () => {
@@ -15,6 +15,7 @@ describe("the fallback report", () => {
     expect(calls[0]!.url).toBe("https://cp.example.test/v1/internal/workspaces/ws-1/operations/op-1/saved-env-fallback");
     expect(calls[0]!.init.method).toBe("POST");
     expect((calls[0]!.init.headers as Record<string, string>)["x-agentx-repository-grant"]).toBe("grant-1");
+    expect((calls[0]!.init.headers as Record<string, string>)["x-agentx-callback-capability"]).toBe("cap-1");
     expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ step: "extract" });
   });
 

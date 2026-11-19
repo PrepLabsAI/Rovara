@@ -15,7 +15,7 @@
  * The infrastructure (infra/lib/broker-names.ts) and the broker both take these tables, so a name added to one cannot be missing from the other.
  * tests/contract/lambda-environment-size.test.ts holds the broker under its ceiling with the longest names: a value that can be derived is derived, not added as a variable.
  */
-import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
+import { ATTENTION_EMAIL_FUNCTION_VARIABLE, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_ENGINE_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE } from "./core-engine-infra.js";
 import {
   environmentAlarmPrefix,
   environmentChannelAdapterSecretPrefix,
@@ -205,10 +205,14 @@ export const BROKER_SETTINGS = {
   // DEC 254z-amend3: test services, ON unless exactly "0" (the stack parameter TestServices, TEST_SERVICES_PARAMETER_VALUES). The broker's core reads it as ROVARA_TEST_SERVICES (the laptop's own switch).
   // Not `tx`: Cloud's own table gives that code to its own test services switch, which is off by default; a code means one thing in both.
   testServices: { code: "td", variable: TEST_SERVICES_SETTING_VARIABLE },
+  /** L4-SE: saved environments, default off. */
+  savedEnvironments: { code: "sv", variable: "ROVARA_SAVED_ENVIRONMENTS" },
   // DEC 254zm: whether the install's copies of the starter images are in place (the stack parameter TestServiceImages, TEST_SERVICE_IMAGES_PARAMETER_VALUES). Only exactly "mirrored" lets Code's workers run test services.
   testServiceImages: { code: "ti", variable: TEST_SERVICE_IMAGES_SETTING_VARIABLE },
   // L4-AM (DEC 254zzn(2)): the hosted answers model (the stack parameter CoreAnswersModel), the BROKER only (the dispatcher does not answer), empty = the agent model.
   coreAnswersModel: { code: "aa", variable: CORE_ANSWERS_MODEL_VARIABLE },
+  // DEC 254zzz58: the hosted lessons' learning model (the stack parameter CoreLearningModel), the BROKER only (the lessons' learning calls run there), empty = claude-haiku-5-5 (DEC 254zzz63).
+  coreLearningModel: { code: "lm", variable: CORE_LEARNING_MODEL_VARIABLE },
   // DEC 254h (room for GitHub sign-in's gh/gs in the broker's 4 KB): the channel adapters' switch (the ChannelAdapters parameter, AllowedValues enabled/disabled), packed.
   channelAdapters: { code: "ca", variable: "CHANNEL_ADAPTERS" },
   // DEC 254zg (a): Code's company layer (the CompanySignIn parameter, through its condition: enabled or disabled), packed.
@@ -216,6 +220,8 @@ export const BROKER_SETTINGS = {
   // Web task channel C8 (option b): the attention email switch (CoreAttentionEmail, AllowedValues off/on), packed. The web app's host is NOT the broker's: only the sender function has it
   // (the broker writes links on a reserved placeholder origin, which the sender replaces), so the broker's 4 KB grows by this one short setting.
   coreAttentionEmail: { code: "ae", variable: "ROVARA_ATTENTION_EMAIL" },
+  // Live switches check 2026-11-18 (DEC 254n(1)): the per-company agent model choice (the stack parameter CoreAgentModelChoice, off/on, default off), the BROKER only.
+  coreAgentModelChoice: { code: "mx", variable: CORE_AGENT_MODEL_CHOICE_VARIABLE },
 } as const satisfies Record<string, BrokerSettingSpec>;
 
 /** DEC 254z-amend3: the values of the TestServices stack parameter. "1" is on (the default); "0" is the owner's opt-out. The broker reads anything but exactly "0" as on. */
@@ -224,6 +230,10 @@ export const TEST_SERVICES_PARAMETER_DEFAULT = "1";
 /** DEC 254zm: the values of the TestServiceImages stack parameter. `none` (the default): Code's workers do not run test services. `mirrored`: the operator copied and checked the five starter images (scripts/test-services-mirror.ts). */
 export const TEST_SERVICE_IMAGES_PARAMETER_VALUES = ["none", "mirrored"] as const;
 export const TEST_SERVICE_IMAGES_PARAMETER_DEFAULT = "none";
+/** L4-SE: hosted saved environments stay off until their registry roles are provisioned. */
+export const SAVED_ENVIRONMENTS_PARAMETER = "SavedEnvironments";
+export const SAVED_ENVIRONMENTS_PARAMETER_DEFAULT = "0";
+export const SAVED_ENVIRONMENTS_PARAMETER_VALUES = ["0", "1"] as const;
 
 export type BrokerSettingKey = keyof typeof BROKER_SETTINGS;
 
@@ -253,6 +263,9 @@ export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   // Core switch-on lane L1a: the core dispatch queue and its dead letters have fixed names (core-engine-infra.ts), so the broker builds their URLs; nothing is passed.
   { variable: CORE_DISPATCH_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchQueueName },
   { variable: CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreDispatchDeadLetterName },
+  // L4-SQS (journey audit B3c): the lessons reflection queue and its dead letters, fixed names too (core-engine-infra.ts): derived, so the broker's 4 KB grows by nothing.
+  { variable: CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectQueueName },
+  { variable: CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, kind: "queueUrl", queueName: coreLessonsReflectDeadLetterName },
   // Web task channel C8 (option b): the attention email's sender function has a fixed name, so the broker builds it; nothing is passed (the function exists only while the email is on).
   { variable: ATTENTION_EMAIL_FUNCTION_VARIABLE, kind: "text", value: coreAttentionEmailFunctionName },
 ];

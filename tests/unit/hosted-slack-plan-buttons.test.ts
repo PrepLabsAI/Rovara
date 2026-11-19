@@ -12,7 +12,7 @@ import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { chatApprovalMethod, createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { chatApprovalMethod, createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedChatApproval, hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { decideFromChat } from "../../packages/broker/src/core-host/chat-decision.js";
 import { chatPressToken } from "../../packages/broker/src/core-host/hosted-chat-approval.js";
@@ -60,7 +60,7 @@ const PROJECT: ProjectDefinition = {
 const CONVERSATION: ConversationRef = { channel: SLACK_CHANNEL, tenant: TEAM_A, space: CHANNEL, thread: TS };
 const ACTOR = (userId: string, tenant: string = TEAM_A): ActorRef => ({ channel: SLACK_CHANNEL, tenant, userId });
 const principalOf = (personId: string, companyId: string = ORG): Principal => ({ companyId, personId, displayName: personId, roles: ["member"], provider: HOSTED_IDENTITY_PROVIDER });
-const PROOF_KEY = stepUpApprovalKeyOf("k".repeat(32));
+const PROOF_KEY = approvalProofKeyOf("k".repeat(32));
 const proved = { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 60 } }], proves: { unit: ["1", "2"] } };
 
 type Kind = "low" | "medium" | "high";
@@ -742,7 +742,7 @@ describe("the approvers' chat method on its own", () => {
     const token = chatPressToken(PROOF_KEY, base);
     expect(token).toBe(chatPressToken(PROOF_KEY, { ...base }));
     for (const change of [{ userId: PEER }, { tenant: TEAM_B }, { outcome: "request_changes" }, { requestId: randomUUID() }, { revision: 3 }, { artifactDigest: "b".repeat(64) }, { companyId: OTHER }]) expect(chatPressToken(PROOF_KEY, { ...base, ...change })).not.toBe(token);
-    expect(chatPressToken(stepUpApprovalKeyOf("z".repeat(32)), base)).not.toBe(token);
+    expect(chatPressToken(approvalProofKeyOf("z".repeat(32)), base)).not.toBe(token);
   });
 });
 
@@ -755,7 +755,7 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
     const root = read("packages/broker/src/aws/core-engine-root.ts");
     expect(root).toContain("const chatApproval = hostedChatApproval(inputs.chatThreads, { membershipOf, projectGrantRole }, ");
     expect(root).toContain("...(chatApproval === undefined ? {} : { chat: chatApproval })");
-    expect(root).toMatch(/decideFromChat\(\{\s+chatThreads, proofKey: stepUpApprovalKeyOf\(inputs\.callbackSigningKey\), now/u);
+    expect(root).toMatch(/decideFromChat\(\{\s+chatThreads, proofKey: approvalProofKeyOf\(inputs\.callbackSigningKey\), now/u);
     expect(root).toContain("chatDecision: (caller: CoreEntryCaller, press");
     const broker = read("packages/broker/src/aws/broker.ts");
     expect(broker).toContain("isSlackCorePressEvent(event)");

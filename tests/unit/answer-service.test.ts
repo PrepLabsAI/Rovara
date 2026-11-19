@@ -175,6 +175,32 @@ describe("outcomes", () => {
     expect((await other.ask({ personId: BOB, project: "alpha", body: same })).answerId).not.toBe(first.answerId);
   });
 
+  it("B8: a repeat of a NOT FOUND answer is the same not-found answer in the same shape (empty text, the fixed words as honesty), never a text on not_found", async () => {
+    const w = ready();
+    const svc = w.service({ model: scriptedModel([answer([])]), over: { perPersonPerHour: 1 } });
+    const same = body({ requestId: "request-0002" });
+    const first = await svc.ask({ personId: ADA, project: "alpha", body: same });
+    const again = await svc.ask({ personId: ADA, project: "alpha", body: same });
+    expect(first).toMatchObject({ outcome: "not_found", text: "", honesty: ANSWER_WORDS.notFound });
+    expect(again).toMatchObject({ answerId: first.answerId, outcome: "not_found", text: "", honesty: ANSWER_WORDS.notFound, sources: [] });
+    expect(again.action).toBeUndefined();
+  });
+
+  it("B8: a repeat of a 'ran out of room' not-found keeps its words as honesty too, and a repeat of a partly answer is unchanged", async () => {
+    const w = ready();
+    const svc = w.service({ model: scriptedModel((_turn, n) => { if (n >= 1) throw new AnswerModelRefused("paused"); return tool({ tool: "wiki_search", query: "refund" }); }), over: { perPersonPerHour: 5 } });
+    const same = body({ requestId: "request-0003" });
+    const first = await svc.ask({ personId: ADA, project: "alpha", body: same });
+    const again = await svc.ask({ personId: ADA, project: "alpha", body: same });
+    expect(first).toMatchObject({ outcome: "not_found", honesty: ANSWER_WORDS.ranOut });
+    expect(again).toMatchObject({ outcome: "not_found", text: "", honesty: ANSWER_WORDS.ranOut });
+    const partly = w.service({ model: scriptedModel([answer([goodSentence, { text: "Invented.", cites: [{ repo: "web", path: "src/refund.ts", line: 3, quote: "export const NOT_THERE_1 = true;" }] }])]) });
+    const second = await partly.ask({ personId: ADA, project: "alpha", body: body({ requestId: "request-0004" }) });
+    const secondAgain = await partly.ask({ personId: ADA, project: "alpha", body: body({ requestId: "request-0004" }) });
+    expect(secondAgain).toMatchObject({ outcome: "partly", sources: [{ n: 1, commit: HEAD }] });
+    expect(secondAgain.text).toContain(second.text);
+  });
+
   it("a bad request is a fixed 400 that repeats nothing, and is checked after the role", async () => {
     const w = ready();
     for (const bad of [{}, { requestId: "x", question: "q" }, { ...body(), extra: "no" }, { ...body(), question: "" }, { ...body(), question: "x".repeat(1_001) }, { ...body(), channel: "fax" }, "a string", undefined]) {
@@ -207,6 +233,19 @@ describe("the check after the model answers", () => {
       expect(result.text, bad.text).toBe("Refunds are allowed for 30 days (`MAX_REFUND_DAYS`). [1]");
       expect(result.outcome, bad.text).toBe("partly");
     }
+  });
+
+  it("B8: a number in brackets inside a sentence (`items[0]`, `items[12]`) is never left looking like a source marker; the markers that remain are the answer's own", async () => {
+    const files = { "web/src/refund.ts": REFUND_TS, "web/src/pick.ts": "export const picked = [refunds[0], refunds[12]];" };
+    const hostile = { text: "The first is `refunds[0]` and the other is `refunds[12]`.", cites: [{ repo: "web", path: "src/pick.ts", line: 1, quote: "export const picked = [refunds[0], refunds[12]];" }] };
+    const { result } = await ask([hostile], files);
+    expect(result.outcome).toBe("answered");
+    expect(result.sources).toHaveLength(2);
+    const markers = [...result.text.matchAll(/\[\s*(\d+)\s*\]/gu)].map((one) => Number(one[1]));
+    expect(markers).toEqual([1, 2]);
+    expect(result.text).toContain("(0)");
+    expect(result.text).toContain("(12)");
+    expect(AnswerResponseSchema.parse(result).text).toBe(result.text);
   });
 
   it("the window is three lines: the quote three lines away is found, four is not", async () => {

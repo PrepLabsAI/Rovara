@@ -10,7 +10,7 @@
 // Cloud keeps its signed catalog. When this build compiles in a catalog signing key the signed catalog is the only way (`prepareLocalTestServices`), and the owner's list is never read.
 import { orgScoped, queryAll, type AuditSink, type DocumentStore, type OrgId, type OwnerListEntry, type OwnerServiceImage, type TestEnvDependencyCandidate } from "@agentx/contracts";
 import {
-  OWNER_IMAGE_REFUSALS, OWNER_STARTER_IMAGES, OwnerServiceImageSchema, describeImage, imageNameOf, isStarterReference, normalizeOwnerList, ownerCatalogIdOf, ownerImageRequest, ownerStarterEntries, parseImageReference, pinnedImageReference,
+  OWNER_IMAGE_REFUSALS, OWNER_STARTER_IMAGES, OwnerServiceImageSchema, describeImage, imageNameOf, isStarterReference, normalizeOwnerList, ownerCatalogIdOf, ownerGcpPackEntries, ownerGcpPackImagesFor, ownerImageRequest, ownerStarterEntries, parseImageReference, pinnedImageReference,
   starterImageFor, type OwnerImageFamily,
 } from "@agentx/contracts";
 import type { DockerRunner } from "./docker-runner.js";
@@ -264,7 +264,9 @@ export async function resolveOwnerImages(input: {
   const tokens = envTokens(input.environment[TEST_SERVICE_IMAGES_VARIABLE]);
   let stored: OwnerServiceImage[] = [];
   try { stored = await input.service.list(); } catch { log({ component: "test-services", event: "test_services.owner_list_unreadable" }); }
-  const wanted: OwnerListEntry[] = [...ownerStarterEntries()];
+  // The starter list, then the GCP pack's images of the groups the setting switches on (ROVARA_TEST_SERVICES_GCP_PACK; none by default). The pack is in Code's source like the starter list, pinned by digest: an owner's approval can
+  // never name an image for a pack family, and a starter's place still comes first (`normalizeOwnerList` keeps the first of a family and major version).
+  const wanted: OwnerListEntry[] = [...ownerStarterEntries(), ...ownerGcpPackEntries(ownerGcpPackImagesFor(input.environment))];
   // 1. what the owner approved on the page
   for (const image of stored) if (image.origin === "page") wanted.push({ reference: image.reference, family: image.family, version: image.version });
   // 2. the env list

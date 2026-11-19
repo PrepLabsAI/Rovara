@@ -8,6 +8,7 @@
 import { z } from "zod";
 import { EvalBaseRecordSchema } from "./eval-base-cache.js";
 import { EvalEnvironmentSchema } from "./eval-environment.js";
+import { EvalStandInDescriptorSchema } from "./eval-stand-in-descriptor.js";
 
 /** The callback action, its own purpose: a capability for any other action (or `model-access` alone) is refused. */
 export const EVAL_PLAN_DELIVERY_ACTION = "eval-plan" as const;
@@ -22,7 +23,7 @@ const whole = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 /** The spend grant as delivered: the same fields as `EvalSpendGrant`, each checked. */
 export const EvalPlanDeliveryGrantSchema = z.object({
   company: z.string().min(1).max(100), project: z.string().min(1).max(200), selection: z.string().min(1).max(512),
-  role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.literal(true),
+  role: z.enum(["owner", "maintainer", "admin"]), inputsDigest: hash, provider: z.literal("customer"), connected: z.boolean(),
   maxCalls: whole, maxCostMicros: whole,
 }).strict();
 
@@ -42,6 +43,8 @@ export const EvalPlanDeliverySchema = z.discriminatedUnion("status", [
     baseline: EvalPlanDeliveryBaselineSchema.nullable(),
     /** L4-EVS: the environment the sealed eval runs in (saved image or install steps), when the project has one. Absent: the bare worker image, as before. */
     environment: EvalEnvironmentSchema.optional(),
+    /** L4-EINT: what this project's evals reach (the dry run's outside hosts, the writer's set), only when the operator's switch AGENTX_EVAL_STAND_INS is on. Absent: today's answer, byte for byte. */
+    standIns: EvalStandInDescriptorSchema.optional(),
   }).strict(),
   /** No plan for this project, a source that is not wired, a fault, or an answer over the bound: the eval reads "not connected", with zero calls. */
   z.object({ status: z.literal("not_available") }).strict(),

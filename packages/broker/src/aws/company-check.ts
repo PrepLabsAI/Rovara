@@ -50,6 +50,23 @@ export async function resolveCompany(reader: CompanyMembershipReader | undefined
   throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
 }
 
+/** P0-14: an administrator's sign-in that is in no company of Code's (an install operator usually is in none). Not "your sign-in has ended": signing in again cannot change it. */
+export const ADMIN_NOT_IN_A_COMPANY = "this admin sign-in is not a member of a company in Code's company records, so it cannot act on one company's records; sign in as an administrator of that company";
+
+/**
+ * P0-14: as resolveCompany, for an administrator's own company: a reader that fails still refuses with the fixed sign-in words (fail closed), but a clean answer of no company
+ * (or a malformed one) is `refusal()` (default FORBIDDEN ADMIN_NOT_IN_A_COMPANY), which tells the administrator what is wrong instead of looping on "login" again. Never looser:
+ * every path that resolveCompany refused still refuses.
+ */
+export async function resolveAdminCompany(reader: CompanyMembershipReader | undefined, personId: string, refusal: () => AgentXError = () => agentXError("FORBIDDEN", ADMIN_NOT_IN_A_COMPANY)): Promise<string | undefined> {
+  if (reader === undefined) return undefined;
+  let value: unknown;
+  try { value = await reader.companyOf(personId); } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  const company = OrgIdSchema.safeParse(value);
+  if (company.success) return company.data;
+  throw refusal();
+}
+
 /** Old rows belong to the fixed company, never whichever company is asking today. */
 export function recordInCompany(record: unknown, companyId: string | undefined): boolean {
   if (companyId === undefined) return true;

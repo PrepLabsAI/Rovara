@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { RuntimeInstallChallengeSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, type RuntimeInstallChallenge, type WebApiProbeRun } from "@agentx/contracts";
 import { containedRuntimeProfileForHost } from "./container-envelope.js";
-import { createProcessDockerCli } from "./host/docker-application-host.js";
+import { buildDnsFromEnvironment, createProcessDockerCli } from "./host/docker-application-host.js";
 import { WEB_API_BUILD_IMAGE, createWebApiProbeRunner, type WebApiProbeModelChannelFactory } from "./host/web-api-probe-runner.js";
 import { qualificationFailureOf } from "./install-qualification-failure.js";
 import { qualifyInstalledP0Runtime,qualifyInstalledWebApiRuntime, type WebApiQualificationEnvironment } from "./install-qualification.js";
@@ -18,20 +18,22 @@ function option(args: readonly string[], name: string): string {
 
 type ProbeRunner = (probeId: string) => Promise<WebApiProbeRun>;
 /** What the production web/API probe runner is built from, all of it read from the worker's own configuration. */
-export type WebApiProbeRunnerConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string }>;
+export type WebApiProbeRunnerConfig = Readonly<{ executorImage: string; buildImage: string; runRoot: string; buildDns?: readonly string[] }>;
 
 /**
  * Reads the runner's configuration, failing closed when any of it is missing. The executor image is the worker's `EXECUTOR_IMAGE` (the image its boot
  * script pulled), the build image is the pinned Node base, and the run root is a directory the worker shares with the Docker host at the same path.
  */
-export function webApiProbeRunnerConfig(environment: NodeJS.ProcessEnv, platform: string = process.platform, arch: string = process.arch): WebApiProbeRunnerConfig {
+export function webApiProbeRunnerConfig(environment: NodeJS.ProcessEnv, platform: string = process.platform, arch: string = process.arch, resolvConf?: () => string): WebApiProbeRunnerConfig {
   const executorImage = environment.EXECUTOR_IMAGE?.trim() ?? "";
   if (executorImage === "" || executorImage.length > 512 || /\s/.test(executorImage) || [...executorImage].some((character) => character.charCodeAt(0) < 0x20) || executorImage.startsWith("-")) {
     throw new Error("EXECUTOR_IMAGE is not set to an image reference on this worker, so the web/API runtime cannot be qualified here");
   }
   const scratch = containedRuntimeProfileForHost(platform, arch)?.candidateScratchRoot;
   if (scratch === undefined) throw new Error("this host has no shared runtime directory for web/API probe runs, so the web/API runtime cannot be qualified here");
-  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-probes") };
+  // L4-NETG2: on a gateway-mode worker the daemon's default name server is the egress gateway; the probes' builds (Rovara's own pinned fixtures, never candidate code) stay on their own bridge with the host resolvers as --dns.
+  const buildDns = buildDnsFromEnvironment(environment, resolvConf);
+  return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-probes"), ...(buildDns === undefined ? {} : { buildDns }) };
 }
 
 /**

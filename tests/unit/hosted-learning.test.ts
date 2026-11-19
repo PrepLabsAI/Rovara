@@ -3,10 +3,11 @@
 // company's workspace) is a refusal with nothing sent; a gateway pause is a fixed code and nothing is echoed; two companies never share a token.
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
+import { CORE_LEARNING_MODEL_DEFAULT, CORE_LEARNING_MODEL_VARIABLE, TaskTokenClaimsSchema, type OrgId } from "@agentx/contracts";
 import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { hostedLessonsLearning, worstCaseUsd } from "../../packages/broker/src/core-host/hosted-learning.js";
+import { COMPANY_LEARNING_MODEL_ENTITY, companyLearningModelKey, installLearningModel } from "../../packages/broker/src/core-host/company-learning-model.js";
 import { LEARNING_CALL_FAILED, LEARNING_CALL_STEP, LEARNING_MESSAGES_PATH, LEARNING_PAUSE_HEADER, LEARNING_NOT_AVAILABLE } from "../../packages/broker/src/lessons/gateway-learning.js";
 import { isLearningRefusal } from "../../packages/broker/src/lessons/pause.js";
 
@@ -25,7 +26,8 @@ const bareKey = (): TokenSigner => ({
   sign: async (input) => sign("sha256", input, pair.privateKey),
 });
 const tokens = () => ({ signer: taskKeySigner(bareKey()), issuer: ISSUER });
-const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL };
+// DEC 254zzz58: the learning model is its own setting (these cases set it; the agent model is irrelevant to learning, see "the learning model").
+const ENV = { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: MODEL, [CORE_LEARNING_MODEL_VARIABLE]: MODEL };
 
 const reply = (headers: Record<string, string> = {}) =>
   new Response(JSON.stringify({ model: MODEL, content: [{ type: "text", text: "{\"candidates\":[]}" }], usage: { input_tokens: 900, output_tokens: 40 } }), { status: 200, headers: { "content-type": "application/json", ...headers } });
@@ -87,7 +89,7 @@ describe("the per-call cap is Code's (the gateway reads no budget)", () => {
     expect(await port.model.quote!({ ...request, maxHoldUsd: 0.000001 })).toEqual({ ok: false, code: "cost_too_high" });
     expect(await port.model.quote!({ ...request, user: "x".repeat(200_000) })).toEqual({ ok: false, code: "cost_too_high" });
     expect(await port.model.quote!({ ...request, workspaceId: ORG_B })).toEqual({ ok: false, code: "no_provider" });
-    const unpriced = factory(r.fetchImpl, { ...ENV, [CORE_AGENT_MODEL_VARIABLE]: "claude-not-a-model-9" })(ORG_A)!;
+    const unpriced = factory(r.fetchImpl, { ...ENV, [CORE_LEARNING_MODEL_VARIABLE]: "claude-not-a-model-9" })(ORG_A)!;
     expect(await unpriced.model.quote!(request)).toEqual({ ok: false, code: "no_suitable_model" });
     expect(r.seen).toEqual([]);
   });
@@ -99,7 +101,7 @@ describe("the per-call cap is Code's (the gateway reads no budget)", () => {
     expect((await refusedWith(port.model.complete(call(ORG_A, { ...big, maxHoldUsd: 0.15 })))).code).toBe("cost_too_high");
     expect((await refusedWith(port.model.complete(call(ORG_A, { ...big, budgetUsd: 0.15 })))).code).toBe("cost_too_high");
     expect((await refusedWith(port.model.complete(call(ORG_A, { budgetUsd: 0.000001 })))).code).toBe("cost_too_high");
-    const unpriced = factory(r.fetchImpl, { ...ENV, [CORE_AGENT_MODEL_VARIABLE]: "claude-not-a-model-9" })(ORG_A)!;
+    const unpriced = factory(r.fetchImpl, { ...ENV, [CORE_LEARNING_MODEL_VARIABLE]: "claude-not-a-model-9" })(ORG_A)!;
     expect((await refusedWith(unpriced.model.complete(call(ORG_A)))).code).toBe("no_suitable_model");
     expect(r.seen).toEqual([]);
     // Exactly the quoted amount is allowed: the call a quote admitted goes through.
@@ -182,12 +184,14 @@ describe("unknown is refusal: nothing is sent and nothing is spent", () => {
     expect(r.seen).toEqual([]);
   });
 
-  it("no port without the gateway's settings, a signer and issuer, a Claude agent model and a well-formed company", () => {
+  it("no port without the gateway's settings, a signer and issuer, a learning model that is a Claude engine name when set, and a well-formed company", () => {
     const r = recording();
     expect(factory(r.fetchImpl, {})(ORG_A)).toBeUndefined();
     expect(factory(r.fetchImpl, { [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY })(ORG_A)).toBeUndefined();
     expect(factory(r.fetchImpl, { ...ENV, [CORE_MODEL_GATEWAY_URL_VARIABLE]: "http://gateway.example" })(ORG_A)).toBeUndefined();
-    expect(factory(r.fetchImpl, { ...ENV, [CORE_AGENT_MODEL_VARIABLE]: "zai.glm-5" })(ORG_A)).toBeUndefined();
+    for (const learning of ["zai.glm-5", "us.anthropic.claude-sonnet-4-6-v1:0", "Claude-sonnet-5", "claude-", `claude-${"m".repeat(40)}`]) {
+      expect(factory(r.fetchImpl, { ...ENV, [CORE_LEARNING_MODEL_VARIABLE]: learning })(ORG_A), learning).toBeUndefined();
+    }
     expect(hostedLessonsLearning(ENV, undefined, { fetch: r.fetchImpl })(ORG_A)).toBeUndefined();
     expect(factory(r.fetchImpl, ENV, () => undefined)(ORG_A)).toBeUndefined();
     expect(factory(r.fetchImpl, ENV, () => ({ signer: taskKeySigner(bareKey()), issuer: "" }))(ORG_A)).toBeUndefined();
@@ -224,5 +228,112 @@ describe("what the gateway refuses", () => {
       expect(isLearningRefusal(error)).toBe(false);
       expect((error as Error).message).toBe(LEARNING_CALL_FAILED);
     }
+  });
+});
+
+// DEC 254zzz58/63: learning has its OWN model, never the agent model: the company's choice, else the install's, else Claude Haiku 5.5.
+describe("the learning model", () => {
+  const GLM = "zai.glm-5";
+  const glm = (learning?: string): NodeJS.ProcessEnv => ({ [CORE_MODEL_GATEWAY_URL_VARIABLE]: GATEWAY, [CORE_AGENT_MODEL_VARIABLE]: GLM, ...(learning === undefined ? {} : { [CORE_LEARNING_MODEL_VARIABLE]: learning }) });
+  const rows = () => {
+    const held = new Map<string, Record<string, unknown>>();
+    const reads: string[] = [];
+    const store = { get: async (key: { pk: string; sk: string }) => { reads.push(key.pk); return held.get(`${key.pk}|${key.sk}`); } };
+    const choose = (companyId: OrgId, model: string, over: Record<string, unknown> = {}) => { const key = companyLearningModelKey(companyId); held.set(`${key.pk}|${key.sk}`, { ...key, entityType: COMPANY_LEARNING_MODEL_ENTITY, orgId: companyId, version: 1, model, updatedAt: "2026-11-18T00:00:00.000Z", updatedBy: "p", ...over }); };
+    return { store, choose, reads, clear: () => held.clear() };
+  };
+  const modelOf = (seen: Seen) => [claimsOf(tokenOf(seen)).mdl, (JSON.parse(seen.init.body as string) as { model: string }).model];
+
+  it("the install's model: ROVARA_CORE_LEARNING_MODEL when it is a Claude engine name, Claude Haiku 5.5 when empty, nothing (not set up) for anything else", () => {
+    expect(CORE_LEARNING_MODEL_DEFAULT).toBe("claude-haiku-5-5");
+    expect(installLearningModel({})).toBe(CORE_LEARNING_MODEL_DEFAULT);
+    expect(installLearningModel({ [CORE_LEARNING_MODEL_VARIABLE]: "  " })).toBe(CORE_LEARNING_MODEL_DEFAULT);
+    expect(installLearningModel({ [CORE_LEARNING_MODEL_VARIABLE]: " claude-sonnet-5-5 " })).toBe("claude-sonnet-5-5");
+    for (const value of [GLM, "us.anthropic.claude-haiku-4-5-v1:0", "anthropic.claude-3", "CLAUDE-HAIKU-4-5", "claude-a=b", "claude-a,b", `claude-${"x".repeat(33)}`]) {
+      expect(installLearningModel({ [CORE_LEARNING_MODEL_VARIABLE]: value }), value).toBeUndefined();
+    }
+  });
+
+  it("agent model zai.glm-5, nothing chosen: lessons learn on Claude Haiku 5.5 (the token's one model and the request's), never the agent model", async () => {
+    const r = recording();
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A)!;
+    await port.model.complete(call(ORG_A));
+    expect(modelOf(r.seen[0]!)).toEqual([[CORE_LEARNING_MODEL_DEFAULT], CORE_LEARNING_MODEL_DEFAULT]);
+    expect(JSON.stringify(r.seen)).not.toContain(GLM);
+  });
+
+  it("agent model zai.glm-5, the install's learning model set: that model", async () => {
+    const r = recording();
+    const port = hostedLessonsLearning(glm(MODEL), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A)!;
+    await port.model.complete(call(ORG_A));
+    expect(modelOf(r.seen[0]!)).toEqual([[MODEL], MODEL]);
+  });
+
+  it("the company's own choice wins over the install's, read on every call (a change applies to the next call; a clear goes back to the install's)", async () => {
+    const r = recording();
+    const company = rows();
+    const port = hostedLessonsLearning(glm(MODEL), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A, { settings: company.store })!;
+    company.choose(ORG_A, "claude-haiku-4-5");
+    expect(await port.model.quote!(call(ORG_A))).toEqual({ ok: true, usd: worstCaseUsd("claude-haiku-4-5", call(ORG_A)) });
+    await port.model.complete(call(ORG_A));
+    company.clear();
+    await port.model.complete(call(ORG_A));
+    expect(r.seen.map(modelOf)).toEqual([[["claude-haiku-4-5"], "claude-haiku-4-5"], [[MODEL], MODEL]]);
+    expect(company.reads.every((pk) => pk === companyLearningModelKey(ORG_A).pk)).toBe(true);
+  });
+
+  it("a company setting that cannot be read, or is not exactly this company's Claude choice, is a failure in fixed words: nothing is sent, never the default in its place", async () => {
+    for (const over of [{ orgId: ORG_B }, { model: GLM }, { entityType: "COMPANY_ENGINE_MODEL" }, { version: 2 }]) {
+      const r = recording();
+      const company = rows();
+      company.choose(ORG_A, MODEL, over);
+      const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A, { settings: company.store })!;
+      for (const action of [port.model.quote!(call(ORG_A)), port.model.complete(call(ORG_A))]) {
+        const error = await action.then(() => undefined, (caught: unknown) => caught);
+        expect(isLearningRefusal(error), JSON.stringify(over)).toBe(false);
+        expect((error as Error).message).toBe("The learning model could not be chosen.");
+      }
+      expect(r.seen).toEqual([]);
+    }
+    const r = recording();
+    const broken = { get: async () => { throw new Error("dynamo sk-ant-secret"); } };
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A, { settings: broken })!;
+    const error = await port.model.complete(call(ORG_A)).then(() => undefined, (caught: unknown) => caught);
+    expect((error as Error).message).toBe("The learning model could not be chosen.");
+    expect(r.seen).toEqual([]);
+  });
+
+  it("a company's choice the catalog cannot price is refused as no_suitable_model before anything is sent", async () => {
+    const r = recording();
+    const company = rows();
+    company.choose(ORG_A, "claude-not-a-model-9");
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A, { settings: company.store })!;
+    expect(await port.model.quote!(call(ORG_A))).toEqual({ ok: false, code: "no_suitable_model" });
+    expect((await refusedWith(port.model.complete(call(ORG_A)))).code).toBe("no_suitable_model");
+    expect(r.seen).toEqual([]);
+  });
+
+  it("a call for another company's workspace, or with no project, is refused before the company's setting is read", async () => {
+    const r = recording();
+    const company = rows();
+    const port = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW })(ORG_A, { settings: company.store })!;
+    expect(await port.model.quote!(call(ORG_B))).toEqual({ ok: false, code: "no_provider" });
+    expect((await refusedWith(port.model.complete(call(ORG_B)))).code).toBe("no_provider");
+    expect((await refusedWith(port.model.complete(call(ORG_A, { project: undefined })))).code).toBe("no_provider");
+    expect(company.reads).toEqual([]);
+    expect(r.seen).toEqual([]);
+  });
+
+  it("two companies through one store: each port reads only its own company's row and learns on its own choice (or the default)", async () => {
+    const r = recording();
+    const company = rows();
+    company.choose(ORG_B, "claude-haiku-4-5");
+    const make = hostedLessonsLearning(glm(), tokens, { fetch: r.fetchImpl, now: () => NOW });
+    const a = make(ORG_A, { settings: company.store })!;
+    const b = make(ORG_B, { settings: company.store })!;
+    await b.model.complete(call(ORG_B));
+    await a.model.complete(call(ORG_A));
+    expect(r.seen.map((seen) => [claimsOf(tokenOf(seen)).cid, claimsOf(tokenOf(seen)).mdl])).toEqual([[ORG_B, ["claude-haiku-4-5"]], [ORG_A, [CORE_LEARNING_MODEL_DEFAULT]]]);
+    expect(company.reads).toEqual([companyLearningModelKey(ORG_B).pk, companyLearningModelKey(ORG_A).pk]);
   });
 });

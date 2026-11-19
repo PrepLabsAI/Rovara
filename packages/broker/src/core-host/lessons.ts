@@ -106,6 +106,11 @@ export interface CoreLessonsOptions {
   knowledge?: KnowledgeSources | undefined;
   /** Which company a chat tenant belongs to (owner decision 131), for the weekly lessons summary's places and the task's Slack thread. Absent: one company, whose every tenant is. */
   channelCompanyOf?: ChannelCompanyOf;
+  /**
+   * Where the weekly lessons summary finds the chat adapters (B6): a deployed install's `channel` point lives only in the company-scoped chat seam (`ChatThreads`, the same view the thread notices read), never in the raw core
+   * registry, so the root passes that view here, with the seam's own `companyOf`. Absent: the registry's `channel` point and `channelCompanyOf` (the laptop). With neither, the summary finds no adapter and is NOT marked done.
+   */
+  digestChannels?: { registry: Pick<RegistryView, "get">; companyOf: ChannelCompanyOf } | undefined;
   /** Whether a person is one the host serves now (owner decision 131's explicit-member rule), for the people whose replies in a task's Slack thread are read. Absent: every linked person. */
   channelMemberRule?: ChannelMemberRule;
   /** Sends the `thread_messages` command for a deployment whose Slack adapter is not in the registry (a signed webhook adapter). Absent: the registry's in-process `channel` adapter, and none means no Slack source. */
@@ -283,7 +288,7 @@ export function createCoreLessons(options: CoreLessonsOptions): CoreLessons | un
       }
       // The weekly lessons summary in the chats, for the projects that have it on (their own choice; else on for a pilot company, off for any other), in at most a quarter of the pass's time.
       const digests = await sendLessonDigests({
-        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry, pilot: digestPilotOf(options), companyOf: options.channelCompanyOf, now,
+        companyId, documents: deps.store, store: runtime.store, directory: runtime.directory, access: runtime.access, settings: runtime.settings, registry: options.digestChannels?.registry ?? registry, pilot: digestPilotOf(options), companyOf: options.digestChannels?.companyOf ?? options.channelCompanyOf, now,
         log: (event, fields) => log(event, fields),
       }, await projectNames().catch(() => []), { deadlineAt: Date.now() + Math.max(0, Math.min(Math.floor(budgetMs / 4), deadlineAt - now())) }).catch(() => ({ projects: 0, sent: 0, held: 0, failed: 0 }));
       const reflected = await pumpReflectQueue({ queues: registry.require("queue"), hostFor, perPass: REFLECT_PER_PASS, now, log, deadlineAt }).catch((error: unknown) => {

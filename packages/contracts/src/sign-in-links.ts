@@ -33,7 +33,7 @@ export const SignInLinkFinishBodySchema = z.object({ linkId: SignInLinkIdSchema,
 export type SignInLinkFinishBody = z.infer<typeof SignInLinkFinishBodySchema>;
 
 // ---- The broker's requests to DeveloperIdentity ----
-/** Start: the caller's live, freshly stepped-up web-app session asks to connect `method`; the answer is where to send the browser. */
+/** Start: the caller's live web-app session asks to connect `method`; the answer is where to send the browser. */
 export const SignInLinkStartRequestSchema = z.object({
   kind: z.literal("sign-in-link-start"), developerId: DeveloperId, sessionId: SessionId,
   method: LinkableSignInMethodSchema, challenge: Pkce, returnTo: z.string().url().max(2_048), state: ClientState,
@@ -47,7 +47,7 @@ export type SignInLinkFinishRequest = z.infer<typeof SignInLinkFinishRequestSche
 /** The connected sign-ins of `personDeveloperId` (the caller's own, or, for a company owner or admin, a person of their company). A live session is enough. */
 export const SignInLinksListRequestSchema = z.object({ kind: z.literal("sign-in-links-list"), developerId: DeveloperId, sessionId: SessionId, personDeveloperId: DeveloperId }).strict();
 export type SignInLinksListRequest = z.infer<typeof SignInLinksListRequestSchema>;
-/** Unlink one connected method of `personDeveloperId`: the person themselves or a company owner or admin, with a fresh step-up. The first method can never be removed. */
+/** Unlink one connected method of `personDeveloperId`: the person themselves or a company owner or admin. The first method can never be removed. */
 export const SignInUnlinkRequestSchema = z.object({ kind: z.literal("sign-in-unlink"), developerId: DeveloperId, sessionId: SessionId, personDeveloperId: DeveloperId, method: LinkableSignInMethodSchema }).strict();
 export type SignInUnlinkRequest = z.infer<typeof SignInUnlinkRequestSchema>;
 
@@ -57,11 +57,11 @@ export type ConnectedSignIn = z.infer<typeof ConnectedSignInSchema>;
 
 /**
  * The refusals. `refused` is the ONE answer for every reason a link cannot be made (already linked to someone, a workspace that proves nothing,
- * the company's own sign-in, a revoked person, a used, expired or foreign link): the words never say which. `reauth`: a fresh step-up is needed.
+ * the company's own sign-in, a revoked person, a used, expired or foreign link): the words never say which.
  * `signed_out`: the caller's session is not live. `forbidden`: not the person and not their company's owner or admin. `last_method`: the method
  * is the person's first (or only) one. `not_found`: no such connected method. `not_set_up`: linking is off on this install.
  */
-export type SignInLinkRefusal = { ok: false; error: "refused" | "reauth" | "signed_out" | "forbidden" | "last_method" | "not_found" | "not_set_up" | "invalid_request" | "unavailable"; message: string };
+export type SignInLinkRefusal = { ok: false; error: "refused" | "signed_out" | "forbidden" | "last_method" | "not_found" | "not_set_up" | "invalid_request" | "unavailable"; message: string };
 export type SignInLinkStartResponse = { ok: true; authorizeUrl: string; linkId: string } | SignInLinkRefusal;
 export type SignInLinkFinishResponse = { ok: true; method: LinkableSignInMethod } | SignInLinkRefusal;
 export type SignInLinksListResponse = { ok: true; signIns: ConnectedSignIn[] } | SignInLinkRefusal;
@@ -70,7 +70,6 @@ export type SignInUnlinkResponse = { ok: true } | SignInLinkRefusal;
 /** Fixed words, never echoing anything a request or a provider sent. */
 export const SIGN_IN_LINK_TEXT = {
   refused: "That sign-in can't be connected to your account.",
-  reauth: "Confirm it's you first: connecting or removing a sign-in needs a confirmation from the last few minutes.",
   signedOut: "Your AgentX sign-in has ended. Sign in again.",
   forbidden: "Only the person or a company owner or admin can change this person's sign-ins.",
   lastMethod: "This is the first way this person signs in, so it can't be removed.",

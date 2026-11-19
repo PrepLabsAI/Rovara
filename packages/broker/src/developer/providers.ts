@@ -7,12 +7,11 @@ import { GITHUB_ISSUER_URL, githubDisplayName } from "./github-profile.js";
 import { SLACK_OIDC_ISSUER, SlackTeamIdSchema, SlackUserIdSchema, cleanDisplayName, type DeveloperSignInMethod } from "@agentx/contracts";
 
 /** `administrator` (spec 063 FR-005): the company sign-in's ID token carried the administrator claim. Slack never sets it. */
-/** `authTime` (lane ID part 2, company sign-in only): the ID token's `auth_time`, epoch seconds, when it carried a whole number. Slack's is never read: a Slack round trip never counts as a step-up. */
 /**
  * `slackTeam` (DEC 254e, only with `anyWorkspace`): the Slack workspace the person signed in with. `slackUserId` is set only for the install's own
  * workspace (the one its bot and directory serve); a person from another workspace has none, and their subject carries the team.
  */
-export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; slackTeam?: { id: string; name?: string }; administrator?: true; authTime?: number }
+export interface ProviderIdentity { method: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; slackTeam?: { id: string; name?: string }; administrator?: true }
 /** `wrongAccount`: the person signed in fine but is not one AgentX accepts (another Slack workspace,
  * or without the required claim), so signing in as someone else may help. */
 export type ProviderResult = { ok: true; identity: ProviderIdentity } | { ok: false; reason: string; wrongAccount?: true };
@@ -23,12 +22,11 @@ export class ProviderNotConfiguredError extends Error { override name = "Provide
 
 export interface SignInProvider {
   readonly method: DeveloperSignInMethod;
-  /** `reauthenticate` (lane ID part 2): a step-up; a company sign-in is asked to sign the person in again (`prompt=login`, `max_age`). Slack ignores it. */
   /**
    * `workspaceHint` (L4-SIGNIN): a Slack workspace id the browser remembers, passed on as Slack's `team` so Slack opens on that workspace. Slack alone uses it, and only when
    * any workspace may sign in; it is a convenience and never decides who is signed in (`complete` never sees it). Anything that is not a workspace id is dropped.
    */
-  authorizeUrl(input: { state: string; nonce: string; redirectUri: string; reauthenticate?: { maxAgeSeconds: number }; workspaceHint?: string }): Promise<string>;
+  authorizeUrl(input: { state: string; nonce: string; redirectUri: string; workspaceHint?: string }): Promise<string>;
   complete(input: { code: string; nonce: string; redirectUri: string }): Promise<ProviderResult>;
 }
 
@@ -207,15 +205,10 @@ export function oidcSignInProvider(input: {
   };
   return {
     method: "oidc",
-    async authorizeUrl({ state, nonce, redirectUri, reauthenticate }) {
+    async authorizeUrl({ state, nonce, redirectUri }) {
       const doc = await discover();
       const url = new URL(doc.authorization_endpoint);
       for (const [key, value] of Object.entries({ response_type: "code", scope: SCOPES, client_id: input.clientId, state, nonce, redirect_uri: redirectUri })) url.searchParams.set(key, value);
-      // OpenID Connect Core 3.1.2.1: ask the company's sign-in to authenticate again and to say when (auth_time).
-      if (reauthenticate !== undefined) {
-        url.searchParams.set("prompt", "login");
-        url.searchParams.set("max_age", String(reauthenticate.maxAgeSeconds));
-      }
       return url.toString();
     },
     async complete({ code, nonce, redirectUri }) {
@@ -250,7 +243,6 @@ export function oidcSignInProvider(input: {
           displayName: (name === undefined ? undefined : cleanDisplayName(name)) ?? payload.sub,
           ...(email === undefined ? {} : { email }),
           ...(isAdministrator(payload, input.administrator) ? { administrator: true as const } : {}),
-          ...(typeof payload.auth_time === "number" && Number.isSafeInteger(payload.auth_time) && payload.auth_time > 0 ? { authTime: payload.auth_time } : {}),
         },
       };
     },

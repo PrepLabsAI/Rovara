@@ -1379,7 +1379,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--admin-claim <claim>", "the OIDC claim that marks AgentX administrators")
     .option("--admin-values <values>", "comma-separated values of --admin-claim that mark an administrator")
     .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role AgentX creates")
-    .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the AgentX operator role")
+    .option("--operator-principal <arn>", "ARN of ONE IAM role or user allowed to assume the AgentX operator role (never a whole account; empty: this account's own principals)")
+    .option("--operator-external-id <id>", "the sts:ExternalId the operator principal must present; required when that principal belongs to another AWS account")
     .addOption(new Option("--model-provider <provider>", "model provider for the orchestrator, classifier and worker; a per-component provider flag wins over it").choices([...MODEL_PROVIDERS]))
     .option("--orchestrator-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
     .option("--classifier-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
@@ -1527,6 +1528,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           ...(options.adminValues === undefined ? {} : { adminValues: options.adminValues }),
           ...(options.permissionBoundary === undefined ? {} : { permissionsBoundaryArn: options.permissionBoundary }),
           ...(options.operatorPrincipal === undefined ? {} : { operatorPrincipalArn: options.operatorPrincipal }),
+          ...(options.operatorExternalId === undefined ? {} : { operatorExternalId: options.operatorExternalId }),
         },
         dependencies.deploy ?? {},
       );
@@ -1690,7 +1692,7 @@ interface InitCommandOptions extends SignInCommandOptions {
   openrouterKeyFile?: string; openrouterKeyEnv?: string;
   anthropicSecretArn?: string; anthropicKeyFile?: string; anthropicKeyEnv?: string;
   openaiSecretArn?: string; openaiKeyFile?: string; openaiKeyEnv?: string;
-  permissionBoundary?: string; operatorPrincipal?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
+  permissionBoundary?: string; operatorPrincipal?: string; operatorExternalId?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
   alertEmail?: string; alertWebhookFile?: string; alertWebhookEnv?: string; alerts: boolean;
   budget?: string; budgetScope?: "tag" | "account";
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
@@ -1741,7 +1743,7 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     openrouterKey: secretSource(options.openrouterKeyFile, options.openrouterKeyEnv),
     anthropicSecretArn: options.anthropicSecretArn, anthropicKey: secretSource(options.anthropicKeyFile, options.anthropicKeyEnv),
     openaiSecretArn: options.openaiSecretArn, openaiKey: secretSource(options.openaiKeyFile, options.openaiKeyEnv),
-    permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
+    permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal, operatorExternalId: options.operatorExternalId,
     alertEmail: options.alertEmail,
     alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),
     alerts: typed("alerts", options.alerts),

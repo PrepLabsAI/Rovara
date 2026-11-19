@@ -5,7 +5,7 @@
 // A bare git repository on disk is not modelled here: the worker-side fake git server belongs to P10 (the end-to-end task), which needs a real clone.
 import { createHash } from "node:crypto";
 import {
-  agentXError, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
+  agentXError, EVAL_WRAPPER_BRANCH_PATTERN, EVAL_WRAPPER_CONFLICT_MESSAGE, EVAL_WRAPPER_PATH_TAKEN_MESSAGE, EVAL_WRAPPER_WRITE_PATHS, type EvalWrapperPullRequestInput, type FileEntryType, type ChangeRequestFile, type CommitIdentity, type Check, type HostAccountKind, type HostPermission, type MergeMethod, type MergeResult, type ReviewState, type Review,
 } from "@agentx/contracts";
 
 export interface FakeAccount { login: string; permission: HostPermission; accountType: HostAccountKind; hostUserId: string }
@@ -241,6 +241,40 @@ export class FakeHostModel {
     const account: FakeAccount = { login, permission, accountType, hostUserId: String(1_000 + this.accounts.size + 1) };
     this.accounts.set(login, account);
     return account;
+  }
+
+  // ---- the eval wrapper pull request (L4-EVW6)
+
+  /**
+   * The rules a real host's adapter holds for the eval wrapper pull request, and no others: a new branch `rovara/eval-wrapper-<12 hex>` that nobody has, one of the two fixed paths, the default branch still where the caller read it,
+   * NOTHING at the path (a file, a folder, a symbolic link, a submodule, or a file where its folder would be), one commit with the one new file, one change request against the base. A failure removes the branch it made.
+   */
+  openEvalWrapper(input: EvalWrapperPullRequestInput): { revision: string; cr: FakeChangeRequest } {
+    if (!EVAL_WRAPPER_BRANCH_PATTERN.test(input.branch) || input.branch === input.baseBranch) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    if (!EVAL_WRAPPER_WRITE_PATHS.includes(input.path)) throw agentXError("CONFIG_INVALID", "file path is not one Rovara writes an eval wrapper to");
+    const baseHead = this.headOf(input.baseBranch);
+    if (baseHead !== input.baseRevision || this.branches.has(input.branch)) throw agentXError("CONFIG_INVALID", EVAL_WRAPPER_CONFLICT_MESSAGE);
+    const at = this.revision(baseHead);
+    const names = [...at.entries.keys(), ...at.files.keys(), ...at.symlinks];
+    // The path itself (a file, a link, a submodule) or anything below it (a folder), and a file, link or submodule where a folder on the way would be.
+    const parents = input.path.split("/").slice(0, -1).map((_, index, all) => all.slice(0, index + 1).join("/"));
+    const taken = names.some((name) => name === input.path || name.startsWith(`${input.path}/`) || parents.includes(name));
+    if (taken) throw agentXError("CONFIG_INVALID", EVAL_WRAPPER_PATH_TAKEN_MESSAGE);
+    const changes: Record<string, string> = {};
+    changes[input.path] = input.content;
+    const revision = this.commit(input.branch, changes);
+    try {
+      return { revision, cr: this.reconcile({ sourceBranch: input.branch, targetBranch: input.baseBranch, title: input.title, body: input.body }).cr };
+    } catch (error) {
+      this.removeBranch(input.branch);
+      throw error;
+    }
+  }
+
+  /** The change request (any state) made from an eval wrapper branch; any other branch name is refused. */
+  evalWrapperChangeRequest(branch: string): FakeChangeRequest | undefined {
+    if (!EVAL_WRAPPER_BRANCH_PATTERN.test(branch)) throw agentXError("CONFIG_INVALID", "branch name is invalid");
+    return [...this.changeRequests].reverse().find((entry) => entry.sourceBranch === branch);
   }
 
   // ---- change requests

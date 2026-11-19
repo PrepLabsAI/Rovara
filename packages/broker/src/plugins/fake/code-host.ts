@@ -2,9 +2,9 @@
 // a real adapter must answer what this one answers for the same state.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
-  isAiInstructionPath, type FileEntryType, agentXError, CodeHostEventSchema, ROVARA_REPLY_MARKER, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
+  isAiInstructionPath, type FileEntryType, agentXError, EvalWrapperPullRequestInputSchema, CodeHostEventSchema, ROVARA_REPLY_MARKER, HostRateLimitError, HostScopeSchema, ChangeRequestUpdateSchema, ChangeRequestInputSchema,
   type BranchPage, type CommitActivityRead, type DirectoryRead, type RepositoryTreeRead, type TreeEntry, type TreeEntryKind, type DeploymentStatusRead, type ChangeRequestDetails, type ChangeRequestFeedback, type ChangeRequestFilesPage, type ChangeRequestInput, type ChangeRequestReconciled,
-  type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type GitAccess,
+  type ChangeRequestRef, type CommitChanges, type CompareChanges, type PageBudget, type CodeOwnersRead, type PathKind, type ChangeRequestStatus, type ChangeRequestUpdate, type CodeHost, type CodeHostCapabilities, type CodeHostEvent, type CodeHostEvents, type EvalWrapperPullRequestHost, type GitAccess,
   type GitCredential, type HostAccount, type HostCommentsPage, type HostScope, type HostStanding, type MergeMethod, type MergeObservation, type MergeResult, type RawDelivery, type ReadBudget, type RepositoryIdentity,
   type RepositoryRef, type SetupFilesRead, type SummaryCheckPost,
 } from "@agentx/contracts";
@@ -271,6 +271,21 @@ export class FakeCodeHost implements CodeHost {
     const text = files.get(".github/CODEOWNERS") ?? files.get("CODEOWNERS") ?? files.get("docs/CODEOWNERS");
     return text === undefined ? undefined : readCodeOwnersFile(text);
   }
+
+  /** L4-EVW6: the same rules a real host's adapter holds (see `FakeHostModel.openEvalWrapper`). */
+  readonly evalWrapperPullRequest: EvalWrapperPullRequestHost = {
+    open: async (input, scope) => {
+      this.checkScope(scope);
+      const parsed = EvalWrapperPullRequestInputSchema.parse(input);
+      const made = this.registered(parsed.repository).openEvalWrapper(parsed);
+      return { revision: made.revision, ref: this.ref(made.cr.id) };
+    },
+    forBranch: async (repository, branch, scope) => {
+      this.checkScope(scope);
+      const found = this.registered(repository).evalWrapperChangeRequest(branch);
+      return found === undefined ? undefined : this.ref(found.id);
+    },
+  };
 
   async reconcileChangeRequest(input: ChangeRequestInput, scope: HostScope): Promise<ChangeRequestReconciled> {
     this.checkScope(scope);

@@ -123,6 +123,8 @@ import { createChannelSink } from "../../core/channel/sink.js";
 import type { DecisionGate } from "../../core/decisions/approval-gate.js";
 import { createCallbackService, createDecisionService, createNoticeService, createSessionService, type CallbackServiceOptions } from "../../services/index.js";
 import { createEvalPlanSources } from "../../core/setup-agent/eval-plan-source.js";
+import { createEvalStandInDescriptorSource } from "../../core/setup-agent/eval-stand-in-descriptor.js";
+import { fixtureObjectPortOf } from "../../core/test-env/fixture-store-aws.js";
 import { createEvalEnvironmentSource, evalSavedEnvDepsOf, repositoryPathsOf } from "../../core/setup-agent/eval-environment-source.js";
 import { channelThreadHandler, planCardPosted, setupPausedPosted, threadFollows } from "../../core/channel/thread-notices.js";
 import { taskLogThreadMirror } from "../../core/channel/log-mirror.js";
@@ -510,6 +512,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
+    // L4-TA6: automatic fixing is held to the task's live run limit, the same `taskLimitUsd` the round cap above and the model proxy enforce (nothing when `ROVARA_RUN_LIMIT=0` turns the limit off: then no limit is enforced and its own cap is the only one).
+    ...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),
     // Decision 70(c): the owner's own machine acts on its own as far as `prepare`, the same default merge tracking reads for a task (there is no recipe or company limit to read here).
     autonomy: async () => ({ autonomy: "prepare" as const }),
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -652,7 +656,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   // The setup agent: a run that sets a project up by running its commands in a sandbox, its journal, the websites it asks for and the owner's use of what it found. Its decisions go through the gate above.
   const setupAgent = createLocalSetupAgent({
     flow: flow.deps, registry, gate, owner, companyId, now: () => clock().getTime(), enabled: options.setupAgent ?? true,
-    modelAccessConfigured: async () => (await chosen()) !== undefined,
+    modelAccessConfigured: async () => (await chosen()) !== undefined, blobs,
     ...(options.installDomains === undefined ? {} : { installDomains: options.installDomains }),
     ...(options.sandboxDenied === undefined ? {} : { sandboxDenied: options.sandboxDenied }),
   });
@@ -760,7 +764,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     // DEC 253j(1): the trusted eval plan source (the stored EVAL_PLAN bound to an approved eval spend item, the approval, the company's base-score cache). The approval uses only the
     // registry's `eval-reservation` adapter; a laptop binds none, so it never answers and an eval reads "spend not approved" (zero calls).
     // L4-EVS2: the sealed eval's environment (this project's saved image when this computer can serve a pull, else its approved install steps, else none), read for the run's own company and project.
-    evalPlan: createEvalPlanSources({ store, companyId, registry, environment: createEvalEnvironmentSource({
+    evalPlan: createEvalPlanSources({ store, companyId, registry, ...((): { standIns?: NonNullable<ReturnType<typeof createEvalStandInDescriptorSource>> } => { const source = createEvalStandInDescriptorSource({ store, companyId, objects: fixtureObjectPortOf(blobs) }, options.environment ?? process.env); return source === undefined ? {} : { standIns: source }; })(), environment: createEvalEnvironmentSource({
       store, companyId, now: () => clock().getTime(), env: options.environment ?? process.env, repositoryPaths: repositoryPathsOf(projectSource),
       savedEnv: () => evalSavedEnvDepsOf({ store, registry: () => registry.require("image-registry"), envName: "local", now: () => clock().getTime(), env: options.environment ?? process.env }),
       log: (event) => { log({ component: "eval-environment", event }); },

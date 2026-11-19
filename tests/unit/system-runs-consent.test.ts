@@ -4,7 +4,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a JSON answer is read field by field */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SYSTEM_RUNS_CONSENT_WORDS, agentXError, queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, SYSTEM_RUNS_CONSENT_WORDS, queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { routeHostedUpkeep, type HostedUpkeepWiring } from "../../packages/broker/src/core-host/upkeep-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
@@ -33,7 +33,7 @@ const standingOf = (company: OrgId, project: string, person: string): SetupRunSt
   return { access: "none" };
 };
 
-interface Options { store?: MemoryDocumentStore; company?: OrgId; ceiling?: boolean; consent?: boolean; standing?: HostedUpkeepWiring["standing"]; cap?: HostedUpkeepWiring["cap"]; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail"; stepUp?: "fresh" | "stale" | "none" | "crash" }
+interface Options { webApp?: boolean; store?: MemoryDocumentStore; company?: OrgId; ceiling?: boolean; consent?: boolean; standing?: HostedUpkeepWiring["standing"]; cap?: HostedUpkeepWiring["cap"]; audit?: (event: AuditEvent, store: MemoryDocumentStore) => Promise<void>; transact?: "fail" }
 
 function hosted(options: Options = {}) {
   const base = options.store ?? new MemoryDocumentStore();
@@ -52,23 +52,17 @@ function hosted(options: Options = {}) {
   const flow = { store, projects: { latest: async (name: string) => (projects.includes(name) ? { definition: { repositories: [] } } : undefined) } } as never;
   const wiring: HostedUpkeepWiring = { standing: options.standing ?? (async (person, org, project) => standingOf(org, project, person)), ...(options.ceiling === false ? {} : { available: () => true }), ...(options.cap === undefined ? {} : { cap: options.cap }) };
   const audit = { stage: () => [], record: async (event: AuditEvent) => { if (options.audit !== undefined) await options.audit(event, base); audited.push(event); } };
-  // L4-P3: the fresh step-up check of the caller. Default: fresh (every older test is a person who just confirmed it was them); "stale" refuses as the real check does; "none" is a host that wired no check; "crash" throws a plain Error.
-  const stepUps: string[] = [];
-  const freshStepUp = options.stepUp === "none" ? undefined : async (refusal: string) => {
-    stepUps.push(refusal);
-    if (options.stepUp === "stale") throw agentXError("REAUTH_REQUIRED", refusal);
-    if (options.stepUp === "crash") throw new Error("boom");
-    return { at: new Date(T0 - 60_000).toISOString(), method: "passkey" };
-  };
   const call = async (person: string, method: "GET" | "PUT", project: string, body?: unknown) => {
     const answer = await routeHostedUpkeep({
       request: { method, path: `/v1/app/projects/${project}/upkeep`, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, path: `/v1/app/projects/${project}/upkeep`,
-      principal: { companyId: company, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: company, flow, wiring, audit, now: () => T0, freshStepUp,
+      principal: { companyId: company, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: company, flow, wiring, audit, now: () => T0,
+      // Owner DEC 254zzz91: the Rovara website's own client by default; a test that is not one says so.
+      webApp: options.webApp ?? true,
     });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
   };
   if (options.consent === true) void base.put({ item: { ...systemRunsConsentKey(company), entityType: "SYSTEM_RUNS_CONSENT", orgId: company, enabled: true, changedAt: new Date(T0).toISOString(), requestId: randomUUID() } });
-  return { store: base, company, audited, call, transacts, stepUps };
+  return { store: base, company, audited, call, transacts };
 }
 const errorOf = (answer: { body: Body }): { code: string; message: string } => answer.body["error"] as { code: string; message: string };
 const setup = (w: ReturnType<typeof hosted>, person: string, body: Record<string, unknown> = {}) => w.call(person, "PUT", "beacon", { requestId: randomUUID(), on: true, allowSystemRuns: true, ...body });
@@ -276,7 +270,7 @@ describe("the setup PUT: consent and the project switch in ONE transaction, audi
     const w = (() => {
       const wiring: HostedUpkeepWiring = { standing: async (person, org, project) => standingOf(org, project, person), available: () => true, schedule: () => ({ put: async (scope) => { calls.push(`put:${scope.project}`); }, remove: async (scope) => { calls.push(`remove:${scope.project}`); } }) };
       const flow = { store: base.store, projects: { latest: async () => ({ definition: { repositories: [] } }) } } as never;
-      return (person: string, body: unknown) => routeHostedUpkeep({ request: { method: "PUT", path: "/v1/app/projects/beacon/upkeep", headers: {}, body: JSON.stringify(body) }, path: "/v1/app/projects/beacon/upkeep", principal: { companyId: COMPANY_A, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A, flow, wiring, audit: { stage: () => [], record: async () => undefined }, now: () => T0, freshStepUp: async () => ({ at: new Date(T0).toISOString(), method: "passkey" }) });
+      return (person: string, body: unknown) => routeHostedUpkeep({ request: { method: "PUT", path: "/v1/app/projects/beacon/upkeep", headers: {}, body: JSON.stringify(body) }, path: "/v1/app/projects/beacon/upkeep", principal: { companyId: COMPANY_A, personId: person, displayName: "x", roles: [], provider: "test" }, companyId: COMPANY_A, flow, wiring, audit: { stage: () => [], record: async () => undefined }, now: () => T0, webApp: true });
     })();
     await w(OWNER, { requestId: randomUUID(), on: true, allowSystemRuns: true });
     await w(OWNER, { requestId: randomUUID(), on: false, allowSystemRuns: false });
@@ -318,82 +312,61 @@ describe("two companies", () => {
   });
 });
 
-// ---- L4-P3 (owner 2026-11-17): ALLOWING needs a fresh step-up; withdrawing never does ---------------------------------------------------------------------------------------------------------
-describe("allowing needs a fresh step-up, checked before the body is acted on (the setup PUT)", () => {
+// ---- L4-P3 (owner 2026-11-17), DEC 254zzz73: ALLOWING and withdrawing need a live company owner or admin, and no step-up -----------------------------------------------------------------------
+describe("allowing needs a live company owner or admin and no step-up (the setup PUT)", () => {
   const nothingDone = async (w: ReturnType<typeof hosted>) => { await nothingWritten(w); expect(w.audited).toEqual([]); expect(w.transacts).toEqual([]); };
 
-  // MUTANT S1: the step-up check is dropped from the setup step (a person with no fresh step-up allows the runs).
-  it("without a fresh step-up the grant is refused (403, REAUTH_REQUIRED, the fixed sign-in words) and NOTHING is written, recorded or transacted", async () => {
-    const w = hosted({ stepUp: "stale" });
-    const answer = await setup(w, OWNER);
-    expect(answer.status).toBe(403);
-    expect(errorOf(answer)).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
-    await nothingDone(w);
-    // The same for an admin, and for a request that would also switch the project on (the one setup request).
-    expect(errorOf(await setup(hosted({ stepUp: "stale" }), ADMIN, { on: false })).code).toBe("REAUTH_REQUIRED");
+  it("a signed-in owner or admin allows the runs with no step-up; the consent's audit record names the role and no factor", async () => {
+    for (const [person, basis] of [[OWNER, "company-owner"], [ADMIN, "company-admin"]] as const) {
+      const w = hosted();
+      const answer = await setup(w, person);
+      expect(answer.status, person).toBe(200);
+      expect(answer.body).toMatchObject({ enabled: true, systemRunsOn: true });
+      const consent = w.audited.find((event) => event.action === "system_runs.consent_set")!;
+      expect(consent.details).toMatchObject({ on: true, basis });
+      expect(consent.details).not.toHaveProperty("stepUp");
+    }
   });
 
-  // MUTANT S2: a host that wired no step-up check lets the grant through.
-  it("a host with no step-up check cannot allow (fail closed), and a check that crashes is a sign-in refusal, never a pass", async () => {
-    for (const stepUp of ["none", "crash"] as const) {
-      const w = hosted({ stepUp });
-      const answer = await setup(w, OWNER);
-      expect(answer.status, stepUp).toBe(403);
-      expect(errorOf(answer), stepUp).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
+  // MUTANT S3: the role check is dropped from allowing.
+  it("a maintainer, a member and a reader are refused for their role and nothing is written, recorded or transacted", async () => {
+    for (const person of [MAINTAINER, MEMBER, VIEWER]) {
+      const w = hosted();
+      const answer = await setup(w, person);
+      expect(answer.status, person).toBe(403);
+      expect(errorOf(answer).code, person).toBe("FORBIDDEN");
       await nothingDone(w);
     }
   });
 
-  it("with a fresh step-up the grant is accepted, the check is asked once with the fixed words, and the consent's audit record names the factor", async () => {
+  it("an owner of another company cannot allow this company's runs: their project is not found here, and nothing changes", async () => {
     const w = hosted();
-    const answer = await setup(w, OWNER);
-    expect(answer.status).toBe(200);
-    expect(answer.body).toMatchObject({ enabled: true, systemRunsOn: true });
-    expect(w.stepUps).toEqual([SYSTEM_RUNS_CONSENT_WORDS.needsSignIn]);
-    const consent = w.audited.find((event) => event.action === "system_runs.consent_set")!;
-    expect(consent.details).toMatchObject({ on: true, stepUp: "passkey", basis: "company-owner" });
-    // The project's own record does not carry it.
-    expect(w.audited.find((event) => event.action === "upkeep.upkeep_switched")!.details).not.toHaveProperty("stepUp");
+    expect(await setup(w, OWNER_B)).toEqual({ status: 404, body: { error: { code: "NOT_FOUND", message: "project not found" } } });
+    await nothingDone(w);
   });
 
-  // MUTANT S3: the step-up is asked BEFORE the role check (a maintainer or reader would be told to sign in again instead of the 403).
-  it("who first: a maintainer, a member and a reader are refused for their role and the step-up is never asked", async () => {
-    for (const person of [MAINTAINER, MEMBER, VIEWER]) {
-      const w = hosted({ stepUp: "stale" });
-      const answer = await setup(w, person);
-      expect(answer.status, person).toBe(403);
-      expect(errorOf(answer).code, person).toBe("FORBIDDEN");
-      expect(w.stepUps, person).toEqual([]);
-    }
-  });
-
-  // MUTANT S4: the ceiling check runs after the step-up (a person is asked to confirm for something that cannot be allowed).
-  it("with the ceiling off the answer is 'unavailable' and the step-up is not asked", async () => {
-    const w = hosted({ ceiling: false, stepUp: "stale" });
+  // MUTANT S4: the ceiling check is dropped.
+  it("with the ceiling off the answer is 'unavailable'", async () => {
+    const w = hosted({ ceiling: false });
     expect(errorOf(await setup(w, OWNER)).code).toBe("NOT_AVAILABLE_HERE");
-    expect(w.stepUps).toEqual([]);
+    await nothingDone(w);
   });
 
-  // MUTANT S5 (the "withdraw needs no step-up" rule): the withdrawal asks for a step-up too.
-  it("WITHDRAWING needs no step-up: an owner and an admin withdraw with a stale or missing check, and the check is never asked", async () => {
-    for (const stepUp of ["stale", "none", "crash"] as const) {
-      for (const person of [OWNER, ADMIN]) {
-        const w = hosted({ consent: true, stepUp });
-        const answer = await setup(w, person, { on: false, allowSystemRuns: false });
-        expect(answer.status, `${stepUp}/${person}`).toBe(200);
-        expect(answer.body).toMatchObject({ enabled: false, systemRunsOn: false });
-        expect((await consentOf(w.store)).enabled).toBe(false);
-        expect(w.stepUps).toEqual([]);
-        expect(w.audited.find((event) => event.action === "system_runs.consent_set")!.details).toMatchObject({ on: false });
-        expect(w.audited.find((event) => event.action === "system_runs.consent_set")!.details).not.toHaveProperty("stepUp");
-      }
+  it("an owner and an admin withdraw it", async () => {
+    for (const person of [OWNER, ADMIN]) {
+      const w = hosted({ consent: true });
+      const answer = await setup(w, person, { on: false, allowSystemRuns: false });
+      expect(answer.status, person).toBe(200);
+      expect(answer.body).toMatchObject({ enabled: false, systemRunsOn: false });
+      expect((await consentOf(w.store)).enabled).toBe(false);
+      expect(w.audited.find((event) => event.action === "system_runs.consent_set")!.details).toMatchObject({ on: false });
     }
   });
 
-  // MUTANT S6: the withdrawal's role check is dropped along with the step-up.
+  // MUTANT S6: the withdrawal's role check is dropped.
   it("a maintainer, a member and a reader cannot withdraw (403) and nothing changes", async () => {
     for (const person of [MAINTAINER, MEMBER, VIEWER]) {
-      const w = hosted({ consent: true, stepUp: "none" });
+      const w = hosted({ consent: true });
       const answer = await setup(w, person, { on: false, allowSystemRuns: false });
       expect(answer.status, person).toBe(403);
       expect((await consentOf(w.store)).enabled).toBe(true);
@@ -401,20 +374,43 @@ describe("allowing needs a fresh step-up, checked before the body is acted on (t
     }
   });
 
-  // MUTANT S7: the plain project switch (no allowSystemRuns) asks for the step-up (turning a project's night on or off is a maintainer's easy act).
-  it("the project's plain switch never asks for a step-up", async () => {
-    const w = hosted({ consent: true, stepUp: "stale" });
+  it("the project's plain switch stays a maintainer's act", async () => {
+    const w = hosted({ consent: true });
     expect((await w.call(MAINTAINER, "PUT", "beacon", { requestId: randomUUID(), on: true })).status).toBe(200);
     expect((await w.call(MAINTAINER, "PUT", "beacon", { requestId: randomUUID(), on: false })).status).toBe(200);
-    expect(w.stepUps).toEqual([]);
+  });
+});
+
+describe("owner DEC 254zzz91: allowing the company's automatic runs is the Rovara website's own client's act", () => {
+  it("the website's client allows them; a CLI or AI-tool client (not webApp) gets 403 with the website words and NOTHING is written or recorded", async () => {
+    const web = hosted();
+    expect((await setup(web, OWNER)).status).toBe(200);
+    expect((await consentOf(web.store)).enabled).toBe(true);
+    for (const person of [OWNER, ADMIN]) {
+      const w = hosted({ webApp: false });
+      const answer = await setup(w, person);
+      expect(answer.status).toBe(403);
+      expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+      await nothingWritten(w);
+      expect(w.audited).toEqual([]);
+    }
   });
 
-  // MUTANT S8: the step-up is checked only on the first request of an id (a replay of a granting request slips by).
-  it("a replay of a granting request id needs the step-up again", async () => {
-    const id = randomUUID();
-    const w = hosted();
-    expect((await setup(w, OWNER, { requestId: id })).status).toBe(200);
-    const stale = hosted({ store: w.store, stepUp: "stale" });
-    expect((await setup(stale, OWNER, { requestId: id })).status).toBe(403);
+  it("the role and company rules still refuse first, on the website's own client too: a maintainer, a member and another company's owner allow nothing", async () => {
+    for (const person of [MAINTAINER, MEMBER, OWNER_B]) {
+      const w = hosted({ webApp: true });
+      const answer = await setup(w, person);
+      expect(answer.status).not.toBe(200);
+      expect(errorOf(answer).message).not.toBe(ON_THE_WEBSITE_MESSAGE);
+      await nothingWritten(w);
+    }
+  });
+
+  it("withdrawing them from a CLI or AI-tool client still works (turning off must be easy)", async () => {
+    const w = hosted({ consent: true, webApp: false });
+    await Promise.resolve();
+    const answer = await w.call(OWNER, "PUT", "beacon", { requestId: randomUUID(), on: false, allowSystemRuns: false });
+    expect(answer.status).toBe(200);
+    expect((await consentOf(w.store)).enabled).toBe(false);
   });
 });

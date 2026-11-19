@@ -2,12 +2,12 @@
 // real App client's mint check. Two companies throughout: A (acme, installation 101) and B (beta, installation 202).
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { AgentXError, GITHUB_DISCONNECTED_MESSAGE } from "@agentx/contracts";
+import { AgentXError, GITHUB_DISCONNECTED_MESSAGE, ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
-import { CONNECTION_NOT_FOUND, DISCONNECT_OWNER_ONLY, DISCONNECT_STEP_UP, DISCONNECT_UNAVAILABLE, githubInUseMessage } from "../../packages/broker/src/aws/github-connect-routes.js";
+import { CONNECTION_NOT_FOUND, DISCONNECT_OWNER_ONLY, DISCONNECT_UNAVAILABLE, githubInUseMessage } from "../../packages/broker/src/aws/github-connect-routes.js";
 import { PROJECT_SCAN_MAX, repositoryUsesInstallation } from "../../packages/broker/src/aws/github-lifecycle.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -65,10 +65,9 @@ async function world() {
     }
   };
   const as = (id: string) => { claims.sub = id; claims.sid = SESSIONS[id]; };
-  const stepUp = (age = 30, method = "passkey") => { claims.step_up_at = Math.floor((NOW - age * 1000) / 1000); claims.step_up_amr = method; };
   const disconnect = (id: number | string) => call("DELETE", `/v1/dev/company/github/${id}`);
   const read = () => call("GET", "/v1/dev/company/github");
-  return { db, bindings, logs, deps, claims, call, as, stepUp, disconnect, read };
+  return { db, bindings, logs, deps, claims, call, as, disconnect, read };
 }
 const refusal = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 const binding = (db: FakeDynamoDb, id: number) => db.get(`GITHUB_INSTALLATION#${id}`, "BINDING");
@@ -89,8 +88,8 @@ describe("the connections read", () => {
 });
 
 describe("disconnect", () => {
-  it("an owner with a fresh step-up unbinds, with an audit row naming them, a company log line, and GitHub's uninstall page", async () => {
-    const h = await world(); h.stepUp();
+  it("an owner (no step-up, DEC 254zzz73) unbinds, with an audit row naming them, a company log line, and GitHub's uninstall page", async () => {
+    const h = await world();
     const answer = await h.disconnect(101);
     expect(answer).toEqual({ status: 200, body: { status: "disconnected", installationId: 101, accountLogin: "acme", uninstallUrl: "https://github.com/organizations/acme/settings/installations/101" } });
     expect(binding(h.db, 101)).toBeUndefined();
@@ -100,11 +99,11 @@ describe("disconnect", () => {
     expect(binding(h.db, 202)).toMatchObject({ companyId: B });
   });
   it("a User installation's page is the person's own settings", async () => {
-    const h = await world(); h.as(OTHER); h.stepUp();
+    const h = await world(); h.as(OTHER);
     expect((await h.disconnect(202)).body["uninstallUrl"]).toBe("https://github.com/settings/installations/202");
   });
-  it("an admin and a member are refused (live role), even with a step-up; nothing changes", async () => {
-    const h = await world(); h.stepUp();
+  it("an admin and a member are refused (live role); nothing changes", async () => {
+    const h = await world();
     for (const id of [ADMIN, MEMBER]) {
       h.as(id);
       expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
@@ -114,22 +113,37 @@ describe("disconnect", () => {
     expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
     expect(binding(h.db, 101)).toBeDefined();
   });
-  it("an owner without a fresh step-up is refused: none, too old, a factor Code does not own", async () => {
-    for (const set of [() => undefined, (h: Awaited<ReturnType<typeof world>>) => h.stepUp(601), (h: Awaited<ReturnType<typeof world>>) => h.stepUp(30, "slack")]) {
-      const h = await world(); set(h);
-      expect(await h.disconnect(101)).toEqual(refusal(403, "REAUTH_REQUIRED", DISCONNECT_STEP_UP));
-      expect(binding(h.db, 101)).toBeDefined();
+  it("owner DEC 254zzz99: the owner's CLI (or AI-tool) token, with no web-app client, is refused with the website words; nothing changes", async () => {
+    const h = await world();
+    // The Rovara CLI's own token: no client (azp), the developer audience, and a session no client started.
+    const cli = (id: string) => {
+      h.as(id); delete h.claims.azp; Object.assign(h.claims, { iss: "https://signin.example.test", aud: "agentx-developer" });
+      h.db.set({ pk: `SESSION#${SESSIONS[id]}`, sk: "META", sessionId: SESSIONS[id], developerId: id, amr: "slack", startedAt: new Date(NOW - 60_000).toISOString(), endsAt: NOW / 1000 + 3600 });
+    };
+    cli(OWNER);
+    expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", ON_THE_WEBSITE_MESSAGE));
+    expect(binding(h.db, 101)).toMatchObject({ companyId: A });
+    // An admin's CLI token is refused for the role first (the owner rule comes before the website rule).
+    cli(ADMIN);
+    expect(await h.disconnect(101)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
+    expect(binding(h.db, 101)).toBeDefined();
+  });
+  it("DEC 254zzz73: an owner disconnects with no step-up claim, and a leftover old or foreign step-up claim changes nothing", async () => {
+    for (const claims of [{}, { step_up_at: 1, step_up_amr: "slack" }]) {
+      const h = await world(); Object.assign(h.claims, claims);
+      expect((await h.disconnect(101)).status).toBe(200);
+      expect(binding(h.db, 101)).toBeUndefined();
     }
   });
   it("another company's installation, an unknown one and a malformed id get the same 404, and change nothing", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     const before = JSON.stringify([...h.db.items]);
     const answers = [await h.disconnect(202), await h.disconnect(999), await h.disconnect("0"), await h.disconnect("12abc"), await h.disconnect("9".repeat(20))];
     for (const answer of answers) expect(answer).toEqual(refusal(404, "NOT_FOUND", CONNECTION_NOT_FOUND));
     expect(JSON.stringify([...h.db.items])).toBe(before);
   });
   it("is refused while projects of the company use a repository on it, naming only those projects", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     project(h.db, "web", A, [repo("https://github.com/acme/web", 101)]);
     project(h.db, "api", A, [repo("https://github.com/other/thing"), repo("https://github.com/Acme/api")]);
     project(h.db, "docs", A, [repo("https://github.com/acme/docs", 777)]);
@@ -141,36 +155,37 @@ describe("disconnect", () => {
     expect(binding(h.db, 101)).toBeDefined();
   });
   it("an unreadable project counts as using it; too many projects to check refuses", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     project(h.db, "odd", A, [repo("https://github.com/acme/x")]);
     h.db.set({ ...h.db.get("PROJECT#odd", "REV#000000000002")!, definition: { name: "odd", revision: 2 } });
     expect((await h.disconnect(101)).status).toBe(409);
-    const many = await world(); many.stepUp();
+    const many = await world();
     for (let i = 0; i <= PROJECT_SCAN_MAX; i++) many.db.set({ pk: "PROJECT_CATALOG", sk: `PROJECT#p${i}`, entityType: "PROJECT_CATALOG", latestRevision: 1 });
     expect(await many.disconnect(101)).toEqual(refusal(503, "RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE));
     expect(binding(many.db, 101)).toBeDefined();
   });
   it("unpinned repositories of an account the company also reaches through another active installation do not block the old one", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     await h.bindings.markLifecycle(101, "deleted", D1);
     expect(await h.bindings.claimPerson(A, { installationId: 103, accountLogin: "acme" }, OWNER)).toBe("bound");
     project(h.db, "web", A, [repo("https://github.com/acme/web")]);
     expect((await h.disconnect(101)).status).toBe(200);
     expect((await h.disconnect(103)).status).toBe(409);
   });
-  it("an owner without a fresh step-up learns nothing: the same 403 whether the id is in use, another company's, or free", async () => {
-    const h = await world();
+  it("a non-owner learns nothing: the same 403 whether the id is in use, another company's, or free", async () => {
+    const h = await world(); h.as(ADMIN);
     project(h.db, "web", A, [repo("https://github.com/acme/web", 101)]);
-    for (const id of [101, 202, 999]) expect(await h.disconnect(id)).toEqual(refusal(403, "REAUTH_REQUIRED", DISCONNECT_STEP_UP));
+    for (const id of [101, 202, 999]) expect(await h.disconnect(id)).toEqual(refusal(403, "FORBIDDEN", DISCONNECT_OWNER_ONLY));
+    expect(binding(h.db, 101)).toBeDefined(); expect(binding(h.db, 202)).toMatchObject({ companyId: B });
   });
   it("probing another company's installation is the 404 even when the caller's own projects use that account (no 404/409 oracle)", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     project(h.db, "mine-on-beta", A, [repo("https://github.com/beta/x", 202)]);
     expect(await h.disconnect(202)).toEqual(refusal(404, "NOT_FOUND", CONNECTION_NOT_FOUND));
     expect(binding(h.db, 202)).toMatchObject({ companyId: B });
   });
   it("another installation of the same account that is not active does not take over unpinned repositories", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     expect(await h.bindings.claimPerson(A, { installationId: 103, accountLogin: "acme" }, OWNER)).toBe("bound");
     await h.bindings.markLifecycle(103, "suspend", D1);
     project(h.db, "web", A, [repo("https://github.com/acme/web")]);
@@ -187,7 +202,7 @@ describe("disconnect", () => {
     for (const bad of [null, "x", [], { url: 7 }, { url: "not a url" }, { url: "https://github.com/acme/a", host: "github" }]) expect(repositoryUsesInstallation(bad, install)).toBe(true);
   });
   it("is unknown for any other method on an installation's path, and for any path below it", async () => {
-    const h = await world(); h.stepUp();
+    const h = await world();
     for (const [method, path] of [["GET", "/v1/dev/company/github/101"], ["POST", "/v1/dev/company/github/101"], ["DELETE", "/v1/dev/company/github/101/x"], ["DELETE", "/v1/dev/company/github/connect"]] as const) {
       expect((await h.call(method, path)).status).toBe(404);
     }

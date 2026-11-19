@@ -9,7 +9,7 @@
 // the company's own (`cache(companyId)`) and read at the plan's own key. Any fault, a missing source, or an answer over `EVAL_PLAN_DELIVERY_MAX_BYTES` is "not_available": the worker then reads
 // "not connected" and spends nothing. A refusal is one fixed sentence that names no company, project or source.
 import {
-  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor,
+  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, EvalStandInDescriptorSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor, standInSettingsFingerprint,
   type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalPlanDelivery, type EvalSpendApproval,
 } from "@agentx/contracts";
 import { isLiveOperation } from "../e2e/uploads-chunks.js";
@@ -31,6 +31,8 @@ export interface EvalPlanRun {
 export interface EvalPlanRead {
   /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins). */
   readonly plan: unknown;
+  /** Broker-only hint from a finished health claim for this exact plan; never supplied by the worker. */
+  readonly baselineStandInSetVersion?: string;
   /** The persisted spend approval of the very item `plan` was read with (F3e `createEvalSpendCapabilities(...).approval`, bound to that item's digest), or undefined when it is not wired here. */
   readonly approval: EvalSpendApproval | undefined;
   /**
@@ -38,6 +40,8 @@ export interface EvalPlanRead {
    * the project's own; this handler re-checks the scope (a saved image's repository must be this company's and this project's) and the shape, and drops anything else.
    */
   readonly environment?: unknown;
+  /** L4-EINT: what the project's evals reach (checked against the strict descriptor schema here; anything else is dropped). Absent when the operator's switch is off. */
+  readonly standIns?: unknown;
 }
 
 /** The broker's trusted sources. Each one is asked only for the run's own scope, and each answer is checked against it again here. */
@@ -68,7 +72,7 @@ export interface EvalPlanDeliveryDeps {
    */
   readonly health?: { read(lease: { requestId: string; claimId: string }, scope: EvalPlanScope): Promise<EvalPlanRead | undefined> } | undefined;
   /** One fixed event name per fail-closed answer (no value of the request, the plan or the sources). */
-  readonly log?: (event: "eval_plan_scope_mismatch" | "eval_plan_unavailable" | "eval_plan_oversize" | "eval_environment_invalid" | "eval_environment_scope_mismatch") => void;
+  readonly log?: (event: "eval_plan_scope_mismatch" | "eval_plan_unavailable" | "eval_plan_oversize" | "eval_environment_invalid" | "eval_environment_scope_mismatch" | "eval_stand_ins_invalid") => void;
 }
 
 const record = (value: unknown): Record<string, unknown> | undefined => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -82,11 +86,12 @@ export function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyPa
   try { evalBaseCacheKey(parts); return parts; } catch { return undefined; }
 }
 
-async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string, unknown>): Promise<Extract<EvalPlanDelivery, { status: "ready" }>["baseline"]> {
-  const parts = cache === undefined ? undefined : baselineParts(plan);
-  if (cache === undefined || parts === undefined) return null;
+async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string, unknown>, version?: string): Promise<Extract<EvalPlanDelivery, { status: "ready" }>["baseline"]> {
+  const plain = cache === undefined ? undefined : baselineParts(plan);
+  const parts = plain === undefined || version === undefined ? plain : { ...plain, standInSetVersion: version, settingsFingerprint: standInSettingsFingerprint(plain.settingsFingerprint, version) };
+  if (cache === undefined || parts === undefined || plain === undefined) return null;
   const found = await cache.read(parts).catch(() => undefined);
-  const measurement = cache.readMeasurement === undefined ? "unavailable" as const : await cache.readMeasurement(parts).catch(() => "unavailable" as const);
+  const measurement = cache.readMeasurement === undefined ? "unavailable" as const : await cache.readMeasurement(plain).catch(() => "unavailable" as const);
   return { key: evalBaseCacheKey(parts), record: found ?? null, measurement };
 }
 
@@ -126,10 +131,18 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
       else if (parsed.data.kind === "saved" && !savedEnvRepositoryIsFor(parsed.data.repository, { orgId: scope.companyId, projectId: scope.project })) log("eval_environment_scope_mismatch");
       else environment = parsed.data;
     }
-    const baseline = await baselineOf(deps.sources.cache(scope.companyId), plan);
-    const answerWith = (env: typeof environment) => EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline, ...(env === undefined ? {} : { environment: env }) });
+    // L4-EINT: the stand-in descriptor (only when the source gave one: the operator's switch). A malformed one is dropped, never a reason to withhold the plan.
+    let standIns: Extract<EvalPlanDelivery, { status: "ready" }>["standIns"];
+    if (found.standIns !== undefined) {
+      const parsed = EvalStandInDescriptorSchema.safeParse(found.standIns);
+      if (parsed.success) standIns = parsed.data; else log("eval_stand_ins_invalid");
+    }
+    const baseline = await baselineOf(deps.sources.cache(scope.companyId), plan, found.baselineStandInSetVersion);
+    const answerWith = (env: typeof environment, stand: typeof standIns = standIns) => EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline, ...(env === undefined ? {} : { environment: env }), ...(stand === undefined ? {} : { standIns: stand }) });
     let answer = answerWith(environment);
     if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
+    // L4-EINT: a stand-in descriptor that makes the answer too big is dropped too (the eval runs without stand-ins), never a reason to withhold the plan.
+    if (standIns !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_stand_ins_invalid"); answer = answerWith(environment, undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
     // An environment that makes the answer too big is dropped (the eval runs on the bare image), never a reason to withhold the plan.
     if (environment !== undefined && Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_environment_invalid"); answer = answerWith(undefined); if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; } }
     if (Buffer.byteLength(JSON.stringify(answer.data), "utf8") > EVAL_PLAN_DELIVERY_MAX_BYTES) { log("eval_plan_oversize"); return NOT_AVAILABLE; }
