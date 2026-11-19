@@ -2,9 +2,11 @@
 // 11.5 (loosening a setting needs a second admin) is the "second person needed" answer.
 import { describe, expect, it } from "vitest";
 import { createPolicyHookClient } from "../../packages/broker/src/core/policy-hook/client.js";
-import { stricterRequirement, withPolicyHookApprovers } from "../../packages/broker/src/core/policy-hook/approvers.js";
+import { personPressOf, stricterRequirement, withPolicyHookApprovers } from "../../packages/broker/src/core/policy-hook/approvers.js";
 import { checkApproverCount, type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type Principal } from "../../packages/contracts/src/index.js";
 import { COMPANY, ISSUER, fakeService, makeKey, memoryAudit, settingsFor, signerOf } from "./policy-hook-fixture.js";
+import { mergeWorld, TASK_ID } from "../support/merge-world.js";
+import { pressMergeAsPerson } from "../../packages/broker/src/core/merge/merge.js";
 
 const install = makeKey("install-key-1");
 const hookKey = makeKey("hook-key-1");
@@ -30,6 +32,60 @@ function world(answer: Parameters<typeof fakeService>[0]["answer"], base: Approv
 const loose = { allow: true, minApprovers: 1, secondPerson: false, selfApproval: true };
 
 describe("policy hook: decisions", () => {
+  it("a website press asks as the task creator, even when another person presses; request data cannot supply the requester", async () => {
+    const worldMerge = await mergeWorld();
+    await worldMerge.seedTracking();
+    const creator = person("task-creator");
+    const presser = person("different-presser");
+    const requests: ApprovalRequest[] = [];
+    const asked: Array<{ by?: string; per?: string; stage?: string }> = [];
+    const deps = {
+      ...worldMerge.deps,
+      requesterOf: async () => creator,
+      personPress: async (req: ApprovalRequest, by: Principal) => {
+        requests.push(req);
+        const serviceWorld = world(() => loose, baseApprovers({ approved: false, reason: "unused" }));
+        const prepared = await personPressOf(serviceWorld.approvers)!.decideForPerson(req, by);
+        asked.push(serviceWorld.service.asked[0]!.q);
+        return prepared;
+      },
+    };
+    const prepared = await (await import("../../packages/broker/src/core/merge/merge.js")).prepareMerge(deps, { taskId: TASK_ID, requestId: worldMerge.requestId() });
+    expect(prepared.request.requestedBy).toEqual(creator);
+    expect(prepared.request.requestedBy).not.toEqual(presser);
+    expect(await pressMergeAsPerson(deps, { taskId: TASK_ID, requestId: worldMerge.requestId(), presserPersonId: presser.personId, presser, expectedHeads: worldMerge.prs.map((pr) => ({ repositoryId: pr.repositoryId, number: pr.number, headSha: pr.head })) })).toMatchObject({ status: "MERGED" });
+    expect(requests.at(-1)?.requestedBy).toEqual(creator);
+    expect(asked.at(-1)).toMatchObject({ stage: "verdict", by: "task-creator", per: "different-presser" });
+  });
+
+  it("refuses a website press with no resolved task creator before asking rules or merging", async () => {
+    const merge = await mergeWorld();
+    await merge.seedTracking();
+    let asked = false;
+    const deps = { ...merge.deps, requesterOf: async () => undefined, personPress: async () => { asked = true; return { allowed: true as const }; } };
+    await expect(pressMergeAsPerson(deps, { taskId: TASK_ID, requestId: merge.requestId(), presserPersonId: "different-presser", presser: person("different-presser") })).rejects.toThrow("someone other than the requester must merge");
+    expect(asked).toBe(false);
+  });
+
+  it("website press uses the verdict transport and fails closed for service refusal, no answer, and a raised approver count", async () => {
+    const other = person("admin-b");
+    const allow = world(() => loose, baseApprovers({ approved: false, reason: "unused" }));
+    const decision = (req: ApprovalRequest, approver: Principal) => personPressOf(allow.approvers)!.decideForPerson(req, approver);
+    expect(await decision(request(), other)).toEqual({ allowed: true });
+    expect(allow.service.asked.map((asked) => asked.q.stage)).toEqual(["verdict"]);
+    expect(await personPressOf(world(() => ({ ...loose, allow: false }), baseApprovers({ approved: false, reason: "unused" })).approvers)!.decideForPerson(request(), other)).toEqual({ allowed: false, reason: "company_rules_refused" });
+    expect(await personPressOf(world(() => new Error("offline"), baseApprovers({ approved: false, reason: "unused" })).approvers)!.decideForPerson(request(), other)).toEqual({ allowed: false, reason: "company_rules_no_answer" });
+    expect(await personPressOf(world(() => ({ ...loose, minApprovers: 2 }), baseApprovers({ approved: false, reason: "unused" })).approvers)!.decideForPerson(request(), other)).toEqual({ allowed: false, reason: "company_rules_refused" });
+  });
+
+  it("a second-person rule refuses the task creator and permits another person", async () => {
+    const w = world(() => ({ ...loose, secondPerson: true }), baseApprovers({ approved: false, reason: "unused" }));
+    const decide = (req: ApprovalRequest, approver: Principal) => personPressOf(w.approvers)!.decideForPerson(req, approver);
+    const req = request({ requestedBy: asker });
+    expect(await decide(req, asker)).toEqual({ allowed: false, reason: "self_approval_not_allowed" });
+    expect(await decide(req, person("admin-b"))).toEqual({ allowed: true });
+  });
+
   it("row 11.5: a second person needed means the asker cannot approve, no sole approver", async () => {
     const w = world(() => ({ ...loose, secondPerson: true }), baseApprovers({ approved: true, approver: asker, method: "local-session", proofId: "p1", soleApprover: true }));
     const requirement = await w.approvers.requirement(request());

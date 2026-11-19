@@ -51,6 +51,7 @@ import {
   type MergeOrderView,
   type MergeView,
   type OrgId,
+  type Principal,
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -259,6 +260,9 @@ export interface MergeDependencies {
   orderInView?: boolean;
   /** DEC 254zzz94/104: readiness needs the checks to have PASSED, never "no CI" (`ReadinessInput.requirePassingCi`). The hosted Merge button sets it; absent: today's rule. */
   requirePassingCi?: boolean;
+  /** Hosted policy-hook press authorization; absent keeps the existing press behavior. */
+  requesterOf?(task: MergeTask): Promise<Principal | undefined>;
+  personPress?(request: ApprovalRequest, presser: Principal): Promise<{ allowed: boolean; reason?: string }>;
 }
 
 const byRepository = <T extends { repositoryId: string; number: number }>(list: readonly T[]): T[] =>
@@ -518,6 +522,11 @@ export async function prepareMerge(
     companyId: tracked.orgId, requestId: input.requestId, kind: MERGE_APPROVAL_KIND, subject: { type: "task", id: tracked.taskId }, projectName: tracked.project,
     revision: tracked.workflow.revision, artifactDigest: mergeArtifactDigest(subject, checked.settings.mergeMethod, risk.level, tier, orderShown), risk: risk.level,
   };
+  if (deps.requesterOf !== undefined) {
+    const requester = await deps.requesterOf(tracked);
+    if (requester === undefined) throw agentXError("FORBIDDEN", "someone other than the requester must merge");
+    request.requestedBy = requester;
+  }
   const steps = order.kind === "dependencies" && ordered.length > 1;
   return {
     request, requirement: await deps.approvers.requirement(request), subject, risk, mergeMethod: checked.settings.mergeMethod, ...(tier === undefined ? {} : { tier }),
@@ -583,7 +592,7 @@ export const WEBSITE_PRESS_METHOD = "rovara-website-press";
 export async function pressMergeAsPerson(
   deps: MergeDependencies,
   input: {
-    taskId: string; requestId: string; presserPersonId: string; orderOverride?: boolean | undefined;
+    taskId: string; requestId: string; presserPersonId: string; presser?: Principal | undefined; orderOverride?: boolean | undefined;
     /** What the person was SHOWN: the heads (a push since is "it changed", never merged) and the risk level (a different level now is "it changed"). */
     expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined; risk?: MergeRisk["level"] | undefined;
   },
@@ -592,6 +601,11 @@ export async function pressMergeAsPerson(
   if (input.risk !== undefined && input.risk !== prepared.risk.level) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   // The approvers point's own count still holds: a merge that needs more than one approver is never one person's press.
   if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
+  if (deps.personPress !== undefined) {
+    if (input.presser === undefined) throw agentXError("FORBIDDEN", "the company rules service did not answer");
+    const decision = await deps.personPress(prepared.request, input.presser);
+    if (!decision.allowed) throw agentXError("FORBIDDEN", decision.reason === "company_rules_no_answer" ? "the company rules service did not answer" : decision.reason === "self_approval_not_allowed" ? "someone other than the requester must merge" : "company rules refused the merge");
+  }
   const task = await deps.host.loadTask(input.taskId);
   if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
