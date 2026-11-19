@@ -80,14 +80,17 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
       "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager",
     ]);
     expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name).sort()).toEqual([
+      // #1149: the broker's names, packed as a named environment's are.
+      "/agentx/production/broker-names",
       "/agentx/production/worker-anthropic-secret-arn", "/agentx/production/worker-e2e-agent-model", "/agentx/production/worker-executor-image",
       "/agentx/production/worker-image", "/agentx/production/worker-model-fallback", "/agentx/production/worker-model-id", "/agentx/production/worker-model-provider",
       "/agentx/production/worker-openai-secret-arn", "/agentx/production/worker-openrouter-providers", "/agentx/production/worker-openrouter-secret-arn",
       "/agentx/production/worker-prompt-cache-retention",
     ]);
     // Spec 064: the legacy deployment's developer sign-in key, for account linking.
+    // #1148: and the core engine's task-token and policy-hook keys.
     expect(all("AWS::KMS::Alias").map((r) => r.Properties.AliasName).sort()).toEqual([
-      "alias/agentx/developer-tokens", "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing",
+      "alias/agentx/developer-tokens", "alias/agentx/production-workspaces", "alias/agentx/production/invoke-signing", "alias/agentx/production/policy-questions", "alias/agentx/production/task-tokens",
     ]);
     const logGroups = all("AWS::Logs::LogGroup").map((r) => r.Properties.LogGroupName).filter((name) => typeof name === "string");
     expect(logGroups).toContain("/agentx/production/worker");

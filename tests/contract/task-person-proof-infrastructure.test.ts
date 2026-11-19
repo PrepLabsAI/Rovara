@@ -72,18 +72,18 @@ function appControlPlane(env: string): TemplateJson {
   return withoutSlackCompanyMode(Template.fromStack(stack).toJSON(), { proof: env === "agentxlivetest123" }) as TemplateJson;
 }
 
-function parentRemainderDigest(template: TemplateJson): string {
+function parentRemainderDigest(template: TemplateJson, named = true): string {
   const remainder = structuredClone(template);
   withoutCoreModelAccessRoute(remainder);
   // The core engine's named-environment addition (E2) is checked in full by core-engine-infrastructure.test.ts. A named environment must carry it (its shape is asserted as it is removed);
-  // the legacy template must carry none of it, so legacy stays byte-identical.
-  if (remainder.Parameters?.CoreEngine !== undefined) {
+  // #1148: the legacy template carries it too now (off by default), and its digest pins it whole, so only a named template has it taken out.
+  if (named && remainder.Parameters?.CoreEngine !== undefined) {
     withoutCoreEngine(remainder);
     // The switch-over parity additions of a named control plane (switchover-parity-infrastructure.test.ts); shape asserted, then taken out.
     withoutSwitchoverControlPlaneParity(remainder);
     // L4-EGR: the NatEgressAddresses parameter and the broker variable that reads it (egress-addresses-infrastructure.test.ts).
     withoutNatEgressControlPlane(remainder);
-  } else expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
+  } else if (named) expect(JSON.stringify(remainder), "only a template without the core engine switch may skip its removal").not.toContain("CoreEngine");
   delete remainder.Parameters?.TaskPersonProofEnabled;
   // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
   // named parameter and its corresponding Broker environment reference from the proof-only hash.
@@ -258,7 +258,8 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
     expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
-    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
+    // #1149: the legacy Broker packs it as well.
+    expect(unpackedBrokerVariables(legacyVariables.Variables, legacy as never).AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy wires only the parameter reference").toEqual({ Ref: "WorkflowDependenciesEnabled" });
 
     // Named/foreign pins include the reviewed destination identity grant and dependency; legacy pins are unchanged. Named/foreign re-pinned for lane E2 (the core engine construct, #663,
     // and R2 step 4: the dispatcher's core queue mapping, its reads, the conditional deleter policy, its variables and the outbox pending index); legacy unchanged.
@@ -308,14 +309,17 @@ describe("the named TEST proof-only installation gate", () => {
         label: "legacy",
         template: legacy,
         // #1129, #1131: the company layer, GitHub sign-in, the company-secrets role and the reliability parts in the legacy (production) template too (no step-up: DEC 254zzz73).
-        withRoute: "2ada0f3ccfc2635f4dcfebf6c33131171c6fd5cf49c48d8db1d0accc34f1bdd6",
-        withoutRoute: "0ffd303eea90c1ff34aed6104fa581546de67abeb76d3d5ce6cfb17aaf81f55b",
+        // #1149: re-pinned for the legacy broker's packed environment (names parameter, AGENTX_SETTINGS, the names parameter's read).
+        // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default, the /v1/app route, saved environment images, the core's keys).
+        withRoute: "d8af185a8e0358129e350521b90822e203f92a35c119729fa21e68e0926a7619",
+        withoutRoute: "139d4dc3a006b30543a654597f925cbde546b8004f1ad4020d22bd70d4578464",
         beforeStepUpRemoval: undefined,
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
     expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
-    expect(legacy.Parameters?.CoreEngine, "legacy has no core engine switch").toBeUndefined();
+    // #1148: the legacy (production) template has the core engine too, off by default.
+    expect(legacy.Parameters?.CoreEngine, "legacy has the core engine switch, off").toMatchObject({ Default: "off" });
     for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
@@ -344,10 +348,10 @@ describe("the named TEST proof-only installation gate", () => {
       const environment = label === "named" ? "agentxlivetest123" : "staging";
       const pinned = label === "legacy" ? template : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutChatGptKeyDeny(withoutSavedEnvSwitch(withoutSavedEnvImages(withoutBrokerSlackPoster(structuredClone(template), environment), environment))))), environment)));
       // L4-HARD (c): the ChatGPT key's Deny is asserted and taken out too (tests/support/chatgpt-key-deny-template.ts); legacy has none.
-      expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
+      expect(parentRemainderDigest(pinned, label !== "legacy"), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
-      expect(parentRemainderDigest(priorRemainder), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
+      expect(parentRemainderDigest(priorRemainder, label !== "legacy"), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
       if (beforeStepUpRemoval !== undefined) {
         // Rule D proof (owner DEC 254zzz73): with exactly the step-up's removed parameter, variables and statements put back, the pre-removal pins hold.
         const restored = withStepUpRestored(pinned);

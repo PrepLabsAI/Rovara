@@ -16,6 +16,7 @@ import {
 } from "../../infra/lib/release-pipeline.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -48,9 +49,10 @@ describe("hosted Slack control-plane infrastructure", () => {
   it("lets the dispatcher read only the immutable E2E admission objects, to hold a reference's kind to its admission", () => {
     const statements = statementsForRole(template, "DispatcherServiceRole");
     const reads = statements.filter((statement) => actionsOf(statement).some((action) => action === "s3:GetObject*" || action === "s3:GetObject"));
-    expect(reads).toHaveLength(1);
-    expect(JSON.stringify(reads[0]!.Resource)).toContain("/workflow-e2e-admissions/*");
-    expect(actionsOf(reads[0]!).some((action) => /Put|Delete/.test(action))).toBe(false);
+    // #1148: plus the core engine's company-bound artifact reader (DISPATCHER_ARTIFACTS_READ_SID), read only.
+    expect(reads).toHaveLength(2);
+    expect(JSON.stringify(reads.map((statement) => statement.Resource))).toContain("/workflow-e2e-admissions/*");
+    for (const read of reads) expect(actionsOf(read).some((action) => /Put|Delete/.test(action))).toBe(false);
     const dispatcher = Object.values(template.findResources("AWS::Lambda::Function")).find((fn) => JSON.stringify(fn).includes("MAX_DISPATCH_ATTEMPTS")) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
     expect(dispatcher.Properties.Environment.Variables).toHaveProperty("ARTIFACT_BUCKET_NAME");
   });
@@ -159,21 +161,19 @@ describe("hosted Slack control-plane infrastructure", () => {
   });
 
   it("tells the broker which role is the orchestrator and which limits apply", () => {
-    template.hasResourceProperties("AWS::Lambda::Function", {
-      Environment: {
-        Variables: Match.objectLike({
-          SLACK_ORCHESTRATOR_ROLE_ARN: { "Fn::GetAtt": [Match.stringLikeRegexp("^SlackOrchestratorTaskRole"), "Arn"] },
-          SLACK_MEMBER_WORKSPACE_LIMIT: { Ref: "SlackMemberWorkspaceLimit" },
-          SLACK_ORGANIZATION_WORKSPACE_LIMIT: { Ref: "SlackOrganizationWorkspaceLimit" },
-        }),
-      },
-    });
+    // #1149: the legacy broker packs the limits (and keeps the role's ARN whole); read them as the broker does.
+    const [, broker] = Object.entries(template.findResources("AWS::Lambda::Function")).find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
+    const variables = unpackedBrokerVariables((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables, template.toJSON() as never);
+    expect(variables.SLACK_ORCHESTRATOR_ROLE_ARN).toEqual({ "Fn::GetAtt": [expect.stringMatching(/^SlackOrchestratorTaskRole/u) as unknown, "Arn"] });
+    expect(variables.SLACK_MEMBER_WORKSPACE_LIMIT).toEqual({ Ref: "SlackMemberWorkspaceLimit" });
+    expect(variables.SLACK_ORGANIZATION_WORKSPACE_LIMIT).toEqual({ Ref: "SlackOrganizationWorkspaceLimit" });
   });
 
   it("the broker can send to the Slack request queue and knows its URL", () => {
     const [, broker] = Object.entries(template.findResources("AWS::Lambda::Function")).find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
-    expect((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables.SLACK_REQUEST_QUEUE_URL)
-      .toEqual({ Ref: expect.stringMatching(/^SlackRequestQueue[0-9A-F]{8}$/) as unknown });
+    // #1149: packed as the queue's name; the broker builds the URL from it (tests/contract/legacy-broker-packed-environment.test.ts).
+    expect(unpackedBrokerVariables((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables, template.toJSON() as never).SLACK_REQUEST_QUEUE_URL)
+      .toEqual({ "Fn::GetAtt": [expect.stringMatching(/^SlackRequestQueue[0-9A-F]{8}$/) as unknown, "QueueName"] });
     const statements = statementsForRole(template, "BrokerServiceRole");
     const send = statements.find((statement) => actionsOf(statement).includes("sqs:SendMessage") && JSON.stringify(statement.Resource).includes("SlackRequestQueue"));
     expect(send).toBeDefined();
@@ -272,8 +272,9 @@ describe("control-plane infrastructure", () => {
 
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 12);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
+    // (which exists only while CoreAttentionEmail is on).
+    template.resourceCountIs("AWS::Lambda::Function", 13);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -318,8 +319,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
-    template.resourceCountIs("AWS::Logs::LogGroup", 14);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too.
+    template.resourceCountIs("AWS::Logs::LogGroup", 15);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -466,7 +467,7 @@ describe("production release pipeline", () => {
     template.hasResourceProperties("AWS::CodeBuild::Project", {
       Name: AGENTX_RELEASE_PROJECT_NAME,
       ConcurrentBuildLimit: 1,
-      TimeoutInMinutes: 60,
+      TimeoutInMinutes: 120,
       Environment: Match.objectLike({
         Type: "ARM_CONTAINER",
         ComputeType: "BUILD_GENERAL1_LARGE",
@@ -480,9 +481,13 @@ describe("production release pipeline", () => {
     }>;
     const buildSpec = project?.Properties.Source.BuildSpec ?? "";
     expect(buildSpec).toContain("npm run release:prod");
+    // #1145: --skip-checks only behind the CI proof; without it every check runs.
+    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ");
+    expect(buildSpec).toContain("--require-existing-foundation $RELEASE_CHECKS");
+    expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);
     expect(buildSpec).toContain("--reuse-unchanged-worker");
     expect(buildSpec).toContain("--require-existing-foundation");
-    expect(buildSpec).not.toMatch(/--skip-checks|--allow-dirty/);
+    expect(buildSpec).not.toMatch(/--allow-dirty/);
     expect(buildSpec).toContain("sha256sum -c");
     expect(buildSpec).toContain("awscli-exe-linux-aarch64-${AWS_CLI_VERSION}.zip");
     // The port guard's tests run the real secret scan: the release machine has the same pinned gitleaks as CI, checked before use.
@@ -551,8 +556,9 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     template.hasOutput("SlackInteractivityUrl", {});
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
-    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064).
-    template.resourceCountIs("AWS::Lambda::Function", 12);
+    // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
+    // (which exists only while CoreAttentionEmail is on).
+    template.resourceCountIs("AWS::Lambda::Function", 13);
   });
 });
 

@@ -254,12 +254,12 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
     expect(JSON.stringify(statements)).not.toContain("img-");
   });
 
-  it("adds nothing else: the stack's new resources are the three roles, their three policies and the template, and the legacy templates carry none of it", () => {
+  it("adds nothing else: the stack's new resources are the three roles, their three policies and the template, and (#1148) the legacy template has the same seven, under rovara-env/production", () => {
     const added = Object.keys(named.Resources).filter((id) => id.startsWith("SavedEnvImages"));
     expect(added).toHaveLength(7);
-    expect(Object.keys(legacy.Resources).filter((id) => id.startsWith("SavedEnvImages"))).toEqual([]);
-    expect(JSON.stringify(legacy)).not.toMatch(/SavedEnv|rovara-env|ROVARA_SAVED_ENV|img-push|AWS::ECR::RepositoryCreationTemplate/u);
-    for (const key of SAVED_ENV_OUTPUT_KEYS) expect(legacy.Outputs?.[key]).toBeUndefined();
+    expect(Object.keys(legacy.Resources).filter((id) => id.startsWith("SavedEnvImages"))).toHaveLength(7);
+    expect(JSON.stringify(legacy)).toContain("rovara-env/production");
+    for (const key of SAVED_ENV_OUTPUT_KEYS) expect(legacy.Outputs?.[key], key).toBeDefined();
   });
 
   it("the boundary names the broker role exactly as the template creates it", () => {

@@ -362,9 +362,11 @@ describe("the legacy deployment (production)", () => {
   it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
     for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
-      "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "MCP_CONFIRM_ELICITATION", "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
+      "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
       expect(text, present).toContain(present);
     }
+    // #1149: the legacy broker packs these two settings (AGENTX_WORKFLOW_DEPENDENCIES_ENABLED as `wd`, MCP_CONFIRM_ELICITATION as `mc`); the sign-in function still has its own whole.
+    for (const packed of [",wd=", ",mc=", "MCP_CONFIRM_ELICITATION"]) expect(text, packed).toContain(packed);
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
     expect(legacy.Parameters.DeveloperSignInSlack).toMatchObject({ Default: "disabled" });
     expect(legacy.Parameters.DeveloperOidcIssuer).toMatchObject({ Default: "" });
@@ -385,8 +387,8 @@ describe("the legacy deployment (production)", () => {
     // The routes and their throttle, as in named environments; still only the one admin JWT authorizer.
     expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toEqual(expect.arrayContaining(["ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", "ANY /review/{proxy+}"]));
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);
-    // Lane L12: the core's /v1/app/* route is a named environment's only; the legacy template stays as deployed.
-    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).not.toContain("ANY /v1/app/{proxy+}");
+    // Lane L12, #1148: the core's /v1/app/* route, in the legacy (production) template too (Rovara Cloud's project page and Inbox call it).
+    expect(ofType(legacy, "AWS::ApiGatewayV2::Route").map(([, r]) => r.Properties.RouteKey)).toContain("ANY /v1/app/{proxy+}");
   });
 });
 
@@ -597,8 +599,8 @@ describe("task-token key and membership IAM", () => {
     expect(key.DeletionPolicy).toBe("Delete");
     expect(key.UpdateReplacePolicy).toBe("Delete");
     expect(ofType(named, "AWS::KMS::Alias").filter(([, r]) => r.Properties.AliasName === "alias/agentx/staging/task-tokens").map(([, r]) => r.Properties.TargetKeyId)).toEqual([{ "Fn::GetAtt": [id, "Arn"] }]);
-    expect(JSON.stringify(legacy)).not.toContain("TaskTokenKey");
-    expect(JSON.stringify(legacy)).not.toContain("TASK_TOKEN_KEY_ARN");
+    // #1148: the legacy (production) template has its own task key too, for the core engine's model gateway.
+    expect(ofType(legacy, "AWS::KMS::Alias").map(([, r]) => r.Properties.AliasName)).toContain("alias/agentx/production/task-tokens");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       const variables = unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named);
       // ENV-ROOM: the broker is given the key's id packed and builds the same ARN (tests/contract/broker-environment.test.ts); the sign-in function gets the ARN whole.
@@ -753,7 +755,8 @@ describe("task-token key and membership IAM", () => {
       for (const action of ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"]) expect(grants.some((s) => allows(s, action))).toBe(false);
       // DEC 254zzz(2): the one Query is the install company import's member mirror read, under exactly ORG#<id>#MEMBERS (#1129: the legacy deployment too).
       expect(grants.filter((s) => allows(s, "dynamodb:Query")).map((s) => leadingKeysOf(s))).toEqual([["ORG#org_????????????????????#MEMBERS"]]);
-      if (template === legacy) expect(leadingKeysOf(grants.find((s) => allows(s, "dynamodb:GetItem"))!)).toEqual(["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS"]);
+      // #1148: the legacy broker has the task token key now, so it reads COMPANY_MEMBER# here, as a named broker does.
+      if (template === legacy) expect(leadingKeysOf(grants.find((s) => allows(s, "dynamodb:GetItem"))!)).toEqual(["SESSION#*", "DEVELOPER#*", "EMAIL#*", "SIGNIN_CLIENTS", "COMPANY_MEMBER#*"]);
       for (const s of statementsOfRole(template, "BrokerServiceRole").filter((s) => touches(s, "dynamodb") && s.Condition?.["ForAllValues:StringLike"] !== undefined)) {
         const keys = leadingKeysOf(s);
         expect(keys).not.toContain("ORG#*");

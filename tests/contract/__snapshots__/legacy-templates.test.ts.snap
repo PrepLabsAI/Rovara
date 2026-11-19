@@ -38,6 +38,54 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       ],
     },
+    "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79": {
+      "Fn::Equals": [
+        {
+          "Ref": "CoreAttentionEmail",
+        },
+        "on",
+      ],
+    },
+    "CoreEngineJobsCoreEngineIsOnCBF38D40": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "CoreEngine",
+            },
+            "off",
+          ],
+        },
+      ],
+    },
+    "CoreEngineJobsCoreSystemRunsIsOn9F1B8C46": {
+      "Fn::And": [
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "CoreEngine",
+                },
+                "off",
+              ],
+            },
+          ],
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "CoreSystemRuns",
+                },
+                "off",
+              ],
+            },
+          ],
+        },
+      ],
+    },
     "OpenAIEnabled": {
       "Fn::Not": [
         {
@@ -137,6 +185,41 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Value": {
         "Ref": "OperatorAlertsA2431256",
       },
+    },
+    "SavedEnvImgManageRoleArn": {
+      "Description": "The role the broker assumes, with a one-repository session policy, to list and delete saved environment images",
+      "Value": {
+        "Fn::GetAtt": [
+          "SavedEnvImagesManageRoleA0F3E8CD",
+          "Arn",
+        ],
+      },
+    },
+    "SavedEnvImgPullRoleArn": {
+      "Description": "The role the broker assumes, with a one-repository session policy, to pull a saved environment image",
+      "Value": {
+        "Fn::GetAtt": [
+          "SavedEnvImagesPullRoleF44C4C9E",
+          "Arn",
+        ],
+      },
+    },
+    "SavedEnvImgPushRoleArn": {
+      "Description": "The role the broker assumes, with a one-repository session policy, to push a saved environment image",
+      "Value": {
+        "Fn::GetAtt": [
+          "SavedEnvImagesPushRole68F53DE7",
+          "Arn",
+        ],
+      },
+    },
+    "SavedEnvRegistryReady": {
+      "Description": "1 when the three saved environment image roles and the repository creation template exist",
+      "Value": "1",
+    },
+    "SavedEnvRepoPrefix": {
+      "Description": "The repository name prefix the saved environment creation template covers",
+      "Value": "rovara-env/production",
     },
     "SessionDeleterArn": {
       "Value": {
@@ -297,6 +380,115 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack); disabled: it is off and no company-only grant exists. Close self-serve and migrate the members first",
       "Type": "String",
     },
+    "CoreAgentModel": {
+      "AllowedPattern": "^([a-z0-9][a-z0-9._:-]{0,63})?$",
+      "Default": "",
+      "Description": "Core engine agent model, any model the model gateway offers by its exact id, such as claude-sonnet-4-6 or zai.glm-5; empty (the default) leaves the core refused",
+      "MaxLength": 64,
+      "Type": "String",
+    },
+    "CoreAgentModelChoice": {
+      "AllowedValues": [
+        "off",
+        "on",
+      ],
+      "Default": "off",
+      "Description": "Core engine per-company agent model choice (setup's AI and spending model picker): off (the default; every company runs the agent model) or on",
+      "Type": "String",
+    },
+    "CoreAllowedCompanies": {
+      "AllowedPattern": "^(none|all|org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
+      "Default": "none",
+      "Description": "Core engine admission: none (safe default), all, or up to two company ids",
+      "MaxLength": 64,
+      "Type": "String",
+    },
+    "CoreAnswersModel": {
+      "AllowedPattern": "^(claude-[a-z0-9][a-z0-9.-]{0,31})?$",
+      "Default": "",
+      "Description": "Core engine hosted answers model, a Claude model id such as claude-haiku-4-5 used for the Just answer and the start-box classifier only; empty (the default) uses the agent model",
+      "MaxLength": 39,
+      "Type": "String",
+    },
+    "CoreAttentionEmail": {
+      "AllowedValues": [
+        "off",
+        "on",
+      ],
+      "Default": "off",
+      "Description": "Attention email (web task channel C8). off (the default): no email is sent, no unsubscribe route is served and no sender function exists; on: people with no chat are told by email from CoreAttentionEmailSender",
+      "Type": "String",
+    },
+    "CoreAttentionEmailHost": {
+      "AllowedPattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+(:[1-9][0-9]{0,4})?)?$",
+      "Default": "",
+      "Description": "The web app's host (no scheme, path or credentials), where the attention email's links point; empty keeps the attention email off",
+      "MaxLength": 56,
+      "Type": "String",
+    },
+    "CoreAttentionEmailSender": {
+      "AllowedPattern": "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$",
+      "Default": "",
+      "Description": "The verified Amazon SES email identity (one address, with no default configuration set) that sends attention email",
+      "MaxLength": 254,
+      "Type": "String",
+    },
+    "CoreCompanyDayCapUsd": {
+      "AllowedPattern": "^([1-9][0-9]{0,2}|1000)$",
+      "Default": "25",
+      "Description": "Core engine per-company UTC-day cap in whole USD, from 1 to 1000",
+      "MaxLength": 4,
+      "Type": "String",
+    },
+    "CoreEngine": {
+      "AllowedPattern": "^(off|on|drain|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
+      "Default": "off",
+      "Description": "off: every new task runs the spec 056 workflow (the default); on: new tasks of every company start on the core engine; on:<company id>[:<company id>]: only those companies' new tasks do; drain: no new task starts on the core and its running tasks finish there",
+      "MaxLength": 64,
+      "Type": "String",
+    },
+    "CoreLearningModel": {
+      "AllowedPattern": "^(claude-[a-z0-9][a-z0-9.-]{0,31})?$",
+      "Default": "",
+      "Description": "Core engine hosted lessons learning model, a Claude model id such as claude-haiku-4-5 used for lessons learning only; empty (the default) uses claude-haiku-5-5, unless a company chose its own",
+      "MaxLength": 39,
+      "Type": "String",
+    },
+    "CoreLessons": {
+      "AllowedPattern": "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
+      "Default": "off",
+      "Description": "Core lessons switch, default off",
+      "MaxLength": 64,
+      "Type": "String",
+    },
+    "CoreModelGatewayHost": {
+      "AllowedPattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+(:[1-9][0-9]{0,4})?)?$",
+      "Default": "",
+      "Description": "Core engine model gateway host, reached over https (no scheme, path or credentials); empty (the default) leaves the core refused",
+      "MaxLength": 56,
+      "Type": "String",
+    },
+    "CorePolicyHook": {
+      "AllowedPattern": "^[ -~]*$",
+      "Default": "",
+      "Description": "Optional policy-hook settings JSON; empty disables the hook",
+      "MaxLength": 532,
+      "Type": "String",
+    },
+    "CoreSystemRuns": {
+      "AllowedPattern": "^(off|on|on:org_[0-9a-z]{20}(:org_[0-9a-z]{20})?)$",
+      "Default": "off",
+      "Description": "Core system-started runs (Rovara's own setup re-check and nightly check): off (the default), on, or on:<company id>[:<company id>]. Also enables the hourly upkeep-night schedule",
+      "MaxLength": 64,
+      "Type": "String",
+    },
+    "CoreTaskCapUsd": {
+      "AllowedPattern": "^([1-9][0-9]{0,2}|1000)$",
+      "Default": "5",
+      "Description": "Core engine per-task cap in whole USD, from 1 to 1000",
+      "MaxLength": 4,
+      "Type": "String",
+    },
     "DeveloperGithubClientId": {
       "AllowedPattern": "^[A-Za-z0-9._-]{0,64}$",
       "Default": "",
@@ -430,6 +622,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "Comma-separated private subnet IDs of the foundation VPC",
       "Type": "String",
     },
+    "SavedEnvironments": {
+      "AllowedValues": [
+        "0",
+        "1",
+      ],
+      "Default": "0",
+      "Description": "Saved environments: 0 (the default) or 1 when registry roles are provisioned",
+      "Type": "String",
+    },
     "SessionManagerSecurityGroupId": {
       "Description": "The foundation's session manager security group",
       "Type": "String",
@@ -502,6 +703,33 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       ],
       "Default": "false",
       "Description": "Whether task people may invite members to public channels in this environment",
+      "Type": "String",
+    },
+    "TestServiceImages": {
+      "AllowedValues": [
+        "none",
+        "mirrored",
+      ],
+      "Default": "none",
+      "Description": "Test service images: none (the default) or mirrored once the starter copies are checked",
+      "Type": "String",
+    },
+    "TestServices": {
+      "AllowedValues": [
+        "1",
+        "0",
+      ],
+      "Default": "1",
+      "Description": "Test services: 1 on (the default), 0 off",
+      "Type": "String",
+    },
+    "WorkerSandboxEgress": {
+      "AllowedValues": [
+        "bridge",
+        "gateway",
+      ],
+      "Default": "bridge",
+      "Description": "How a worker host's task sandboxes and devcontainers reach the internet: bridge (the default, today's behaviour) or gateway (an internal network whose only exit is the host's egress gateway; the worker boot fails if the gateway cannot start)",
       "Type": "String",
     },
     "WorkflowDependenciesEnabled": {
@@ -666,6 +894,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "DependsOn": [
         "BrokerServiceRoleDefaultPolicyDDFD9E7E",
         "BrokerServiceRole1938BCC9",
+        "BrokerNamesParameter",
       ],
       "Properties": {
         "Code": {
@@ -682,92 +911,153 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "ADMIN_VALUES": {
               "Ref": "AdminValues",
             },
+            "AGENTX_ACCOUNT_ID": {
+              "Ref": "AWS::AccountId",
+            },
             "AGENTX_ALARM_PREFIX": "AgentX",
-            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-production-e2e-mock-runtime-v1",
             "AGENTX_ENV": "production",
-            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
-            "AGENTX_TASK_PEOPLE_CHANGES_ENABLED": {
-              "Ref": "TaskPeopleChangesEnabled",
-            },
-            "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED": {
-              "Ref": "TaskPeoplePrivateInvitationsEnabled",
-            },
-            "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED": {
-              "Ref": "TaskPeoplePublicInvitationsEnabled",
-            },
-            "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
-              "Ref": "WorkflowDependenciesEnabled",
-            },
-            "ARTIFACT_BUCKET_NAME": {
-              "Ref": "Artifacts82DD59A1",
-            },
-            "CALLBACK_SIGNING_KEY_SECRET_ID": "agentx/production/callback-key",
-            "CHANNEL_ADAPTERS": {
-              "Ref": "ChannelAdapters",
-            },
-            "CHANNEL_ADAPTER_SECRET_PREFIX": "agentx/production/",
-            "CHATGPT_CONNECTION_KEY_ARN": {
-              "Fn::GetAtt": [
-                "ChatGptConnectionKey03C49F9D",
-                "Arn",
+            "AGENTX_NAMES_PARAMETER": "/agentx/production/broker-names",
+            "AGENTX_NAMES_REVISION": "<asset-hash>",
+            "AGENTX_SETTINGS": {
+              "Fn::Join": [
+                "",
+                [
+                  "aa=",
+                  {
+                    "Ref": "CoreAnswersModel",
+                  },
+                  ",ac=",
+                  {
+                    "Ref": "CoreAllowedCompanies",
+                  },
+                  ",ae=",
+                  {
+                    "Ref": "CoreAttentionEmail",
+                  },
+                  ",am=",
+                  {
+                    "Ref": "CoreAgentModel",
+                  },
+                  ",ca=",
+                  {
+                    "Ref": "ChannelAdapters",
+                  },
+                  ",cd=",
+                  {
+                    "Ref": "CoreCompanyDayCapUsd",
+                  },
+                  ",cl=",
+                  {
+                    "Ref": "CoreLessons",
+                  },
+                  ",ct=",
+                  {
+                    "Ref": "CoreTaskCapUsd",
+                  },
+                  ",gh=",
+                  {
+                    "Ref": "DeveloperSignInGithub",
+                  },
+                  ",gs=",
+                  {
+                    "Ref": "DeveloperGithubSince",
+                  },
+                  ",gw=",
+                  {
+                    "Ref": "CoreModelGatewayHost",
+                  },
+                  ",lm=",
+                  {
+                    "Ref": "CoreLearningModel",
+                  },
+                  ",ly=legacy,mc=",
+                  {
+                    "Ref": "McpConfirmElicitation",
+                  },
+                  ",ml=",
+                  {
+                    "Ref": "SlackMemberWorkspaceLimit",
+                  },
+                  ",mx=",
+                  {
+                    "Ref": "CoreAgentModelChoice",
+                  },
+                  ",ol=",
+                  {
+                    "Ref": "SlackOrganizationWorkspaceLimit",
+                  },
+                  ",os=",
+                  {
+                    "Ref": "DeveloperOidcSince",
+                  },
+                  ",si=",
+                  {
+                    "Fn::If": [
+                      "CompanySignInSwitchOn6E5AE93A",
+                      "1",
+                      "0",
+                    ],
+                  },
+                  ",sn=",
+                  {
+                    "Ref": "DeveloperSignInSlackSince",
+                  },
+                  ",ss=",
+                  {
+                    "Ref": "DeveloperSignInSlack",
+                  },
+                  ",sv=",
+                  {
+                    "Ref": "SavedEnvironments",
+                  },
+                  ",sw=",
+                  {
+                    "Ref": "CoreEngine",
+                  },
+                  ",sy=",
+                  {
+                    "Ref": "CoreSystemRuns",
+                  },
+                  ",tc=",
+                  {
+                    "Ref": "TaskPeopleChangesEnabled",
+                  },
+                  ",td=",
+                  {
+                    "Ref": "TestServices",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "TestServiceImages",
+                  },
+                  ",tm=",
+                  {
+                    "Ref": "SlackTeamId",
+                  },
+                  ",tu=",
+                  {
+                    "Ref": "TaskPeoplePublicInvitationsEnabled",
+                  },
+                  ",tv=",
+                  {
+                    "Ref": "TaskPeoplePrivateInvitationsEnabled",
+                  },
+                  ",wd=",
+                  {
+                    "Ref": "WorkflowDependenciesEnabled",
+                  },
+                ],
               ],
             },
+            "CALLBACK_SIGNING_KEY_SECRET_ID": "agentx/production/callback-key",
             "COMPANY_SECRETS_ROLE_ARN": {
               "Fn::GetAtt": [
                 "CompanySecretsRole63E074C9",
                 "Arn",
               ],
             },
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
-            "DELETER_ARN": {
-              "Ref": "SessionsDeleterB48741EA",
-            },
-            "DEVELOPER_GITHUB_SINCE": {
-              "Ref": "DeveloperGithubSince",
-            },
-            "DEVELOPER_IDENTITY_FUNCTION_ARN": {
-              "Fn::GetAtt": [
-                "DeveloperSignInFunction10B62B05",
-                "Arn",
-              ],
-            },
             "DEVELOPER_OIDC_ISSUER": {
               "Ref": "DeveloperOidcIssuer",
-            },
-            "DEVELOPER_OIDC_SINCE": {
-              "Ref": "DeveloperOidcSince",
-            },
-            "DEVELOPER_SIGNIN_GITHUB": {
-              "Ref": "DeveloperSignInGithub",
-            },
-            "DEVELOPER_SIGNIN_SLACK": {
-              "Ref": "DeveloperSignInSlack",
-            },
-            "DEVELOPER_SIGNIN_SLACK_SINCE": {
-              "Ref": "DeveloperSignInSlackSince",
-            },
-            "DEVELOPER_SIGNIN_TABLE_NAME": {
-              "Ref": "DeveloperSignInTable26CE739E",
-            },
-            "DEVELOPER_TOKEN_ISSUER": {
-              "Fn::Join": [
-                "",
-                [
-                  {
-                    "Fn::GetAtt": [
-                      "HttpApi",
-                      "ApiEndpoint",
-                    ],
-                  },
-                  "/v1/auth",
-                ],
-              ],
             },
             "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
               "Ref": "Ec2WorkerLaunchTemplateId",
@@ -784,70 +1074,36 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
               "Ref": "GitHubAppPrivateKeySecretArn",
             },
-            "HEALTH_DEAD_LETTER_QUEUES": {
-              "Fn::Join": [
-                "",
-                [
-                  "{"dispatch":"",
-                  {
-                    "Ref": "DispatchDeadLetterQueue3E30F4B8",
-                  },
-                  "","slack-requests":"",
-                  {
-                    "Ref": "SlackRequestDeadLetterQueueBBBDDF4E",
-                  },
-                  "","developer-notices":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
-                  },
-                  "","developer-notice-stream":"",
-                  {
-                    "Ref": "DeveloperTaskNotifierStreamFailureQueue58891933",
-                  },
-                  "","channel-events":"",
-                  {
-                    "Ref": "ChannelApiEventDeadLettersE21C25D1",
-                  },
-                  ""}",
-                ],
-              ],
-            },
-            "MCP_CONFIRM_ELICITATION": {
-              "Ref": "McpConfirmElicitation",
-            },
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
             },
-            "PROVISIONER_ARN": {
-              "Ref": "SessionsProvisioner9C44055B",
+            "ROVARA_POLICY_HOOK": {
+              "Ref": "CorePolicyHook",
             },
-            "SLACK_MEMBER_WORKSPACE_LIMIT": {
-              "Ref": "SlackMemberWorkspaceLimit",
+            "ROVARA_SAVED_ENV_MANAGE_ROLE_ARN": {
+              "Fn::GetAtt": [
+                "SavedEnvImagesManageRoleA0F3E8CD",
+                "Arn",
+              ],
             },
+            "ROVARA_SAVED_ENV_PULL_ROLE_ARN": {
+              "Fn::GetAtt": [
+                "SavedEnvImagesPullRoleF44C4C9E",
+                "Arn",
+              ],
+            },
+            "ROVARA_SAVED_ENV_PUSH_ROLE_ARN": {
+              "Fn::GetAtt": [
+                "SavedEnvImagesPushRole68F53DE7",
+                "Arn",
+              ],
+            },
+            "ROVARA_SAVED_ENV_REPO_PREFIX": "rovara-env/production",
             "SLACK_ORCHESTRATOR_ROLE_ARN": {
               "Fn::GetAtt": [
                 "SlackOrchestratorTaskRole2372FE40",
                 "Arn",
               ],
-            },
-            "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
-              "Ref": "SlackOrganizationWorkspaceLimit",
-            },
-            "SLACK_REQUEST_QUEUE_URL": {
-              "Ref": "SlackRequestQueueCC82C864",
-            },
-            "SLACK_TEAM_ID": {
-              "Ref": "SlackTeamId",
-            },
-            "SLACK_THREADS_TABLE_NAME": {
-              "Ref": "SlackThreads36E14C1E",
-            },
-            "STATE_TABLE_NAME": {
-              "Ref": "State1C20CC9A",
-            },
-            "SWEBENCH_SETTINGS_PREFIX": "/agentx/production/",
-            "TURN_RECORDS_TABLE_NAME": {
-              "Ref": "TurnRecords69ECFCD9",
             },
           },
         },
@@ -933,6 +1189,118 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         ],
       },
       "Type": "AWS::Logs::MetricFilter",
+    },
+    "BrokerNamesParameter": {
+      "Properties": {
+        "Description": "The broker's CloudFormation-generated resource names (AGENTX_NAMES); no secrets. Written by the control plane stack only.",
+        "Name": "/agentx/production/broker-names",
+        "Tier": "Standard",
+        "Type": "String",
+        "Value": {
+          "Fn::Join": [
+            "",
+            [
+              "v1:<asset-hash>:ar=",
+              {
+                "Ref": "Artifacts82DD59A1",
+              },
+              ",ce=",
+              {
+                "Fn::GetAtt": [
+                  "ChannelApiEventDeadLettersE21C25D1",
+                  "QueueName",
+                ],
+              },
+              ",ck=",
+              {
+                "Ref": "ChatGptConnectionKey03C49F9D",
+              },
+              ",dl=",
+              {
+                "Fn::GetAtt": [
+                  "SessionsDeleterB48741EA",
+                  "Name",
+                ],
+              },
+              ",dn=",
+              {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierNoticeDeadLetterQueue3C87E1D7",
+                  "QueueName",
+                ],
+              },
+              ",dq=",
+              {
+                "Fn::GetAtt": [
+                  "DispatchDeadLetterQueue3E30F4B8",
+                  "QueueName",
+                ],
+              },
+              ",ds=",
+              {
+                "Fn::GetAtt": [
+                  "DeveloperTaskNotifierStreamFailureQueue58891933",
+                  "QueueName",
+                ],
+              },
+              ",id=",
+              {
+                "Ref": "DeveloperSignInFunction10B62B05",
+              },
+              ",kp=",
+              {
+                "Ref": "DeveloperSignInPolicyHookKey1CC2C9E2",
+              },
+              ",kt=",
+              {
+                "Ref": "DeveloperSignInTaskTokenKey10D3ED68",
+              },
+              ",pv=",
+              {
+                "Fn::GetAtt": [
+                  "SessionsProvisioner9C44055B",
+                  "Name",
+                ],
+              },
+              ",sl=",
+              {
+                "Ref": "SlackThreads36E14C1E",
+              },
+              ",sq=",
+              {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "QueueName",
+                ],
+              },
+              ",sr=",
+              {
+                "Fn::GetAtt": [
+                  "SlackRequestDeadLetterQueueBBBDDF4E",
+                  "QueueName",
+                ],
+              },
+              ",st=",
+              {
+                "Ref": "DeveloperSignInTable26CE739E",
+              },
+              ",ti=",
+              {
+                "Ref": "HttpApi",
+              },
+              ",tr=",
+              {
+                "Ref": "TurnRecords69ECFCD9",
+              },
+              ",ts=",
+              {
+                "Ref": "State1C20CC9A",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
     },
     "BrokerServiceRole1938BCC9": {
       "Properties": {
@@ -1451,6 +1819,26 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/broker-names",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -1579,6 +1967,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     "DEVELOPER#*",
                     "EMAIL#*",
                     "SIGNIN_CLIENTS",
+                    "COMPANY_MEMBER#*",
                   ],
                 },
               },
@@ -3370,43 +3759,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::IAM::Policy",
     },
-    "CompanySignInSwitchBrokerCompanyMemberships050A22BC": {
-      "Condition": "CompanySignInSwitchOn6E5AE93A",
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": "dynamodb:GetItem",
-              "Condition": {
-                "ForAllValues:StringLike": {
-                  "dynamodb:LeadingKeys": [
-                    "COMPANY_MEMBER#*",
-                  ],
-                },
-                "Null": {
-                  "dynamodb:LeadingKeys": "false",
-                },
-              },
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "DeveloperSignInTable26CE739E",
-                  "Arn",
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "company-signin-brokercompanymemberships",
-        "Roles": [
-          {
-            "Ref": "BrokerServiceRole1938BCC9",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
     "CompanySignInSwitchSignInCompanyGrants87369E9E": {
       "Condition": "CompanySignInSwitchOn6E5AE93A",
       "Properties": {
@@ -3628,8 +3980,1136 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "CoreEngineJobsAttentionEmailSenderBrokerInvokesD5D91205": {
+      "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
+      "Properties": {
+        "Action": "lambda:InvokeFunction",
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "CoreEngineJobsAttentionEmailSenderC7CE396D",
+            "Arn",
+          ],
+        },
+        "Principal": {
+          "Fn::GetAtt": [
+            "BrokerServiceRole1938BCC9",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::Lambda::Permission",
+    },
+    "CoreEngineJobsAttentionEmailSenderC7CE396D": {
+      "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
+      "DependsOn": [
+        "CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicyE00455AD",
+        "CoreEngineJobsAttentionEmailSenderServiceRole3E35E76D",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "ATTENTION_EMAIL_FROM": {
+              "Ref": "CoreAttentionEmailSender",
+            },
+            "ATTENTION_EMAIL_LINK_ORIGIN": {
+              "Fn::Join": [
+                "",
+                [
+                  "https://",
+                  {
+                    "Ref": "CoreAttentionEmailHost",
+                  },
+                ],
+              ],
+            },
+          },
+        },
+        "FunctionName": "agentx-production-attention-email",
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "CoreEngineJobsAttentionEmailSenderLogsC69CF626",
+          },
+        },
+        "MemorySize": 256,
+        "Role": {
+          "Fn::GetAtt": [
+            "CoreEngineJobsAttentionEmailSenderServiceRole3E35E76D",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Timeout": 10,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "CoreEngineJobsAttentionEmailSenderLogsC69CF626": {
+      "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CoreEngineJobsAttentionEmailSenderServiceRole3E35E76D": {
+      "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicyE00455AD": {
+      "Condition": "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "ses:SendEmail",
+              "Condition": {
+                "StringEquals": {
+                  "ses:FromAddress": {
+                    "Ref": "CoreAttentionEmailSender",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ses:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":identity/",
+                    {
+                      "Ref": "CoreAttentionEmailSender",
+                    },
+                  ],
+                ],
+              },
+              "Sid": "AttentionEmailSend",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicyE00455AD",
+        "Roles": [
+          {
+            "Ref": "CoreEngineJobsAttentionEmailSenderServiceRole3E35E76D",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CoreEngineJobsDeadLetterQueue4163BB61": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "QueueName": "agentx-production-core-dispatch-dead",
+        "RedriveAllowPolicy": {
+          "redrivePermission": "byQueue",
+          "sourceQueueArns": [
+            {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":sqs:",
+                  {
+                    "Ref": "AWS::Region",
+                  },
+                  ":",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":agentx-production-core-dispatch",
+                ],
+              ],
+            },
+          ],
+        },
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CoreEngineJobsDeadLetterQueuePolicy8333AE6C": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsDeadLetterQueue4163BB61",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsDeadLetterQueue4163BB61",
+                  "Arn",
+                ],
+              },
+              "Sid": "BrokerUsesCoreDispatchQueue",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "CoreEngineJobsDeadLetterQueue4163BB61",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "CoreEngineJobsDeadLettersAlarmDDAE4AF3": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A core engine dispatch message exhausted its receives and is in the core dispatch dead-letter queue, so its task may hold its workspace. Check the broker logs for the operation ID, then redrive or purge the queue.",
+        "AlarmName": "AgentXCoreDispatchDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "CoreEngineJobsDeadLetterQueue4163BB61",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "CoreEngineJobsDispatcherCorePolicy1A9E3DBB": {
+      "Condition": "CoreEngineJobsCoreEngineIsOnCBF38D40",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "states:StartExecution",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SessionsDeleterB48741EA",
+              },
+              "Sid": "CoreStartSessionDeleter",
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "CallbackSigningKeySecret28D4CB19",
+              },
+              "Sid": "ReadCallbackSigningKey",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CoreEngineJobsDispatcherCorePolicy1A9E3DBB",
+        "Roles": [
+          {
+            "Ref": "DispatcherServiceRole904BCD09",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CoreEngineJobsDispatcherMapping13D37C6B": {
+      "DependsOn": [
+        "DispatcherServiceRoleDefaultPolicyDA413007",
+      ],
+      "Properties": {
+        "BatchSize": 1,
+        "Enabled": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            true,
+            false,
+          ],
+        },
+        "EventSourceArn": {
+          "Fn::GetAtt": [
+            "CoreEngineJobsQueue9C998495",
+            "Arn",
+          ],
+        },
+        "FunctionName": {
+          "Ref": "DispatcherD4A12972",
+        },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
+      },
+      "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "CoreEngineJobsInvokeRole08FF5F47": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                  "aws:SourceArn": {
+                    "Fn::GetAtt": [
+                      "CoreEngineJobsScheduleGroupABAD63AF",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "scheduler.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "EventBridge Scheduler invokes the broker for the core engine's scheduled jobs",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "CoreEngineJobsInvokeRoleDefaultPolicyDFC5AF3B": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "BrokerE1355FD6",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CoreEngineJobsInvokeRoleDefaultPolicyDFC5AF3B",
+        "Roles": [
+          {
+            "Ref": "CoreEngineJobsInvokeRole08FF5F47",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CoreEngineJobsJobAdmissionHoldSweep71AA868B": {
+      "Properties": {
+        "Description": "Core engine job admission-hold-sweep",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(15 minutes)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"admission-hold-sweep"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobAfterMergeA9F063EB": {
+      "Properties": {
+        "Description": "Core engine job after-merge",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"after-merge"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobAutomationStop0D2CE527": {
+      "Properties": {
+        "Description": "Core engine job automation-stop",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"automation-stop"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobDispatchSweep8E9A1FFF": {
+      "Properties": {
+        "Description": "Core engine job dispatch-sweep",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"dispatch-sweep"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobLessons6FA2B537": {
+      "Properties": {
+        "Description": "Core engine job lessons",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(5 minutes)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"lessons"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobMergeTrackingD3E4F6DF": {
+      "Properties": {
+        "Description": "Core engine job merge-tracking",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"merge-tracking"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobNotifyDeliverD2E5392A": {
+      "Properties": {
+        "Description": "Core engine job notify-deliver",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(5 minutes)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"notify-deliver"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobOutboxRelayBackstopA07586BC": {
+      "Properties": {
+        "Description": "Core engine job outbox-relay-backstop",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"outbox-relay-backstop"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobPersonEraseResumeE9A98484": {
+      "Properties": {
+        "Description": "Core engine job person-erase-resume",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(15 minutes)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"person-erase-resume"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobRunWatch8EEA5EEB": {
+      "Properties": {
+        "Description": "Core engine job run-watch",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"run-watch"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobSessionSweep9FB9CB73": {
+      "Properties": {
+        "Description": "Core engine job session-sweep",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(5 minutes)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreEngineIsOnCBF38D40",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"session-sweep"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsJobUpkeepNight99A21E36": {
+      "Properties": {
+        "Description": "Core engine job upkeep-night",
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "GroupName": {
+          "Ref": "CoreEngineJobsScheduleGroupABAD63AF",
+        },
+        "ScheduleExpression": "rate(1 hour)",
+        "State": {
+          "Fn::If": [
+            "CoreEngineJobsCoreSystemRunsIsOn9F1B8C46",
+            "ENABLED",
+            "DISABLED",
+          ],
+        },
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.core-job","job":"upkeep-night"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 120,
+            "MaximumRetryAttempts": 1,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsInvokeRole08FF5F47",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "CoreEngineJobsLessonsReflectDeadLetterQueue524DEFD4": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "QueueName": "agentx-production-lessons-reflect-dead",
+        "RedriveAllowPolicy": {
+          "redrivePermission": "byQueue",
+          "sourceQueueArns": [
+            {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":sqs:",
+                  {
+                    "Ref": "AWS::Region",
+                  },
+                  ":",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":agentx-production-lessons-reflect",
+                ],
+              ],
+            },
+          ],
+        },
+        "SqsManagedSseEnabled": true,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CoreEngineJobsLessonsReflectDeadLetterQueuePolicyC449A642": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsLessonsReflectDeadLetterQueue524DEFD4",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "sqs:GetQueueAttributes",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsLessonsReflectDeadLetterQueue524DEFD4",
+                  "Arn",
+                ],
+              },
+              "Sid": "BrokerReadsLessonsReflectDeadLetterAttributes",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "CoreEngineJobsLessonsReflectDeadLetterQueue524DEFD4",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "CoreEngineJobsLessonsReflectQueueCC4FF525": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "QueueName": "agentx-production-lessons-reflect",
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsLessonsReflectDeadLetterQueue524DEFD4",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 5,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 1800,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CoreEngineJobsLessonsReflectQueuePolicyD2D83BBA": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsLessonsReflectQueueCC4FF525",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsLessonsReflectQueueCC4FF525",
+                  "Arn",
+                ],
+              },
+              "Sid": "BrokerUsesLessonsReflectQueue",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "CoreEngineJobsLessonsReflectQueueCC4FF525",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "CoreEngineJobsQueue9C998495": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "QueueName": "agentx-production-core-dispatch",
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": [
+              "CoreEngineJobsDeadLetterQueue4163BB61",
+              "Arn",
+            ],
+          },
+          "maxReceiveCount": 21,
+        },
+        "SqsManagedSseEnabled": true,
+        "VisibilityTimeout": 120,
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "CoreEngineJobsQueuePolicyEEE3AC30": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sqs:*",
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false",
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsQueue9C998495",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsQueue9C998495",
+                  "Arn",
+                ],
+              },
+              "Sid": "BrokerUsesCoreDispatchQueue",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Queues": [
+          {
+            "Ref": "CoreEngineJobsQueue9C998495",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::QueuePolicy",
+    },
+    "CoreEngineJobsScheduleGroupABAD63AF": {
+      "Type": "AWS::Scheduler::ScheduleGroup",
+    },
     "DefaultStage": {
       "DependsOn": [
+        "DeveloperSignInAppRouteBAD38FAA",
         "DeveloperSignInAuthRoute98555360",
         "DeveloperSignInDevRoute4BB932E2",
         "DeveloperSignInFeedbackReviewRoute881C7CFE",
@@ -3641,6 +5121,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "AutoDeploy": true,
         "RouteSettings": {
           "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
+          "ANY /v1/app/{proxy+}": {
             "ThrottlingBurstLimit": 50,
             "ThrottlingRateLimit": 20,
           },
@@ -3656,6 +5140,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "StageName": "$default",
       },
       "Type": "AWS::ApiGatewayV2::Stage",
+    },
+    "DeveloperSignInAppRouteBAD38FAA": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /v1/app/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "DeveloperSignInAuthRoute98555360": {
       "Properties": {
@@ -3910,6 +5415,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "MCP_CONFIRM_ELICITATION": {
               "Ref": "McpConfirmElicitation",
             },
+            "POLICY_HOOK_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInPolicyHookKey1CC2C9E2",
+                "Arn",
+              ],
+            },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
             },
@@ -3921,6 +5432,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
+            },
+            "TASK_TOKEN_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInTaskTokenKey10D3ED68",
+                "Arn",
+              ],
             },
           },
         },
@@ -4084,6 +5601,26 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
             },
             {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTaskTokenKey10D3ED68",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInPolicyHookKey1CC2C9E2",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": "secretsmanager:GetSecretValue",
               "Effect": "Allow",
               "Resource": {
@@ -4179,6 +5716,168 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::ApiGatewayV2::Integration",
     },
+    "DeveloperSignInPolicyHookKey1CC2C9E2": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX production policy hook questions",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "BrokerSignsPolicyQuestions",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "StringEquals": {
+                  "kms:MessageType": "RAW",
+                  "kms:SigningAlgorithm": "RSASSA_PKCS1_V1_5_SHA_256",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "DispatcherServiceRole904BCD09",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "DispatcherSignsPolicyQuestions",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "DispatcherServiceRole904BCD09",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "DispatcherReadsPolicyQuestionKey",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DispatcherServiceRole904BCD09",
+                        "Arn",
+                      ],
+                    },
+                  ],
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignOnlyAsBroker",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeveloperSignInFunctionServiceRole47322E59",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DispatcherServiceRole904BCD09",
+                        "Arn",
+                      ],
+                    },
+                  ],
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "RSA_2048",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInPolicyHookKeyAlias9F9A2B5B": {
+      "Properties": {
+        "AliasName": "alias/agentx/production/policy-questions",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DeveloperSignInPolicyHookKey1CC2C9E2",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
+    },
     "DeveloperSignInSignInCompanyImportUndo0D26C2D1": {
       "Properties": {
         "PolicyDocument": {
@@ -4254,6 +5953,119 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::DynamoDB::Table",
       "UpdateReplacePolicy": "Retain",
+    },
+    "DeveloperSignInTaskTokenKey10D3ED68": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "Signs AgentX production task tokens",
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Sign",
+                "kms:GetPublicKey",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": "kms:Sign",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": {
+                    "Fn::GetAtt": [
+                      "BrokerServiceRole1938BCC9",
+                      "Arn",
+                    ],
+                  },
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "SignOnlyAsBroker",
+            },
+            {
+              "Action": "kms:GetPublicKey",
+              "Condition": {
+                "ArnNotEquals": {
+                  "aws:PrincipalArn": [
+                    {
+                      "Fn::GetAtt": [
+                        "BrokerServiceRole1938BCC9",
+                        "Arn",
+                      ],
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DeveloperSignInFunctionServiceRole47322E59",
+                        "Arn",
+                      ],
+                    },
+                  ],
+                },
+              },
+              "Effect": "Deny",
+              "Principal": {
+                "AWS": "*",
+              },
+              "Resource": "*",
+              "Sid": "GetPublicKeyOnlyAsBrokerAndDeveloperIdentity",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "KeySpec": "RSA_2048",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 7,
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "DeveloperSignInTaskTokenKeyAliasBA394975": {
+      "Properties": {
+        "AliasName": "alias/agentx/production/task-tokens",
+        "TargetKeyId": {
+          "Fn::GetAtt": [
+            "DeveloperSignInTaskTokenKey10D3ED68",
+            "Arn",
+          ],
+        },
+      },
+      "Type": "AWS::KMS::Alias",
     },
     "DeveloperSignInTokenKey9F4912A4": {
       "DeletionPolicy": "Delete",
@@ -4348,6 +6160,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
+            },
+            "BROKER_FUNCTION_NAME": {
+              "Ref": "BrokerE1355FD6",
             },
             "BUILT_IN_ADAPTER": {
               "Ref": "SlackViaChannel",
@@ -4483,6 +6298,17 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
               "Effect": "Allow",
               "Resource": "*",
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "BrokerE1355FD6",
+                  "Arn",
+                ],
+              },
+              "Sid": "RelayCoreOutboxToBroker",
             },
             {
               "Action": [
@@ -4898,10 +6724,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "FilterCriteria": {
           "Filters": [
             {
-              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK"]}}}}",
-            },
-            {
-              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK_POINTER"]}}}}",
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK","DEVELOPER_TASK_POINTER"]}}}}",
             },
             {
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["OPERATION"]},"status":{"S":["SUCCEEDED","FAILED","CANCELLED","INTERRUPTED"]}}}}",
@@ -4912,11 +6735,17 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             {
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["WORKFLOW_ACTION_REFUSAL","TASK_COMMENT_NUDGE","TASK_PEOPLE_NOTIFICATION"]}}}}",
             },
+            {
+              "Pattern": "{"eventName":["INSERT"],"dynamodb":{"NewImage":{"entityType":{"S":["OUTBOX"]},"pk":{"S":[{"prefix":"ORG#"}]},"outboxState":{"S":[{"exists":true}]}}}}",
+            },
           ],
         },
         "FunctionName": {
           "Ref": "DeveloperTaskNotifierFunction551419CC",
         },
+        "FunctionResponseTypes": [
+          "ReportBatchItemFailures",
+        ],
         "MaximumRecordAgeInSeconds": 3600,
         "MaximumRetryAttempts": 10,
         "StartingPosition": "LATEST",
@@ -5087,11 +6916,97 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
+            "AGENTX_SETTINGS": {
+              "Fn::Join": [
+                "",
+                [
+                  "ac=",
+                  {
+                    "Ref": "CoreAllowedCompanies",
+                  },
+                  ",am=",
+                  {
+                    "Ref": "CoreAgentModel",
+                  },
+                  ",cd=",
+                  {
+                    "Ref": "CoreCompanyDayCapUsd",
+                  },
+                  ",cl=",
+                  {
+                    "Ref": "CoreLessons",
+                  },
+                  ",ct=",
+                  {
+                    "Ref": "CoreTaskCapUsd",
+                  },
+                  ",gw=",
+                  {
+                    "Ref": "CoreModelGatewayHost",
+                  },
+                  ",sv=",
+                  {
+                    "Ref": "SavedEnvironments",
+                  },
+                  ",sy=",
+                  {
+                    "Ref": "CoreSystemRuns",
+                  },
+                  ",td=",
+                  {
+                    "Ref": "TestServices",
+                  },
+                  ",ti=",
+                  {
+                    "Ref": "TestServiceImages",
+                  },
+                ],
+              ],
+            },
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },
+            "CALLBACK_SIGNING_KEY_SECRET_ID": {
+              "Fn::If": [
+                "CoreEngineJobsCoreEngineIsOnCBF38D40",
+                "agentx/production/callback-key",
+                "",
+              ],
+            },
+            "CORE_DISPATCH_DEAD_LETTER_URL": {
+              "Ref": "CoreEngineJobsDeadLetterQueue4163BB61",
+            },
+            "CORE_DISPATCH_QUEUE_ARN": {
+              "Fn::GetAtt": [
+                "CoreEngineJobsQueue9C998495",
+                "Arn",
+              ],
+            },
+            "CORE_DISPATCH_QUEUE_URL": {
+              "Ref": "CoreEngineJobsQueue9C998495",
+            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
+            },
+            "DEVELOPER_TOKEN_ISSUER": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/auth",
+                ],
+              ],
+            },
+            "EC2_WORKER_LAUNCH_TEMPLATE_ID": {
+              "Ref": "Ec2WorkerLaunchTemplateId",
+            },
+            "EC2_WORKER_SUBNETS": {
+              "Ref": "Ec2WorkerSubnets",
             },
             "INVOKE_SIGNING_KEY_ARN": {
               "Fn::GetAtt": [
@@ -5100,8 +7015,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "MAX_DISPATCH_ATTEMPTS": "5",
+            "POLICY_HOOK_KEY_ARN": {
+              "Fn::GetAtt": [
+                "DeveloperSignInPolicyHookKey1CC2C9E2",
+                "Arn",
+              ],
+            },
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
+            },
+            "ROVARA_CORE_ENGINE": {
+              "Ref": "CoreEngine",
+            },
+            "ROVARA_POLICY_HOOK": {
+              "Ref": "CorePolicyHook",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
@@ -5308,6 +7235,41 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
             },
             {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/private/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/workspaces/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "ReadCompanyArtifacts",
+            },
+            {
               "Action": "kms:Sign",
               "Effect": "Allow",
               "Resource": {
@@ -5323,6 +7285,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Resource": {
                 "Ref": "SessionsProvisioner9C44055B",
               },
+            },
+            {
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "CoreEngineJobsQueue9C998495",
+                  "Arn",
+                ],
+              },
+              "Sid": "ConsumeCoreDispatchQueue",
             },
           ],
           "Version": "2012-10-17",
@@ -6622,6 +8600,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "StreamArn",
           ],
         },
+        "FilterCriteria": {
+          "Filters": [
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"pk":{"S":[{"anything-but":{"prefix":"ORG#"}}]}}}}",
+            },
+          ],
+        },
         "FunctionName": {
           "Ref": "OutboxPublisherD572F72E",
         },
@@ -6722,6 +8707,295 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "TreatMissingData": "notBreaching",
       },
       "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SavedEnvImagesCreationTemplate55581766": {
+      "DependsOn": [
+        "SavedEnvImagesManageRoleDefaultPolicyB6EE424C",
+        "SavedEnvImagesManageRoleA0F3E8CD",
+        "SavedEnvImagesPullRoleDefaultPolicy3F49BC10",
+        "SavedEnvImagesPullRoleF44C4C9E",
+        "SavedEnvImagesPushRoleDefaultPolicy52BB6454",
+        "SavedEnvImagesPushRole68F53DE7",
+      ],
+      "Properties": {
+        "AppliedFor": [
+          "CREATE_ON_PUSH",
+        ],
+        "Description": "Rovara saved environment images: immutable tags, AES-256, keep the newest images, data actions for the push and pull roles only",
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "LifecyclePolicy": "{"rules":[{"rulePriority":1,"description":"Untagged images expire","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":1},"action":{"type":"expire"}},{"rulePriority":2,"description":"Backstop: keep at most 13 images","selection":{"tagStatus":"tagged","tagPatternList":["*"],"countType":"imageCountMoreThan","countNumber":13},"action":{"type":"expire"}}]}",
+        "Prefix": "rovara-env/production",
+        "RepositoryPolicy": {
+          "Fn::Join": [
+            "",
+            [
+              "{"Version":"2012-10-17","Statement":[{"Sid":"OnlyTheRolesMayRead","Effect":"Deny","Principal":"*","Action":["ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:BatchCheckLayerAvailability"],"Condition":{"ArnNotEquals":{"aws:PrincipalArn":["",
+              {
+                "Fn::GetAtt": [
+                  "SavedEnvImagesPushRole68F53DE7",
+                  "Arn",
+                ],
+              },
+              "","",
+              {
+                "Fn::GetAtt": [
+                  "SavedEnvImagesPullRoleF44C4C9E",
+                  "Arn",
+                ],
+              },
+              ""]}}},{"Sid":"OnlyThePushRoleMayWrite","Effect":"Deny","Principal":"*","Action":["ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"],"Condition":{"ArnNotEquals":{"aws:PrincipalArn":"",
+              {
+                "Fn::GetAtt": [
+                  "SavedEnvImagesPushRole68F53DE7",
+                  "Arn",
+                ],
+              },
+              ""}}},{"Sid":"OnlyTheManageRoleMayDeleteImages","Effect":"Deny","Principal":"*","Action":["ecr:BatchDeleteImage"],"Condition":{"ArnNotEquals":{"aws:PrincipalArn":["",
+              {
+                "Fn::GetAtt": [
+                  "SavedEnvImagesManageRoleA0F3E8CD",
+                  "Arn",
+                ],
+              },
+              ""]}}}]}",
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ECR::RepositoryCreationTemplate",
+    },
+    "SavedEnvImagesManageRoleA0F3E8CD": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Rovara saved environment images: the broker assumes this with a one-repository session policy to list and delete images",
+        "MaxSessionDuration": 3600,
+        "RoleName": "agentx-production-img-manage",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SavedEnvImagesManageRoleDefaultPolicyB6EE424C": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "ecr:DescribeRepositories",
+                "ecr:GetRepositoryPolicy",
+                "ecr:DescribeImages",
+                "ecr:ListImages",
+                "ecr:BatchDeleteImage",
+                "ecr:DeleteRepository",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-env/production/*",
+                  ],
+                ],
+              },
+              "Sid": "ThisEnvironmentsImages",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SavedEnvImagesManageRoleDefaultPolicyB6EE424C",
+        "Roles": [
+          {
+            "Ref": "SavedEnvImagesManageRoleA0F3E8CD",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SavedEnvImagesPullRoleDefaultPolicy3F49BC10": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "RegistryToken",
+            },
+            {
+              "Action": [
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-env/production/*",
+                  ],
+                ],
+              },
+              "Sid": "ThisEnvironmentsImages",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SavedEnvImagesPullRoleDefaultPolicy3F49BC10",
+        "Roles": [
+          {
+            "Ref": "SavedEnvImagesPullRoleF44C4C9E",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "SavedEnvImagesPullRoleF44C4C9E": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Rovara saved environment images: the broker assumes this with a one-repository session policy to pull an image",
+        "MaxSessionDuration": 3600,
+        "RoleName": "agentx-production-img-pull",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SavedEnvImagesPushRole68F53DE7": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Rovara saved environment images: the broker assumes this with a one-repository session policy to push an image",
+        "MaxSessionDuration": 3600,
+        "RoleName": "agentx-production-img-push",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "SavedEnvImagesPushRoleDefaultPolicy52BB6454": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "RegistryToken",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload",
+                "ecr:PutImage",
+                "ecr:BatchGetImage",
+                "ecr:DescribeImages",
+                "ecr:CreateRepository",
+                "ecr:TagResource",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-env/production/*",
+                  ],
+                ],
+              },
+              "Sid": "ThisEnvironmentsImages",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SavedEnvImagesPushRoleDefaultPolicy52BB6454",
+        "Roles": [
+          {
+            "Ref": "SavedEnvImagesPushRole68F53DE7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "SchedulerRoleForTarget490aa1BE062C91": {
       "Properties": {
@@ -8927,6 +11201,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "Arn",
               ],
             },
+            "ROVARA_TEST_SERVICES": {
+              "Ref": "TestServices",
+            },
+            "ROVARA_TEST_SERVICES_HOSTED_IMAGES": {
+              "Ref": "TestServiceImages",
+            },
+            "ROVARA_WORKER_SANDBOX_EGRESS": {
+              "Ref": "WorkerSandboxEgress",
+            },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
@@ -10700,6 +12983,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "AttributeType": "S",
           },
           {
+            "AttributeName": "outboxState",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "outboxStagedAt",
+            "AttributeType": "S",
+          },
+          {
             "AttributeName": "dispatchDuePk",
             "AttributeType": "S",
           },
@@ -10751,6 +13042,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
               {
                 "AttributeName": "webhookRecoverySk",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+          {
+            "IndexName": "outbox-pending",
+            "KeySchema": [
+              {
+                "AttributeName": "outboxState",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "outboxStagedAt",
                 "KeyType": "RANGE",
               },
             ],
@@ -11050,6 +13357,48 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
           "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI.",
         },
       ],
+    },
+    "CoreEngineJobsAttentionEmailAttentionEmailOwnSenderAA8E714F": {
+      "Assertions": [
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "CoreAttentionEmailSender",
+                  },
+                  "",
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CoreAttentionEmail on needs CoreAttentionEmailSender, a verified SES identity of its own",
+        },
+        {
+          "Assert": {
+            "Fn::Not": [
+              {
+                "Fn::Equals": [
+                  {
+                    "Ref": "CoreAttentionEmailHost",
+                  },
+                  "",
+                ],
+              },
+            ],
+          },
+          "AssertDescription": "CoreAttentionEmail on needs CoreAttentionEmailHost, the web app's host",
+        },
+      ],
+      "RuleCondition": {
+        "Fn::Equals": [
+          {
+            "Ref": "CoreAttentionEmail",
+          },
+          "on",
+        ],
+      },
     },
   },
 }
@@ -13005,7 +15354,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "build": {
       "commands": [
-        "npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation"
+        "if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS"
       ]
     }
   },
@@ -13018,7 +15367,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
 }",
           "Type": "CODEPIPELINE",
         },
-        "TimeoutInMinutes": 60,
+        "TimeoutInMinutes": 120,
       },
       "Type": "AWS::CodeBuild::Project",
     },

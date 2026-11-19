@@ -31,7 +31,8 @@ describe("the stack parameter WorkerSandboxEgress", () => {
     expect(json.Parameters.WorkerSandboxEgress).toMatchObject({ Type: "String", Default: "bridge", AllowedValues: ["bridge", "gateway"] });
     expect(WORKER_SANDBOX_EGRESS_DEFAULT).toBe("bridge");
     expect([...WORKER_SANDBOX_EGRESS_VALUES]).toEqual(["bridge", "gateway"]);
-    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("WorkerSandboxEgress");
+    // #1148: the legacy (production) template too, bridge by default (today's behaviour).
+    expect((legacy.toJSON() as Json).Parameters.WorkerSandboxEgress).toMatchObject({ Type: "String", Default: "bridge", AllowedValues: ["bridge", "gateway"] });
   });
 
   it("is read by the session steps only, as a plain variable: not packed, not on the broker or the dispatcher, and nothing else in the template refers to it", () => {

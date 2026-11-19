@@ -16,7 +16,7 @@
 // value, so a broker that cannot name what it needs does not start.
 import {
   BROKER_ACCOUNT_VARIABLE, BROKER_NAMES, BROKER_NAMES_PARAMETER_VARIABLE, BROKER_NAMES_VARIABLE, BROKER_SETTINGS, BROKER_SETTINGS_VARIABLE, BROKER_SETTING_VALUE, BROKER_SWITCH_FLAG_VALUES, DERIVED_BROKER_VARIABLES, EnvironmentNameSchema,
-  decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
+  LEGACY_INSTALL_LAYOUT, decodeBrokerList, environmentRolePath, type BrokerNameSpec, type BrokerSettingSpec,
 } from "@agentx/contracts";
 
 export type MutableEnvironment = Record<string, string | undefined>;
@@ -165,7 +165,10 @@ export function hydrateBrokerEnvironment(env: MutableEnvironment): void {
   const listed = Object.values(BROKER_NAMES).flatMap((spec: BrokerNameSpec) => (queues.has(spec) ? [[spec.label ?? spec.code, queues.get(spec)!] as const] : []));
   if (listed.length > 0 && !isSet(env.HEALTH_DEAD_LETTER_QUEUES)) env.HEALTH_DEAD_LETTER_QUEUES = JSON.stringify(Object.fromEntries(listed));
   const name = environmentName(env, "the broker's derived variables");
+  // #1149: the legacy install (production) derives only what is marked `legacy`, the values identical to its own; nothing else is added (contracts LEGACY_INSTALL_LAYOUT).
+  const legacy = env[BROKER_SETTINGS.installLayout.variable] === LEGACY_INSTALL_LAYOUT;
   for (const entry of DERIVED_BROKER_VARIABLES) {
+    if (legacy && entry.legacy !== true) continue;
     if (isSet(env[entry.variable])) continue;
     env[entry.variable] = entry.kind === "text" ? entry.value(name) : queueUrl(requiredScope(env, entry.variable), entry.queueName(name));
   }

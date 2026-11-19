@@ -77,7 +77,8 @@ export class ReleasePipelineStack extends Stack {
         privileged: true,
       },
       concurrentBuildLimit: 1,
-      timeout: Duration.minutes(60),
+      // #1151: a release that runs the full checks (CI proof not proven) and rebuilds the worker took over 60 minutes; one proven by CI takes 5-15.
+      timeout: Duration.minutes(120),
       cache: codebuild.Cache.local(codebuild.LocalCacheMode.DOCKER_LAYER),
       logging: { cloudWatch: { logGroup } },
       buildSpec: codebuild.BuildSpec.fromObject({
@@ -112,7 +113,10 @@ export class ReleasePipelineStack extends Stack {
           },
           build: {
             commands: [
-              'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation',
+              // #1145: skip the typecheck, lint and tests only when GitHub CI's gate already passed on exactly this code (the same file tree; scripts/release-ci-proof.ts).
+              // Not proven (behind mainline, CI not green, GitHub unreachable): every check runs, as before. The proof itself never fails the build.
+              `if node scripts/release-ci-proof.ts --repository ${AGENTX_RELEASE_REPOSITORY_OWNER}/${AGENTX_RELEASE_REPOSITORY_NAME}; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ` +
+                'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS',
             ],
           },
         },

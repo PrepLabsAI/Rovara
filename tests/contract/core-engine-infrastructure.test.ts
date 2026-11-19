@@ -26,6 +26,7 @@ import { CORE_ENGINE_VARIABLE as BROKER_SWITCH_VARIABLE, CORE_JOBS, CORE_SCHEDUL
 import { configKey, coreEngineValueWhenWired } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
+import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
 
 skipLambdaBundling();
 
@@ -92,12 +93,12 @@ describe("the model gateway settings (stack parameters CoreModelGatewayHost and 
     }
   });
 
-  it("are absent from the legacy (production) template, whose broker is still given the secret prefix whole", () => {
+  it("are in the legacy (production) template too since #1148, empty by default, and its broker derives the same secret prefix it was given whole (#1149)", () => {
     const legacyJson = legacy.toJSON() as Json;
-    expect(legacyJson.Parameters).not.toHaveProperty("CoreModelGatewayHost");
-    expect(legacyJson.Parameters).not.toHaveProperty("CoreAgentModel");
+    expect(legacyJson.Parameters.CoreModelGatewayHost).toMatchObject({ Default: "" });
+    expect(legacyJson.Parameters.CoreAgentModel).toMatchObject({ Default: "" });
     const legacyBroker = Object.entries(legacyJson.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")!;
-    expect((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
+    expect(unpackedBrokerVariables((legacyBroker[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables, legacyJson as never).CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
   });
 });
 
@@ -127,9 +128,8 @@ describe("the hosted answers model (stack parameter CoreAnswersModel)", () => {
     }
   });
 
-  it("is absent from the legacy (production) template", () => {
-    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("CoreAnswersModel");
-    expect(JSON.stringify((legacy.toJSON() as Json).Resources)).not.toContain("CoreAnswersModel");
+  it("is in the legacy (production) template too since #1148, empty by default (the agent model)", () => {
+    expect((legacy.toJSON() as Json).Parameters.CoreAnswersModel).toMatchObject({ Default: "" });
   });
 
   it("is kept across an upgrade and set only by its config key", () => {
@@ -164,9 +164,8 @@ describe("the hosted lessons learning model (stack parameter CoreLearningModel)"
     }
   });
 
-  it("is absent from the legacy (production) template", () => {
-    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("CoreLearningModel");
-    expect(JSON.stringify((legacy.toJSON() as Json).Resources)).not.toContain("CoreLearningModel");
+  it("is in the legacy (production) template too since #1148, empty by default (claude-haiku-5-5)", () => {
+    expect((legacy.toJSON() as Json).Parameters.CoreLearningModel).toMatchObject({ Default: "" });
   });
 
   it("is kept across an upgrade and set only by its config key", () => {
@@ -204,9 +203,11 @@ describe("the switch (stack parameter CoreEngine)", () => {
     expect(JSON.stringify(brokerVariables.AGENTX_SETTINGS)).toMatch(/sw=",\{"Ref":"CoreEngine"\}/u);
   });
 
-  it("is missing from the legacy (production) template, which has no parameter, queue or schedule for it", () => {
-    const text = JSON.stringify(legacy.toJSON());
-    for (const word of ["CoreEngine", CORE_ENGINE_VARIABLE, "core-dispatch", CORE_JOB_EVENT_SOURCE]) expect(text, word).not.toContain(word);
+  it("is in the legacy (production) template too since #1148, off by default, with its queue under production's name (tests/contract/legacy-core-engine-infrastructure.test.ts)", () => {
+    const legacyJson = legacy.toJSON() as Json;
+    expect(legacyJson.Parameters.CoreEngine).toMatchObject({ Default: "off" });
+    const text = JSON.stringify(legacyJson);
+    for (const word of ["agentx-production-core-dispatch", CORE_JOB_EVENT_SOURCE]) expect(text, word).toContain(word);
   });
 
   it("is set with `agentx config set coreEngine.switch`, refused before anything changes when it is not a clean value, and an upgrade keeps it", () => {
@@ -463,11 +464,12 @@ describe("the attention email (CoreAttentionEmail, default off)", () => {
     ]);
   });
 
-  it("is kept across upgrades, and the legacy template has none of it", () => {
+  it("is kept across upgrades, and the legacy template has it too since #1148, off by default, under production's sender name", () => {
     for (const name of ["CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]) expect(OPERATOR_PARAMETERS["control-plane"], name).toContain(name);
     const legacyJson = legacy.toJSON() as Json;
-    expect(Object.keys(legacyJson.Parameters ?? {}).filter((name) => name.startsWith("CoreAttentionEmail"))).toEqual([]);
-    expect(JSON.stringify(legacyJson)).not.toContain("attention-email");
+    expect(Object.keys(legacyJson.Parameters ?? {}).filter((name) => name.startsWith("CoreAttentionEmail")).sort()).toEqual(["CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender"]);
+    expect(legacyJson.Parameters.CoreAttentionEmail).toMatchObject({ Default: "off" });
+    expect(JSON.stringify(legacyJson)).toContain("agentx-production-attention-email");
   });
 });
 
@@ -543,12 +545,10 @@ describe("the dispatcher as the core queue's consumer (step 4)", () => {
     expect(pending.Projection.ProjectionType).toBe("ALL");
   });
 
-  it("is missing from the legacy (production) template: no core variable on the dispatcher, no core mapping, no conditional policy, no outbox pending index", () => {
+  it("is in the legacy (production) template too since #1148: the dispatcher's core variables, its core mapping, the conditional policy and the outbox pending index", () => {
     const text = JSON.stringify(legacy.toJSON());
-    expect((resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("EC2_WORKER_SUBNETS");
-    for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name, CORE_ENGINE_VARIABLE]) expect(text).not.toContain(word);
-    const legacyDispatcher = resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))!;
-    expect((legacyDispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).not.toHaveProperty("CALLBACK_SIGNING_KEY_SECRET_ID");
+    expect((resources(legacy, "AWS::Lambda::Function").find(([id]) => /^Dispatcher[0-9A-F]{8}$/u.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables).toHaveProperty("EC2_WORKER_SUBNETS");
+    for (const word of [CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, "DispatcherCorePolicy", "DispatcherMapping", OUTBOX_PENDING_INDEX.name]) expect(text, word).toContain(word);
   });
 });
 
@@ -643,7 +643,10 @@ describe("L1a broker environment derivation", () => {
     // #1129: re-pinned for the company layer, the sign-in extras and the company-secrets role in the legacy template (both company switches off by default).
     // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
     // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
-    expect(digest(legacy.toJSON())).toBe("8810373a272829e43c4598946700c01a64b5ee1fb54a5d9507e51f7e36120bdf");
+    // #1149: re-pinned. The legacy broker packs its environment (the names parameter /agentx/production/broker-names, AGENTX_SETTINGS with the legacy layout marker, the
+    // names parameter's read in its ssm:GetParameters statement); tests/contract/legacy-broker-packed-environment.test.ts proves it boots with the same values.
+    // #1148: re-pinned for the core engine in the legacy template (CoreEngine off by default).
+    expect(digest(legacy.toJSON())).toBe("c1400c85c23480e00b391b4b3163bb320032d040d2aa5287f296b6ed7d47dd33");
   });
 });
 import { createHash } from "node:crypto";
@@ -662,7 +665,8 @@ describe("the test services setting (stack parameter TestServices)", () => {
   const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
   it("is declared on (\"1\") by default, with exactly the values 1 and 0, named environments only (the legacy template has none)", () => {
     expect(typed.Parameters.TestServices).toMatchObject({ Default: "1", AllowedValues: ["1", "0"] });
-    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServices");
+    // #1148: the legacy (production) template too.
+    expect((legacy.toJSON() as Json).Parameters.TestServices).toMatchObject({ Default: "1", AllowedValues: ["1", "0"] });
   });
 
   it("is packed for the broker and the dispatcher (td), never as a variable of their own, and given whole to the session steps", () => {
@@ -685,7 +689,8 @@ describe("the test service images setting (stack parameter TestServiceImages)", 
   const typed = json as unknown as { Parameters: Record<string, { Default?: string; AllowedValues?: string[] }> };
   it("is declared none by default, with exactly the values none and mirrored, named environments only", () => {
     expect(typed.Parameters.TestServiceImages).toMatchObject({ Default: "none", AllowedValues: ["none", "mirrored"] });
-    expect((legacy.toJSON() as Json).Parameters).not.toHaveProperty("TestServiceImages");
+    // #1148: the legacy (production) template too.
+    expect((legacy.toJSON() as Json).Parameters.TestServiceImages).toMatchObject({ Default: "none", AllowedValues: ["none", "mirrored"] });
   });
 
   it("is packed for the broker and the dispatcher (ti), and given whole to the session steps beside the switch", () => {
