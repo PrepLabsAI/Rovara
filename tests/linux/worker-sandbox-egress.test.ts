@@ -716,7 +716,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(launched.code, launched.stderr).toBe(0);
       const mode = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", captureName);
       expect(mode.code, mode.stderr).toBe(0);
-      expect(mode.stdout.trim()).toBe(`container:${sandboxName}|true|[ALL]|`);
+      // Docker reads a `container:<name>` network mode back as `container:<full id>`: compare with the id of THIS sandbox (never any container).
+      const sandboxId = (await docker("inspect", "--format", "{{.Id}}", sandboxName)).stdout.trim();
+      expect(sandboxId).toMatch(/^[0-9a-f]{64}$/u);
+      expect(mode.stdout.trim()).toBe(`container:${sandboxId}|true|[ALL]|`);
 
       const browserUp = async () => {
         const top = await docker("top", captureName, "-eo", "pid,comm");
@@ -864,7 +867,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const broken = `"use strict";\n// ${"x".repeat(21_000)}\nprocess.exit(3);\n`;
     const result = await stage(broken);
     expect(result.code).not.toBe(0);
-    expect(result.failure).toMatch(/sandbox egress gateway|did not pass its checks/u);
+    // Every step after the gateway starts depends on a LIVE gateway, so a gateway that dies at once fails the boot at whichever of them first sees it dead: the start, the running check, the bridge-port isolation (it execs into the gateway to find
+    // its port, sandbox-egress.sh se_container_port_index, so it fails closed on a dead one) or the boot probe. Exactly these four, nothing else (an unrelated failure must not pass for this one).
+    expect(result.failure).toMatch(/^(could not start the sandbox egress gateway|the sandbox egress gateway is not running on its two networks|could not set and verify sandbox bridge port isolation|the sandbox egress gateway did not pass its checks.*)$/u);
+    // And the failure is because the gateway is dead, with no sandbox started by the stage and the worker given nothing.
+    // (Docker may be restarting it under its `unless-stopped` policy, so "running" is not stable: what proves it died is its own exit code 3 or a restart.)
+    const state = await docker("inspect", "--format", "{{.State.ExitCode}}|{{.RestartCount}}", "rovara-egw");
+    const [exitCode, restarts] = state.stdout.trim().split("|").map(Number);
+    expect(exitCode === 3 || (restarts ?? 0) > 0, state.stdout).toBe(true);
     expect(await readFile(join(dir, "worker.env"), "utf8")).toBe("AWS_REGION=us-west-2\n");
   }, 180_000);
 });
