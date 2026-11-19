@@ -93,6 +93,11 @@ const CLOUD_PATH_ALLOWED = new Set<string>([
   // Cloud's ledger code stays refused by the audit/ directory, contracts audit-* and CDK stack rules above.
   "packages/contracts/src/audit-sink",
   "packages/contracts/src/audit-sink.test",
+  // The audit record v1 FORMAT (owner DEC 254zzz171): commitment-only canonical JSON, hashes and schemas, byte-identical to Cloud's pinned
+  // mirror so Code's public audit sink and Cloud's ledger share one digest. The capture adapter, relay, appender, sealer and their infra stay
+  // in Cloud and stay refused. Exactly this file and its test; no other audit* contracts file.
+  "packages/contracts/src/audit-record-v1",
+  "tests/unit/audit-record-v1.test",
   // Public's own install-upgrade command, which was in public before the port. A lane may edit these six files (and main.ts may keep
   // importing them) but may not add to the directory: Cloud's much larger upgrade directory is not ported (decision 41).
   "packages/cli/src/upgrade/answers",
