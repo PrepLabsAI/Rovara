@@ -1,7 +1,7 @@
 // Lane L12, slice 3: the local proof page's report for a task, from what the broker itself recorded about the checked code: the verification results of the approved checks, the reviews, the risk it judged, and the
 // evidence pack kept for this very code (if one was). Every line is the broker's own words; a name from the repository or a worker is made inert (`inertPlanLine`) and redacted, and nothing here repeats a
 // claim the broker could not check (a missing pack says "no evidence was kept", it never fills the gap).
-import { FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, GENERAL_FAKE_MADE_NOTE, failureCauseWords, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowSnapshot } from "@agentx/contracts";
+import { FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, GENERAL_FAKE_MADE_NOTE, failureCauseWords, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import type { ProofFailuresView, ProofReportView, ProofRowView } from "../../core/local-pages/views.js";
 import { inertPlanLine } from "../../core/proof/inert-text.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
@@ -11,6 +11,11 @@ const words = (text: string, max = 200): string => Array.from(inertPlanLine(reda
 export const proofWords = words;
 const OUTCOME: Record<EvidencePack["checks"][number]["after"], ProofRowView["status"]> = { passed: "passed", failed: "failed", timed_out: "failed", unknown: "not_run", not_run: "not_run" };
 const KIND_WORDS: Record<string, string> = { test: "tests", lint: "lint", types: "types", build: "build", security: "security scan", migration: "migration", other: "check" };
+
+/** A failure marker takes precedence over a review's nominal status on every proof surface. */
+export function reviewDidNotFinish(review: WorkflowReviewReport): boolean {
+  return review.failureReason !== undefined || review.status === "UNKNOWN" || review.status === "FAILED" || review.status === "INTERRUPTED";
+}
 
 /** The test counts of a pack check as one phrase ("12 passed, 1 failed; 2 new"). */
 function testsDetail(check: EvidencePack["checks"][number]): string | undefined {
@@ -70,8 +75,8 @@ export function proofReportOf(task: TaskRecord, workflow: WorkflowSnapshot, pack
   for (const review of (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === workflow.candidate?.digest)) {
     const accepted = (workflow.acceptedFindings ?? []).filter((finding) => finding.candidateDigest === workflow.candidate?.digest && finding.role === review.role).length;
     rows.push({
-      claim: review.role === "SECURITY" ? "Security review" : "Code review", check: "independent review", status: review.status === "PASS" && review.failureReason === undefined ? "passed" : review.status === "FINDINGS" ? "failed" : "not_run",
-      ...(review.status === "UNKNOWN" || review.status === "FAILED" || review.status === "INTERRUPTED" || review.failureReason !== undefined ? { detail: "the review could not finish" }
+      claim: review.role === "SECURITY" ? "Security review" : "Code review", check: "independent review", status: reviewDidNotFinish(review) ? "not_run" : review.status === "PASS" ? "passed" : review.status === "FINDINGS" ? "failed" : "not_run",
+      ...(reviewDidNotFinish(review) ? { detail: "the review could not finish" }
         : review.findings.length === 0 ? {} : { detail: `${String(review.findings.length)} finding${review.findings.length === 1 ? "" : "s"}${accepted > 0 ? `, ${String(accepted)} accepted by the owner` : ""}` }),
     });
   }

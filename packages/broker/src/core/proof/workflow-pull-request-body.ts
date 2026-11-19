@@ -11,7 +11,6 @@ import {
   type RovaraCheckVerdict,
   type WorkflowSnapshot,
   workflowIsReviewOnly,
-  workflowReviewRoles,
   planSummaryLines,
   workflowFindingAccepted,
   reviewCleared,
@@ -23,7 +22,7 @@ import { documentSummaryLines } from "../../developer/workflow-messages.js";
 import { breakLinearKeys, normalizeIssueKey, sealLinearText } from "./linear-close.js";
 import { inertPlanLine } from "./inert-text.js";
 import { reviewSameModelOf } from "./review-model-lines.js";
-import { ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL, lessonsUsedLines, rovaraPullRequestBody, rovaraPullRequestVerdict, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
+import { ROVARA_PULL_REQUEST_CLOSING, ROVARA_PULL_REQUEST_CLOSING_NO_APPROVAL, lessonsUsedLines, requiredReviewDidNotClear, rovaraPullRequestBody, rovaraPullRequestVerdict, rovaraStatusLines, type PullRequestBodyContext } from "./pull-request-body.js";
 
 /** The task as the description needs it. */
 export interface PullRequestBodyTask {
@@ -33,14 +32,6 @@ export interface PullRequestBodyTask {
 }
 
 const WORKFLOW_PULL_REQUEST_BODY_MAX_BYTES = 30_000;
-function requiredReviewDidNotClear(workflow: WorkflowSnapshot): boolean {
-  const digest = workflow.candidate?.digest;
-  const current = (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === digest);
-  if (current.length === 0) return ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
-  return current.some((review) => !reviewCleared(review, workflow.acceptedFindings))
-    || (["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage)
-      && workflowReviewRoles(workflow).some((role) => !current.some((review) => review.role === role)));
-}
 /** The closing drawer of a version 2 description, which holds the plan summary and the record (pull-request-body.ts). */
 const RECORD_DRAWER_START = "<details>";
 const RECORD_DRAWER_END = "</details>";

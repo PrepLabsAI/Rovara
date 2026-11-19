@@ -62,6 +62,11 @@ describe("proofIndexOf", () => {
     });
   });
 
+  it.each(["PASS", "FINDINGS"])("a failure-marked %s review is unknown in the shared index", (status) => {
+    const workflow = workflowWith({ reviews: [{ role: "CRITIC", candidateDigest: DIGEST, status, failureReason: "SESSION_FAILED", findings: [] }] });
+    expect(Index.parse(proofIndexOf("t", workflow, undefined)).items.find((item) => item.id === "review:code")?.verdict).toBe("unknown");
+  });
+
   it("golden: no workflow, no candidate, or results and reviews for older code give an empty index", () => {
     expect(proofIndexOf("t", undefined, undefined)).toEqual({ taskId: "t", items: [] });
     expect(proofIndexOf("t", workflowWith({ candidate: undefined }), v1Pack())).toEqual({ taskId: "t", items: [] });

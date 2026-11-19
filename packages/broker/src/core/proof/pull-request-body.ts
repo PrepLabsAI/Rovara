@@ -254,14 +254,16 @@ export function browserEvidenceSection(lines: readonly string[] | undefined): st
   return kept.length === 0 ? [] : ["## Browser evidence", ...kept, ""];
 }
 
-export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[], budgetBytes = PULL_REQUEST_BODY_MAX_BYTES - SUMMARY_MAX_BYTES - 2_000): string[] {
+/** Missing or uncleared current-candidate reviews cannot enter a passing-only PR renderer, at any stage. */
+export function requiredReviewDidNotClear(workflow: WorkflowSnapshot): boolean {
   const digest = workflow.candidate?.digest;
-  const currentReviews = (workflow.reviews ?? []).filter((entry) => entry.candidateDigest === digest);
-  const published = ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
-  const requiredReviewDidNotClear = currentReviews.length === 0 ? published
-    : currentReviews.some((review) => !reviewCleared(review, workflow.acceptedFindings))
-      || (published && workflowReviewRoles(workflow).some((role) => !currentReviews.some((review) => review.role === role)));
-  if (requiredReviewDidNotClear) return ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."];
+  const current = (workflow.reviews ?? []).filter((entry) => digest !== undefined && entry.candidateDigest === digest);
+  return current.length === 0 || current.some((review) => !reviewCleared(review, workflow.acceptedFindings))
+    || workflowReviewRoles(workflow).some((role) => !current.some((review) => review.role === role));
+}
+
+export function rovaraStatusLines(workflow: WorkflowSnapshot, context: PullRequestBodyContext, reviewLines: (listed: number) => string[], budgetBytes = PULL_REQUEST_BODY_MAX_BYTES - SUMMARY_MAX_BYTES - 2_000): string[] {
+  if (requiredReviewDidNotClear(workflow)) return ["The required reviews did not finish. Nothing was sent to GitHub. See the task page for review results."];
   const risk = riskShown(workflow, context);
   const linearKey = normalizeIssueKey(context.linearIssueKey);
   const parts = proofParts(workflow, context.proof);
