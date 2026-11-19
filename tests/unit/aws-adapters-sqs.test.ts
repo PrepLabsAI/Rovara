@@ -90,6 +90,26 @@ describe("the SQS adapter reads a queue's policy from SQS and declares what it c
     await expect(queues.queue("q")).rejects.toThrow(/same kind/);
   });
 
+  it.each([false, true])("refuses a dead-letter queue whose returned kind differs from its URL's (main FIFO: %s)", async (fifo) => {
+    const fake = new FakeSqs();
+    const url = urlOf("main", fifo);
+    const deadLetterUrl = urlOf("dead", fifo);
+    fake.createQueue(deadLetterUrl);
+    fake.createQueue(url, { maxReceiveCount: 3, deadLetterUrl });
+    // The URL suffix passes the up-front check; only the read-back FifoQueue attribute disagrees.
+    const client = { send: async (command: Parameters<FakeSqs["send"]>[0]) => {
+      const out = await fake.send(command);
+      if (command instanceof GetQueueAttributesCommand && command.input.QueueUrl === deadLetterUrl) {
+        const attributes = { ...(out as { Attributes?: Record<string, string> }).Attributes };
+        if (fifo) delete attributes.FifoQueue; else attributes.FifoQueue = "true";
+        return { ...(out as object), Attributes: attributes };
+      }
+      return out;
+    } };
+    const queues = new SqsQueueService({ client, queues: { q: { url, deadLetterUrl } } });
+    await expect(queues.queue("q")).rejects.toThrow(/not a queue of the same kind/);
+  });
+
   it("says what a standard queue and a FIFO queue guarantee", async () => {
     const world = sqsWorld();
     const standard = await world.provisioning(false).queue("a");
