@@ -130,6 +130,11 @@ se_rule() { local tool=$1; shift; "$tool" -C "$@" 2>/dev/null || "$tool" -I "$@"
 # The metadata address stays dropped for every container by wall_off_containers' own rule.
 se_walls() {
   local range resolver proto bridge
+  # Docker's ICC-off bridge rule blocks every same-bridge flow. Keep only the
+  # sandbox services that the gateway provides, and only replies from it.
+  for proto in udp tcp; do se_rule iptables DOCKER-USER -i rvs+ -o rvs+ -d "$SE_INNER_IP/32" -p "$proto" --dport 53 -j ACCEPT || return 1; done
+  for port in 80 443; do se_rule iptables DOCKER-USER -i rvs+ -o rvs+ -d "$SE_INNER_IP/32" -p tcp --dport "$port" -j ACCEPT || return 1; done
+  se_rule iptables DOCKER-USER -i rvs+ -o rvs+ -s "$SE_INNER_IP/32" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT || return 1
   se_rule iptables DOCKER-USER -i rvs+ ! -o rvs+ -j DROP || return 1
   se_rule iptables INPUT -i rvs+ -j DROP || return 1
   for range in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 127.0.0.0/8; do
@@ -156,8 +161,12 @@ se_walls() {
 # The network `$1` is as Rovara makes it: a bridge, the expected internal flag, host-address option, bridge name and subnet, and no IPv6.
 se_network_is() {
   local name=$1 internal=$2 inhibit=$3 bridge=$4 subnet=$5 found
-  found=$(docker network inspect --format '{{.Driver}}|{{.Internal}}|{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}|{{index .Options "com.docker.network.bridge.name"}}|{{.EnableIPv6}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$name" 2>/dev/null) || return 1
-  [[ "$found" == "bridge|$internal|$inhibit|$bridge|false|$subnet " ]]
+  found=$(docker network inspect --format '{{.Driver}}|{{.Internal}}|{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}|{{index .Options "com.docker.network.bridge.name"}}|{{.EnableIPv6}}|{{index .Options "com.docker.network.bridge.enable_icc"}}|{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$name" 2>/dev/null) || return 1
+  if [[ "$name" == "$SE_INNER_NET" ]]; then
+    [[ "$found" == "bridge|$internal|$inhibit|$bridge|false|false|$subnet " ]]
+  else
+    [[ "$found" == "bridge|$internal|$inhibit|$bridge|false|<no value>|$subnet " ]]
+  fi
 }
 # A network of this name is not trusted (the data root lives on the workspace volume, so one can be left from an earlier session): one that is not exactly as made here is removed and made again.
 se_ensure_network() {
@@ -165,7 +174,7 @@ se_ensure_network() {
   se_network_is "$name" "$internal" "$inhibit" "$bridge" "$subnet" && return 0
   docker network inspect "$name" >/dev/null 2>&1 && { docker network rm "$name" >/dev/null || return 1; }
   if [[ "$internal" == true ]]; then
-    docker network create --driver bridge --ipv6=false --internal --subnet "$subnet" -o com.docker.network.bridge.inhibit_ipv4=true -o "com.docker.network.bridge.name=$bridge" "$name" >/dev/null || return 1
+    docker network create --driver bridge --ipv6=false --internal --subnet "$subnet" -o com.docker.network.bridge.inhibit_ipv4=true -o com.docker.network.bridge.enable_icc=false -o "com.docker.network.bridge.name=$bridge" "$name" >/dev/null || return 1
   else
     docker network create --driver bridge --ipv6=false --subnet "$subnet" -o "com.docker.network.bridge.name=$bridge" "$name" >/dev/null || return 1
   fi
@@ -282,9 +291,9 @@ se_proxy_probe() {
 
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
 se_install_restore_unit() {
-  { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET"
+  { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s SE_INNER_IP=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET" "$SE_INNER_IP"
     declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is se_dropin_is se_allow_dir
-    printf 'readonly SE_DAEMON_JSON=%s SE_INNER_IP=%s SE_TASK_NETWORK=%s SE_ALLOW_DIR=%s SE_DROPIN=%s\n' "$SE_DAEMON_JSON" "$SE_INNER_IP" "$SE_TASK_NETWORK" "$SE_ALLOW_DIR" "$SE_DROPIN"
+    printf 'readonly SE_DAEMON_JSON=%s SE_TASK_NETWORK=%s SE_ALLOW_DIR=%s SE_DROPIN=%s\n' "$SE_DAEMON_JSON" "$SE_TASK_NETWORK" "$SE_ALLOW_DIR" "$SE_DROPIN"
     printf 'SE_DROPIN_WANT=%q\n' "$SE_DROPIN_WANT"
     printf 'se_daemon_dns_is || exit 1\n'
     printf 'se_dropin_is || exit 1\n'

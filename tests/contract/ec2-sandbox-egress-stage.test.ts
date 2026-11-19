@@ -17,7 +17,7 @@ const WORKER_IMAGE = `111122223333.dkr.ecr.us-west-2.amazonaws.com/agentx-stagin
 interface Host { proxyReply: string | null; dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
 interface Options {
   failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
-  failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
+  failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean; innerIccOn?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
   otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; installFailsForAgentx?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
 }
@@ -45,8 +45,9 @@ function host(options: Options = {}): Host {
   writeFileSync(join(dir, "program"), options.emptyProgram === true ? "" : EGRESS_GATEWAY_SOURCE);
   writeFileSync(join(dir, "s3names"), (options.fewS3 === true ? SANDBOX_S3_DENY.slice(0, 2) : options.badS3 === true ? [...SANDBOX_S3_DENY, "bad name"] : SANDBOX_S3_DENY).join("\n"));
   writeFileSync(join(dir, "names"), `${(options.fewNames === true ? SANDBOX_REGISTRY_DENY.slice(0, 3) : options.badName === true ? [...SANDBOX_REGISTRY_DENY, "bad name"] : SANDBOX_REGISTRY_DENY).join("\n")}`);
-  if (options.innerExistsRight === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|172.28.250.0/24 ");
-  if (options.innerNotInternal === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|false||rvs0|false|172.28.250.0/24 ");
+  if (options.innerExistsRight === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|false|172.28.250.0/24 ");
+  if (options.innerNotInternal === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|false||rvs0|false|false|172.28.250.0/24 ");
+  if (options.innerIccOn === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|true|172.28.250.0/24 ");
   const fake = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/bash\nprintf '%s %s\\n' "${name}" "$*" >>"${h.calls}"\n${body}\n`); chmodSync(join(bin, name), 0o755); };
   const table = (file: string, failInsert: boolean) => `case "$1" in
   -C) shift; grep -qxF -- "$*" "${file}" ;;
@@ -67,11 +68,11 @@ case "$1" in
       inspect) f="$S/nets/\${@: -1}"; [[ -e "$f" ]] && cat "$f" || exit 1 ;;
       rm) [[ "$3" == agentx-task && -e "$S/held" ]] && exit 1; rm -f "$S/nets/$3" ;;
       create)
-        shift 2; internal=false; inhibit=""; bridge=""; subnet=""
-        while (($#)); do case "$1" in --internal) internal=true ;; --subnet) subnet=$2; shift ;; -o) case "$2" in com.docker.network.bridge.inhibit_ipv4=*) inhibit=\${2#*=} ;; com.docker.network.bridge.name=*) bridge=\${2#*=} ;; esac; shift ;; esac; name=$1; shift; done
+        shift 2; internal=false; inhibit=""; icc="<no value>"; bridge=""; subnet=""
+        while (($#)); do case "$1" in --internal) internal=true ;; --subnet) subnet=$2; shift ;; -o) case "$2" in com.docker.network.bridge.inhibit_ipv4=*) inhibit=\${2#*=} ;; com.docker.network.bridge.enable_icc=*) icc=\${2#*=} ;; com.docker.network.bridge.name=*) bridge=\${2#*=} ;; esac; shift ;; esac; name=$1; shift; done
         ${options.failInnerCreate === true ? '[[ "$name" == rovara-snet ]] && exit 1' : ":"}
         ${options.failOuterCreate === true ? '[[ "$name" == rovara-xnet ]] && exit 1' : ":"}
-        printf 'bridge|%s|%s|%s|false|%s ' "$internal" "$inhibit" "$bridge" "$subnet" >"$S/nets/$name" ;;
+        printf 'bridge|%s|%s|%s|false|%s|%s ' "$internal" "$inhibit" "$bridge" "$icc" "$subnet" >"$S/nets/$name" ;;
       connect) ${options.failConnect === true ? "exit 1" : `echo "$5" >>"$S/gw.nets"; for a; do :; done`} ;;
       *) exit 1 ;;
     esac ;;
@@ -138,7 +139,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     const log = calls(h);
     // The networks: the sandbox one is internal with no host address and a fixed bridge name; the outer one is a plain bridge. Neither has IPv6.
     const innerCreate = log.find((line) => line.startsWith("docker network create") && line.endsWith(" rovara-snet"))!;
-    expect(innerCreate).toBe("docker network create --driver bridge --ipv6=false --internal --subnet 172.28.250.0/24 -o com.docker.network.bridge.inhibit_ipv4=true -o com.docker.network.bridge.name=rvs0 rovara-snet");
+    expect(innerCreate).toBe("docker network create --driver bridge --ipv6=false --internal --subnet 172.28.250.0/24 -o com.docker.network.bridge.inhibit_ipv4=true -o com.docker.network.bridge.enable_icc=false -o com.docker.network.bridge.name=rvs0 rovara-snet");
     const outerCreate = log.find((line) => line.startsWith("docker network create") && line.endsWith(" rovara-xnet"))!;
     expect(outerCreate).toBe("docker network create --driver bridge --ipv6=false --subnet 172.28.251.0/24 -o com.docker.network.bridge.name=rvx0 rovara-xnet");
     expect(outerCreate).not.toContain("--internal");
@@ -175,6 +176,10 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(runStage(h).status).toBe(0);
     const installed = rules(h);
     expect(installed).toContain("DOCKER-USER -i rvs+ ! -o rvs+ -j DROP");
+    expect(installed).toContain("DOCKER-USER -i rvs+ -o rvs+ -d 172.28.250.2/32 -p udp --dport 53 -j ACCEPT");
+    for (const port of [53, 80, 443]) expect(installed).toContain(`DOCKER-USER -i rvs+ -o rvs+ -d 172.28.250.2/32 -p tcp --dport ${port} -j ACCEPT`);
+    expect(installed).toContain("DOCKER-USER -i rvs+ -o rvs+ -s 172.28.250.2/32 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT");
+    expect(installed).not.toContain("DOCKER-USER -i rvs+ -o rvs+ -j ACCEPT");
     expect(installed).toContain("INPUT -i rvs+ -j DROP");
     expect(installed).toContain("INPUT -i rvx+ -j DROP");
     for (const range of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"]) expect(installed).toContain(`DOCKER-USER -i rvx+ -d ${range} -j DROP`);
@@ -183,10 +188,11 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
       "DOCKER-USER -i rvx+ -d 10.42.0.2 -p tcp --dport 53 -j RETURN", "DOCKER-USER -i rvx+ -d 10.42.0.2 -p udp --dport 53 -j RETURN",
       "DOCKER-USER -i rvx+ -d 169.254.169.253 -p tcp --dport 53 -j RETURN", "DOCKER-USER -i rvx+ -d 169.254.169.253 -p udp --dport 53 -j RETURN",
     ]);
-    // The resolver exceptions sit above the range drops, and nothing is opened for the sandbox side (rvs+).
+    // The resolver exceptions sit above the range drops; only the pinned gateway IP gets narrow service ports on rvs+.
     const index = (rule: string): number => installed.indexOf(rule);
     for (const rule of opened) for (const range of ["10.0.0.0/8", "169.254.0.0/16"]) expect(index(rule)).toBeLessThan(index(`DOCKER-USER -i rvx+ -d ${range} -j DROP`));
-    expect(installed.some((rule) => rule.includes("rvs+") && rule.endsWith("RETURN") || rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toBe(false);
+    expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("RETURN"))).toHaveLength(0);
+    expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toHaveLength(5);
     expect(readFileSync(h.rules6, "utf8").split("\n")).toEqual(expect.arrayContaining(["INPUT -i rvs+ -j DROP", "INPUT -i rvx+ -j DROP"]));
     // The metadata block (wall_off_containers') is untouched and still on top for every container.
     expect(installed).toContain("DOCKER-USER -d 169.254.169.254/32 -j DROP");
@@ -378,7 +384,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(drop).toBeGreaterThan(-1);
     expect(accept).toBeLessThan(drop);
     expect(installed.filter((rule) => rule.includes("rvx+") && rule.endsWith("ACCEPT"))).toHaveLength(1);
-    expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toHaveLength(0);
+    expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toHaveLength(5);
   });
 
   it("puts the old daemon.json back (and restarts Docker on it) when Docker will not run on the new one, then fails the boot", () => {
@@ -439,7 +445,13 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     const log = calls(wrong);
     expect(log.indexOf("docker network rm rovara-snet")).toBeGreaterThan(-1);
     expect(log.indexOf("docker network rm rovara-snet")).toBeLessThan(log.findIndex((line) => line.startsWith("docker network create") && line.endsWith(" rovara-snet")));
-    expect(readFileSync(join(wrong.state, "nets", "rovara-snet"), "utf8")).toBe("bridge|true|true|rvs0|false|172.28.250.0/24 ");
+    expect(readFileSync(join(wrong.state, "nets", "rovara-snet"), "utf8")).toBe("bridge|true|true|rvs0|false|false|172.28.250.0/24 ");
+    const iccOn = host({ innerIccOn: true });
+    expect(runStage(iccOn).status).toBe(0);
+    const iccLog = calls(iccOn);
+    expect(iccLog.indexOf("docker network rm rovara-snet")).toBeGreaterThan(-1);
+    expect(iccLog.indexOf("docker network rm rovara-snet")).toBeLessThan(iccLog.findIndex((line) => line.startsWith("docker network create") && line.endsWith(" rovara-snet")));
+    expect(readFileSync(join(iccOn.state, "nets", "rovara-snet"), "utf8")).toBe("bridge|true|true|rvs0|false|false|172.28.250.0/24 ");
   });
 
   it("is idempotent for the walls: a second run adds no rule", () => {

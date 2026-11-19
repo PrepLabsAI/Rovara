@@ -44,6 +44,8 @@ const stagePath = new URL("../../packages/worker/ec2/sandbox-egress.sh", import.
 const wrapperPath = new URL("../../packages/worker/ec2/devcontainer-docker.sh", import.meta.url).pathname;
 const GATEWAY_IP = "172.28.250.2";
 const NETWORK = "rovara-snet";
+const ICC_PEER = "rovara-netg-icc-peer";
+const ICC_PEER_IP = "172.28.250.16";
 // A host name, not an image: the registry the sandbox side is denied (a bare host keeps the CI image guard, which reads every `host/path`, to real image references).
 const REGISTRY_HOST = "ghcr.io";
 // A digest-pinned reference on a raw address: only ever fetched by a daemon that must refuse it.
@@ -152,8 +154,18 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
+    const peer = await docker("run", "-d", "--name", ICC_PEER, "--network", NETWORK, "--ip", ICC_PEER_IP, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", "require('net').createServer(s=>s.end('peer')).listen(4567,'0.0.0.0',()=>console.log('READY'))");
+    expect(peer.code, peer.stderr).toBe(0);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if ((await docker("logs", ICC_PEER)).stdout.includes("READY")) break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    expect((await docker("logs", ICC_PEER)).stdout).toContain("READY");
+    const peerControl = await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567));
+    expect(peerControl.stdout.trim(), peerControl.stderr).toBe("open");
   }, 300_000);
   afterAll(async () => {
+    await docker("rm", "--force", ICC_PEER);
     await docker("rm", "--force", HELD_CONTAINER);
     await docker("rm", "--force", "rovara-egw");
     await docker("network", "rm", "agentx-task");
@@ -176,13 +188,24 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 240_000);
 
   it("the sandbox network is internal, has no host address, and the gateway is on exactly its two networks", async () => {
-    const inspected = await docker("network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{index .Options \"com.docker.network.bridge.name\"}}|{{.EnableIPv6}}", NETWORK);
-    expect(inspected.stdout.trim()).toBe("bridge|true|true|rvs0|false");
+    const inspected = await docker("network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{index .Options \"com.docker.network.bridge.name\"}}|{{.EnableIPv6}}|{{index .Options \"com.docker.network.bridge.enable_icc\"}}", NETWORK);
+    expect(inspected.stdout.trim()).toBe("bridge|true|true|rvs0|false|false");
     const gateway = await docker("inspect", "--format", "{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-egw");
     expect(gateway.stdout.trim()).toBe("true|unless-stopped|true|[ALL]|rovara-snet rovara-xnet");
     const env = await readFile(join(dir, "worker.env"), "utf8");
     expect(env).toContain(`AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=${NETWORK}\nAGENTX_SANDBOX_DNS=${GATEWAY_IP}\n`);
   });
+
+  it("a live peer on the shared sandbox bridge is unreachable while the gateway resolver and TLS forwarder still answer", async () => {
+    const peer = await sandbox(connectOutcome(ICC_PEER_IP, 4567));
+    expect(peer.stdout.trim(), peer.stderr).not.toBe("open");
+    expect(peer.stdout.trim()).toMatch(/^(ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|timeout)$/u);
+
+    const lookup = await sandbox(lookupOutcome("registry.npmjs.org"));
+    expect(lookup.stdout.trim(), lookup.stderr).toBe(GATEWAY_IP);
+    const tls = await sandbox(tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"));
+    expect(tls.stdout.trim(), tls.stderr).toBe("handshake");
+  }, 120_000);
 
   // The S3 deny list is read by the stage from the contracts, exactly as in production (here through the same stub as the registry list); an S3 name is refused to a sandbox though the HOST resolves it.
   it("an S3 name the host resolves is NXDOMAIN to a sandbox (the S3 deny list the stage read from the contracts is in force), in every spelling that list covers", async () => {
@@ -238,8 +261,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const looked = await sandbox(lookupOutcome("registry.npmjs.org"));
     expect(looked.stdout.trim(), looked.stderr).toBe(GATEWAY_IP);
     const fetched = await sandbox(httpsOutcome("https://registry.npmjs.org/"));
-    if (/^status /u.test(control)) expect(fetched.stdout.trim(), `${fetched.stderr}`).toMatch(/^status \d{3}$/u);
-    else expect(fetched.stdout.trim()).toMatch(/^(status \d{3}|error .*|timeout)$/u);
+    expect(control).toMatch(/^status \d{3}$/u);
+    expect(fetched.stdout.trim(), `${fetched.stderr}`).toMatch(/^status \d{3}$/u);
+    expect((await sandbox(tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"))).stdout.trim()).toBe("handshake");
   }, 120_000);
 
   it("a sandbox cannot reach the host, the metadata address, the gateway's other side or another private address", async () => {
