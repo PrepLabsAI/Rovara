@@ -320,3 +320,41 @@ it("registers every client-created project with the registration preflight on", 
   expect(body.match(/preflight: true/gu)).toHaveLength(2);
   expect(body).not.toContain("preflight: false");
 });
+
+// #1161: the deployed broker never sets the broker-wide `githubBindings` (only the client project routes get bindings), so these operator events must
+// work without it, over the broker's own State table, as they did in production only after this fix.
+it("runs the operator claim and the backfill without a broker-wide githubBindings, as the deployed broker is composed", async () => {
+  const h = await world(false);
+  h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
+  // As deployed: no broker-wide githubBindings, but the client project routes' own store over the same table.
+  const extra = { ...h.extra, clientProjects: { ...h.clientProjects, bindings: new GithubInstallationBindings(h.db, "state") }, githubBindingInstallations: {
+    get: async (id: number) => (id === 123 ? { installationId: 123, accountLogin: "new-org" } : undefined),
+    page: async () => ({ installations: [{ installationId: 124, accountLogin: "existing-org" }], more: false }),
+  } };
+  expect((extra as { githubBindings?: unknown }).githubBindings).toBeUndefined();
+  const { handler } = createBroker({ extra });
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const claimed = await handler({ source: "agentx.github-binding-claim", installationId: 123, companyId: B });
+    expect(claimed.statusCode).toBe(200);
+    expect(h.db.get("GITHUB_INSTALLATION#123", "BINDING")).toMatchObject({ companyId: B, boundBy: "operator-lambda" });
+    expect(h.db.get(`ORG#${B}#GITHUB_INSTALLATIONS`, "INSTALLATION#123")).toMatchObject({ companyId: B, installationId: 123 });
+    const backfilled = await handler({ source: "agentx.github-binding-backfill" });
+    expect(backfilled.statusCode).toBe(200);
+    expect(h.db.get("GITHUB_INSTALLATION#124", "BINDING")).toMatchObject({ companyId: IMPLICIT_COMPANY_ID });
+    expect(h.db.get("GITHUB_INSTALLATION#123", "BINDING")).toMatchObject({ companyId: B });
+    expect(h.db.get("GITHUB_INSTALLATION_BINDING", "BACKFILL")).toBeDefined();
+  } finally { log.mockRestore(); }
+});
+
+it("logs an operator event's refusal reason without putting it in the answer", async () => {
+  const h = await world(false);
+  const { handler } = createBroker({ extra: { ...h.extra, githubBindingInstallations: { get: async () => undefined, page: async () => ({ installations: [], more: false }) } } });
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const refused = await handler({ source: "agentx.github-binding-claim", installationId: 555, companyId: B });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.body).not.toContain("reason");
+    expect(log.mock.calls.map(([line]) => String(line)).some((line) => line.includes("github.binding_claim_refused") && line.includes("\"reason\""))).toBe(true);
+  } finally { log.mockRestore(); }
+});
