@@ -32,7 +32,8 @@ const CORE = [
   "ROVARA_SAVED_ENV_REPO_PREFIX", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "TASK_TOKEN_KEY_ARN",
 ];
 
-const REGION = "us-east-1", ACCOUNT = "944937319445";
+// AWS's documentation placeholder account and API id (the port guard refuses real ones; the shapes are what is pinned).
+const REGION = "us-east-1", ACCOUNT = "123456789012";
 type Json = Record<string, unknown>;
 interface Template { Resources: Record<string, { Type: string; Properties: Json }>; Conditions?: Record<string, unknown>; Parameters?: Record<string, { Default?: unknown }> }
 
@@ -41,7 +42,7 @@ function resolverOf(template: Template, parameters: Record<string, string>) {
   const pseudo: Record<string, string> = { "AWS::Region": REGION, "AWS::AccountId": ACCOUNT, "AWS::Partition": "aws", "AWS::URLSuffix": "amazonaws.com", "AWS::StackName": "AgentXControlPlane" };
   const typeOf = (id: string) => { const resource = template.Resources[id]; if (resource === undefined) throw new Error(`no resource ${id}`); return resource.Type; };
   const ref = (id: string): string => {
-    const type = typeOf(id), phys = `PHYS-${id}`;
+    const type = typeOf(id), phys = type === "AWS::ApiGatewayV2::Api" ? "example" : `PHYS-${id}`;
     if (type === "AWS::SQS::Queue") return `https://sqs.${REGION}.amazonaws.com/${ACCOUNT}/${phys}`;
     if (type === "AWS::StepFunctions::StateMachine") return `arn:aws:states:${REGION}:${ACCOUNT}:stateMachine:${phys}`;
     return phys;
@@ -118,13 +119,13 @@ describe("production's broker, packed (#1149)", () => {
       expect(env.COMPANY_SIGNIN).toBe(companySignIn);
       // What a named environment would derive differently stays production's own: the alarm prefix is passed whole, and the roles keep their ARNs (no /agentx/production/ path).
       expect(env.AGENTX_ALARM_PREFIX).toBe("AgentX");
-      expect(env.SLACK_ORCHESTRATOR_ROLE_ARN).toMatch(/^arn:aws:iam::944937319445:role\/PHYS-SlackOrchestratorTaskRole/u);
-      expect(env.COMPANY_SECRETS_ROLE_ARN).toMatch(/^arn:aws:iam::944937319445:role\/PHYS-CompanySecretsRole/u);
+      expect(env.SLACK_ORCHESTRATOR_ROLE_ARN).toMatch(/^arn:aws:iam::123456789012:role\/PHYS-SlackOrchestratorTaskRole/u);
+      expect(env.COMPANY_SECRETS_ROLE_ARN).toMatch(/^arn:aws:iam::123456789012:role\/PHYS-CompanySecretsRole/u);
       // Rebuilt from the packed names, to the values the whole variables held.
       expect(env.STATE_TABLE_NAME).toMatch(/^PHYS-State/u);
-      expect(env.SLACK_REQUEST_QUEUE_URL).toMatch(/^https:\/\/sqs\.us-east-1\.amazonaws\.com\/944937319445\/PHYS-SlackRequestQueue/u);
-      expect(env.DEVELOPER_TOKEN_ISSUER).toBe("https://PHYS-HttpApi.execute-api.us-east-1.amazonaws.com/v1/auth");
-      expect(env.DELETER_ARN).toMatch(/^arn:aws:states:us-east-1:944937319445:stateMachine:PHYS-SessionsDeleter/u);
+      expect(env.SLACK_REQUEST_QUEUE_URL).toMatch(/^https:\/\/sqs\.us-east-1\.amazonaws\.com\/123456789012\/PHYS-SlackRequestQueue/u);
+      expect(env.DEVELOPER_TOKEN_ISSUER).toBe("https://example.execute-api.us-east-1.amazonaws.com/v1/auth");
+      expect(env.DELETER_ARN).toMatch(/^arn:aws:states:us-east-1:123456789012:stateMachine:PHYS-SessionsDeleter/u);
       expect(Object.keys(JSON.parse(env.HEALTH_DEAD_LETTER_QUEUES!) as Json)).toEqual(["dispatch", "slack-requests", "developer-notices", "developer-notice-stream", "channel-events"]);
       // The four derivations identical to production's own values.
       expect(env.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
@@ -137,8 +138,8 @@ describe("production's broker, packed (#1149)", () => {
   it("derives nothing a named environment's name would decide differently (no metrics namespace, connector prefix or AI navigation prefix), and the core's queues under production's names", async () => {
     const { env } = await bootedBroker(template, {});
     for (const variable of ["AGENTX_METRICS_NAMESPACE", "CONNECTOR_SECRET_PREFIX", "AGENTX_E2E_AGENT_SETTINGS_PREFIX"]) expect(env[variable], variable).toBeUndefined();
-    expect(env.CORE_DISPATCH_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/944937319445/agentx-production-core-dispatch");
-    expect(env.CORE_LESSONS_REFLECT_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/944937319445/agentx-production-lessons-reflect");
+    expect(env.CORE_DISPATCH_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/123456789012/agentx-production-core-dispatch");
+    expect(env.CORE_LESSONS_REFLECT_QUEUE_URL).toBe("https://sqs.us-east-1.amazonaws.com/123456789012/agentx-production-lessons-reflect");
     expect(env.ATTENTION_EMAIL_FUNCTION_NAME).toBe("agentx-production-attention-email");
     expect(env.ROVARA_CORE_ENGINE).toBe("off");
   }, 120_000);
