@@ -115,7 +115,7 @@ export class ReleasePipelineStack extends Stack {
             commands: [
               // #1145: skip the typecheck, lint and tests only when GitHub CI's gate already passed on exactly this code (the same file tree; scripts/release-ci-proof.ts).
               // Not proven (behind mainline, CI not green, GitHub unreachable): every check runs, as before. The proof itself never fails the build.
-              `if node scripts/release-ci-proof.ts --repository ${AGENTX_RELEASE_REPOSITORY_OWNER}/${AGENTX_RELEASE_REPOSITORY_NAME}; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ` +
+              `if node scripts/release-ci-proof.ts --repository ${AGENTX_RELEASE_REPOSITORY_OWNER}/${AGENTX_RELEASE_REPOSITORY_NAME} --github-app-stack ${AGENTX_RELEASE_STACKS[0]} --region "$AWS_REGION"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ` +
                 'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS',
             ],
           },
@@ -162,6 +162,12 @@ export class ReleasePipelineStack extends Stack {
           scoped("ecr", `repository/${AGENTX_PRODUCTION_WORKER_REPOSITORY}`),
           scoped("ecr", `repository/${AGENTX_SLACK_ORCHESTRATOR_REPOSITORY}`),
         ],
+      }),
+      // #1166: the release's CI proof reads GitHub as the install's own GitHub App (scripts/release-ci-proof.ts), whose key is in this account's agentx/github-apps/ secrets.
+      new iam.PolicyStatement({
+        sid: "ReadGithubAppKeyForCiProof",
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [scoped("secretsmanager", "secret:agentx/github-apps/*")],
       }),
       new iam.PolicyStatement({
         sid: "ReadReleaseStacks",

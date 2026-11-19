@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ciProof, githubCheckRuns, latestGateRun, type CheckRun } from "../../scripts/release-ci-proof.js";
+import { createVerify, generateKeyPairSync } from "node:crypto";
+import { ciProof, githubAppInstallationToken, githubCheckRuns, latestGateRun, type CheckRun } from "../../scripts/release-ci-proof.js";
 
 // #1145: the release skips its own checks only when CI's gate passed on exactly the code it releases.
 const MERGE = "a".repeat(40), BASE = "b".repeat(40), HEAD = "c".repeat(40);
@@ -65,5 +66,50 @@ describe("the release's CI proof", () => {
     expect(urls[0]).toBe(`https://api.github.com/repos/o/r/commits/${HEAD}/check-runs?check_name=local&per_page=100`);
     expect(await githubCheckRuns("o/r", (async () => new Response("rate limited", { status: 403 })))(HEAD)).toBeUndefined();
     expect(await githubCheckRuns("o/r", (async () => { throw new Error("offline"); }))(HEAD)).toBeUndefined();
+  });
+});
+
+// #1166: the check-runs read as the install's own GitHub App (its own rate budget), never failing the release when the App can't be used.
+describe("the release's CI proof as the GitHub App", () => {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
+  const TOKEN = "ghs_" + "a".repeat(36);
+
+  it("mints an installation token for this one repository with metadata read only, signed with the App's key", async () => {
+    const calls: Array<{ url: string; method: string; auth: string; body?: string }> = [];
+    const fake = (async (url: string, init: RequestInit = {}) => {
+      const headers = init.headers as Record<string, string>;
+      calls.push({ url, method: init.method ?? "GET", auth: headers.authorization ?? "", ...(typeof init.body === "string" ? { body: init.body } : {}) });
+      if (url.endsWith("/repos/o/r/installation")) return new Response(JSON.stringify({ id: 42 }), { status: 200 });
+      if (url.endsWith("/app/installations/42/access_tokens")) return new Response(JSON.stringify({ token: TOKEN }), { status: 201 });
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    expect(await githubAppInstallationToken({ appId: "5002502", privateKey, repository: "o/r", fetch: fake, now: () => 1_700_000_000_000 })).toBe(TOKEN);
+    // GitHub's newer signed token form (seen 2026-11-19): ghs_<app id>_<header>.<payload>.<signature>.
+    const signed = "ghs_5002502_eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJ4In0.sig-nature_part";
+    const newer = (async (url: string) => (url.endsWith("/installation") ? new Response(JSON.stringify({ id: 42 })) : new Response(JSON.stringify({ token: signed }), { status: 201 }))) as typeof fetch;
+    expect(await githubAppInstallationToken({ appId: "5002502", privateKey, repository: "o/r", fetch: newer })).toBe(signed);
+    expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(["GET https://api.github.com/repos/o/r/installation", "POST https://api.github.com/app/installations/42/access_tokens"]);
+    expect(JSON.parse(calls[1]!.body!)).toEqual({ repositories: ["r"], permissions: { metadata: "read" } });
+    const jwt = calls[0]!.auth.replace("Bearer ", "");
+    const [header, payload, signature] = jwt.split(".");
+    expect(JSON.parse(Buffer.from(payload!, "base64url").toString())).toEqual({ iat: 1_699_999_940, exp: 1_700_000_300, iss: "5002502" });
+    expect(createVerify("RSA-SHA256").update(`${header}.${payload}`).verify(publicKey, Buffer.from(signature!, "base64url"))).toBe(true);
+  });
+
+  it("answers no token when the App is not installed on the repository, GitHub refuses, or the answer doesn't read", async () => {
+    const answer = (installation: Response, minted?: Response) => (async (url: string) => (url.endsWith("/installation") ? installation : minted ?? new Response("{}", { status: 500 }))) as typeof fetch;
+    expect(await githubAppInstallationToken({ appId: "1", privateKey, repository: "o/r", fetch: answer(new Response("{}", { status: 404 })) })).toBeUndefined();
+    expect(await githubAppInstallationToken({ appId: "1", privateKey, repository: "o/r", fetch: answer(new Response(JSON.stringify({ id: 7 }), { status: 200 }), new Response("{}", { status: 403 })) })).toBeUndefined();
+    expect(await githubAppInstallationToken({ appId: "1", privateKey, repository: "o/r", fetch: answer(new Response(JSON.stringify({ id: 7 }), { status: 200 }), new Response(JSON.stringify({ token: "not a token!" }), { status: 201 })) })).toBeUndefined();
+    expect(await githubAppInstallationToken({ appId: "not-a-number", privateKey, repository: "o/r", fetch: answer(new Response("{}")) })).toBeUndefined();
+    expect(await githubAppInstallationToken({ appId: "1", privateKey: "not a key", repository: "o/r", fetch: answer(new Response("{}")) })).toBeUndefined();
+  });
+
+  it("sends the token on the check-runs read when it has one, and nothing when it doesn't", async () => {
+    const seen: string[] = [];
+    const fake = (async (_url: string, init: RequestInit = {}) => { seen.push((init.headers as Record<string, string>).authorization ?? "none"); return new Response(JSON.stringify({ check_runs: [] }), { status: 200 }); }) as typeof fetch;
+    await githubCheckRuns("o/r", fake, TOKEN)(HEAD);
+    await githubCheckRuns("o/r", fake)(HEAD);
+    expect(seen).toEqual([`Bearer ${TOKEN}`, "none"]);
   });
 });
