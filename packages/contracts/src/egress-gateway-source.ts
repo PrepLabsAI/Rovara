@@ -447,7 +447,8 @@ function s3Host(host) {
   for (let i = 0; i < labels.length; i++) if (labels[i] === "s3" || labels[i].indexOf("s3-") === 0 || labels[i].indexOf("s3express") === 0) return true;
   return false;
 }
-const ECR_LAYER_BUCKET = /^prod-[a-z0-9-]{1,40}-starport-layer-bucket\.s3\.[a-z0-9-]{1,30}\.amazonaws\.com$/;
+// The region in the bucket's name is the region of the host: anyone can register a bucket called prod-anything-starport-layer-bucket, but not the one AWS owns for a region (the back-reference ties the two).
+const ECR_LAYER_BUCKET = /^prod-([a-z0-9-]{1,40})-starport-layer-bucket\.s3\.\1\.amazonaws\.com$/;
 function proxyAllowed(host) {
   if (!validName(host)) return false;
   if (s3Host(host) && !ECR_LAYER_BUCKET.test(host)) return false;

@@ -124,7 +124,7 @@ const envLines = (h: Host): string[] => readFileSync(h.envFile, "utf8").split("\
 const calls = (h: Host): string[] => (existsSync(h.calls) ? readFileSync(h.calls, "utf8").split("\n").filter((line) => line !== "") : []);
 const rules = (h: Host): string[] => readFileSync(h.rules, "utf8").split("\n").filter(Boolean);
 const NO_SANDBOX_ENV = ["AWS_REGION=us-west-2", "AGENTX_SANDBOX_IMAGE=x"];
-const DROPIN_TEXT = '[Service]\nEnvironment="HTTP_PROXY=http://172.28.251.2:3128" "HTTPS_PROXY=http://172.28.251.2:3128" "NO_PROXY=localhost,127.0.0.1,172.28.251.2,logs.us-west-2.amazonaws.com"\n';
+const DROPIN_TEXT = '[Service]\nEnvironment="HTTP_PROXY=http://172.28.251.2:3128" "HTTPS_PROXY=http://172.28.251.2:3128" "NO_PROXY=localhost,127.0.0.1,169.254.169.254,172.28.251.2,logs.us-west-2.amazonaws.com"\n';
 
 describe("the sandbox-egress stage on a worker (gateway mode)", () => {
   it("walls the two bridges, makes the internal network and the outer one, runs the hardened gateway on both, checks it from a sandbox's place, and hands the worker the network and name server", () => {

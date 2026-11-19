@@ -57,7 +57,7 @@ se_worker_dns() {
   install -m 0644 /dev/null "$SE_WORKER_DNS_FILE" && printf '%s\n' "$resolvers" >"$SE_WORKER_DNS_FILE"
 }
 # The gateway is the Docker DAEMON's default name server (a `docker build` step has no `--dns`): "dns" in daemon.json. And the daemon's own HTTP(S) fetches use the gateway's daemon proxy (HTTP_PROXY/HTTPS_PROXY in a systemd drop-in of
-# docker.service). NO_PROXY keeps off the proxy: the proxy itself, loopback, and the CloudWatch Logs endpoint of the region (the awslogs driver of the worker container, which must not depend on the gateway). A container with its own `--dns` is not
+# docker.service). NO_PROXY keeps off the proxy: the proxy itself, loopback, the instance metadata address (the daemon's awslogs driver gets the instance role's credentials from it, and Go does not exempt link-local addresses; the launch template requires IMDSv2 with hop limit 1, so a build's ADD of it gets 401 anyway), and the CloudWatch Logs endpoint of the region (the awslogs driver of the worker container, which must not depend on the gateway). A container with its own `--dns` is not
 # affected by the default name server; one with none asks the gateway, which is reachable only from rovara-snet: on any other network (docker0, a stale bridge) a name lookup now fails, which is the point.
 # Idempotent. Docker is restarted only when either file changes, then the container firewall is put back (a restart rebuilds Docker's chains); on any failure both files are put back and Docker restarted on them.
 se_daemon_dns_is() { grep -q "\"dns\": \[\"${SE_INNER_IP//./\\.}\"\]" "$SE_DAEMON_JSON" 2>/dev/null; }
@@ -66,7 +66,7 @@ se_dropin_text() {
   local region
   region=$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE" 2>/dev/null | head -n 1)
   [[ "$region" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || return 1
-  printf '[Service]\nEnvironment="HTTP_PROXY=http://%s:%s" "HTTPS_PROXY=http://%s:%s" "NO_PROXY=localhost,127.0.0.1,%s,logs.%s.amazonaws.com"\n' "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$region"
+  printf '[Service]\nEnvironment="HTTP_PROXY=http://%s:%s" "HTTPS_PROXY=http://%s:%s" "NO_PROXY=localhost,127.0.0.1,169.254.169.254,%s,logs.%s.amazonaws.com"\n' "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$SE_PROXY_PORT" "$SE_OUTER_IP" "$region"
 }
 se_dropin_is() { [[ -n "${SE_DROPIN_WANT:-}" && -f "$SE_DROPIN" && "$(<"$SE_DROPIN")" == "$SE_DROPIN_WANT" ]]; }
 se_daemon_rollback() {

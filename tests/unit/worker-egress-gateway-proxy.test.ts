@@ -156,7 +156,7 @@ describe("the daemon proxy: what it is for", () => {
     const { port } = await startProxy();
     const refused = ["ok-bucket.s3.us-west-2.amazonaws.com", "s3.amazonaws.com", "s3.us-west-2.amazonaws.com", "s3-us-west-2.amazonaws.com", "bucket.s3-us-west-2.amazonaws.com", "bucket.s3.dualstack.us-west-2.amazonaws.com", "bucket.s3-accelerate.amazonaws.com",
       "bucket.s3-website-us-east-1.amazonaws.com", "bucket.s3express-use1-az1.us-east-1.amazonaws.com", "x.s3-accesspoint.us-west-2.amazonaws.com", "prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com.evil.example.org.s3.us-west-2.amazonaws.com",
-      "evil-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-x-starport-layer-bucket.evil.s3.us-west-2.amazonaws.com", "bucket.s3.cn-north-1.amazonaws.com.cn"];
+      "evil-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-evil-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-us-east-1-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-x-starport-layer-bucket.evil.s3.us-west-2.amazonaws.com", "bucket.s3.cn-north-1.amazonaws.com.cn"];
     for (const name of refused) expect(statusOf(await raw(port, connectLine(`${name}:443`))), name).toBeGreaterThanOrEqual(400);
     expect(site.dialed).toEqual([]);
     expect(statusOf(await raw(port, connectLine("prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com:443")))).toBe(200);
