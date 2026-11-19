@@ -489,6 +489,8 @@ describe("production release pipeline", () => {
     expect(buildSpec).toContain("gitleaks_${GITLEAKS_VERSION}_linux_arm64.tar.gz");
     expect(buildSpec).toContain('echo \\"${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -');
     expect(buildSpec).toContain("/opt/gitleaks:$PATH");
+    // #1118: tsc -b needs about 4 GB since mainline took code/next; without a larger heap the release's typecheck dies out of memory.
+    expect(buildSpec).toContain('"NODE_OPTIONS": "--max-old-space-size=8192"');
   });
 
   it("keeps the release project outside the broker's CodeBuild gate allow-list", () => {
