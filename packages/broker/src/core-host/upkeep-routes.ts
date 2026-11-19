@@ -3,7 +3,7 @@
 //   GET /v1/app/projects/{project}/upkeep   { enabled, canManage, available, systemRunsOn, canEnableSystemRuns, cap }: any role on the project reads it (contracts/upkeep.ts `UpkeepViewSchema`)
 //   PUT /v1/app/projects/{project}/upkeep   { requestId, on, allowSystemRuns? }: a live company owner or admin, or an administrator of the project, switches the PROJECT's switch (ON needs the company's consent);
 //                                            with `allowSystemRuns` (the setup step) ONLY a live company owner or admin, setting the company's consent and the switch in one transaction; answers the view.
-//                                            ALLOWING (`allowSystemRuns: true`) needs a FRESH STEP-UP (L4-P3, the script token's rule); withdrawing (`false`) never does
+//                                            ALLOWING (`allowSystemRuns: true`) needs a live company owner or admin (DEC 254zzz73: no step-up); withdrawing (`false`) too
 // Two locks (L4-P2, owner DEC 254zzt): Rovara's automatic runs need the operator's ceiling (`CoreSystemRuns`) AND the company's stored consent (core/system-runs/consent.ts).
 //
 // Rules (the wiki build controls' and the setup run's, reused: `standing` is the one live read of a person's standing):
@@ -13,7 +13,7 @@
 //   - Off by default. The same request id with the same choice is one act (a replay answers the view and records nothing); the same id with the other choice is a new act.
 //   - The audit record (naming the person and why they were allowed) is written BEFORE the row: nothing changes when it cannot be written. Refusals are fixed words, nothing a caller sent is echoed.
 //   - The monthly dollar cap is not here: the gateway holds it (Cloud's Spending limits page). This route only switches the nights on.
-import { AgentXError, SYSTEM_RUNS_CONSENT_AUDIT, SYSTEM_RUNS_CONSENT_WORDS, WikiProjectSchema, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
+import { AgentXError, SYSTEM_RUNS_CONSENT_AUDIT, WikiProjectSchema, agentXError, type AuditEvent, type AuditSink, type OrgId } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { UPKEEP_WORDS, upkeepSwitchControl, upkeepView, type UpkeepSettingsDeps } from "../core/upkeep/settings.js";
@@ -41,8 +41,8 @@ export interface HostedUpkeepInput {
   wiring: HostedUpkeepWiring;
   audit: AuditSink;
   now: () => number;
-  /** L4-P3: the fresh step-up check of the caller (dev-routes' `freshStepUp`, against the company's window). Absent: nobody can ALLOW automatic runs through this input (withdrawing never needs it). */
-  freshStepUp?: ((refusal: string) => Promise<{ at: string; method: string }>) | undefined;
+  /** Owner DEC 254zzz91: the caller is the Rovara website's own client (set by the broker's sign-in, never from a request). */
+  webApp?: boolean | undefined;
 }
 
 const UPKEEP_PATH = /^\/v1\/app\/projects\/([^/]+)\/upkeep$/u;
@@ -90,12 +90,8 @@ export async function routeHostedUpkeep(input: HostedUpkeepInput): Promise<Broke
       try { now = await wiring.standing(person, companyId, name); } catch { return { access: "none" }; }
       return isManage(now) ? { access: "manage", companyAdmin: isCompanyAdmin(now) } : now?.access === "view" ? { access: "view" } : { access: "none" };
     };
-    // The factor the caller proved it was them with, when ALLOWING was asked (kept on the consent's audit record).
-    let stepUpMethod: string | undefined;
-    const freshStepUp = input.freshStepUp;
     const deps: UpkeepSettingsDeps = {
-      requireStepUp: freshStepUp === undefined ? undefined : async () => { stepUpMethod = (await freshStepUp(SYSTEM_RUNS_CONSENT_WORDS.needsSignIn)).method; },
-      store: flow.store, companyId, now: input.now, standing: live, schedule: wiring.schedule?.(companyId), available: wiring.available === undefined ? undefined : () => wiring.available!(companyId),
+      store: flow.store, companyId, now: input.now, webApp: input.webApp === true, standing: live, schedule: wiring.schedule?.(companyId), available: wiring.available === undefined ? undefined : () => wiring.available!(companyId),
       cap: wiring.cap === undefined ? undefined : () => wiring.cap!(companyId, project),
       // L4-SR1: this month's nightly spend of THIS project in THIS company, from the company's own rows.
       spend: (name) => readSystemRunSpend({ store: flow.store, companyId, now: input.now }, { project: name }),
@@ -103,7 +99,7 @@ export async function routeHostedUpkeep(input: HostedUpkeepInput): Promise<Broke
       recordConsent: async (details) => {
         const event: AuditEvent = {
           eventId: `${SYSTEM_RUNS_CONSENT_AUDIT}:${companyId}:${personId}:${details.requestId}:${details.on ? "on" : "off"}:${details.previous}`, companyId, at: new Date(input.now()).toISOString(), actor: { type: "person", id: personId },
-          action: SYSTEM_RUNS_CONSENT_AUDIT, subject: { type: "company", id: companyId }, details: { ...(isCompanyAdmin(standing) ? { basis: (standing as { basis: SetupRunBasis }).basis } : {}), requestId: details.requestId, on: details.on, previous: details.previous, ...(details.on && stepUpMethod !== undefined ? { stepUp: stepUpMethod } : {}) },
+          action: SYSTEM_RUNS_CONSENT_AUDIT, subject: { type: "company", id: companyId }, details: { ...(isCompanyAdmin(standing) ? { basis: (standing as { basis: SetupRunBasis }).basis } : {}), requestId: details.requestId, on: details.on, previous: details.previous },
         };
         await input.audit.record(event);
       },

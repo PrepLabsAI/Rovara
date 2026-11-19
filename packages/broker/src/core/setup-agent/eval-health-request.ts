@@ -10,8 +10,8 @@
 // under) -> `finished` (a result: pass or fail per case) or `not_run` (a closed reason). Only the broker moves it, each move one conditional write on the exact prior row.
 import { z } from "zod";
 import {
-  EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalHealthNotRunReasonSchema, agentXError, change, evalBaseCacheKey, when,
-  type DocumentStore, type JsonValue, type EvalHealthNotRunReason, type OrgId, type Principal, type StoredDocument,
+  EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalBlockedReachSchema, EvalHealthNotRunReasonSchema, agentXError, change, evalBaseCacheKey, when,
+  type DocumentStore, type JsonValue, type EvalBlockedReach, type EvalHealthNotRunReason, type OrgId, type Principal, type StoredDocument,
 } from "@agentx/contracts";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
@@ -39,6 +39,8 @@ const ClaimSchema = z.object({
   claimId: z.string().uuid(), at: z.iso.datetime(),
   bases: z.array(z.object({ repositoryId: z.string().min(1).max(200), baseCommitSha: hex40 }).strict()).min(1).max(16),
   parts: KeyPartsSchema,
+  /** Bound by the broker when accepting the measured result; parts/mark remain the original lock identity. */
+  standInSetVersion: hash.optional(),
   /** The baseline's measuring mark (so a task that arrives meanwhile reads "measuring", not a second measurement); finished with the run. */
   mark: z.object({ claimId: z.string().uuid(), startedAt: z.number().int().min(0), expiresAt: z.number().int().min(0), state: z.literal("measuring") }).strict().optional(),
 }).strict();
@@ -63,7 +65,7 @@ const RecordSchema = z.object({
   requestedBy: z.object({ personId: z.string().min(1).max(256), provider: z.string().min(1).max(200), role: z.enum(["owner", "admin", "maintainer"]), at: z.iso.datetime() }).strict(),
   state: z.enum(["requested", "running", "finished", "not_run"]),
   claim: ClaimSchema.optional(),
-  notRun: z.object({ reason: EvalHealthNotRunReasonSchema, at: z.iso.datetime() }).strict().optional(),
+  notRun: z.object({ reason: EvalHealthNotRunReasonSchema, at: z.iso.datetime(), /** TH1: what the sealed eval tried to reach (fixed shape, host names only), only with `blocked_connection`. */ blocked: EvalBlockedReachSchema.optional() }).strict().optional(),
   result: ResultSchema.optional(),
 }).strict();
 export type EvalHealthRequestRecord = z.infer<typeof RecordSchema>;
@@ -185,14 +187,16 @@ export async function finishEvalHealthRequest(deps: Pick<EvalHealthRequestDeps, 
 }
 
 /** A request that did not run: `not_run`, with one closed reason. From a waiting request (no claim named) or from a claimed run (its claim named). Once; a repeat or a different claim changes nothing. */
-export async function failEvalHealthRequest(deps: Pick<EvalHealthRequestDeps, "store" | "companyId"> & { now?: (() => number) | undefined }, project: string, requestId: string, reason: EvalHealthNotRunReason, options?: { claimId?: string }): Promise<boolean> {
+export async function failEvalHealthRequest(deps: Pick<EvalHealthRequestDeps, "store" | "companyId"> & { now?: (() => number) | undefined }, project: string, requestId: string, reason: EvalHealthNotRunReason, options?: { claimId?: string; blocked?: EvalBlockedReach }): Promise<boolean> {
   const key = evalHealthRequestKey(deps.companyId, project);
   const row = parse(deps, project, await deps.store.get(key));
   const claimId = options?.claimId;
   if (row === undefined || row.requestId !== requestId || row.state !== (claimId !== undefined ? "running" : "requested") || !EvalHealthNotRunReasonSchema.safeParse(reason).success) return false;
   if (claimId !== undefined && row.claim?.claimId !== claimId) return false;
   const condition = claimId !== undefined ? when.and(when.eq("requestId", requestId), when.eq("state", "running"), when.eq(["claim", "claimId"], claimId)) : when.and(when.eq("requestId", requestId), when.eq("state", "requested"));
-  const written = await deps.store.update({ key, ops: [change.set("state", "not_run"), change.set("notRun", { reason, at: iso(deps) })], condition }).catch(() => undefined);
+  // TH1: the blocked list is kept only with its own reason and only when it is the fixed shape.
+  const blocked = reason === "blocked_connection" && options?.blocked !== undefined ? EvalBlockedReachSchema.safeParse(options.blocked) : undefined;
+  const written = await deps.store.update({ key, ops: [change.set("state", "not_run"), change.set("notRun", { reason, at: iso(deps), ...(blocked?.success ? { blocked: blocked.data as unknown as JsonValue } : {}) })], condition }).catch(() => undefined);
   return written?.applied === true;
 }
 
@@ -200,6 +204,8 @@ export async function failEvalHealthRequest(deps: Pick<EvalHealthRequestDeps, "s
 export interface EvalHealthView {
   state: "none" | "requested" | "running" | "finished" | "not_run";
   reason?: EvalHealthNotRunReason;
+  /** TH1: with `blocked_connection`, what the eval tried to reach. */
+  blocked?: EvalBlockedReach;
   result?: EvalHealthResultSummary;
 }
 export async function readEvalHealthView(deps: Pick<EvalHealthRequestDeps, "store" | "companyId" | "members" | "monthlyCapMicros"> & { now?: (() => number) | undefined }, project: string): Promise<EvalHealthView> {
@@ -208,7 +214,7 @@ export async function readEvalHealthView(deps: Pick<EvalHealthRequestDeps, "stor
   // The age of a yes and the window of a run are judged only against a clock the caller gives (the host's); without one the row is read as it is.
   const nowMs = deps.now?.();
   if (row.state === "finished") return { state: "finished", ...(row.result === undefined ? {} : { result: row.result }) };
-  if (row.state === "not_run") return { state: "not_run", reason: row.notRun?.reason ?? "unavailable" };
+  if (row.state === "not_run") return { state: "not_run", reason: row.notRun?.reason ?? "unavailable", ...(row.notRun?.reason === "blocked_connection" && row.notRun.blocked !== undefined ? { blocked: row.notRun.blocked } : {}) };
   if (row.state === "running") return nowMs !== undefined && evalHealthRunExpired(row, nowMs) ? { state: "not_run", reason: "no_report" } : { state: "running" };
   // A waiting yes: void once its approval is replaced; "not run" once it is a day old.
   if (!await evalHealthApprovalStands(deps, project, row)) return { state: "none" };

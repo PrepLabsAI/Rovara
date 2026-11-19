@@ -11,23 +11,32 @@
 // `changedPrompt` classifier names. An absent, unreadable or undecidable classification counts as changed.
 import { createHash, randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { isIP } from "node:net";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
-import { EVAL_INSTALL_STEP_MAX_MS, EVAL_QUESTION_LIMIT, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { seedLockHolds, EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { checkoutSeedReader } from "../service-seed-lock.js";
+import { seedPathInRepository } from "../eval-repository-path.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import { createModelBridge } from "../model-bridge.js";
 import { createModelBridgeLedger } from "../model-bridge-ledger.js";
 import { MODEL_HELPER_DEFAULT_PORT, MODEL_HELPER_LEDGER_PATH, MODEL_HELPER_REPLIES_PATH, MODEL_HELPER_ROWS_PATH, MODEL_HELPER_RUN_DIR, modelHelperArgs } from "../model-helper-args.js";
-import { MODEL_BLACKHOLE_ADDRESS, isModelHelperAddress, modelHostAddHostArgs, planModelHostBlock, type ModelHostBlock } from "../model-helper-block.js";
+import { MODEL_BLACKHOLE_ADDRESS, isModelHelperAddress, modelHostAddHostArgs, planModelHostBlock, sealedModelHostPairs, type ModelHostBlock } from "../model-helper-block.js";
 import { modelHelperOffer, startModelHelper, type StartedModelHelper } from "../model-helper-network.js";
+import { SERVED_MODEL_FAMILIES, type ModelReplySet } from "@agentx/contracts/model-helper";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "../model-reply-bundle.js";
 import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT } from "../model-sandbox-env.js";
-import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, type ServicesNetwork } from "../run-network.js";
+import { CHECK_SANDBOX_HOSTNAME, SINKHOLE_ALIAS, checkSandboxHostsFile, checkSandboxNames, checkSandboxResolvConf, readSealedDnsRecord, sealedDnsHelperRunArgs, waitForSealedDnsHelper, type RunHostEntry, type SealedDnsRecord } from "../check-sandbox.js";
+import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkHelperIp, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../swebench/containers.js";
-import { SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_WORKSPACE_LABEL, sandboxNetworkFromEnvironment } from "../task-sandbox.js";
+import { SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_WORKSPACE_LABEL, gatewayEgressFor, sandboxNetworkFromEnvironment } from "../task-sandbox.js";
 import { readContainedReport } from "./report-file.js";
 import { EVAL_PYTHON_USER_BASE, useSavedEnvironment, type UseSavedEnvironmentInput } from "./eval-environment.js";
 import { EvalSandboxRunFailure, diagnoseEvalFailure } from "./eval-run-diagnostic.js";
+import type { EvalServicesStarted, EvalServicesStarter } from "./eval-services.js";
+import { EVAL_CA_RELATIVE_PATH, evalStandInTrustEnvironment } from "../run-ca.js";
+import { evalStandInDnsPairs, evalStandInHostsLines, startEvalStandIns, type StartedEvalStandIns } from "../eval-standin-hosted.js";
+import type { EvalStandInRound } from "../eval-standin-round.js";
 import { caseRowsOf, measuresFromCaseReports, type CaseRow } from "./eval-report-formats.js";
 import { TEST_REPORT_MAX_BYTES } from "./test-report.js";
 import type { EvalReportLocation } from "./eval-round.js";
@@ -49,6 +58,8 @@ export interface FreshEvalSandboxResult {
   readonly report: EvalReportLocation;
   /** The old side only: made by `attestRovaraOnlyBaseCheckout` after the base commit ran in a Rovara-only checkout. A plain object is not an attestation. */
   readonly attestation?: EvalBaseAttestation | undefined;
+  /** L4-E56: only when the round has stand-ins: whether this run hit a gap (a made-up answer; an unreadable helper counts as a hit) and the round's counts as they stand. */
+  readonly standIns?: EvalStandInRunReport | undefined;
 }
 /**
  * The check round's own sandbox: started new for the run (a network of its own, the model helper at its fixed address, nothing mounted from the working sandbox), the
@@ -58,6 +69,32 @@ export interface FreshEvalSandbox {
   /** Whether a fresh sandbox can be started now. False reads "needs a fresh sandbox" before any money is held. */
   available(): boolean;
   run(input: FreshEvalSandboxRun): Promise<FreshEvalSandboxResult>;
+  /**
+   * L4-E12 (E2): the FREE dry run. The eval command runs ONCE on the commit the sandbox is configured with (main), in a sealed box whose model helper serves SCRIPTED replies: no bridge, no token, no model route to the gateway,
+   * so no model call can be made and none can cost money. Returns what the run left behind (its output tail, how it ended, the sealed name server's record of every unknown name); it never reads a report and never throws for a
+   * failed command (a failed eval still shows what it reached). Absent on a sandbox that cannot run one.
+   */
+  dryRun?(input: FreshEvalDryRun): Promise<EvalDryRunObservation>;
+}
+
+export interface FreshEvalDryRun {
+  readonly ids: readonly string[];
+  readonly signal: AbortSignal;
+}
+/** What one dry run left behind. Nothing here has been read for meaning: `eval-dry-run.ts` makes the dependency list from it. The output is redacted (the run's own secrets are gone) and bounded. */
+export interface EvalDryRunObservation {
+  readonly code: number | undefined;
+  readonly timedOut: boolean;
+  /** The last 200 lines of the eval's own output (stdout and stderr), redacted of this run's token and placeholder keys. */
+  readonly output: string;
+  /** The sealed name server's record: every unknown name the eval asked for. */
+  readonly dns: SealedDnsRecord;
+  /** The hosts pinned to the model helper (never named as a dependency). */
+  readonly modelRoute: { readonly hosts: readonly string[]; readonly suffixes: readonly string[] };
+  /** The run's own placeholder values (never a real secret: a dry run holds none), so a name that contains one is never kept. */
+  readonly secrets: readonly string[];
+  /** The sinkhole's address: where every unknown name pointed, so a failed connection to it (nothing listens there: it reads refused or unreachable) names the port the eval wanted. */
+  readonly sinkholeIp: string;
 }
 
 export interface BridgedEvalExecOptions {
@@ -160,6 +197,7 @@ export function createBridgedEvalExec(options: BridgedEvalExecOptions): EvalSand
         return {
           report: result.report, changedPromptCalls: state.changedPromptCalls,
           ...(request.side === "old" && result.attestation !== undefined ? { attestation: result.attestation } : {}),
+          ...(result.standIns === undefined ? {} : { standIns: result.standIns }),
         };
       } finally {
         // The token is gone first (above); then no call is left open (the stage's close joins the calls), and nothing of the run stays on disk.
@@ -191,6 +229,17 @@ export function createBridgedEvalExec(options: BridgedEvalExecOptions): EvalSand
 //
 // OFF BY DEFAULT: nothing in production makes one (`evalHostSourcesFor` answers undefined until the trusted sources are delivered, EVAL-WIRE-SOURCES-NOT-DELIVERED), and `available()` is false on a worker that does not
 // offer the model helper (its walls and IPv6 drops: `modelHelperOffer`).
+
+/** L4-E12: a dry run has no bridge; this placeholder fills the helper's `/x/<token>` path segment and opens nothing. */
+const DRY_RUN_TOKEN = "dryrun0000000000";
+/** The sinkhole's address: the last of the round's 32 service addresses, which no service takes (test-services-run.ts `SINKHOLE_HELPER_INDEX`). */
+const SINKHOLE_HELPER_INDEX = 31;
+const MODEL_HELPER_NAME = "rovara-models";
+/** A dry run's scripted replies: ONE reply per served model family that matches every call, so the eval gets as far as it can without any model. Never a real answer; never counted as proof. */
+const DRY_RUN_REPLY_SETS: readonly ModelReplySet[] = SERVED_MODEL_FAMILIES.map((family): ModelReplySet => ({
+  version: 1, family,
+  replies: [{ id: "dry-run", match: {}, response: { text: "ok", finish: "stop" }, provenance: "task_made" }],
+}));
 
 /** Where the checkout is mounted in the sandbox; the eval command's `cwd` is relative to it. */
 export const FRESH_EVAL_WORKSPACE = "/workspace";
@@ -274,6 +323,29 @@ export interface FreshEvalSandboxConfig {
   readonly useSavedEnvironment?: (input: UseSavedEnvironmentInput) => Promise<boolean>;
   /** The network an install step joins. Default: the machine's shared sandbox network (its reach is the allowed-websites firewall). */
   readonly installNetwork?: string | undefined;
+  /**
+   * L4-E12 (E1): the project's test services on this round's network. Absent: no service, byte-identical to before. Each `run` starts a FRESH copy (the old side and the new side never share one) and stops it before the network goes.
+   * With services the round uses the sealed name server (the service names are in the box's hosts file and the name server's table).
+   */
+  readonly services?: EvalServicesStarter | undefined;
+  /**
+   * L4-E12 (E2): the sealed name server on the round instead of loopback DNS: `resolv.conf` names it, every unknown name goes to the sinkhole and is recorded. Default: on when `services` is set or for a dry run, off otherwise (the
+   * round is exactly what it was). A host that wants it on for every eval round says true.
+   */
+  readonly sealedDns?: boolean | undefined;
+  /**
+   * L4-E56: the round's outside-HTTP stand-ins. Absent: the sandbox is byte-identical to before (no helper, no vendor name, no trust variable). Present: the round uses the sealed name server (E2) and a stand-in helper takes the
+   * SINKHOLE's address (.47): every planned vendor name is in the box's hosts file and the name server's table at that address, and every other name the name server does not know goes to the sinkhole, which is the stand-in's
+   * catch-all (never stop). The ONE `round` is shared by both sides and every re-ask (one answer book). The box trusts the round's authority through environment variables only. `start` is a test seam (default: `startEvalStandIns`).
+   */
+  readonly standIns?: { readonly round: EvalStandInRound; readonly start?: typeof startEvalStandIns | undefined } | undefined;
+  /** L4-NETG: the name server an install step is given (`--dns`), set only on a worker whose sandboxes go through the egress gateway (the gateway's address on the shared network). Default: none (the network's own resolver, as before). */
+  readonly installDns?: string | undefined;
+  /**
+   * L4-EINT (review M1): true only when the operator's stand-in switch is on. Then the run names the databases it was stood in for (and the PR says "Ran against stand-ins for Postgres"). Absent: a services round reports
+   * nothing of the kind, byte for byte as before the switch existed (those services are real software, not stand-ins, when the switch is off).
+   */
+  readonly reportStandInDatabases?: boolean | undefined;
 }
 
 const configProblem = (config: FreshEvalSandboxConfig): boolean => {
@@ -295,9 +367,16 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
     if (c.workingSandbox !== null && (typeof c.workingSandbox !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(c.workingSandbox))) return true;
     if (c.evalEnvironment !== undefined && !EvalEnvironmentSchema.safeParse(c.evalEnvironment).success) return true;
     if (c.installNetwork !== undefined && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(c.installNetwork)) return true;
+    if (c.services !== undefined && typeof c.services?.start !== "function") return true;
+    if (c.sealedDns !== undefined && typeof c.sealedDns !== "boolean") return true;
+    if (c.installDns !== undefined && isIP(c.installDns) !== 4) return true;
+    if (c.reportStandInDatabases !== undefined && typeof c.reportStandInDatabases !== "boolean") return true;
     return false;
   } catch { return true; }
 };
+
+/** The by-name block of a fresh eval round whose model helper is at `helperIp` (a model row, as every paid round has). Exported so the allow-list tests build the same block the round does without importing the guarded block module themselves. */
+export const freshEvalModelBlock = (helperIp: string): ModelHostBlock => planModelHostBlock({ hasModelRow: true, helperIp });
 
 /** The input of one run, checked at runtime (the types are not a check). */
 function runProblem(input: FreshEvalSandboxRun): boolean {
@@ -314,7 +393,7 @@ function runProblem(input: FreshEvalSandboxRun): boolean {
 }
 
 export interface FreshEvalSandboxArgsInput {
-  readonly net: Pick<ServicesNetwork, "name" | "checkSandboxIp" | "labelArgs">;
+  readonly net: Pick<ServicesNetwork, "name" | "checkSandboxIp" | "labelArgs"> & Partial<Pick<ServicesNetwork, "dnsHelperIp">>;
   readonly image: string;
   readonly name: string;
   /** The checkout on the worker: the one mount, at `FRESH_EVAL_WORKSPACE`. */
@@ -322,29 +401,42 @@ export interface FreshEvalSandboxArgsInput {
   readonly envFile: string;
   readonly block: ModelHostBlock;
   readonly command: FreshEvalCommand;
+  /** L4-E12 (E1): the names of the run's services and the helper address of each (.16 to .47 of the round's slot). Pinned with `--add-host` (no sealed name server) or written in the hosts file (sealed). */
+  readonly serviceHosts?: readonly RunHostEntry[];
+  /** L4-E12 (E2): the sealed name server's two files, mounted read-only over /etc/resolv.conf and /etc/hosts (the run's own folder, never the checkout). Present: no `--dns` and no `--add-host`. */
+  readonly dnsFiles?: FreshEvalDnsFiles;
 }
+export interface FreshEvalDnsFiles { readonly resolvConfPath: string; readonly hostsPath: string }
+const RESOLV_CONF_TARGET = "/etc/resolv.conf";
+const HOSTS_TARGET = "/etc/hosts";
 
 /** The fresh sandbox's `docker run` arguments. Throws CONFIG_INVALID (a fixed sentence) when the result would not pass `freshEvalSandboxArgProblems`. Pure. */
 export function freshEvalSandboxRunArgs(input: FreshEvalSandboxArgsInput, forbidden: { readonly bridgeDir: string }): string[] {
   const workdir = input.command.cwd === "." ? FRESH_EVAL_WORKSPACE : posix.join(FRESH_EVAL_WORKSPACE, input.command.cwd);
   const args = [
     "run", "--detach", "--pull=never", "--name", input.name, "--stop-timeout", "1", ...input.net.labelArgs(),
-    "--network", input.net.name, "--ip", input.net.checkSandboxIp, "--dns", NO_UPSTREAM_DNS, ...modelHostAddHostArgs(input.block),
+    "--network", input.net.name, "--ip", input.net.checkSandboxIp,
+    // Sealed: the name server's own files are mounted (below) and the hostname is the check sandbox's; otherwise loopback DNS and the pinned names, as before (plus the run's service names, E1).
+    ...(input.dnsFiles === undefined
+      ? ["--dns", NO_UPSTREAM_DNS, ...modelHostAddHostArgs(input.block), ...(input.serviceHosts ?? []).flatMap((entry) => ["--add-host", `${entry.alias}:${entry.address}`])]
+      // Sealed: Docker's embedded resolver (127.0.0.11) cannot be removed from a user-network container, so its ONLY upstream is the run's own sealed name server (`--dns`): an unpatched daemon that forwards the queries of an internal-only container then forwards them to the sinkholing, recording name server and never to the host's resolvers.
+      : ["--dns", input.net.dnsHelperIp ?? "", "--hostname", CHECK_SANDBOX_HOSTNAME]),
     "--user", FRESH_EVAL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--memory", FRESH_EVAL_MEMORY, "--memory-swap", FRESH_EVAL_MEMORY, "--cpus", FRESH_EVAL_CPUS, "--pids-limit", FRESH_EVAL_PIDS, "--log-driver", "json-file", ...FRESH_EVAL_LOG_OPTIONS.flatMap(option => ["--log-opt", option]),
     "--tmpfs", FRESH_EVAL_TMPFS,
     "--volume", `${input.checkout}:${FRESH_EVAL_WORKSPACE}:rw`,
+    ...(input.dnsFiles === undefined ? [] : ["--volume", `${input.dnsFiles.resolvConfPath}:${RESOLV_CONF_TARGET}:ro`, "--volume", `${input.dnsFiles.hostsPath}:${HOSTS_TARGET}:ro`]),
     "--env-file", input.envFile,
     "--workdir", workdir,
     "--entrypoint", SANDBOX_INIT,
     input.image, "--", input.command.executable, ...input.command.args,
   ];
-  const problems = freshEvalSandboxArgProblems(args, input.net, { checkout: input.checkout, bridgeDir: forbidden.bridgeDir, helperIp: input.block.address });
+  const problems = freshEvalSandboxArgProblems(args, input.net, { checkout: input.checkout, bridgeDir: forbidden.bridgeDir, helperIp: input.block.address, ...(input.serviceHosts === undefined ? {} : { serviceHosts: input.serviceHosts }), ...(input.dnsFiles === undefined ? {} : { dnsFiles: input.dnsFiles }) });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", "the fresh eval sandbox's arguments are unsound");
   return args;
 }
 
-const SANDBOX_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--ip", "--dns", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--tmpfs", "--volume", "--env-file", "--workdir", "--entrypoint", "--log-driver", "--log-opt"]);
+const SANDBOX_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--ip", "--dns", "--add-host", "--hostname", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--tmpfs", "--volume", "--env-file", "--workdir", "--entrypoint", "--log-driver", "--log-opt"]);
 const SANDBOX_SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 const isUnder = (path: string, folder: string): boolean => path === folder || path.startsWith(`${folder.replace(/\/+$/u, "")}/`) || folder.startsWith(`${path.replace(/\/+$/u, "")}/`);
 
@@ -352,7 +444,7 @@ const isUnder = (path: string, folder: string): boolean => path === folder || pa
  * Reads the fresh sandbox's `docker run` arguments back and names every way they are unsound, in fixed words. Allow-list: a flag the sandbox does not take is a problem, so a second network, a published port, a capability,
  * a device, a second mount or the bridge folder cannot be added by accident. An empty list is a sound set.
  */
-export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<ServicesNetwork, "name" | "checkSandboxIp">, expected: { readonly checkout: string; readonly bridgeDir: string; readonly helperIp: string | undefined }): string[] {
+export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<ServicesNetwork, "name" | "checkSandboxIp"> & Partial<Pick<ServicesNetwork, "dnsHelperIp">>, expected: { readonly checkout: string; readonly bridgeDir: string; readonly helperIp: string | undefined; readonly serviceHosts?: readonly RunHostEntry[]; readonly dnsFiles?: FreshEvalDnsFiles }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -376,7 +468,15 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   if (image === undefined || !PINNED_IMAGE.test(image)) problems.push("the sandbox must run the worker's pinned image");
   if (!only("--network", net.name) || !NETWORK_NAME.test(net.name)) problems.push("the sandbox must be on the round network and on no other network");
   if (!only("--ip", net.checkSandboxIp)) problems.push("the sandbox must have the round's check sandbox address");
-  if (!only("--dns", NO_UPSTREAM_DNS)) problems.push("the sandbox's only DNS server must be its own loopback (no upstream)");
+  const sealed = expected.dnsFiles !== undefined;
+  // Sealed (E2): the name server is the run's own, through two mounted files, and the embedded resolver's only upstream is that same name server; `--add-host` is not used (a bind-mounted /etc/hosts would hide it). Not sealed: loopback DNS, as before.
+  if (sealed) {
+    if (net.dnsHelperIp === undefined || !only("--dns", net.dnsHelperIp)) problems.push("a sealed sandbox's only DNS server must be the run's own sealed name server");
+    if (!only("--hostname", CHECK_SANDBOX_HOSTNAME)) problems.push("a sealed sandbox's host name is the check sandbox's");
+  } else {
+    if (!only("--dns", NO_UPSTREAM_DNS)) problems.push("the sandbox's only DNS server must be its own loopback (no upstream)");
+    if (flags.has("--hostname")) problems.push("only a sealed sandbox sets its host name");
+  }
   if (!only("--cap-drop", "ALL")) problems.push("the sandbox must drop every capability");
   if (!only("--security-opt", "no-new-privileges")) problems.push("the sandbox must have no-new-privileges and no other security option");
   if (!flags.has("--read-only")) problems.push("the sandbox's root must be read-only");
@@ -384,8 +484,12 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   if (!only("--entrypoint", SANDBOX_INIT)) problems.push("the sandbox must start under the init");
   if (!only("--tmpfs", FRESH_EVAL_TMPFS)) problems.push("the sandbox has one tmpfs");
   const volumes = flags.get("--volume") ?? [];
-  if (volumes.length !== 1 || volumes[0] !== `${expected.checkout}:${FRESH_EVAL_WORKSPACE}:rw`) problems.push("the sandbox has exactly one mount, the checkout");
+  const wantedVolumes = [`${expected.checkout}:${FRESH_EVAL_WORKSPACE}:rw`, ...(expected.dnsFiles === undefined ? [] : [`${expected.dnsFiles.resolvConfPath}:${RESOLV_CONF_TARGET}:ro`, `${expected.dnsFiles.hostsPath}:${HOSTS_TARGET}:ro`])];
+  if (volumes.length !== wantedVolumes.length || volumes.some((volume, index) => volume !== wantedVolumes[index])) problems.push(sealed ? "the sandbox has exactly three mounts: the checkout and the run's two name files, read-only" : "the sandbox has exactly one mount, the checkout");
   if (isUnder(expected.checkout, expected.bridgeDir)) problems.push("the sandbox must never mount the bridge folder");
+  if (expected.dnsFiles !== undefined) for (const file of [expected.dnsFiles.resolvConfPath, expected.dnsFiles.hostsPath]) {
+    if (!SAFE_HOST_PATH.test(file) || isUnder(file, expected.bridgeDir) || isUnder(file, expected.checkout)) problems.push("the name files are outside the checkout and the bridge folder");
+  }
   const envFiles = flags.get("--env-file") ?? [];
   if (envFiles.length !== 1 || !SAFE_HOST_PATH.test(envFiles[0]!) || isUnder(envFiles[0]!, expected.bridgeDir) || isUnder(envFiles[0]!, expected.checkout)) problems.push("the sandbox takes one env file, outside its checkout and the bridge folder");
   for (const [flag, value] of [["--memory", FRESH_EVAL_MEMORY], ["--memory-swap", FRESH_EVAL_MEMORY], ["--cpus", FRESH_EVAL_CPUS], ["--pids-limit", FRESH_EVAL_PIDS], ["--stop-timeout", "1"], ["--log-driver", "json-file"], ["--name", `${net.name}-eval`]] as const) {
@@ -398,7 +502,12 @@ export function freshEvalSandboxArgProblems(args: readonly string[], net: Pick<S
   const labelKeys = (flags.get("--label") ?? []).map((label) => label.split("=")[0]!);
   const runLabels = [RUN_NETWORK_LABEL, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_WORKSPACE_LABEL];
   if (labelKeys.length !== runLabels.length || runLabels.some((key) => labelKeys.filter((candidate) => candidate === key).length !== 1)) problems.push("the sandbox carries the round network's labels and no other");
-  for (const host of flags.get("--add-host") ?? []) if (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp) problems.push("a pinned name points somewhere other than the model helper");
+  const serviceHosts = new Set((expected.serviceHosts ?? []).map((entry) => `${entry.alias}:${entry.address}`));
+  if (sealed && flags.has("--add-host")) problems.push("a sealed sandbox pins no name with --add-host");
+  // A pinned name points at the model helper, or is one of the run's own service names at that service's helper address (E1). Nothing else.
+  // A service entry is checked again here (plain alias, an address in the run's helper range .16 to .47), not only where it was made.
+  for (const entry of expected.serviceHosts ?? []) if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/u.test(entry.alias) || !new RegExp(`^${net.checkSandboxIp.replace(/\.\d+$/u, "").replace(/\./gu, "\\.")}\\.(?:1[6-9]|2\\d|3\\d|4[0-6])$`, "u").test(entry.address)) problems.push("a service name is not a plain name at one of the run's helper addresses");
+  for (const host of flags.get("--add-host") ?? []) if (!serviceHosts.has(host) && (expected.helperIp === undefined || host.slice(host.lastIndexOf(":") + 1) !== expected.helperIp)) problems.push("a pinned name points somewhere other than the model helper or one of the run's own services");
   return problems;
 }
 
@@ -422,7 +531,7 @@ export async function containerMounts(docker: DockerCli, container: string): Pro
  * TE-F1C-SOCKET-ACCESS, read from the daemon: the helper mounts the bridge folder and nothing else, read-only; the sandbox mounts the checkout (bind) and its tmpfs and nothing else, and never the bridge folder. A look that
  * cannot be read is a failure. Fixed words; no path is repeated.
  */
-export function bridgeFolderMountProblems(input: { helper: Awaited<ReturnType<typeof containerMounts>>; sandbox: Awaited<ReturnType<typeof containerMounts>>; bridgeDir: string; checkout: string }): string[] {
+export function bridgeFolderMountProblems(input: { helper: Awaited<ReturnType<typeof containerMounts>>; sandbox: Awaited<ReturnType<typeof containerMounts>>; bridgeDir: string; checkout: string; dnsFiles?: FreshEvalDnsFiles | undefined }): string[] {
   const problems: string[] = [];
   const realBridge = realOrSelf(input.bridgeDir);
   if (input.helper === undefined) problems.push("the helper's mounts could not be read");
@@ -434,7 +543,12 @@ export function bridgeFolderMountProblems(input: { helper: Awaited<ReturnType<ty
   else {
     if (input.sandbox.some((mount) => isUnder(realOrSelf(mount.source), realBridge))) problems.push("the sandbox mounts the bridge folder");
     const binds = input.sandbox.filter((mount) => mount.type !== "tmpfs");
-    if (binds.length !== 1 || realOrSelf(binds[0]!.source) !== realOrSelf(input.checkout) || binds[0]!.destination !== FRESH_EVAL_WORKSPACE) problems.push("the sandbox must mount the checkout and nothing else");
+    // The checkout, and (sealed, E2) the run's own two name files read-only over /etc/resolv.conf and /etc/hosts: nothing else.
+    const checkoutBinds = binds.filter((mount) => mount.destination === FRESH_EVAL_WORKSPACE);
+    const others = binds.filter((mount) => mount.destination !== FRESH_EVAL_WORKSPACE);
+    if (checkoutBinds.length !== 1 || realOrSelf(checkoutBinds[0]!.source) !== realOrSelf(input.checkout)) problems.push("the sandbox must mount the checkout and nothing else");
+    const wanted = input.dnsFiles === undefined ? [] : [[RESOLV_CONF_TARGET, input.dnsFiles.resolvConfPath], [HOSTS_TARGET, input.dnsFiles.hostsPath]] as const;
+    if (others.length !== wanted.length || !wanted.every(([target, source]) => others.some((mount) => mount.destination === target && !mount.rw && realOrSelf(mount.source) === realOrSelf(source)))) problems.push("the sandbox must mount the checkout and nothing else");
   }
   return problems;
 }
@@ -446,7 +560,7 @@ function realOrSelf(path: string): string {
  * The `vertex` row (L4-EVV) gets the Vertex client's variables instead of the Gemini ones, the same ones the catalog row lists as verified for google-genai in Vertex mode: its base URL, Rovara's placeholder project and location (the gateway maps
  * them to the connected ones), and the metadata-server pair that lets Application Default Credentials find a dummy token at the helper (`helperIp:8081`). No API key of any kind: a key next to a project makes the client use the express
  * form, which has no project in its path and which the gateway does not serve. A `gemini` row's lines are exactly as before. */
-export function freshEvalEnvironment(input: { rowId: string; token: string; side: "old" | "new"; runs: 1 | 2 | 3; ids: readonly string[]; helperIp?: string; /** L4-EVS: only when an environment was prepared: a `pip --user` install in the install step lives in the checkout and the run finds it. */ pythonUserBase?: boolean }): string {
+export function freshEvalEnvironment(input: { rowId: string; token: string; side: "old" | "new"; runs: 1 | 2 | 3; ids: readonly string[]; helperIp?: string; /** L4-E56: the path of the round's PUBLIC certificate inside the box: the trust variables (names and this one path; never a key or PEM text). */ standInCertificate?: string; /** L4-EVS: only when an environment was prepared: a `pip --user` install in the install step lives in the checkout and the run finds it. */ pythonUserBase?: boolean; /** L4-E12 (E1): the connection variables of the run's services (`DATABASE_URL`, `PG*`, `REDIS_URL`, ...): plain `[name, value]` pairs, after the model's and before the run's own. A name already set, or one of Rovara's, is refused. */ services?: ReadonlyArray<readonly [string, string]> }): string {
   const base = `${MODEL_HELPER_BASE_URL}/p/${input.rowId}/x/${input.token}`;
   const model: [string, string][] = input.rowId === EVAL_VERTEX_ROW
     ? [
@@ -459,11 +573,14 @@ export function freshEvalEnvironment(input: { rowId: string; token: string; side
     ...model,
     ["HOME", "/tmp"],
     ...(input.pythonUserBase === true ? [["PYTHONUSERBASE", EVAL_PYTHON_USER_BASE] as [string, string]] : []),
+    ...(input.services ?? []).map(([name, value]): [string, string] => [name, value]),
+    ...(input.standInCertificate === undefined ? [] : evalStandInTrustEnvironment(input.standInCertificate)),
     [FRESH_EVAL_SIDE_VARIABLE, input.side],
     [FRESH_EVAL_RUNS_VARIABLE, String(input.runs)],
     [FRESH_EVAL_IDS_VARIABLE, input.ids.join(",")],
   ];
   if (lines.some(([, value]) => !/^[\x21-\x7e]{1,40000}$/u.test(value))) throw new Error("the fresh eval environment is not plain");
+  if (lines.some(([name]) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/u.test(name)) || new Set(lines.map(([name]) => name)).size !== lines.length) throw new Error("the fresh eval environment names a variable twice or one that is not a plain name");
   return `${lines.map(([name, value]) => `${name}=${value}`).join("\n")}\n`;
 }
 /** The helper's metadata address for a Vertex row: its own address (.9 of the round network) and the metadata port; any other address is refused. */
@@ -488,6 +605,8 @@ const INSTALL_NETWORK_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u;
 export interface EvalInstallArgsInput {
   /** The machine's shared sandbox network (`agentx-task`, or the one `AGENTX_SANDBOX_NETWORK` names). Never the round's network. */
   readonly network: string;
+  /** L4-NETG: the one name server (an IPv4 address), set only when the shared network is the gateway-mode internal network. Absent: no `--dns`, byte-identical to before. */
+  readonly dns?: string | undefined;
   readonly image: string;
   readonly name: string;
   readonly checkout: string;
@@ -508,7 +627,7 @@ export function evalInstallRunArgs(input: EvalInstallArgsInput): string[] {
   const args = [
     "run", "--detach", "--pull=never", "--name", input.name, "--stop-timeout", "1",
     "--label", `${TASK_SANDBOX_LABEL}=${input.taskId}`, "--label", `${TASK_SANDBOX_WORKSPACE_LABEL}=${input.workspace}`,
-    "--network", input.network, ...modelHostAddHostArgs(installModelBlock()),
+    "--network", input.network, ...(input.dns === undefined ? [] : ["--dns", input.dns]), ...modelHostAddHostArgs(installModelBlock()),
     "--user", INSTALL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "1024",
     "--log-driver", "json-file", ...INSTALL_LOG_OPTIONS.flatMap(option => ["--log-opt", option]),
@@ -519,15 +638,15 @@ export function evalInstallRunArgs(input: EvalInstallArgsInput): string[] {
     "--entrypoint", SANDBOX_INIT,
     input.image, "--", input.command.executable, ...input.command.args,
   ];
-  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
+  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network, ...(input.dns === undefined ? {} : { dns: input.dns }) }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
   return args;
 }
 
-const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
+const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--dns", "--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
 const INSTALL_SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 
 /** Reads an install step's `docker run` arguments back and names every way they are unsound, in fixed words. Allow-list: a flag the install box does not take (an env file, a second mount, a published port, a device, a DNS server, an address, a capability) is a problem. */
-export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string }): string[] {
+export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string; readonly dns?: string | undefined }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -550,6 +669,8 @@ export function evalInstallArgProblems(args: readonly string[], expected: { read
   const only = (flag: string, wanted: string): boolean => (flags.get(flag) ?? []).length === 1 && flags.get(flag)![0] === wanted;
   if (image === undefined || !/^(?:[A-Za-z0-9][A-Za-z0-9._/:-]{0,200}@sha256:[a-f0-9]{64}|sha256:[a-f0-9]{64})$/u.test(image)) problems.push("the install box must run the worker's pinned image");
   if (!INSTALL_NETWORK_NAME.test(expected.network) || !only("--network", expected.network)) problems.push("the install box must be on the shared sandbox network and on no other network");
+  // L4-NETG: a name server only when the caller expects exactly that one (the gateway's address); otherwise any `--dns` is a flag the install box does not take, as before.
+  if (expected.dns === undefined ? flags.has("--dns") : isIP(expected.dns) !== 4 || !only("--dns", expected.dns)) problems.push("a flag the install box does not take");
   if (!only("--cap-drop", "ALL")) problems.push("the install box must drop every capability");
   if (!only("--security-opt", "no-new-privileges")) problems.push("the install box must have no-new-privileges and no other security option");
   if (!flags.has("--read-only")) problems.push("the install box's root must be read-only");
@@ -579,14 +700,11 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
   let rounds = 0;
   const docker = config?.docker;
   const call = (args: string[], timeoutMs = DOCKER_CALL_MS) => docker.run(args, { timeoutMs }).catch(() => ({ exitCode: -1, stdout: "", stderr: "", timedOut: false }));
-  return {
-    available(): boolean {
-      if (configProblem(config)) return false;
-      try { return modelHelperOffer(config.environment ?? process.env).offered; } catch { return false; }
-    },
-    async run(input: FreshEvalSandboxRun): Promise<FreshEvalSandboxResult> {
+  /** L4-E12: ONE round, shared by `run` (the paid eval: the model over the bridge) and `dryRun` (the free dry run: scripted replies, nothing bridged). A dry round hands what it saw to `dry.observed` and returns nothing. */
+  const execute = async (input: FreshEvalSandboxRun, dry: { readonly observed: (seen: EvalDryRunObservation) => void } | undefined): Promise<FreshEvalSandboxResult | undefined> => {
       if (configProblem(config)) throw new Error("no fresh sandbox");
       if (runProblem(input)) throw new Error("fresh eval run unreadable");
+      const dryRun = dry !== undefined;
       if (input.signal.aborted) throw new Error("eval stage stopped");
       const now = config.now ?? Date.now;
       const round = ++rounds;
@@ -616,8 +734,13 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
       let installed = false;
       const remainingMs = (): number => (installed ? Math.max(1, deadline - now()) : config.roundBudgetMs);
       // What must never show in a failed run's output tail: this run's token and the placeholder keys.
-      const secrets = [input.model.token, MODEL_DUMMY_KEY];
-      const outcome = await (async (): Promise<FreshEvalSandboxResult> => { try {
+      const secrets: string[] = [input.model.token, MODEL_DUMMY_KEY];
+      // L4-E12: the sealed name server (E2) is used when asked for, for a dry run, and (unless switched off) whenever the round has services; otherwise loopback DNS as before.
+      // A stand-in always uses the sealed name server (a setting that says otherwise cannot leave the vendor names unresolved).
+      const sealed = dryRun || config.sealedDns === true || config.standIns !== undefined || (config.sealedDns === undefined && config.services !== undefined);
+      let servicesRun: EvalServicesStarted | undefined;
+      let standIn: StartedEvalStandIns | undefined;
+      const outcome = await (async (): Promise<FreshEvalSandboxResult | undefined> => { try {
         // 0. The base side: the working sandbox is paused (checked from the daemon) BEFORE the checkout is written and stays paused until the run is over, so nothing of the agent's runs beside the base round or
         // while its objects are read. A sandbox that was already paused is left paused after (it is not ours to wake).
         if (input.side === "old" && config.workingSandbox !== null) {
@@ -632,6 +755,14 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         await chmod(checkout, 0o755);
         await (config.materialize ?? ((root, sha, destination, signal) => createProcessCandidateGit(runDir).materializeInto(root, sha, destination, signal)))(config.repository.directory, commit, checkout, input.signal);
         if (input.signal.aborted) throw new Error("eval stage stopped");
+        // 1a. L4-E56: the round's PUBLIC certificate, written NOW, before any install step runs repository code in a box that mounts this checkout read-write as the worker's own uid: such code could plant a link where the worker
+        // writes. The folder is removed first (it is the worker's own materialized content, a link in it is removed as a link), made new, and the file created exclusively and never through a link. Never in a dry run.
+        if (!dryRun && config.standIns !== undefined) {
+          const certificateDir = join(checkout, dirname(EVAL_CA_RELATIVE_PATH));
+          await rm(certificateDir, { recursive: true, force: true });
+          await mkdir(certificateDir, { mode: 0o755 });
+          await writeFile(join(checkout, EVAL_CA_RELATIVE_PATH), config.standIns.round.certificatePem, { mode: 0o644, flag: "wx" });
+        }
         // 1b. L4-EVS: the environment. The saved image's dependency folders next to the commit's files, or (when there is none, or it cannot be used) the project's approved install steps, run now in a box with no
         // model route and gone before the round network exists. No environment in the plan: nothing here runs and the sealed run is exactly what it was.
         const environment = config.evalEnvironment;
@@ -642,7 +773,10 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         } else if (environment?.kind === "install") installs = environment.commands;
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // Only a plan with install steps reads the network setting (a plan without an environment is byte-identical to before).
-        const installNetwork = installs.length === 0 ? "" : config.installNetwork ?? sandboxNetworkFromEnvironment(config.environment ?? process.env) ?? TASK_SANDBOX_NETWORK;
+        // L4-NETG: on a worker whose sandboxes go through the egress gateway the install box joins the gateway's internal network with the gateway as its only name server (it never falls back to the open bridge).
+        const gateway = installs.length === 0 ? undefined : gatewayEgressFor(config.environment ?? process.env);
+        const installNetwork = installs.length === 0 ? "" : gateway?.network ?? config.installNetwork ?? sandboxNetworkFromEnvironment(config.environment ?? process.env) ?? TASK_SANDBOX_NETWORK;
+        const installDns = gateway?.dns ?? config.installDns;
         const taskHash = createHash("sha256").update(`eval-install\0${config.taskId}`).digest("hex").slice(0, 12);
         let step = 0;
         for (const command of installs) {
@@ -651,7 +785,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           installBoxes.push(name);
           installing = name;
           installed = true;
-          const started = await call(evalInstallRunArgs({ network: installNetwork, image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
+          const started = await call(evalInstallRunArgs({ network: installNetwork, ...(installDns === undefined ? {} : { dns: installDns }), image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
           if (started.exitCode !== 0) throw new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "install", output: started.stderr, secrets }));
           const waited = await call(["wait", name], Math.min(EVAL_INSTALL_STEP_MAX_MS, remainingMs()));
           if (input.signal.aborted) throw new Error("eval stage stopped");
@@ -666,33 +800,102 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           if (waited.exitCode !== 0 || code !== 0) throw new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "install", exitCode: code, output: `${logged.stdout}\n${logged.stderr}`, secrets }));
         }
         // 2. The helper's run files beside the socket (its one mount): the row it serves and an empty reply bundle (mode real answers from the bridge only).
-        const bundle = buildModelReplyBundle([]);
+        // A dry run answers every model call from a scripted reply (mode `scripted`, no bridge socket: nothing can reach the gateway, so nothing can cost money); a paid run's helper has no scripted reply (mode `real` over the bridge).
+        const bundle = buildModelReplyBundle(dryRun ? DRY_RUN_REPLY_SETS : []);
         await writeFile(join(bridgeDir, "rows.json"), JSON.stringify([{ id: config.rowId, family: vertexRow ? "vertex" : "gemini" }]), { mode: 0o644 });
         await writeFile(join(bridgeDir, "replies.json"), modelReplyBundleBytes(bundle), { mode: 0o644 });
         // 3. The round network and the helper on it (.9), serving only the sandbox's address (.4), real mode over the bridge socket.
         helper = await startModelHelper(docker, {
           kind: "round", id: `${config.taskId}#${randomBytes(8).toString("hex")}`, round, workspace: config.workspace, roundBudgetMs: config.roundBudgetMs, image: config.image, runDir: bridgeDir,
           helperArgs: ({ listen, caller }) => modelHelperArgs({
-            listen, port: MODEL_HELPER_DEFAULT_PORT, metaPort: vertexRow ? MODEL_METADATA_PORT : undefined, caller, mode: "real", rows: MODEL_HELPER_ROWS_PATH, replies: MODEL_HELPER_REPLIES_PATH, digest: modelReplyBundleDigest(bundle),
-            ledger: MODEL_HELPER_LEDGER_PATH, blockState: "by_name", projectId: vertexRow ? EVAL_VERTEX_PLACEHOLDER.projectId : undefined, recordEscapes: false, bridgeSocket: `${MODEL_HELPER_RUN_DIR}/${EVAL_BRIDGE_SOCKET_NAME}`,
+            listen, port: MODEL_HELPER_DEFAULT_PORT, metaPort: vertexRow ? MODEL_METADATA_PORT : undefined, caller, mode: dryRun ? "scripted" : "real", rows: MODEL_HELPER_ROWS_PATH, replies: MODEL_HELPER_REPLIES_PATH, digest: modelReplyBundleDigest(bundle),
+            ledger: MODEL_HELPER_LEDGER_PATH, blockState: "by_name", projectId: vertexRow ? EVAL_VERTEX_PLACEHOLDER.projectId : undefined, recordEscapes: false, ...(dryRun ? {} : { bridgeSocket: `${MODEL_HELPER_RUN_DIR}/${EVAL_BRIDGE_SOCKET_NAME}` }),
           }),
           ...(config.environment === undefined ? {} : { environment: config.environment }), ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }),
         });
         if (helper.sandboxRole !== "check") throw new Error("not a round network");
         const block = helper.sandboxBlock({});
         if (input.signal.aborted) throw new Error("eval stage stopped");
+        // 4. L4-E12 (E1): this run's OWN copy of the project's services, on this round's network at .16 to .47 (never in a dry run: a dry run must SEE what the eval needs, so it is given nothing). A start that fails ends the run.
+        if (!dryRun && config.services !== undefined) {
+          const net = helper.network;
+          // Only the stand-in path supplies a runner; switch-off calls are unchanged. Each command
+          // gets the side's own checkout and the SAME round network, with the eval box's walls.
+          servicesRun = config.reportStandInDatabases !== true ? await config.services.start(net, input.signal) : await config.services.start(net, input.signal, started => async (command, signal, lock) => {
+            if (signal.aborted || input.signal.aborted || now() >= deadline) throw new Error("eval stage stopped");
+            const path = seedPathInRepository(`${command.cwd}/.rovara-command`, config.repository.directory);
+            if (path === undefined) throw new Error("the eval seed folder is unavailable");
+            const cwd = posix.dirname(path);
+            if (lock !== undefined && !await seedLockHolds(command, lock, checkoutSeedReader(checkout, cwd, [checkout]))) throw new Error("the eval seed lock differs");
+            const name = `${net.name}-eval`;
+            installBoxes.push(name);
+            installing = name;
+            installed = true;
+            try {
+              // The existing argument guard pins the reserved eval name/address. This temporary
+              // preparation box is removed before the eval box takes that name and address.
+              // No bridge token is given to a project preparation command.
+              await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: MODEL_DUMMY_KEY, side: input.side, runs: 1, ids: input.ids, helperIp: helper!.helperIp, pythonUserBase: environment !== undefined, services: [...started.env, ...Object.entries(command.env ?? {})] }), { mode: 0o600 });
+              const args = freshEvalSandboxRunArgs({ net, image: config.image, name, checkout, envFile, block: block.block, command: { executable: command.executable, args: command.args, cwd }, serviceHosts: started.hosts }, { bridgeDir });
+              const began = await call(args, SANDBOX_START_MS);
+              await rm(envFile, { force: true });
+              if (began.exitCode !== 0 || signal.aborted || input.signal.aborted) throw new Error("the eval seed could not start");
+              if (bridgeFolderMountProblems({ helper: await containerMounts(docker, helper!.helperName), sandbox: await containerMounts(docker, name), bridgeDir, checkout }).length > 0) throw new Error("the eval seed is not isolated");
+              const waited = await call(["wait", name], Math.min(command.timeoutSeconds * 1000, remainingMs()));
+              if (signal.aborted || input.signal.aborted) throw new Error("eval stage stopped");
+              const code = /^-?\d+$/u.test(waited.stdout.trim()) ? Number(waited.stdout.trim()) : null;
+              return { exitCode: waited.exitCode === 0 ? code : null, timedOut: waited.timedOut === true };
+            } finally {
+              await call(["rm", "--force", name]);
+              await rm(envFile, { force: true });
+              installing = undefined;
+            }
+          });
+          secrets.push(...servicesRun.secrets);
+        }
+        if (input.signal.aborted) throw new Error("eval stage stopped");
+        // 4a. L4-E56: the round's outside-HTTP stand-in at the sinkhole's address (.47), serving only the box (.4) on ports 80 and 443. One retry; a second failure fails the run (a Rovara problem: the eval is "Not run", the task still
+        // reaches its PR). The PUBLIC certificate was written into the checkout right after it was materialized (step 1a: before any install step can plant a link); the authority's key stays in the helper's own read-only mount and the worker's memory. Never in a dry run.
+        let standInNames: string[] = [];
+        if (!dryRun && config.standIns !== undefined) {
+          const round = config.standIns.round;
+          const reserved = new Set([...sealedModelHostPairs(block.block).map((pair) => pair.slice(0, pair.indexOf("="))), MODEL_HELPER_NAME, SINKHOLE_ALIAS, CHECK_SANDBOX_HOSTNAME]);
+          standInNames = round.plan.map((entry) => entry.host).filter((host) => isEvalStandInPlanHost(host) && !reserved.has(host));
+          const standInDir = join(runDir, "standin-run");
+          await mkdir(standInDir, { mode: 0o700 });
+          standIn = await (config.standIns.start ?? startEvalStandIns)({ docker, image: config.image, net: helper.network, parent: standInDir, content: round.setContent(), roundBudgetMs: config.roundBudgetMs, ...(config.sleep === undefined ? {} : { sleep: config.sleep }) });
+          if (input.signal.aborted) throw new Error("eval stage stopped");
+        }
+        // 4b. L4-E12 (E2): the sealed name server at .2: the run's service names and the model hosts in its table, every other name to the sinkhole (.47), every unknown name recorded. Its two files are mounted read-only over /etc/resolv.conf and /etc/hosts.
+        const sinkholeIp = runNetworkHelperIp(helper.network.slot, SINKHOLE_HELPER_INDEX);
+        const serviceHosts: RunHostEntry[] = servicesRun === undefined || servicesRun.hosts.length === 0 ? [] : checkSandboxNames(helper.network, servicesRun.hosts, sinkholeIp).filter((entry) => entry.alias !== SINKHOLE_ALIAS);
+        const dnsName = `${helper.network.name}-dns`;
+        let dnsFiles: FreshEvalDnsFiles | undefined;
+        if (sealed) {
+          const names = checkSandboxNames(helper.network, serviceHosts, sinkholeIp);
+          const modelPairs = sealedModelHostPairs(block.block);
+          dnsFiles = { resolvConfPath: join(runDir, "resolv.conf"), hostsPath: join(runDir, "hosts") };
+          await writeFile(dnsFiles.resolvConfPath, checkSandboxResolvConf(helper.network.dnsHelperIp), { flag: "wx", mode: 0o644 });
+          await writeFile(dnsFiles.hostsPath, `${checkSandboxHostsFile(helper.network.checkSandboxIp, names)}${modelPairs.map((pair) => `${pair.slice(pair.indexOf("=") + 1)} ${pair.slice(0, pair.indexOf("="))}\n`).join("")}${standIn === undefined ? "" : evalStandInHostsLines(standIn.address, standInNames)}`, { flag: "wx", mode: 0o644 });
+          await chmod(dnsFiles.resolvConfPath, 0o644);
+          await chmod(dnsFiles.hostsPath, 0o644);
+          const dnsStarted = await call([...sealedDnsHelperRunArgs({ net: helper.network, image: config.image, helpers: serviceHosts, sinkholeIp }), ...modelPairs.flatMap((pair) => ["--host", pair]), ...(standIn === undefined ? [] : evalStandInDnsPairs(standIn.address, standInNames).flatMap((pair) => ["--host", pair]))], SANDBOX_START_MS);
+          if (dnsStarted.exitCode !== 0) throw new Error("the sealed name server could not start");
+          await waitForSealedDnsHelper(docker, dnsName, { signal: input.signal, ...(config.now === undefined ? {} : { now: config.now }), ...(config.sleep === undefined ? {} : { sleep: config.sleep }) });
+        }
+        if (input.signal.aborted) throw new Error("eval stage stopped");
         // 5. The sandbox: the env file (0600, read by the docker CLI only), then the container on the round network only, then the daemon's own view of both containers' mounts.
         const name = `${helper.network.name}-eval`;
         /** Starts the sealed eval once (`runs` is what the command is told) and waits for it: its own exit, the run's deadline, or the signal (which kills the sandbox at once). */
         const sealedRun = async (runs: 1 | 2 | 3): Promise<{ notBeforeMs: number; code: number | undefined; timedOut: boolean; output: string }> => {
-          await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: input.model.token, side: input.side, runs, ids: input.ids, helperIp: helper!.helperIp, ...(environment === undefined ? {} : { pythonUserBase: true }) }), { mode: 0o600 });
-          const args = freshEvalSandboxRunArgs({ net: helper!.network, image: config.image, name, checkout, envFile, block: block.block, command: config.command }, { bridgeDir });
+          await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: input.model.token, side: input.side, runs, ids: input.ids, helperIp: helper!.helperIp, ...(environment === undefined ? {} : { pythonUserBase: true }), ...(servicesRun === undefined ? {} : { services: servicesRun.env }), ...(standIn === undefined ? {} : { standInCertificate: posix.join(FRESH_EVAL_WORKSPACE, EVAL_CA_RELATIVE_PATH) }) }), { mode: 0o600 });
+          const args = freshEvalSandboxRunArgs({ net: helper!.network, image: config.image, name, checkout, envFile, block: block.block, command: config.command, ...(serviceHosts.length === 0 ? {} : { serviceHosts }), ...(dnsFiles === undefined ? {} : { dnsFiles }) }, { bridgeDir });
           const notBeforeMs = now();
           sandboxName = name;
           const started = await call(args, SANDBOX_START_MS);
           await rm(envFile, { force: true });
           if (started.exitCode !== 0) throw new Error("the fresh sandbox could not start");
-          const mounts = bridgeFolderMountProblems({ helper: await containerMounts(docker, helper!.helperName), sandbox: await containerMounts(docker, name), bridgeDir, checkout });
+          const mounts = bridgeFolderMountProblems({ helper: await containerMounts(docker, helper!.helperName), sandbox: await containerMounts(docker, name), bridgeDir, checkout, dnsFiles });
           if (mounts.length > 0) { kill(); throw new Error("the fresh sandbox is not isolated from the bridge folder"); }
           // 6. Wait for the eval to end.
           const waited = await call(["wait", name], remainingMs());
@@ -708,8 +911,15 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         const reportTarget = join(checkout, config.report.cwd, config.report.argument);
         const readReport = (notBeforeMs: number) => readContainedReport({ root: checkout, cwd: config.report.cwd, argument: config.report.argument, maxBytes: TEST_REPORT_MAX_BYTES, notBeforeMs });
         /** A run that left no readable report AND did not end well is a failed eval with a named cause; one that ended well without a report reads as it always did (no measures file). */
-        const failed = (run: Awaited<ReturnType<typeof sealedRun>>): EvalSandboxRunFailure => new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "run", exitCode: run.code, timedOut: run.timedOut, output: run.output, secrets }));
+        const failed = (run: Awaited<ReturnType<typeof sealedRun>>): EvalSandboxRunFailure => new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "run", exitCode: run.code, timedOut: run.timedOut, output: run.output, secrets, modelRoute: { hosts: block.block.hosts, suffixes: block.block.suffixesNotBlockedByName } }));
         const firstRun = await sealedRun(input.runs);
+        // L4-E12 (E2): a dry run reads no report. It hands back what the one run left: its output, how it ended and the sealed name server's record (read while the name server still runs), then everything is stopped below.
+        if (dry !== undefined) {
+          const dns = dnsFiles === undefined ? { unknown: [], dropped: 0, unrecorded: 0 } : await readSealedDnsRecord(docker, dnsName);
+          dry.observed({ code: firstRun.code, timedOut: firstRun.timedOut, output: firstRun.output, dns, modelRoute: { hosts: [...block.block.hosts], suffixes: [...block.block.suffixesNotBlockedByName] }, secrets: [...secrets], sinkholeIp });
+          finished = true;
+          return undefined;
+        }
         const firstRead = await readReport(firstRun.notBeforeMs);
         let notBeforeMs = firstRun.notBeforeMs;
         let bytes: Buffer | undefined;
@@ -750,10 +960,20 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           await mkdir(dirname(target), { recursive: true, mode: 0o700 });
           await writeFile(target, bytes, { mode: 0o600 });
         }
+        // Capture actual database lookups before the disposable helpers and network disappear.
+        await servicesRun?.observe?.(input.ids, input.signal).catch(() => undefined);
+        // 8. L4-E56: the stand-in's summary, read while the helper is still up and after the sandbox's last exit (the helper writes it before it sends each answer). An unreadable one says nothing, so the run counts as having hit a gap.
+        // L4-EINT: what this run was stood in for: databases by engine (the services' own ports), planned outside hosts, and the fixed telemetry entries answered `OK`. A database-only round reports no gap and empty counts.
+        const databases = config.reportStandInDatabases !== true ? [] : [...new Set((servicesRun?.started ?? []).flatMap((entry) => entry.ports.map((port) => evalStandInEngineOfPort(port))).filter((engine): engine is NonNullable<typeof engine> => engine !== undefined))];
+        const absorbed = config.standIns === undefined || standIn === undefined ? undefined : config.standIns.round.absorb(await standIn.summary().catch(() => undefined));
+        const standInResult: EvalStandInRunReport | undefined = absorbed !== undefined && config.standIns !== undefined
+          ? { ...absorbed, telemetry: config.standIns.round.telemetry(), hosts: config.standIns.round.plannedHosts(), databases }
+          : databases.length > 0 ? { hitGap: false, counts: EMPTY_EVAL_STAND_IN_COUNTS, databases } : undefined;
         finished = true;
         return {
           report: { root: reportRoot, cwd: config.report.cwd, argument: config.report.argument, notBeforeMs: Math.min(notBeforeMs, firstRun.notBeforeMs) },
           ...(input.side === "old" ? { attestation: attestRovaraOnlyBaseCheckout({ baseCommit: commit }) } : {}),
+          ...(standInResult === undefined ? {} : { standIns: standInResult }),
         };
       } finally {
         input.signal.removeEventListener("abort", onAbort);
@@ -763,19 +983,49 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         // Once more after the first removal has returned: a removal sent while `docker run` was still creating the container may have found nothing. (The network's stop also removes every container with its labels.)
         if (sandboxName !== undefined) await call(["rm", "--force", sandboxName]);
         for (const box of installBoxes) await call(["rm", "--force", box]);
+        // This run's services go before the network does (the network's own stop would remove them too; this one waits for their files).
+        await standIn?.stop().catch(() => undefined);
+        await servicesRun?.stop().catch(() => undefined);
         await helper?.stop().catch(() => undefined);
         if (paused && config.workingSandbox !== null) {
           await call(["unpause", config.workingSandbox]);
           woke = (await call(["inspect", "--format", "{{.State.Paused}}", config.workingSandbox])).stdout.trim() === "false";
         }
         await rm(runDir, { recursive: true, force: true }).catch(() => undefined);
-        if (!finished) await rm(reportRoot, { recursive: true, force: true }).catch(() => undefined);
+        // A dry run copies no report out, so its report folder never stays.
+        if (!finished || dryRun) await rm(reportRoot, { recursive: true, force: true }).catch(() => undefined);
         await rm(join(bridgeDir, "rows.json"), { force: true }).catch(() => undefined);
         await rm(join(bridgeDir, "replies.json"), { force: true }).catch(() => undefined);
       } })();
       // A working sandbox left paused is a fault of its own (checked after every other step is done): the run is not a result.
       if (!woke) throw new Error("the working sandbox could not be unpaused");
       return outcome;
+  };
+  return {
+    available(): boolean {
+      if (configProblem(config)) return false;
+      try { return modelHelperOffer(config.environment ?? process.env).offered; } catch { return false; }
+    },
+    async run(input: FreshEvalSandboxRun): Promise<FreshEvalSandboxResult> {
+      const done = await execute(input, undefined);
+      if (done === undefined) throw new Error("fresh eval run unreadable");
+      return done;
+    },
+    async dryRun(input: FreshEvalDryRun): Promise<EvalDryRunObservation> {
+      if (configProblem(config)) throw new Error("no fresh sandbox");
+      if (!(input?.signal instanceof AbortSignal)) throw new Error("fresh eval run unreadable");
+      await mkdir(config.scratchDir, { recursive: true, mode: 0o700 });
+      const dir = await mkdtemp(join(config.scratchDir, "dry-"));
+      try {
+        // The helper's one mount is a folder named `models`; a dry run has no bridge, so it holds only the helper's own run files.
+        const bridgeDir = join(dir, EVAL_HELPER_DIR_NAME);
+        await mkdir(bridgeDir, { mode: 0o700 });
+        let seen: EvalDryRunObservation | undefined;
+        // The old side is main (the configured base commit). The token is a placeholder that opens nothing: there is no bridge for it to reach.
+        await execute({ side: "old", ids: input.ids, runs: 1, signal: input.signal, model: { socketPath: join(bridgeDir, EVAL_BRIDGE_SOCKET_NAME), token: DRY_RUN_TOKEN } }, { observed: (value) => { seen = value; } });
+        if (seen === undefined) throw new Error("the dry run left nothing");
+        return seen;
+      } finally { await rm(dir, { recursive: true, force: true }).catch(() => undefined); }
     },
   };
 }

@@ -1,6 +1,7 @@
 // The two access-stack policy documents as pure functions: no CDK imports, so they can be unit
 // tested with plain strings and printed as JSON (the access stack passes CDK tokens instead).
 import { STACK_PARTS, environmentStackName } from "./environments.js";
+import { savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName } from "./saved-env-image.js";
 
 export interface PolicyScope {
   env: string;
@@ -155,6 +156,76 @@ function environmentInstanceProfiles(scope: Pick<PolicyScope, "env" | "partition
 }
 
 /**
+ * Saved environment images (L4-SE6, owner-approved 2026-11-18): the broker assumes three fixed-name roles (push, pull, manage), each with a session policy that names ONE repository
+ * (contracts saved-env-image.ts). Three statements carry it, all for named environments:
+ *   - `AssumeSessionRoles` (the boundary only): `sts:AssumeRole` on exactly those three role ARNs, and only for the broker's role (`aws:PrincipalArn`). The boundary has no other
+ *     `sts:AssumeRole`: `sts:*` would let a bounded role assume any same-account role that trusts the account. The three roles' trust policies name the broker role too, so the broker's own
+ *     inline policy needs nothing (it is at its size pin). The company-secrets role (lane T6) has the same gap and is NOT added here (not approved in this change): when it is, its role ARN
+ *     goes into `brokerAssumableRoleArns`, with `sts:TagSession`, so the two share ONE statement.
+ *   - `IamFixedNameRolesNotYetCreated` (deploy role and boundary): CloudFormation looks a fixed-name role up by its PATH-LESS ARN (iam:GetRole) before it creates it, and cleans it up by that ARN when
+ *     a create rolls back; IAM, which cannot know the path of a role that does not exist yet, checks `role/<name>`. Lookups and deletes only: no create or change action, so a role at the root path
+ *     can never be made through it (the real role is created under the environment path, where `IamRoles` applies).
+ *   - `EcrTemplateServiceLinkedRole` (deploy role and boundary): the first repository creation template in an account makes ECR create AWSServiceRoleForECRTemplate, and the caller must hold
+ *     iam:CreateServiceLinkedRole (https://docs.aws.amazon.com/AmazonECR/latest/userguide/slr-rct.html). Named exactly, apart from `SERVICE_LINKED_ROLE_SERVICES`. The deploy role is itself
+ *     bounded (the access stack's aspect), so the boundary carries it too.
+ */
+const FIXED_NAME_ROLE_LOOKUP_ACTIONS = [
+  "iam:GetRole",
+  "iam:GetRolePolicy",
+  "iam:ListRolePolicies",
+  "iam:ListAttachedRolePolicies",
+  "iam:DeleteRolePolicy",
+  "iam:DetachRolePolicy",
+  "iam:DeleteRole",
+];
+const ECR_TEMPLATE_SERVICE = "ecr.amazonaws.com";
+
+/** The broker's role, as the three session roles' trust and the boundary's condition name it: `agentx-<env>-broker-role` under the environment's path. */
+export function brokerRoleArn(scope: Pick<PolicyScope, "env" | "partition" | "account">): string {
+  return `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}agentx-${scope.env}-broker-role`;
+}
+
+/** The three roles the broker assumes for a saved environment image (push, pull, manage), by their exact ARNs under the environment's path. */
+export function savedEnvSessionRoleArns(scope: Pick<PolicyScope, "env" | "partition" | "account">): string[] {
+  return [savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env)]
+    .map((name) => `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}${name}`);
+}
+
+/** Every role the broker may assume under the boundary: today the three saved environment image roles only. */
+export function brokerAssumableRoleArns(scope: Pick<PolicyScope, "env" | "partition" | "account">): string[] {
+  return savedEnvSessionRoleArns(scope);
+}
+
+function assumeSessionRolesStatement(scope: Pick<PolicyScope, "env" | "partition" | "account">): PolicyStatementJson {
+  return {
+    Sid: "AssumeSessionRoles",
+    Effect: "Allow",
+    Action: ["sts:AssumeRole"],
+    Resource: brokerAssumableRoleArns(scope),
+    Condition: { ArnEquals: { "aws:PrincipalArn": brokerRoleArn(scope) } },
+  };
+}
+
+function fixedNameRoleLookupStatement(scope: Pick<PolicyScope, "env" | "partition" | "account">): PolicyStatementJson {
+  return {
+    Sid: "IamFixedNameRolesNotYetCreated",
+    Effect: "Allow",
+    Action: [...FIXED_NAME_ROLE_LOOKUP_ACTIONS],
+    Resource: [savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`),
+  };
+}
+
+function ecrTemplateServiceLinkedRoleStatement(scope: Pick<PolicyScope, "partition" | "account">): PolicyStatementJson {
+  return {
+    Sid: "EcrTemplateServiceLinkedRole",
+    Effect: "Allow",
+    Action: ["iam:CreateServiceLinkedRole"],
+    Resource: `arn:${scope.partition}:iam::${scope.account}:role/aws-service-role/${ECR_TEMPLATE_SERVICE}/AWSServiceRoleForECRTemplate`,
+    Condition: { StringEquals: { "iam:AWSServiceName": ECR_TEMPLATE_SERVICE } },
+  };
+}
+
+/**
  * The inline policy of the role CloudFormation assumes to deploy this environment's stacks. The
  * boundary Deny statements name `permissionsBoundaryArn` when given, else the default boundary.
  */
@@ -196,9 +267,44 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
       Resource: `arn:${scope.partition}:iam::${scope.account}:role/aws-service-role/*`,
       Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
+    // L4-SE6: the saved environment image roles' fixed-name lookups, and ECR's creation template service-linked role (see above).
+    fixedNameRoleLookupStatement(scope),
+    ecrTemplateServiceLinkedRoleStatement(scope),
     // FR-047: the control-plane stack's monthly budget, and only that one, never budgets:* on *.
     { Sid: "Budget", Effect: "Allow", Action: [...BUDGET_ACTIONS], Resource: `arn:${scope.partition}:budgets::${scope.account}:budget/agentx-${scope.env}-monthly` },
   ];
+}
+
+// ---- Who may assume the operator role (L4-HARD, owner 2026-11-18)
+/**
+ * The operator-role principal the access stack accepts (`OperatorPrincipalArn`): empty (this account's own principals) or ONE IAM role or user. A whole
+ * account (`...:root`) is not accepted, whichever account it is: it would trust every principal of that account. The pattern is a source string because
+ * CloudFormation takes it as the parameter's AllowedPattern; OPERATOR_PRINCIPAL_PATTERN is the same pattern without the empty case.
+ */
+export const OPERATOR_PRINCIPAL_PATTERN_SOURCE = "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(role|user)/.+$";
+export const OPERATOR_PRINCIPAL_PATTERN = /^arn:aws[a-z-]*:iam::([0-9]{12}):(?:role|user)\/.+$/u;
+/** STS's external id alphabet and length (2 to 1,224 of [\w+=,.@:/-]); empty means none. */
+export const OPERATOR_EXTERNAL_ID_PATTERN_SOURCE = "^$|^[\\w+=,.@:/-]{2,1224}$";
+export const OPERATOR_EXTERNAL_ID_PATTERN = /^[\w+=,.@:/-]{2,1224}$/u;
+
+/**
+ * The refusal, in words, for an operator principal / external id pair that must not reach the access stack, or undefined when it is fine. `account` is the
+ * account the access stack is deployed to. A principal of another account is allowed only with an external id (the trust policy then lets it in only when it
+ * presents that id: access.ts); a whole-account principal is never allowed; an id with no principal is a mistake. The same rules the template's parameter
+ * patterns and Rule enforce, so a person hears it before a deploy instead of from CloudFormation.
+ */
+export function operatorTrustProblem(input: { principal?: string | undefined; externalId?: string | undefined; account: string }): string | undefined {
+  const principal = input.principal ?? "";
+  const externalId = input.externalId ?? "";
+  if (externalId !== "" && !OPERATOR_EXTERNAL_ID_PATTERN.test(externalId)) return "the operator external id must be 2 to 1224 characters of letters, digits and + = , . @ : / _ -";
+  if (principal === "") return externalId === "" ? undefined : "an operator external id is only used with an operator principal: name the role or user that will present it, or drop the external id";
+  if (/^arn:aws[a-z-]*:iam::[0-9]{12}:root$/u.test(principal)) return "the operator principal can't be a whole account (:root): name one IAM role or user, or leave it empty for this account's own principals";
+  const match = OPERATOR_PRINCIPAL_PATTERN.exec(principal);
+  if (match === null) return "the operator principal must be the ARN of one IAM role or user (arn:aws:iam::<12-digit account>:role/<name> or :user/<name>)";
+  if (match[1] !== input.account && externalId === "") {
+    return `the operator principal belongs to another AWS account (${match[1]}): a principal of another account needs an external id (--operator-external-id), which it must present to assume the operator role`;
+  }
+  return undefined;
 }
 
 /**
@@ -219,8 +325,9 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
     // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
     // not scoped further, since scoped ARNs in the identity policy already limit it to two quotas.
     { Sid: "Quotas", Effect: "Allow", Action: ["servicequotas:GetServiceQuota"], Resource: "*" },
-    // Hosted wiring (a): the sign-in function sends step-up codes through SES. Only sending, and only as an email identity of this account and region (the function's own policy narrows it
-    // to the one identity the StepUpEmailSender parameter names); never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role).
+    // SES sending only, and only as an email identity of this account and region (the attention email sender's own policy narrows it to the one identity CoreAttentionEmailSender names);
+    // never ses:* (identity, configuration and suppression-list changes stay outside every AgentX role). The Sid keeps its old name (the step-up sender, removed by DEC 254zzz73) so the
+    // deployed boundary does not change.
     { Sid: "StepUpEmail", Effect: "Allow", Action: ["ses:SendEmail"], Resource: `arn:${partition}:ses:${scope.region}:${account}:identity/*` },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
@@ -239,6 +346,10 @@ export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "part
       Resource: `arn:${partition}:iam::${account}:role/aws-service-role/*`,
       Condition: { StringLike: { "iam:AWSServiceName": [...SERVICE_LINKED_ROLE_SERVICES] } },
     },
+    // L4-SE6: the saved environment image roles (see above). The broker's one `sts:AssumeRole`, its lookups, and ECR's template service-linked role.
+    assumeSessionRolesStatement(scope),
+    fixedNameRoleLookupStatement(scope),
+    ecrTemplateServiceLinkedRoleStatement(scope),
     { Sid: "DenyAccountChanges", Effect: "Deny", Action: ["organizations:*", "account:*"], Resource: "*" },
     { Sid: "DenyUsersAndGroups", Effect: "Deny", Action: ["iam:*User*", "iam:*Group*"], Resource: "*" },
     {

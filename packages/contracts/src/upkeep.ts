@@ -105,8 +105,6 @@ export const SYSTEM_RUNS_CONSENT_WORDS = {
   notAllowed: "Only company owners and admins can allow or stop Rovara's automatic runs for the company.",
   needsConsent: "A company owner or admin has to allow Rovara's automatic runs for the company first.",
   contradiction: "Rovara's automatic runs cannot be stopped and nightly upkeep switched on in the same step.",
-  // L4-P3 (owner 2026-11-17): ALLOWING them needs a fresh step-up (the script token's pattern: a long-lived grant is never made by a tool that holds an API token). Stopping them never does.
-  needsSignIn: "Rovara's automatic runs are allowed right after you confirm it's you on the sign-in page: a tool that holds an API token cannot allow them. Confirm it's you, then try again within a few minutes.",
 } as const;
 
 /**
@@ -151,8 +149,7 @@ export type UpkeepView = z.infer<typeof UpkeepViewSchema>;
 
 /**
  * The company-level route for the consent itself: a live company owner or admin reads it (GET) and allows or withdraws it (PUT). Hosted only, a page session only (a script token never reaches it).
- * ALLOWING (`allowed: true`) needs a FRESH STEP-UP (a passkey or an emailed code, the same rule as making a script token), checked before the body is acted on; the refusal is REAUTH_REQUIRED (403) with
- * `SYSTEM_RUNS_CONSENT_WORDS.needsSignIn`. WITHDRAWING (`allowed: false`) needs only the live owner or admin role (turning off must be easy), works while the operator's ceiling is off, writes one audit record
+ * ALLOWING (`allowed: true`) needs the live owner or admin role and the operator's ceiling (DEC 254zzz73: no step-up). WITHDRAWING (`allowed: false`) needs only the live owner or admin role (turning off must be easy), works while the operator's ceiling is off, writes one audit record
  * (`SYSTEM_RUNS_CONSENT_AUDIT`) before the row, and leaves every project's own switch exactly as it is (they read as off while the consent is off). Future runs stop at once: the effective gate is read on every use.
  */
 export const SYSTEM_RUNS_ROUTE = { method: "GET and PUT", path: "/v1/app/company/system-runs" } as const;

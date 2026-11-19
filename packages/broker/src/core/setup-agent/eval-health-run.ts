@@ -13,21 +13,23 @@
 // text is echoed. Nothing in this file calls a model or reaches AWS.
 import { randomUUID } from "node:crypto";
 import {
-  EvalBaseRecordSchema, EvalHealthResultBodySchema, createDocumentBaseScoreCache, evalBaseCacheKey,
-  type AdapterRegistry, type DocumentStore, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalHealthNotRunReason, type OrgId,
+  EvalBaseRecordSchema, EvalHealthResultBodySchema, createDocumentBaseScoreCache, evalBaseCacheKey, isStandInSetVersion, standInSettingsFingerprint, change, when,
+  type AdapterRegistry, type DocumentStore, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalBlockedReach, type EvalHealthNotRunReason, type OrgId, type JsonValue,
 } from "@agentx/contracts";
 import { baselineParts, type EvalPlanRead } from "../proof/eval-plan-delivery.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";
 import {
-  claimEvalHealthRequest, evalHealthApprovalStands, evalHealthRequestExpired, evalHealthRunExpired, failEvalHealthRequest, finishEvalHealthRequest, readEvalHealthRow,
+  claimEvalHealthRequest, evalHealthRequestKey, evalHealthApprovalStands, evalHealthRequestExpired, evalHealthRunExpired, failEvalHealthRequest, finishEvalHealthRequest, readEvalHealthRow,
   type EvalHealthRequestRecord, type EvalHealthResultSummary,
 } from "./eval-health-request.js";
-import { baseOf, createEvalPlanSources } from "./eval-plan-source.js";
+import { baseOf, createEvalPlanSources, type EvalPlanSourceDeps } from "./eval-plan-source.js";
 import { readApprovedEvalPlan, roleFor } from "./eval-spend.js";
+import { settleEvalWrapperTest } from "./eval-wrapper.js";
 
 export interface EvalHealthRunDeps {
   store: DocumentStore;
+  standIns?: EvalPlanSourceDeps["standIns"];
   companyId: OrgId;
   now: () => number;
   members?: SessionMembers | undefined;
@@ -73,14 +75,29 @@ async function whyNot(deps: EvalHealthRunDeps, project: string, row: EvalHealthR
 
 /** The plan and grant for this request's own approved item and the broker's own main heads; the install's reservation adapter is the only authority behind the grant. */
 async function planFor(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, bases: ReadonlyArray<{ repositoryId: string; baseCommitSha: string }>, cap: number | undefined): Promise<EvalPlanRead | undefined> {
-  const sources = createEvalPlanSources({ ...table(deps, cap), registry: deps.registry });
+  const sources = createEvalPlanSources({ ...table(deps, cap), registry: deps.registry, ...(deps.standIns === undefined ? {} : { standIns: deps.standIns }) });
   return await sources.read({ companyId: deps.companyId, project }, { bases, spendDigest: row.spendDigest });
 }
 
+/** The reasons that say the run could not READ the eval's results (the wrapper file's whole job). Every other "not run" reason is about the run itself (it never happened, was stopped or ran out), so the file's test stays approved. */
+const UNREADABLE_REASONS: ReadonlySet<EvalHealthNotRunReason> = new Set<EvalHealthNotRunReason>(["invalid_results", "incomplete_questions"]);
+
+/**
+ * The run's answer for a wrapped eval's file (DEC 254zzz43): `readable` when the results were read in full (a measured result, or a baseline the project already held), `unreadable` when they could not be read.
+ * Only for the approved plan THIS request was made under, in this request's own company and project; a replaced approval records nothing. Best effort: it never changes the run's own outcome.
+ */
+async function settleWrapperTest(deps: EvalHealthRunDeps, project: string, row: Pick<EvalHealthRequestRecord, "spendDigest">, result: "readable" | "unreadable"): Promise<void> {
+  try {
+    const found = await readApprovedEvalPlan(table(deps), project);
+    if (found === undefined || found.spend.digest !== row.spendDigest) return;
+    await settleEvalWrapperTest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, found.plan, result);
+  } catch { /* the file keeps its state: the card still reads "test approved" */ }
+}
+
 /** Writes one move: its audit record first, then the conditional write. A failed audit stops the move. */
-async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, reason: EvalHealthNotRunReason, claimId?: string): Promise<EvalHealthStart> {
+async function settleNotRun(deps: EvalHealthRunDeps, project: string, row: EvalHealthRequestRecord, reason: EvalHealthNotRunReason, claimId?: string, blocked?: EvalBlockedReach): Promise<EvalHealthStart> {
   try { await deps.audit({ action: "eval.health_not_run", project, requestId: row.requestId, reason }); } catch { return { outcome: "nothing" }; }
-  const done = await failEvalHealthRequest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, row.requestId, reason, claimId === undefined ? undefined : { claimId });
+  const done = await failEvalHealthRequest({ store: deps.store, companyId: deps.companyId, now: deps.now }, project, row.requestId, reason, claimId === undefined && blocked === undefined ? undefined : { ...(claimId === undefined ? {} : { claimId }), ...(blocked === undefined ? {} : { blocked }) });
   return done ? { outcome: "not_run", requestId: row.requestId, reason } : { outcome: "nothing" };
 }
 
@@ -127,7 +144,9 @@ export async function startEvalHealthRun(deps: EvalHealthRunDeps, project: strin
     if (reusedSummary !== undefined) {
       try { await deps.audit({ action: "eval.health_reused", project, requestId: row.requestId }); } catch { return { outcome: "nothing" }; }
       // From `requested` straight to finished: the plain mark with the result (no claim, no worker).
-      return await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { result: reusedSummary }) ? { outcome: "reused", requestId: row.requestId } : { outcome: "nothing" };
+      if (!await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { result: reusedSummary })) return { outcome: "nothing" };
+      await settleWrapperTest(deps, project, row, "readable");
+      return { outcome: "reused", requestId: row.requestId };
     }
     // A baseline that is being measured right now (a task's, or another check) is not measured twice.
     const mark = cache.startMeasurement === undefined ? undefined : await cache.startMeasurement(parts);
@@ -177,7 +196,7 @@ export type EvalHealthRecorded = { outcome: "finished" | "not_run" | "duplicate"
 
 /**
  * The worker's one result. Taken once, for the live claim only. A measured result is checked against the broker's own plan before it is kept; anything that does not hold is `not_run` with a closed reason (and no
- * baseline is saved). The cache key is the one the broker wrote at the claim.
+ * baseline is saved). Only the validated stand-in digest can extend the broker-owned claim identity.
  */
 export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: string, rawBody: unknown): Promise<EvalHealthRecorded> {
   try {
@@ -192,12 +211,14 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     const claim = row.claim;
     const parts = claim.parts as unknown as EvalBaseCacheKeyParts;
     const cache = cacheOf(deps);
-    const end = async (reason: EvalHealthNotRunReason): Promise<EvalHealthRecorded> => {
-      const settled = await settleNotRun(deps, project, row, reason, claim.claimId);
+    const end = async (reason: EvalHealthNotRunReason, blocked?: EvalBlockedReach): Promise<EvalHealthRecorded> => {
+      const settled = await settleNotRun(deps, project, row, reason, claim.claimId, blocked);
       await finish(deps, cache, parts, claim.mark);
-      return settled.outcome === "not_run" ? { outcome: "not_run" } : { outcome: "refused" };
+      if (settled.outcome !== "not_run") return { outcome: "refused" };
+      if (UNREADABLE_REASONS.has(reason)) await settleWrapperTest(deps, project, row, "unreadable");
+      return { outcome: "not_run" };
     };
-    if (body.result.status === "not_run") return await end(body.result.reason);
+    if (body.result.status === "not_run") return await end(body.result.reason, body.result.blocked);
     const cap = await capOf(deps, project);
     // The result is for the approved plan the claim was made under; a plan replaced since is not the one this measured.
     const found = await readApprovedEvalPlan(table(deps, cap), project);
@@ -206,16 +227,41 @@ export async function recordEvalHealthResult(deps: EvalHealthRunDeps, project: s
     const ids = found.plan.questions.map(q => q.id);
     const rows = record.success ? record.data.questions : undefined;
     if (!record.success || rows === undefined || rows.length !== ids.length || record.data.caseCount !== ids.length || new Set(rows.map(q => q.id)).size !== rows.length || !rows.every(q => ids.includes(q.id) && q.samples.length === 3)) return await end("invalid_results");
+    // DEC 254zzz101(4): the worker knows the checkout's stand-in digest, never any other key part.
+    const version = body.result.standInSetVersion;
+    if (version !== undefined && !isStandInSetVersion(version)) return { outcome: "refused" };
+    if ((claim.standInSetVersion !== undefined && claim.standInSetVersion !== version)
+      || (record.data.standInSetVersion !== undefined && record.data.standInSetVersion !== version)) return { outcome: "refused" };
+    const measuredParts = version === undefined ? parts : { ...parts, standInSetVersion: version, settingsFingerprint: standInSettingsFingerprint(parts.settingsFingerprint, version) };
+    const measuredRecord = version === undefined ? record.data : { ...record.data, standInSetVersion: version };
     // The move is audited first; a failed audit keeps nothing (no baseline either) and leaves the run waiting for the result again.
     try { await deps.audit({ action: "eval.health_finished", project, requestId: row.requestId }); } catch { return { outcome: "refused" }; }
-    const written = await (async () => { try { return await cache.write(parts, record.data, { writer: "rovara_base_round", baseCommit: parts.baseCommit }); } catch { return "refused" as const; } })();
-    const summary = evalHealthSummaryOf(record.data, { saved: written === "stored", reused: false }, deps.now());
+    if (version !== undefined) {
+      // Bind before writing any baseline. A changed/ended claim or a competing version refuses the result.
+      const bound = await deps.store.update({ key: evalHealthRequestKey(deps.companyId, project),
+        ops: [change.set(["claim", "standInSetVersion"], version)],
+        condition: when.and(when.eq("requestId", body.requestId), when.eq("state", "running"), when.eq("company", deps.companyId), when.eq("project", project), when.eq("claim", JSON.parse(JSON.stringify(claim)) as JsonValue)),
+      }).catch(() => undefined);
+      if (bound?.applied !== true) return { outcome: "refused" };
+    }
+    const written = await (async () => { try { return await cache.write(measuredParts, measuredRecord, { writer: "rovara_base_round", baseCommit: parts.baseCommit }); } catch { return "refused" as const; } })();
+    const summary = evalHealthSummaryOf(measuredRecord, { saved: written === "stored", reused: false }, deps.now());
     if (summary === undefined) return await end("invalid_results");
     const done = await finishEvalHealthRequest({ store: deps.store, companyId: deps.companyId }, project, row.requestId, { claimId: claim.claimId, result: summary });
     await finish(deps, cache, parts, claim.mark);
-    return done ? { outcome: "finished" } : { outcome: "refused" };
+    if (!done) return { outcome: "refused" };
+    await settleWrapperTest(deps, project, row, "readable");
+    return { outcome: "finished" };
   } catch { return { outcome: "refused" }; }
 }
 
 /** The cache key this run keeps its result under (for a caller that needs to look): derived from the claim only. */
-export const evalHealthKeyOf = (row: EvalHealthRequestRecord): string | undefined => { try { return row.claim === undefined ? undefined : evalBaseCacheKey(row.claim.parts); } catch { return undefined; } };
+export const evalHealthKeyOf = (row: EvalHealthRequestRecord): string | undefined => {
+  try {
+    const claim = row.claim;
+    if (claim === undefined) return undefined;
+    return evalBaseCacheKey(claim.standInSetVersion === undefined ? claim.parts : {
+      ...claim.parts, standInSetVersion: claim.standInSetVersion, settingsFingerprint: standInSettingsFingerprint(claim.parts.settingsFingerprint, claim.standInSetVersion),
+    });
+  } catch { return undefined; }
+};

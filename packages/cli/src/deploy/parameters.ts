@@ -2,7 +2,7 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorTrustProblem } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -41,6 +41,8 @@ export interface InstallAnswers {
   callbackSigningKey: string;
   permissionsBoundaryArn?: string;
   operatorPrincipalArn?: string;
+  /** The sts:ExternalId the operator principal must present: required when that principal belongs to another account (contracts operatorTrustProblem). */
+  operatorExternalId?: string;
   /** Testing only, until the first published release exists: a private-ECR image digest used as-is
    * instead of mapping the release's public image through the pull-through cache. */
   images?: { worker?: string; slack?: string };
@@ -86,17 +88,21 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
     // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
     "TestServices",
     // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
-    "TestServiceImages",
+    "TestServiceImages", "SavedEnvironments",
+    // L4-NETG (DEC 254zzz77): how the worker hosts' sandboxes reach the internet (bridge | gateway), set with `agentx config set workerSandboxEgress`, kept across upgrades.
+    "WorkerSandboxEgress",
     // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
     "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
     // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
     "CoreAnswersModel",
-    // Hosted wiring (a): the verified SES identity that sends step-up codes, as the operator set it.
-    "StepUpEmailSender",
+    // DEC 254zzz58: the hosted lessons learning model (agentx config set coreEngine.learningModel), empty = claude-haiku-5-5 (DEC 254zzz63; a company may choose its own).
+    "CoreLearningModel",
     // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
     "CompanySignIn", "CompanySelfServe",
     // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
-    "SlackCompanyWorkspaces"],
+    "SlackCompanyWorkspaces",
+    // Live switches check 2026-11-18: the per-company model choice (agentx config set coreEngine.agentModelChoice).
+    "CoreAgentModelChoice"],
   // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
   slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
 };
@@ -316,7 +322,12 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
   const routing = openRouter?.providers ? { OpenRouterProviders: openRouter.providers.join(",") } : {};
   switch (part) {
     case "access":
-      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "" };
+      // Backstop for every caller (init, upgrade, export, resume): a whole-account or cross-account principal without its external id never reaches the template.
+      {
+        const problem = operatorTrustProblem({ principal: answers.operatorPrincipalArn, externalId: answers.operatorExternalId, account: answers.account });
+        if (problem !== undefined) throw new Error(problem);
+      }
+      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "", ...(answers.operatorExternalId === undefined ? {} : { OperatorExternalId: answers.operatorExternalId }) };
 
     case "foundation":
       return base;

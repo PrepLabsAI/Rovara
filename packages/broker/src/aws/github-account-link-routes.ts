@@ -4,8 +4,8 @@
 // the login are kept (core/people/github-links.ts), under the company.
 //
 //   GET    /v1/dev/me/github              the caller's own link: { linked: false } or { linked: true, login, linkedAt }
-//   POST   /v1/dev/me/github/link   {}                       FRESH step-up: a single-use state and GitHub's authorize address
-//   POST   /v1/dev/me/github/link/claim  { state, code }     FRESH step-up: spend the state, check GitHub, link the account to the caller
+//   POST   /v1/dev/me/github/link   {}                       a single-use state and GitHub's authorize address
+//   POST   /v1/dev/me/github/link/claim  { state, code }     spend the state, check GitHub, link the account to the caller
 //   DELETE /v1/dev/me/github                                 unlink the caller's own account
 //
 // Rules (the common brief's shared security rules):
@@ -18,7 +18,7 @@
 //   - Everything before the GitHub check passes is ONE answer (403 "Start again from Rovara."), so nothing tells whether a state exists. After it: 409 when the account is another member's of this
 //     company (first link wins) or the caller already holds a different account; idempotent 200 when it is already theirs.
 //   - One account per person, one person per account, per company: the two rows are written in one conditional transaction.
-//   - The step-up (a factor Code owns, `requireFreshStepUp`) is checked at start AND at claim. Unlinking needs none: it only takes away what the person had.
+//   - DEC 254zzz73: no step-up; the web app's own client and the person's live membership are checked at start AND at claim.
 //   - Never logged or returned: the code, the state, the user token. The claim's answer names the linked account (GitHub's numeric id and login, to the person who just proved it is theirs); log lines carry
 //     event names and the person's id only; audit rows never carry the GitHub id or login.
 //   - A member's removal from the company removes their link rows in the same request (company-member-routes.ts, L4-GH2; the person erase and the company purge remove them too), so re-adding the person
@@ -29,7 +29,6 @@ import { z } from "zod";
 import { agentXError, companyLog, when, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, isGithubLogin, linkGithubAccount, unlinkGithubAccount } from "../core/people/github-links.js";
 import { Membership, membershipKey } from "./company-check.js";
-import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
@@ -40,7 +39,6 @@ export const START_AGAIN = "Start again from Rovara.";
 export const LINK_NOT_SET_UP = "Connecting your GitHub account isn't set up on this Rovara yet. Ask the Rovara team.";
 export const LINK_UNAVAILABLE = "Your GitHub account could not be connected just now. Start again from Rovara.";
 export const LINK_WEB_ONLY = "Connecting your GitHub account is done in the Rovara web app.";
-export const LINK_STEP_UP = "Connecting your GitHub account needs a fresh sign-in check; sign in again and retry.";
 export const LINK_TAKEN = "This GitHub account is already connected to another member of your company.";
 export const LINK_HAS_ANOTHER = "You already have a GitHub account connected. Disconnect it first.";
 export const LINK_READ_UNAVAILABLE = "Your GitHub connection could not be read just now; try again.";
@@ -135,10 +133,10 @@ async function spend(ctx: GithubLinkContext, secret: string, who: { companyId: s
  * The routes. The caller is authenticated and its route row (`full`) applied; `companyId` is its live membership's company (resolveCompany). The membership row is read again here, so a company
  * that changed since is what counts.
  */
-export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL, stepUp?: CallerStepUp): Promise<unknown> {
+export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   // A session that is not a sign-in session (a registered service's own token has none) is never a person linking their own account.
   if (caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  // Only the Rovara web app's own sign-in client (full access AND marked `webApp` by the operator): another full-access client could get a step-up token, show GitHub's page to someone else
+  // Only the Rovara web app's own sign-in client (full access AND marked `webApp` by the operator): another full-access client could show GitHub's page to someone else
   // and pass the code back, which would link that someone's account to this person. Cloud's cookie binding is the only thing tying the browser at GitHub to the person, and it is the web app's.
   if (caller.webApp !== true) throw agentXError("FORBIDDEN", LINK_WEB_ONLY);
   const member = await liveMembership(ctx, caller, companyId);
@@ -168,7 +166,6 @@ export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperC
 
   if (url.pathname === LINK) {
     if (!NoBody.safeParse(body(request)).success) throw agentXError("CONFIG_INVALID", "connecting your GitHub account takes no body");
-    requireFreshStepUp(stepUp, ctx.now(), LINK_STEP_UP);
     let client: { clientId: string } | undefined;
     try { client = await ctx.wiring.github.oauthClient(); } catch { throw agentXError("RUNTIME_UNAVAILABLE", LINK_NOT_SET_UP); }
     if (client === undefined || !/^[A-Za-z0-9.]{1,64}$/.test(client.clientId)) throw agentXError("RUNTIME_UNAVAILABLE", LINK_NOT_SET_UP);
@@ -191,7 +188,6 @@ export async function routeGithubLink(ctx: GithubLinkContext, caller: DeveloperC
   if (url.pathname === CLAIM) {
     const parsed = ClaimBody.safeParse(body(request));
     if (!parsed.success) throw startAgain();
-    requireFreshStepUp(stepUp, ctx.now(), LINK_STEP_UP);
     if (!await spend(ctx, parsed.data.state, who)) throw startAgain();
     let user: { id: number; login: string };
     try { user = await ctx.wiring.github.githubUserOfCode(parsed.data.code); } catch { throw startAgain(); }

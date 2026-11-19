@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { SETUP_AGENT_LIMITS_DEFAULT } from "../../packages/contracts/src/index.js";
+import { SETUP_AGENT_LIMITS_DEFAULT, SETUP_RUN_REFUSED_MESSAGES, agentXError, redactText } from "../../packages/contracts/src/index.js";
 import { dropUntrackedCitations, trackedPathsOf } from "../../packages/worker/src/setup-citations.js";
 import { readSetupProposalAnswer } from "../../packages/worker/src/setup-draft.js";
 import { scanRepositories } from "../../packages/worker/src/setup-scan.js";
@@ -16,7 +16,7 @@ import { runSetupAgent, type SetupRunInput, type SetupRunPorts } from "../../pac
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { assertSetupSandboxRunArgs } from "../../packages/worker/src/setup-agent.js";
 import { removeLeftoverSetupRuns, setupNetworkAddresses } from "../../packages/worker/src/setup-network.js";
-import { taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
+import { TASK_SANDBOX_IMAGE_ENVIRONMENT, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import type { RunNetwork } from "../../packages/worker/src/setup-network.js";
 
@@ -254,6 +254,26 @@ describe("F3: money", () => {
     const dependencies = { rootPath: r.root, model: { provider: "amazon-bedrock", modelId: "global.anthropic.claude-fable-5" }, eventSink: async () => undefined, setupAgent: async () => ({}), docker };
     await expect(runSetupAgentInvocation(invocation, { ...dependencies, environment: { AGENTX_SANDBOX_IMAGE: "i@sha256:" + "b".repeat(64) } }, { repositories: [] }, r.root)).rejects.toThrow("model proxy");
     await expect(runSetupAgentInvocation(invocation, { ...dependencies, model: { provider: "x", modelId: "unlisted" }, environment: { AGENTX_SANDBOX_IMAGE: "i@sha256:" + "b".repeat(64), AGENTX_MODEL_PROXY_URL: "https://proxy.test" } }, { repositories: [{ name: "web", path: "repo/web", resolvedCommit: COMMIT, defaultBranch: "main", resolvedAt: "", completedAt: "" }] }, r.root)).rejects.toThrow("price");
+    expect(calls).toEqual([]);
+  });
+  it("L4-T5: each refusal that trying again cannot fix is its own fixed sentence, which the broker matches exactly, and one that redaction leaves alone", async () => {
+    const r = await repository();
+    const calls: string[][] = [];
+    const docker: DockerCli = { run: (args) => { calls.push([...args]); return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }); } };
+    const invocation = { operationId: "11111111-1111-4111-8111-111111111111", projectRevision: 1, payload: { conversationId: "c", setupAgent: { limits: SETUP_AGENT_LIMITS_DEFAULT, commits: [{ repository: "web", commit: "a".repeat(40) }] } } } as never;
+    const dependencies = { rootPath: r.root, model: { provider: "amazon-bedrock", modelId: "global.anthropic.claude-fable-5" }, eventSink: async () => undefined, setupAgent: async () => ({}), docker };
+    const manifest = { repositories: [{ name: "web", path: "repo/web", resolvedCommit: COMMIT, defaultBranch: "main", resolvedAt: "", completedAt: "" }] };
+    const withImage = { AGENTX_SANDBOX_IMAGE: "i@sha256:" + "b".repeat(64) };
+    const message = async (environment: NodeJS.ProcessEnv, model = dependencies.model): Promise<string> => { try { await runSetupAgentInvocation(invocation, { ...dependencies, model, environment }, manifest, r.root); } catch (error) { return (error as Error).message; } return ""; };
+    const reported = (text: string) => agentXError("RUNTIME_UNAVAILABLE", text).message;
+    expect(await message({})).toBe(reported(SETUP_RUN_REFUSED_MESSAGES.noSandboxImage));
+    expect(await message(withImage)).toBe(reported(SETUP_RUN_REFUSED_MESSAGES.noModelProxy));
+    expect(await message({ ...withImage, AGENTX_MODEL_PROXY_URL: "https://proxy.test" }, { provider: "x", modelId: "unlisted" })).toBe(reported(SETUP_RUN_REFUSED_MESSAGES.noModelPrice));
+    expect(await message({ ...withImage, AGENTX_RUNTIME: "ec2", AGENTX_ENVIRONMENT_KIND: "named" })).toBe(reported(SETUP_RUN_REFUSED_MESSAGES.isolationUnavailable));
+    // The worker redacts an error before it reports it: the broker's exact match must still hold afterwards.
+    for (const text of Object.values(SETUP_RUN_REFUSED_MESSAGES)) expect(redactText(reported(text))).toBe(reported(text));
+    // The image sentence names the variable the worker really reads.
+    expect(SETUP_RUN_REFUSED_MESSAGES.noSandboxImage).toContain(TASK_SANDBOX_IMAGE_ENVIRONMENT);
     expect(calls).toEqual([]);
   });
   it("F6: a model call the proxy refused for a spent budget is the budget limit", async () => {

@@ -76,7 +76,7 @@ const ClientRecord = z.object({
   scopes: ClientScopesSchema.optional(),
   fullAccess: z.literal(true).optional(),
   /**
-   * DEC 236h: this client is the Rovara web app, the one surface where a security review finding may be accepted (with a fresh step-up). Written only by the operator or the install that seeds Cloud's web
+   * DEC 236h: this client is the Rovara web app, the one surface where a security review finding may be accepted. Written only by the operator or the install that seeds Cloud's web
    * app client: the registration schema above has no such field, so an administrator's registration, a company's included, can never carry it, and an update by registration drops it. Only with full access.
    */
   webApp: z.literal(true).optional(),
@@ -130,7 +130,7 @@ export const AccessCheckResponseSchema = z.object({
    * Recorded by Code's sign-in server on the session when it was minted; never from a claim, a request or an access rule. Absent otherwise (already a
    * member, a legacy join, a session with no company, a check by developer id, a Code with no company layer). Sent only with the company.
    * It describes the whole session (every check on it, also after refreshes), not "just joined". Absent does NOT mean "not the invited person": a
-   * sign-in that spent the invite but then failed (an expired code, a refused step-up) leaves the person a member, and later sign-ins never carry it.
+   * sign-in that spent the invite but then failed (an expired code) leaves the person a member, and later sign-ins never carry it.
    */
   joinedByInvite: z.boolean().optional(),
   /**

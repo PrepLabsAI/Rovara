@@ -176,6 +176,12 @@ export class SlackOrchestratorStack extends Stack {
             Principal: { Service: "events.amazonaws.com" },
             Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
             Resource: actionLogStreamArn,
+            // Confused-deputy guard (L4-HARD, owner 2026-11-18): only this account's own deployment-failure rule (below, by name: the rule depends on this log group, so
+            // its ARN can't be referenced from here), like the delivery statement above. The rule's name is `agentx-<env>-<attempt>-service-failures`.
+            Condition: {
+              StringEquals: { "aws:SourceAccount": this.account },
+              ArnLike: { "aws:SourceArn": Fn.join("", ["arn:", Aws.PARTITION, ":events:", Aws.REGION, ":", Aws.ACCOUNT_ID, ":rule/agentx-", naming.env, "-", attemptShort, "-service-failures"]) },
+            },
           },
         ],
       });

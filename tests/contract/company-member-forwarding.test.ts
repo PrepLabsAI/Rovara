@@ -39,11 +39,12 @@ it.each(["member", "revoked", "missing", "foreign", "malformed", "slack-unlinked
   expect(await h.forward(mode === "slack-unlinked" ? { ...caller, developerId: "slack:U123", amr: "slack" } : caller, request)).toEqual({ ok: false, error: "not_found" });
   expect(h.forwarded).toEqual([]);
 });
-it("preserves step-up fixed response and rechecks actor when Lambda runs after broker authentication", async () => {
+it("keeps the owner-only fixed response (DEC 254zzz73: no step-up refusal) and rechecks actor when Lambda runs after broker authentication", async () => {
   const h = world();
   expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "unavailable", message: "only an owner can change or remove an owner" });
   h.seed(actor, "owner");
-  expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: false, error: "step_up_required", message: "this role change needs a fresh sign-in check; sign in again and retry" });
+  expect(await h.forward(caller, { ...request, role: "owner" })).toEqual({ ok: true });
+  h.seed(target, "member");
   const send = h.db.send; let reads = 0;
   h.db.send = async (command) => {
     const result = await send(command);

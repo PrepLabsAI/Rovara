@@ -36,6 +36,7 @@ FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63
 ARG TARGETARCH
 ARG DOCKER_VERSION=29.8.1
 ARG COMPOSE_VERSION=v5.5.1
+ARG BUILDX_VERSION=v0.38.2
 ARG UV_VERSION=0.12.20
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \
@@ -53,6 +54,16 @@ RUN set -eu; \
     curl -fsSL -o /tmp/docker-compose "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-$arch"; \
     echo "$compose_sha  /tmp/docker-compose" | sha256sum -c -; \
     install -D -m 0755 /tmp/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+# buildx v0.38.2: official release checksums, verified by 9d (ANSWER-4).
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      arm64) buildx_sha=46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36 ;; \
+      amd64) buildx_sha=7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6 ;; \
+      *) echo "unsupported architecture $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o /tmp/docker-buildx "https://github.com/docker/buildx/releases/download/$BUILDX_VERSION/buildx-$BUILDX_VERSION.linux-$TARGETARCH"; \
+    echo "$buildx_sha  /tmp/docker-buildx" | sha256sum -c -; \
+    install -D -m 0755 /tmp/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 # uv, which runs a Python repository's setup and tests. Pinned by the release's published SHA-256,
 # checked against the downloads (2026-09-29).
 RUN set -eu; \
@@ -82,6 +93,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
+COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-buildx /usr/local/lib/docker/cli-plugins/docker-buildx
 COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx
 WORKDIR /opt/agentx

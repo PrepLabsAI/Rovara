@@ -14,8 +14,7 @@ import { routeDeveloperRequest } from "../../packages/broker/src/aws/developer-r
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { signInLinksThroughLambda } from "../../packages/broker/src/aws/sign-in-link-routes.js";
 import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
-import { STEP_UP_COOKIE, STEP_UP_TEXT, type StepUpEmailSender } from "../../packages/broker/src/developer/step-up.js";
-import { API, ISSUER, authorizeQuery, httpEvent, TEAM } from "../support/developer-fakes.js";
+import { API, authorizeQuery, httpEvent, TEAM } from "../support/developer-fakes.js";
 import { B, SECRET, WEB, X, person, sharedSignInWorld } from "../support/company-shared-signin-world.js";
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, fakeGithub, type FakeGithubUser } from "../support/fake-github.js";
 import { signInRolePolicy, underSignInRole, type TableCall } from "../support/signin-role-policy.js";
@@ -40,8 +39,8 @@ const P = gid(2001);
 
 type Api = { status: number; body: Record<string, unknown> };
 
-function world(options: { stepUp?: { email: StepUpEmailSender } } = {}) {
-  const w = sharedSignInWorld({ slackUsers, ...(options.stepUp === undefined ? {} : { stepUp: options.stepUp }) });
+function world() {
+  const w = sharedSignInWorld({ slackUsers });
   const gh = fakeGithub(githubUsers);
   w.deps.config.github = {};
   w.deps.providers.github = githubSignInProvider({ clientId: GITHUB_CLIENT_ID, clientSecret: async () => GITHUB_CLIENT_SECRET, fetch: gh.fetch, now: w.now });
@@ -68,11 +67,6 @@ function world(options: { stepUp?: { email: StepUpEmailSender } } = {}) {
     const tokens = await w.exchange(code, { client_id: "web-app", client_secret: SECRET, redirect_uri: WEB });
     return { access: tokens.body.access_token as string };
   };
-  /** The session's own step-up, as a completed step-up page leaves it (`at` seconds ago). */
-  const stepUp = (token: string, ago = 30) => {
-    const row = w.db.get(`SESSION#${decodeJwt(token).sid as string}`, "META")!;
-    w.db.set({ ...row, stepUpAt: Math.floor(w.now() / 1000) - ago, stepUpMethod: "passkey" });
-  };
   const start = (token: string, method: "slack" | "github", overrides: Record<string, unknown> = {}) =>
     api("POST", "/v1/dev/me/sign-ins/link", token, { method, challenge: CHALLENGE, returnTo: WEB, state: STATE, ...overrides });
   /** The browser at the provider and back at Code's callback: Code's redirect to the web app. */
@@ -96,7 +90,6 @@ function world(options: { stepUp?: { email: StepUpEmailSender } } = {}) {
     await w.setup();
     await w.operator({ kind: "company-preapprove", companyId: X, email: "octo@example.test", role: "member", expiresInHours: 24 });
     const signed = await githubSignIn("octo-link", { company: X });
-    stepUp(signed.access!);
     return signed.access!;
   };
   /** A Slack sign-in through the web app up to its code (not redeemed yet). */
@@ -109,7 +102,7 @@ function world(options: { stepUp?: { email: StepUpEmailSender } } = {}) {
   const redeem = (code: string) => w.exchange(code, { client_id: "web-app", client_secret: SECRET, redirect_uri: WEB });
   const linkRows = () => w.db.find((row) => row.entityType === "SIGNIN_LINK_ROW");
   const companyLog = (event: string) => w.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === event);
-  return Object.assign(w, { slackCode, redeem, gh, api, githubSignIn, stepUp, start, atProvider, finish, link, githubMember, linkRows, companyLog });
+  return Object.assign(w, { slackCode, redeem, gh, api, githubSignIn, start, atProvider, finish, link, githubMember, linkRows, companyLog });
 }
 skipLambdaBundling();
 
@@ -180,7 +173,6 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     await w.setup();
     await w.operator({ kind: "company-preapprove", companyId: X, email: "solo@example.test", role: "member", expiresInHours: 24 });
     const slack = await w.signIn("U0SOLO001", { slackTeam: TEAM, company: X });
-    w.stepUp(slack.access!);
     expect(await w.link(slack.access!, "github", { github: "octo-two" })).toEqual({ status: 200, body: { method: "github" } });
     const github = await w.githubSignIn("octo-two");
     expect(decodeJwt(github.access!).sub).toBe(sid("U0SOLO001"));
@@ -207,7 +199,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     const { location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
     const bob = await w.signIn("bob", { company: B });
     expect(bob.refused).toBeUndefined();
-    w.stepUp(bob.access!);
     expect(await w.finish(bob.access!, location!)).toEqual(REFUSED);
     expect(w.linkRows()).toEqual([]);
     // Bob is B's admin, not X's: P's sign-ins are not his to see or change.
@@ -253,7 +244,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     const started = await w.start(p, "slack");
     const { location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
     w.tick(301_000);
-    w.stepUp(p);
     expect(await w.finish(p, location!)).toEqual(REFUSED);
   });
 
@@ -262,7 +252,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     const p = await w.githubMember();
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     const owner = (await w.signIn("owner")).access!;
-    w.stepUp(owner);
     expect(await w.link(owner, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
     // A Slack person who signed in on their own (and holds a membership elsewhere) is not merged into anyone either.
     await w.operator({ kind: "company-preapprove", companyId: B, email: "solo@example.test", role: "member", expiresInHours: 24 });
@@ -278,7 +267,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     expect(await w.link(p, "slack", { slack: "U0AWAY001", team: OTHER })).toEqual(REFUSED);
     expect(w.db.get(`DEVELOPER#${sid(`${OTHER}:U0AWAY001`)}`, "META")).toBeUndefined();
     // The same workspace bound to the person's own company proves it.
-    w.stepUp(p);
     w.deps.slackTeamCompany = (team) => (team === OTHER ? X : undefined);
     expect(await w.link(p, "slack", { slack: "U0AWAY001", team: OTHER })).toEqual({ status: 200, body: { method: "slack" } });
   });
@@ -287,7 +275,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     const w = world();
     await w.setup();
     const bob = await w.signIn("bob", { company: B });
-    w.stepUp(bob.access!);
     expect(await w.start(bob.access!, "github")).toEqual(REFUSED);
   });
 
@@ -312,12 +299,9 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     expect(await w.handler({ ...direct, linkId: `lnk_${"B".repeat(43)}` } as never)).toMatchObject({ ok: false, error: "signed_out" });
   });
 
-  it("starting needs a fresh step-up and the web app's own client and registered return URL; a method the person already has is refused", async () => {
+  it("starting needs the web app's own client and registered return URL (no step-up, DEC 254zzz73); a method the person already has is refused", async () => {
     const w = world();
     const p = await w.githubMember();
-    w.stepUp(p, 3_600);
-    expect((await w.start(p, "slack")).body).toEqual({ error: { code: "REAUTH_REQUIRED", message: SIGN_IN_LINK_TEXT.reauth } });
-    w.stepUp(p);
     expect(await w.start(p, "slack", { returnTo: "https://evil.example.test/callback" })).toEqual(REFUSED);
     expect(await w.start(p, "github")).toEqual(REFUSED);
     expect(w.db.find((row) => row.entityType === "SIGNIN_LINK")).toEqual([]);
@@ -361,7 +345,6 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     await w.githubMember();
     const cli = await w.signIn("owner", { cli: true });
     expect(cli.refused).toBeUndefined();
-    w.stepUp(cli.access!);
     expect(await w.start(cli.access!, "slack")).toEqual(REFUSED);
   });
 
@@ -426,7 +409,6 @@ describe("DeveloperIdentity checks every link request itself (not only the broke
     await w.setup();
     w.deps.slackTeamCompany = (team) => (team === TEAM ? B : undefined);
     const bob = (await w.signIn("bob", { company: B })).access!;
-    w.stepUp(bob);
     expect(await w.start(bob, "github")).toEqual(REFUSED);
     expect(await w.link(bob, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
   });
@@ -440,13 +422,10 @@ describe("unlinking (DEC 254w)", () => {
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).body).toEqual({ error: { code: "NOT_FOUND", message: SIGN_IN_LINK_TEXT.notFound } });
   });
 
-  it("the person removes a connected method with a fresh step-up: every session ends, the identity is no longer theirs, and it is logged", async () => {
+  it("the person removes a connected method (no step-up, DEC 254zzz73): every session ends, the identity is no longer theirs, and it is logged", async () => {
     const w = world();
     const p = await w.githubMember();
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
-    w.stepUp(p, 3_600);
-    expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(403);
-    w.stepUp(p);
     w.tick(1_000);
     expect(await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).toEqual({ status: 200, body: { removed: true } });
     expect(w.linkRows()).toEqual([]);
@@ -476,7 +455,6 @@ describe("unlinking (DEC 254w)", () => {
     const pending = await w.slackCode("U0LINKME1");
     const slackSession = await w.signIn("U0LINKME1", { slackTeam: TEAM });
     expect(w.db.find((row) => row.entityType === "SESSION" && row.signedInId === sid("U0LINKME1"))).not.toEqual([]);
-    w.stepUp(p);
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
     expect((await w.redeem(pending)).status).toBe(400);
     expect((await w.refresh(slackSession.refresh!)).status).toBe(400);
@@ -496,7 +474,6 @@ describe("unlinking (DEC 254w)", () => {
     const p = await w.githubMember();
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     w.db.set({ ...w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")!, revoked: true });
-    w.stepUp(p);
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
     expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ revoked: true, unlinkedFrom: P });
     expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).not.toHaveProperty("mergedInto");
@@ -509,9 +486,7 @@ describe("unlinking (DEC 254w)", () => {
     await w.operator({ kind: "company-preapprove", companyId: X, email: "carol@example.test", role: "admin", expiresInHours: 24 });
     const carol = (await w.signIn("carol", { company: X })).access!;
     const owner = (await w.signIn("owner")).access!;
-    w.stepUp(owner);
     expect((await w.link(owner, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
-    w.stepUp(carol);
     expect((await w.api("DELETE", `/v1/dev/company/members/${person("owner")}/sign-ins/slack`, carol)).body).toEqual({ error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.forbidden } });
     expect(w.linkRows()).toHaveLength(1);
   });
@@ -522,17 +497,15 @@ describe("unlinking (DEC 254w)", () => {
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     await w.operator({ kind: "company-preapprove", companyId: X, email: "carol@example.test", role: "member", expiresInHours: 24 });
     const carol = (await w.signIn("carol", { company: X })).access!;
-    w.stepUp(carol);
     expect((await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, carol)).status).toBe(403);
     const owner = (await w.signIn("owner")).access!;
-    w.stepUp(owner);
     expect((await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner)).status).toBe(200);
     expect(w.companyLog("company-signin-unlink")).toEqual([expect.objectContaining({ personId: P, createdBy: person("owner") })]);
   });
 });
 
 // DEC 254zzz39 (4): an unlinked identity's kept record (DEC 254zzz33) can be linked again: to the same person, or (with the normal finish proof) to another person of the
-// company it was unlinked from; never into another company, never one an admin turned off or one that has a membership of its own. Its own sign-ins in between capture its factor email.
+// company it was unlinked from; never into another company, never one an admin turned off or one that has a membership of its own.
 describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
   const SLACK = () => sid("U0LINKME1");
   /** A copy of a row without the named fields. */
@@ -542,17 +515,15 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
   const linkedThenUnlinked = async (w: ReturnType<typeof world>) => {
     const p = await w.githubMember();
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
-    w.stepUp(p);
     w.tick(1_000);
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
     expect(kept(w)).toMatchObject({ unlinkedFrom: P, unlinkedCompany: X, companyless: true });
     w.tick(1_000);
   };
-  /** A member of X by preapproval (an install OIDC person), with a fresh step-up. */
+  /** A member of X by preapproval (an install OIDC person). */
   const memberOfX = async (w: ReturnType<typeof world>, subject: string, role: "member" | "admin" = "member") => {
     await w.operator({ kind: "company-preapprove", companyId: X, email: `${subject}@example.test`, role, expiresInHours: 24 });
     const token = (await w.signIn(subject, { company: X })).access!;
-    w.stepUp(token);
     return token;
   };
 
@@ -560,7 +531,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     const w = world();
     await linkedThenUnlinked(w);
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     expect(await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
     const record = kept(w);
     expect(record).toMatchObject({ provider: "slack", mergedInto: P, revoked: false, linkedBy: P, companyless: true });
@@ -584,12 +554,11 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     expect(decodeJwt(alone.access!).sub).toBe(SLACK());
     w.tick(1_000);
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     expect(kept(w).sessionsEndedAt).toEqual(expect.any(String));
-    // Its own sign-in wrote its email; linked again it carries none (a linked record never does), and keeps the factor email its own sign-in captured.
+    // Its own sign-in wrote its email; linked again it carries none (a linked record never does), and no factor email is ever written (DEC 254zzz73).
     expect(kept(w)).not.toHaveProperty("email");
-    expect(kept(w)).toMatchObject({ factorEmail: "octo@example.test" });
+    expect(kept(w)).not.toHaveProperty("factorEmail");
     expect((await w.refresh(alone.refresh!)).status).toBe(400);
     // The refresh never seated it anywhere (it is still company-less, so never a legacy seat in the built-in company).
     expect(w.db.get(membershipKey(SLACK()).pk, membershipKey(SLACK()).sk)).toBeUndefined();
@@ -600,7 +569,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     await linkedThenUnlinked(w);
     const pending = await w.slackCode("U0LINKME1");
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     // It may no longer hold a session with no company: it points at a person.
     expect(await w.invites.companylessEligible(SLACK())).toBe(false);
@@ -626,7 +594,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     await w.operator({ kind: "company-create", name: "Charlie", firstAdminEmail: "dana@example.test", expiresInHours: 24 }, C);
     const dana = (await w.signIn("dana", { company: C })).access!;
     expect(decodeJwt(dana).sub).toBe(person("dana"));
-    w.stepUp(dana);
     const before = structuredClone(kept(w));
     expect(await w.link(dana, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
     expect(kept(w)).toEqual(before);
@@ -643,7 +610,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     expect(await w.link(carol, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
     expect(w.logs.filter((one) => one.event === "signin.link_refused").at(-1)).toMatchObject({ developerId: person("carol"), reason: "identity_taken" });
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     expect(await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
   });
 
@@ -651,7 +617,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     const w = world();
     await linkedThenUnlinked(w);
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     const carol = await memberOfX(w, "carol");
     const started = await w.start(p, "slack");
     const { location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
@@ -669,7 +634,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     const w = world();
     await linkedThenUnlinked(w);
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     const reasons = () => w.logs.filter((one) => one.event === "signin.link_refused").map((one) => one.reason);
     w.db.set({ ...kept(w), revoked: true });
     expect(await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
@@ -707,7 +671,6 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
       const w = world();
       await linkedThenUnlinked(w);
       const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-      w.stepUp(p);
       const send = w.db.send.bind(w.db);
       (w.db as unknown as { send: unknown }).send = async (command: { constructor: { name: string } }) => {
         if (command.constructor.name === "TransactWriteCommand") w.db.set(change(kept(w)));
@@ -720,53 +683,19 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     }
   });
 
-  it("its first-sign-in mark goes at each link and unlink: an own sign-in without an email, a link again and an unlink again, then its next own sign-in captures", async () => {
+  it("DEC 254zzz73: its own sign-ins, links and unlinks never write a factor email or a first-sign-in mark, and it never takes a seat in the built-in company", async () => {
     const w = world();
     await linkedThenUnlinked(w);
-    const user = slackUsers.find((one) => one.userId === "U0LINKME1")!;
-    const noEmail = without(user, "email");
-    slackUsers.splice(slackUsers.indexOf(user), 1, noEmail);
-    try { expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeUndefined(); } finally { slackUsers.splice(slackUsers.indexOf(noEmail), 1, user); }
-    expect(kept(w)).not.toHaveProperty("factorEmail");
+    expect(decodeJwt((await w.signIn("U0LINKME1", { slackTeam: TEAM })).access!).sub).toBe(SLACK());
+    expect(w.db.get(membershipKey(SLACK()).pk, membershipKey(SLACK()).sk)).toBeUndefined();
     w.tick(1_000);
     const p = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(p);
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
-    w.stepUp(p);
     w.tick(1_000);
     expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).status).toBe(200);
     w.tick(1_000);
     expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeUndefined();
-    expect(kept(w)).toMatchObject({ factorEmail: "octo@example.test", factorEmailSetBy: "first_sign_in" });
-  });
-
-  it("its own sign-in after the unlink captures its factor email (once), so a step-up after it works; it never takes a seat in the built-in company", async () => {
-    const sent: Array<{ to: string; subject: string; text: string }> = [];
-    const w = world({ stepUp: { email: { async send(message) { sent.push(message); } } } });
-    await linkedThenUnlinked(w);
-    expect(kept(w)).not.toHaveProperty("factorEmail");
-    expect(decodeJwt((await w.signIn("U0LINKME1", { slackTeam: TEAM })).access!).sub).toBe(SLACK());
-    expect(kept(w)).toMatchObject({ factorEmail: "octo@example.test", factorEmailSetBy: "first_sign_in" });
-    expect(w.db.get(membershipKey(SLACK()).pk, membershipKey(SLACK()).sk)).toBeUndefined();
-    // A later sign-in never moves it.
-    w.tick(1_000);
-    const user = slackUsers.find((one) => one.userId === "U0LINKME1")!;
-    user.email = "moved@example.test";
-    try { await w.signIn("U0LINKME1", { slackTeam: TEAM }); } finally { user.email = "octo@example.test"; }
-    expect(kept(w)).toMatchObject({ factorEmail: "octo@example.test" });
-    // Invited into X on its own, it steps up: the code goes to the captured factor email.
-    await w.operator({ kind: "company-preapprove", companyId: X, email: "octo@example.test", role: "member", expiresInHours: 24 });
-    expect((await w.signIn("U0LINKME1", { slackTeam: TEAM, company: X })).refused).toBeUndefined();
-    let response = await w.http(httpEvent("GET", authorizeQuery({ client_id: "web-app", redirect_uri: WEB, company: X, acr_values: "step-up" })));
-    if (response.statusCode === 200) response = await w.http(httpEvent("GET", /href="([^"]*method=slack)"/.exec(response.body)![1]!.replaceAll("&amp;", "&")));
-    const back = await w.http(httpEvent("GET", w.slack.approve(response.headers.location!, "U0LINKME1", { teamId: TEAM })));
-    const stepped = new URL(back.headers.location!);
-    expect(stepped.searchParams.get("error_description")).not.toBe(STEP_UP_TEXT.noFactor);
-    expect(stepped.toString()).toBe(`${ISSUER}/step-up`);
-    const cookie = back.cookies?.map((one) => new RegExp(`^${STEP_UP_COOKIE}=([^;]+);`).exec(one)?.[1]).find((one) => one !== undefined);
-    const ask = httpEvent("POST", "/v1/auth/step-up/email");
-    expect((await w.http({ ...ask, headers: { ...ask.headers, origin: new URL(API).origin }, cookies: [`${STEP_UP_COOKIE}=${cookie!}`] })).statusCode).toBe(200);
-    expect(sent.map((one) => one.to)).toEqual(["octo@example.test"]);
+    for (const field of ["factorEmail", "factorEmailSetAt", "factorEmailSetBy", "firstSignInMark"]) expect(kept(w)).not.toHaveProperty(field);
   });
 });
 
@@ -782,12 +711,10 @@ describe("a link, the list and an unlink under the synthesized sign-in role (DEC
     const p = await w.githubMember();
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     expect((await w.api("GET", "/v1/dev/me/sign-ins", p)).status).toBe(200);
-    w.stepUp(p);
     expect(await w.api("DELETE", "/v1/dev/me/sign-ins/slack", p)).toEqual({ status: 200, body: { removed: true } });
     // DEC 254zzz39: the kept record's own sign-in, then linking it again, need no grant beyond these either.
     expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeUndefined();
     const again = (await w.githubSignIn("octo-link", { company: X })).access!;
-    w.stepUp(again);
     expect(await w.link(again, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
     const shape = (call: TableCall) => `${call.action} ${call.pk.replace(/org_[0-9a-z]{20}/gu, "<org>").replace(/[a-f0-9]{64}|[0-9a-f-]{36}/gu, "<id>")}`;
     expect(seen.filter((call) => !call.allowed).map(shape)).toEqual([]);
@@ -804,6 +731,6 @@ describe("a link, the list and an unlink under the synthesized sign-in role (DEC
     const newCalls = seen.filter((call) => added.includes(call.action) && !(call.action === "dynamodb:Query" && call.pk.startsWith("SIGNIN_CLIENTS")));
     expect(newCalls.length).toBeGreaterThan(0);
     for (const call of newCalls) expect(before.allows(call), shape(call)).toBe(false);
-    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ mergedInto: P, factorEmail: "octo@example.test" });
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ mergedInto: P });
   }, 120_000);
 });

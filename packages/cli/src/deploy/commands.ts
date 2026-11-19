@@ -110,6 +110,7 @@ const deployAnswersSchema = (mode: "install" | "upgrade") => z
     github: githubAnswersSchema(mode),
     permissionsBoundaryArn: z.string().min(1).optional(),
     operatorPrincipalArn: z.string().min(1).optional(),
+    operatorExternalId: z.string().min(1).optional(),
     images: ImagesAnswersSchema.optional(),
     slackAppPostedMessages: z.enum(["accept", "ignore"]).optional(),
     budget: BudgetAnswersSchema.optional(),
@@ -174,6 +175,7 @@ function toDeployAnswers(parsed: z.infer<typeof UpgradeDeployAnswersSchema>): De
     },
     ...(parsed.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: parsed.permissionsBoundaryArn }),
     ...(parsed.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: parsed.operatorPrincipalArn }),
+    ...(parsed.operatorExternalId === undefined ? {} : { operatorExternalId: parsed.operatorExternalId }),
     ...(images === undefined ? {} : { images }),
     ...(parsed.slackAppPostedMessages === undefined ? {} : { slackAppPostedMessages: parsed.slackAppPostedMessages }),
     ...(parsed.budget === undefined ? {} : { budget: parsed.budget }),
@@ -752,6 +754,7 @@ export interface InitExportOptions {
   adminValues?: string;
   permissionsBoundaryArn?: string;
   operatorPrincipalArn?: string;
+  operatorExternalId?: string;
   orchestratorModel: string;
   classifierModel: string;
   workerModel: string;
@@ -851,6 +854,7 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
     github: { account: "", appId: "", installationId: "", privateKeySecretArn: "" },
     ...(options.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: options.permissionsBoundaryArn }),
     ...(options.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: options.operatorPrincipalArn }),
+    ...(options.operatorExternalId === undefined ? {} : { operatorExternalId: options.operatorExternalId }),
   };
 
   const release = await loadRelease(options.releaseDir);

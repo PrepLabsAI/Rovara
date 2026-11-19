@@ -7,7 +7,7 @@ import { VERTEX_LOCATIONS } from "./vertex-locations.js";
  * registries, OS package mirrors, Docker registries, the AI providers, and Slack and the connector
  * hosts. Everything else gets NXDOMAIN. A wildcard entry matches subdomains only, not the bare domain.
  *
- * Narrow on purpose. The list governs a task sandbox as much as the worker beside it (one resolver, one list), so a name that lets anyone upload
+ * Narrow on purpose. The list governs a task sandbox as much as the worker beside it (one resolver, one list; with the worker setting `WorkerSandboxEgress=gateway` the sandbox side also loses the push-capable registries, sandbox-deny-domains.ts), so a name that lets anyone upload
  * (a bucket of any account, a repository or gist of any user) is an exit for an injected agent. Not on the list, and never to be added back as a wildcard:
  *  - `*.amazonaws.com`, `*.aws`: every AWS customer's storage bucket, API endpoint and so on. A cloud install adds the exact regional hosts its own
  *    machines call; a laptop needs none (model calls go through the host's proxy).

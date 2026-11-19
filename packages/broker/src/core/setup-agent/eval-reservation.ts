@@ -30,3 +30,13 @@ export function boundEvalMonthlyCap(registry: Pick<AdapterRegistry, "names" | "g
   if (adapter === undefined || typeof adapter.monthlyCapMicros !== "function") return undefined;
   return (scope) => adapter.monthlyCapMicros!(scope);
 }
+
+/**
+ * L4-T3: whether the project's own AI provider is connected, from the bound adapter's `providerConnected` (the model gateway's own key check, the one the spend authority and the stage hold make). Undefined when no
+ * adapter is bound or it has none (a laptop): "connected" is then unknown and nothing claims either. A fault answers undefined as well.
+ */
+export function boundEvalProviderConnected(registry: Pick<AdapterRegistry, "names" | "get">): ((scope: { company: string; project: string }) => Promise<boolean | undefined>) | undefined {
+  const adapter = boundEvalReservation(registry);
+  if (adapter === undefined || typeof adapter.providerConnected !== "function") return undefined;
+  return async (scope) => { try { const answer = await adapter.providerConnected!(scope); return typeof answer === "boolean" ? answer : undefined; } catch { return undefined; } };
+}

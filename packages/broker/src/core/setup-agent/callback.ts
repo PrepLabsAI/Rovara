@@ -6,19 +6,27 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 // never named at all: a host ask is credited to the starter the broker recorded on the task (`requestHostAsk` reads it itself). The body is a strict union:
 //   journal       the commands the run ran, in order (at most 20 a call; the broker reads each again and keeps the first for a position);
 //   host          a website the run could not reach: the name only (and where it came from): the broker decides whether it is refused, already allowed, joined or a new ask. Nothing is granted;
+//   alive         the worker is still here while the run ends (nothing is handed over or answered);
 //   poll          "anything for me?": the next command the owner typed (handed over once), and where each host this run asked for stands (open, approved, refused);
 //   command_done  a person's command finished, with the journal position of its result;
+//   eval_dry_run  L4-E12: the free dry run's dependency list (databases by port, outside hosts by name, missing variables by name), kept once per project (the newest run's) and shown through the TH1 words (`eval-dependency-list.ts`).
 //   eval_discovery  DEC 253n(1): the eval questions the run found (suites, their question files and categories, the command, judge pins, model catalog row and image), kept once per run and
 //                 never trusted for a hash (`eval-discovery.ts`): a maintainer or admin confirms a selection from it, and the broker builds the eval plan from its own reads.
+//   stand_in_data L4-E7: the sample rows and answers the run's stand-in writer made on the company's own AI. Checked strictly, scanned for personal data, credentials and the project's production names, and kept (ONE set per run, versioned
+//                 by digest, for THIS company and project: both come from the authenticated run, never the body) by `standin-data-store.ts`. The answer is `{stored}` with a digest and version, or a fixed reason.
 // Nothing in a reply is repository or command text except the person's own command (which only the owner could type and the broker already checked).
 import { z } from "zod";
-import { agentXError, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
+import { agentXError, change, when, type DocumentStore, type OrgId, type TestEnvProdDeny } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
 import { SETUP_AGENT_WORKFLOW_MODE } from "./agent.js";
 import { finishSetupCommand, readSetupCommand, takeSetupCommand } from "./command.js";
 import { listHostAsks, approvedHostsOf, requestHostAsk } from "./host-ask.js";
 import { SETUP_JOURNAL_BATCH_MAX, appendSetupJournal } from "./journal.js";
 import { recordEvalDiscovery, type EvalDiscoveryLogEvent } from "./eval-discovery.js";
+import { recordEvalDependencyList, type EvalDependencyListLogEvent } from "./eval-dependency-list.js";
+import { createStandInDataStore } from "../test-env/standin-data-store.js";
+import { NO_PROD_DENY } from "../proof/evidence-guard.js";
+import type { FixtureObjectPort } from "../test-env/fixture-store.js";
 
 export interface SetupAgentCallbackDeps {
   store: DocumentStore;
@@ -32,8 +40,10 @@ export interface SetupAgentCallbackDeps {
   sandboxDenied?: ((project: string) => readonly string[]) | undefined;
   /** Whether the person who typed a command may still have it run (the owner, read live at hand-over). Absent: nothing is handed over. */
   mayStillRun?: ((by: string) => Promise<boolean>) | undefined;
+  /** L4-E7: where the stand-in writer's sample data is kept (the install's object storage as a fixture object port). Absent: a `stand_in_data` report is answered `stored: false` and nothing is kept. */
+  standInObjects?: FixtureObjectPort | undefined;
   /** Fixed-word log lines (the eval discovery's); never the body. */
-  log?: ((entry: { event: EvalDiscoveryLogEvent; reason?: string }) => void) | undefined;
+  log?: ((entry: { event: EvalDiscoveryLogEvent | EvalDependencyListLogEvent; reason?: string }) => void) | undefined;
 }
 
 /** The authenticated operation, as the callback route read it. */
@@ -51,9 +61,15 @@ export const SetupAgentCallbackBodySchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("journal"), entries: z.array(z.unknown()).min(1).max(SETUP_JOURNAL_BATCH_MAX) }).strict(),
   HostSchema,
   z.object({ kind: z.literal("poll") }).strict(),
+  // L4-T5: "I am still here", said while the run finishes (the poll has stopped, a person's command may still run). Takes nothing and answers nothing: it only notes the time.
+  z.object({ kind: z.literal("alive") }).strict(),
   z.object({ kind: z.literal("command_done"), seq: z.number().int().min(1).max(20), journalN: z.number().int().min(1).max(400).optional() }).strict(),
   // The report itself is checked by `recordEvalDiscovery` (`SetupEvalDiscoveryReportSchema`), so a bad report gets its own fixed refusal.
   z.object({ kind: z.literal("eval_discovery"), report: z.unknown() }).strict(),
+  // L4-E12 (DEC 254zzz55 N6): what the free dry run of the drafted eval found it reaches. Checked by `recordEvalDependencyList` (a fixed-shape list; a model call claimed is refused).
+  z.object({ kind: z.literal("eval_dry_run"), list: z.unknown() }).strict(),
+  // The set is checked by the stand-in data store (`StandInWriterSetSchema`, the bytes cap, the data guard).
+  z.object({ kind: z.literal("stand_in_data"), set: z.unknown() }).strict(),
 ]);
 export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema>;
 
@@ -61,17 +77,27 @@ export type SetupAgentCallbackBody = z.infer<typeof SetupAgentCallbackBodySchema
 const RUNNING_STATUSES: ReadonlySet<string> = new Set(["DISPATCHING", "RUNNING"]);
 
 /** The run an operation belongs to: its task, which must be a setup-run task of this company. Undefined for anything else. */
-export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "store" | "companyId">, operation: SetupAgentOperation): Promise<{ orgId: OrgId; project: string; taskId: string } | undefined> {
+export async function setupRunOfOperation(deps: Pick<SetupAgentCallbackDeps, "store" | "companyId">, operation: SetupAgentOperation): Promise<{ orgId: OrgId; project: string; taskId: string; seenAt?: string } | undefined> {
   if (operation.kind !== "task" || operation.workflowMode !== SETUP_AGENT_WORKFLOW_MODE || !RUNNING_STATUSES.has(operation.status)) return undefined;
   const pointer = await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey());
   if (typeof pointer?.["taskId"] !== "string") return undefined;
   const task = await deps.store.get(taskKey(pointer["taskId"]));
   if (task === undefined || task["purpose"] !== "setup_agent" || task["companyId"] !== deps.companyId || task["workspaceId"] !== operation.workspaceId || task["closedAt"] !== undefined || typeof task["project"] !== "string") return undefined;
   if (operation.companyId !== undefined && operation.companyId !== task["companyId"]) return undefined;
-  return { orgId: deps.companyId, project: task["project"], taskId: pointer["taskId"] };
+  return { orgId: deps.companyId, project: task["project"], taskId: pointer["taskId"], ...(typeof task["setupAgentSeenAt"] === "string" ? { seenAt: task["setupAgentSeenAt"] } : {}) };
 }
 
-/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of the five shapes. */
+/** L4-T5: how often the run's task is stamped with the worker's last word (the worker polls every 3 seconds; one write a minute is all a 10-minute silence rule needs). */
+export const SETUP_RUN_SEEN_EVERY_MS = 60_000;
+
+/** Notes that the worker just talked, on the run's own task and only while the task is still there. Best effort: a write that fails changes nothing (the next poll tries again). */
+async function noteSetupRunSeen(deps: Pick<SetupAgentCallbackDeps, "store" | "now">, run: { taskId: string; seenAt?: string }): Promise<void> {
+  const last = run.seenAt === undefined ? Number.NaN : Date.parse(run.seenAt);
+  if (Number.isFinite(last) && deps.now() - last < SETUP_RUN_SEEN_EVERY_MS) return;
+  await deps.store.update({ key: taskKey(run.taskId), ops: [change.set("setupAgentSeenAt", new Date(deps.now()).toISOString())], condition: when.present() }).catch(() => undefined);
+}
+
+/** Handles one setup callback. Throws CALLBACK_FORBIDDEN for an operation that is not a running setup run, CONFIG_INVALID for a body that is not one of its shapes. */
 export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, operation: SetupAgentOperation, rawBody: unknown): Promise<object> {
   const run = await setupRunOfOperation(deps, operation);
   if (run === undefined) throw agentXError("CALLBACK_FORBIDDEN", "the setup callback is limited to a running setup run");
@@ -79,7 +105,11 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the setup callback body is not one of its shapes");
   const body = parsed.data;
   const table = { store: deps.store, now: deps.now };
+  // L4-T5: any word from a live worker is noted, so a run that is journaling, answering or finishing never reads as stopped.
+  await noteSetupRunSeen(deps, run);
   switch (body.kind) {
+    case "alive":
+      return {};
     case "journal":
       return appendSetupJournal(table, run, body.entries);
     case "host": {
@@ -99,7 +129,17 @@ export async function handleSetupAgentCallback(deps: SetupAgentCallbackDeps, ope
     }
     case "command_done":
       return { finished: await finishSetupCommand(table, run, { seq: body.seq, journalN: body.journalN }) };
+    // DEC 254zzz43: recording the report is ALL it does. A wrapper file is never proposed or written from here: only a person's click (the card's POST) may open a pull request.
     case "eval_discovery":
       return await recordEvalDiscovery({ ...table, store: deps.store, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.report);
+    case "eval_dry_run":
+      return await recordEvalDependencyList({ ...table, ...(deps.log === undefined ? {} : { log: deps.log }) }, run, body.list);
+    case "stand_in_data": {
+      if (deps.standInObjects === undefined) return { stored: false, reason: "off" };
+      // The project's production names when the install knows them (a list that cannot be read stops the write: fail closed); none known is the empty list, and the guard still scans for personal data and credentials.
+      const store = createStandInDataStore({ objects: deps.standInObjects, documents: deps.store, denyFor: async (_org, project) => (await deps.prodDeny?.(project)) ?? NO_PROD_DENY, now: () => new Date(deps.now()) });
+      const stored = await store.put(run.orgId, run.project, { taskId: run.taskId, actor: "rovara-stand-in-writer" }, body.set);
+      return stored.ok ? { stored: true, digest: stored.digest, version: stored.version } : { stored: false, reason: stored.reason };
+    }
   }
 }

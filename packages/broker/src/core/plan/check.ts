@@ -6,7 +6,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 // (`planCritiqueOutcome`).
 import { createHash } from "node:crypto";
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, blockWorkflow, closePlanCritique, readPlanCritique, redactText,
+  isBudgetExhaustedMessage, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, blockWorkflow, closePlanCritique, readPlanCritique, redactText,
   retryPlanCritique, submitPlanCritique, workflowIsDesignReviewing, workflowRequestId, when, WorkflowTransitionError,
   type ModelIdentifier, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -159,7 +159,7 @@ export async function recordCritiqued(
   try {
     if (ended.status !== "SUCCEEDED") {
       // The check is advice: whatever goes wrong with it, the plan goes on to the person, who is told it was not checked.
-      if (ended.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE) { await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "stopped_at_limit", limit: "other", now })); return; }
+      if (isBudgetExhaustedMessage(ended.error)) { await move(closePlanCritique(workflow, { expectedRevision: workflow.revision, status: "stopped_at_limit", limit: "other", now })); return; }
       if (ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true) { await move(blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.stepRuleFilesUnverified, now)); return; }
       if (ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) { await move(blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.leftoverProcesses, now)); return; }
       // The model could not serve this account: the check is made again on the next model the install's rule ranks, by a row of its own, while tries are left (`check-retry.ts`). A check on the install's

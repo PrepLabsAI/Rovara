@@ -527,14 +527,14 @@ async function cleanLateResult(deps: SavedEnvDeps, ids: { orgId: string; project
 }
 
 /** The registry call's address: the company and the project's repository, or undefined when the switch is off or an id is not text. */
-function callOf(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }): { companyId: string; repository: string } | undefined {
-  if (!deps.session.config.enabled) return undefined;
+function callOf(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }, includeWhenDisabled = false): { companyId: string; repository: string } | undefined {
+  if (!includeWhenDisabled && !deps.session.config.enabled) return undefined;
   const repository = repositoryOf(deps.session.config, ids.orgId, ids.projectId);
   return repository === undefined ? undefined : { companyId: ids.orgId, repository };
 }
 
 async function deleteDigest(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }, digest: string): Promise<void> {
-  const call = callOf(deps, ids);
+  const call = callOf(deps, ids, true);
   if (call === undefined) return;
   try { await deps.session.ports.registry.deleteImages({ ...call, digests: [digest] }); } catch { return; }
   await deps.store.audit(audit(deps, ids, "images_deleted", { digest, count: 1, reason: "refused_build" })).catch(() => undefined);
@@ -656,8 +656,7 @@ export type WalkResult = { ok: true; deleted: number } | { ok: false; reason: "d
  * older than a day go. A recorded image the registry no longer holds is dropped from the row. Uses the broker's own registry call. A registry's own count rule (`keep` plus a margin) is a backstop.
  */
 export async function walk(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }): Promise<WalkResult> {
-  const off = disabled(deps);
-  if (off !== undefined) return off;
+  // Housekeeping remains available while the user-facing feature is off, so retained images still age out.
   const state = await deps.store.get(ids.orgId, ids.projectId);
   if (state === undefined) return { ok: true, deleted: 0 };
   // A deleted project's registry is deleted whole (a push that was in flight at the delete may have re-created the repository); the nightly walk includes deleted rows for this.
@@ -665,7 +664,7 @@ export async function walk(deps: SavedEnvDeps, ids: { orgId: string; projectId: 
     const purged = await purgeRegistry(deps, ids, "deleted_walk");
     return purged.ok ? { ok: true, deleted: purged.deleted } : { ok: false, reason: "unavailable" };
   }
-  const call = callOf(deps, ids);
+  const call = callOf(deps, ids, true);
   if (call === undefined) return { ok: false, reason: "unavailable" };
   const registry = deps.session.ports.registry;
   let listed: RegistryImage[];
@@ -717,22 +716,21 @@ export async function onProjectArchived(deps: SavedEnvDeps, ids: { orgId: string
  * the broker's own registry call. A repository that does not exist counts as done. If the registry cannot be reached the row stays deleted and the caller retries the registry part. Audited, with or without a row.
  */
 export async function onProjectDeleted(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }): Promise<{ ok: true; deleted: number } | { ok: false; reason: "disabled" | "unavailable" | "stale_write" }> {
-  // The mark is written whatever the saved-environments switch says (a project deleted while the switch is off must never get a build or a login later); only the registry part needs the switch.
+  // The mark and registry purge both run whatever the feature switch says. Keep the first deletion time: retries must not restart the in-flight push drain.
   let committed = false;
   for (let attempt = 0; attempt < COMMIT_RETRIES && !committed; attempt += 1) {
     const state = await deps.store.get(ids.orgId, ids.projectId);
     const base = state ?? blank(ids.orgId, ids.projectId);
-    committed = (await commit(deps, state, { ...base, images: [], job: undefined, resetRequested: false, deleted: true, deletedAt: iso(deps.now()), health: "never_proved" }, audit(deps, base, "project_deleted"))) !== undefined;
+    committed = (await commit(deps, state, { ...base, images: [], job: undefined, resetRequested: false, deleted: true, deletedAt: state?.deleted === true && state.deletedAt !== undefined ? state.deletedAt : iso(deps.now()), health: "never_proved" }, audit(deps, base, "project_deleted"))) !== undefined;
   }
   if (!committed) return { ok: false, reason: "stale_write" };
   return purgeRegistry(deps, ids, "project_deleted");
 }
 
-/** Deletes the project's repository with its images (the broker's own registry call). A repository that does not exist counts as done. Answers `disabled` when the switch is off: nothing is touched. */
+/** Deletes the project's repository even when the feature switch is off. A repository that does not exist counts as done. */
 async function purgeRegistry(deps: SavedEnvDeps, ids: { orgId: string; projectId: string }, reason: string): Promise<{ ok: true; deleted: number } | { ok: false; reason: "disabled" | "unavailable" }> {
-  const off = disabled(deps);
-  if (off !== undefined) return off;
-  const call = callOf(deps, ids);
+  // Erasure is not gated by the feature switch: images already stored must remain deletable.
+  const call = callOf(deps, ids, true);
   if (call === undefined) return { ok: false, reason: "unavailable" };
   const registry = deps.session.ports.registry;
   let count = 0;
@@ -762,8 +760,7 @@ async function markPurged(deps: SavedEnvDeps, ids: { orgId: string; projectId: s
  * delete cannot push after that. Best effort per project.
  */
 export async function sweepDeleted(deps: SavedEnvDeps): Promise<{ ok: true; swept: number; failed: number } | { ok: false; reason: "disabled" | "unavailable" }> {
-  const off = disabled(deps);
-  if (off !== undefined) return off;
+  // Repeated deletion of already removed projects must continue with the feature switch off.
   let rows: Array<{ orgId: string; projectId: string }>;
   try { rows = await deps.store.deletedNeedingPurge(SAVED_ENV_JOB_LEASE_MS); } catch { return { ok: false, reason: "unavailable" }; }
   let swept = 0;

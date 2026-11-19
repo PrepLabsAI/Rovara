@@ -119,7 +119,7 @@ export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: numb
     case "spend-cap": return capUsd === undefined ? "Another automatic round would go over the per-task spending cap." : `Another automatic round would go over the ${usd(capUsd)} per-task cap on automatic fixing.`;
     case "day-budget": return "The project's daily AI budget has no room for another automatic round today.";
     case "history-full": return "This task's decision history is full.";
-    case "inputs-missing": return "I could not read what this task has spent so far, so I did not act.";
+    case "inputs-missing": return "I could not read what this task has spent so far, or its spending limit, so I did not act.";
   }
 }
 

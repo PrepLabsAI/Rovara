@@ -4,9 +4,10 @@ import { HIDDEN_EVAL_NEEDS_SEALED_SENTENCE, type EvalRoundKind } from "./eval-hi
 import { EVAL_NOT_RUN_CLASSES, type EvalRoundFacts } from "./eval-pacing.js";
 import { NOT_RUN_SENTENCES } from "./model-egress/classify.js";
 import { EvalRunDiagnosticSchema, evalRunFailureSentence, type EvalRunDiagnostic } from "./eval-run-diagnostic.js";
+import type { EvalStandInResult } from "./eval-standin-set.js";
 
 export const EVAL_NOT_RUN_REASONS = [
-  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed", "eval_run_failed",
+  ...EVAL_NOT_RUN_CLASSES, "baseline_measuring", "baseline_not_confirmed", "too_many_not_run", "too_few_questions", "hidden_set_needs_sealed_round", "hidden_set_unavailable", "no_base_score", "partial_run", "unreadable_score", "no_measures_file", "eval_set_changed", "eval_set_unknown", "base_round_unattested", "question_data_missing", "no_changed_prompt_call", "judge_changed", "round_limit", "invalid_question_data", "no_product_key", "no_eval_configured", "not_connected", "provider_not_connected", "spend_not_approved", "needs_fresh_sandbox", "checks_failed", "stopped", "questions_changed", "eval_run_failed", "outside_calls_made_up",
 ] as const;
 export type EvalNotRunReason = (typeof EVAL_NOT_RUN_REASONS)[number];
 
@@ -15,6 +16,7 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   baseline_measuring: "not run: baseline still being measured",
   baseline_not_confirmed: "not run: the eval health check is waiting for a maintainer or admin to confirm it",
   not_connected: "not run: the eval's spend approval or model meter is not connected yet",
+  provider_not_connected: "not run: the AI your evals call is not connected for this project (connect it in Company settings, AI keys)",
   spend_not_approved: "not run: an owner, maintainer or admin must confirm the eval's call estimate in setup",
   needs_fresh_sandbox: "not run: real model checks need a fresh check sandbox",
   checks_failed: "not run: the tests did not pass, so the eval was not run",
@@ -46,6 +48,8 @@ export const EVAL_NOT_RUN_SENTENCES: Readonly<Record<EvalNotRunReason, string>> 
   eval_set_changed: "not run: the eval set changed, so main's score is not comparable",
   eval_set_unknown: "not run: the eval did not say which eval set it ran",
   eval_run_failed: "not run: the eval could not run",
+  /** L4-EINT (DEC 254zzz71): most of the failing questions had to be dropped because an outside answer was made up, so what is left would not be a comparison. */
+  outside_calls_made_up: "Not run: outside calls were made up",
 };
 
 
@@ -80,8 +84,11 @@ export interface EvalCheckResult {
   readonly measures: readonly never[];
   readonly verdicts: readonly never[];
   readonly questions: readonly EvalQuestionResult[];
-  readonly excluded: ReadonlyArray<{ readonly id: string; readonly reason: "edited" | "suspect_limit" }>;
+  /** `stand_in_gap` (L4-E56): a question that failed in a run where Rovara had to make up an answer for an outside service: dropped from BOTH sides, never "Worse on eval". */
+  readonly excluded: ReadonlyArray<{ readonly id: string; readonly reason: "edited" | "suspect_limit" | "stand_in_gap" }>;
   readonly notices: readonly string[];
+  /** L4-E56: what the outside-HTTP stand-in did this round (numbers only). Absent when there was none. */
+  readonly standIns?: EvalStandInResult;
   readonly summary: string;
   readonly fixRequested: boolean;
   readonly disposition: { readonly draft: boolean; readonly check: "failure" | "success" | "neutral"; readonly retry: boolean };
@@ -145,7 +152,8 @@ export function evalNotRunResult(args: { readonly roundKind: EvalRoundKind; read
   // L4-EVS: a run failure is read through its schema (a name, a code, a bounded tail); anything else is dropped and the fixed sentence of the reason stays.
   const failure = reason === "eval_run_failed" && args.runFailure !== undefined ? EvalRunDiagnosticSchema.safeParse(args.runFailure) : undefined;
   const sentence = failure?.success ? `not run: ${evalRunFailureSentence(failure.data)}` : EVAL_NOT_RUN_SENTENCES[reason];
-  const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" ? "" : "Retry.";
+  // TH1: a blocked connection is the same on a second try (the sealed box reaches nothing but the model), so it does not say "Retry."
+  const ending = reason === "baseline_measuring" ? "Not a pass or a fail." : reason === "baseline_not_confirmed" || (failure?.success === true && failure.data.code === "blocked_connection") ? "" : "Retry.";
   return { kind: "eval", roundKind: args.roundKind, outcome: "not_run", label: "Not run", notRun: { reason, sentence, ...(failure?.success ? { runFailure: failure.data } : {}) }, usedHiddenSet: args.hiddenSetUsed === true,
     casesRun: 0, casesTotal: 0, measures: [], verdicts: [], questions: [], excluded: [], notices: [], fixRequested: false,
     summary: `Eval: Not run — ${sentence.replace(/^not run: /iu, "")}.${ending === "" ? "" : ` ${ending}`}`, disposition: { draft: false, check: "neutral", retry: true } };

@@ -56,7 +56,7 @@ async function world(options: {
       w.concurrent.now += 1; w.concurrent.max = Math.max(w.concurrent.max, w.concurrent.now);
       w.ran.push({ command, at: w.ran.length });
       opts.onData(Buffer.from("ok\n"));
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await new Promise((resolve) => setTimeout(resolve, command === "a-long-command-a-person-typed" ? 300 : 5));
       w.concurrent.now -= 1;
       return { exitCode: 0 };
     },
@@ -619,6 +619,52 @@ describe("L12: setup runs turned off for the company end a run that is going", (
     expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", partial: true });
     expect(result.setupProposal).toBeDefined();
   });
+  it("L4-T5: the run says it was turned off (the summary's `cannot`), and a stop for any other reason does not say so", async () => {
+    let polls = 0;
+    const off = await world({
+      script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await new Promise((resolve) => setTimeout(resolve, 80)); await bash.exec("npm test", "/work", { onData: () => undefined }); },
+      poll: () => { polls += 1; return polls >= 2 ? { hosts: [], companyOff: true } : { hosts: [] }; },
+    });
+    expect((await runSetupAgent(off.input)).setupRunSummary).toMatchObject({ stop: "infrastructure", partial: true, cannot: "company_off" });
+    // Nothing can reach the run (5 polls in a row failed): it ends `infrastructure` too, but trying again can help, so it says nothing of being turned off.
+    const unreachable = await world({ script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await new Promise((resolve) => setTimeout(resolve, 200)); await bash.exec("npm test", "/work", { onData: () => undefined }); } });
+    unreachable.input.ports.callback = async (body) => { if ((body as { kind: string }).kind !== "poll") return { ok: true }; throw new Error("the broker is unreachable"); };
+    const summary = (await runSetupAgent(unreachable.input)).setupRunSummary;
+    expect(summary.stop).toBe("infrastructure");
+    expect(summary).not.toHaveProperty("cannot");
+    // The run was already over for another reason (its command limit) when the answer came: the reason it stopped is the one it reports, with no cause of being turned off.
+    let denied = false;
+    const limited = await world({
+      limits: { commands: 1 as never },
+      script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await bash.exec("npm test", "/work", { onData: () => undefined }).catch(() => undefined); denied = true; await new Promise((resolve) => setTimeout(resolve, 150)); },
+      poll: () => (denied ? { hosts: [], companyOff: true } : { hosts: [] }),
+    });
+    const limitedSummary = (await runSetupAgent(limited.input)).setupRunSummary;
+    expect(limitedSummary.stop).toBe("attempts_used");
+    expect(limitedSummary).not.toHaveProperty("cannot");
+    // A run that finished by itself before the answer came reports no cause.
+    const done = await world({ script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await bash.exec("npm test", "/work", { onData: () => undefined }); } });
+    const finished = (await runSetupAgent(done.input)).setupRunSummary;
+    expect(finished.stop).toBe("proposed");
+    expect(finished).not.toHaveProperty("cannot");
+  });
+  it("L4-T5: after its talk stops, a run still ending (a person's command still running) says it is alive, and stops saying so once it is over", async () => {
+    let polls = 0;
+    const t = await world({
+      script: async ({ bash }) => { await bash.exec("npm ci", "/work", { onData: () => undefined }); await new Promise((resolve) => setTimeout(resolve, 60)); },
+      poll: () => { polls += 1; return polls === 1 ? { hosts: [], command: { seq: 1, command: "a-long-command-a-person-typed" } } : { hosts: [] }; },
+    });
+    t.input.ports.aliveMs = 20;
+    const original = t.input.ports.callback.bind(t.input.ports);
+    let beats = 0;
+    t.input.ports.callback = async (body) => { if ((body as { kind: string }).kind === "alive") beats += 1; return original(body); };
+    await runSetupAgent(t.input);
+    expect(t.w.ran.map((entry) => entry.command)).toContain("a-long-command-a-person-typed");
+    expect(beats).toBeGreaterThanOrEqual(2);
+    const after = beats;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(beats).toBe(after);
+  });
   it("the run still looks at the broker when its journal callback fails: a stop reaches it", async () => {
     let polls = 0;
     const t = await world({
@@ -722,6 +768,45 @@ describe("DEC 253q(a): the eval the agent drafts goes to the broker through the 
     await runSetupAgent(none.input);
     expect(none.w.progress.join("\n")).not.toContain("did not use the eval");
   });
+  // DEC 254zzz43: the wrapper file is dry-run in THIS sandbox, before the sandbox is removed, and only a pass makes it offered.
+  const ROWS_OUTPUT = { kind: "rows", format: "jsonl", language: "python", idField: "case_id", pass: { field: "passed", equals: true } };
+  const GOOD_REPORT = "---REPORT---\n<testsuite name=\"rovara-eval\" tests=\"2\" failures=\"1\">\n  <testcase classname=\"eval\" name=\"rovara-dry-run-pass\"/>\n  <testcase classname=\"eval\" name=\"rovara-dry-run-fail\"><failure message=\"did not pass\"/></testcase>\n</testsuite>\n";
+  const wrapperWorld = async (exec: (command: string) => { exitCode: number; output: string }) => {
+    const t = await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], output: ROWS_OUTPUT }] } }) });
+    t.w.base.exec = async (command, _cwd, opts) => {
+      if (!command.includes("rovara-wrapper-dryrun")) return { exitCode: 0 };
+      t.w.order.push("dry-run");
+      const done = exec(command);
+      opts.onData(Buffer.from(done.output));
+      return { exitCode: done.exitCode };
+    };
+    return t;
+  };
+  it("dry-runs the wrapper in the setup sandbox BEFORE it is removed, and a pass is carried into the report (mutants: the order, the carry)", async () => {
+    const t = await wrapperWorld(() => ({ exitCode: 0, output: GOOD_REPORT }));
+    await runSetupAgent(t.input);
+    expect(t.w.order.indexOf("dry-run")).toBeGreaterThanOrEqual(0);
+    expect(t.w.order.indexOf("dry-run")).toBeLessThan(t.w.order.indexOf("sandbox.dispose"));
+    expect(sent(t)[0]!.report.suites[0]).toMatchObject({ output: ROWS_OUTPUT, wrapperDryRun: "passed" });
+  });
+  it("a failed dry-run is carried as failed (not offered), and a wrapper whose report does not read the samples is failed too", async () => {
+    for (const exec of [() => ({ exitCode: 98, output: "" }), () => ({ exitCode: 0, output: "---REPORT---\n<testsuite/>" })]) {
+      const t = await wrapperWorld(exec);
+      await runSetupAgent(t.input);
+      expect(sent(t)[0]!.report.suites[0]).toMatchObject({ wrapperDryRun: "failed" });
+    }
+  });
+  it("runs nothing for an eval that needs no file, and the draft can never carry its own pass (the schema is strict)", async () => {
+    const plain = await evalWorld();
+    let ran = 0;
+    plain.w.base.exec = async (command) => { if (command.includes("rovara-wrapper-dryrun")) ran += 1; return { exitCode: 0 }; };
+    await runSetupAgent(plain.input);
+    expect(ran).toBe(0);
+    expect(sent(plain)[0]!.report.suites[0]).not.toHaveProperty("wrapperDryRun");
+    const forged = await evalWorld({ final: block({ ...ANSWER, eval: { suites: [{ ...EVAL.suites[0], output: ROWS_OUTPUT, wrapperDryRun: "passed" }] } }) });
+    await runSetupAgent(forged.input);
+    expect(sent(forged)).toEqual([]);
+  });
   it("a broker that refuses the report does not fail the run", async () => {
     const t = await evalWorld();
     const ports = t.input.ports;
@@ -730,6 +815,101 @@ describe("DEC 253q(a): the eval the agent drafts goes to the broker through the 
     const result = await runSetupAgent(t.input);
     expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
     expect(result.setupProposal).toBeDefined();
+  });
+});
+
+describe("L4-E12: the free dry run of the drafted eval goes through the same callback, after the report, and never changes the run", () => {
+  const IMAGE = `registry.example/worker@sha256:${"e".repeat(64)}`;
+  const EVAL = { suites: [{ selection: "evals/demo", questions: [{ id: "q1", category: "ordinary", path: "evals/demo/q1.txt" }], command: { executable: "node", args: ["evals/run.js"], cwd: "." },
+    report: { cwd: ".", argument: "rovara-measures.json" }, model: "gemini-2.5-flash", modelVersion: "gemini-2.5-flash-001", judge: { kind: "rule", scoringPath: "evals/demo/score.txt" }, subsetSupported: false, maxCallsPerQuestion: 1, maxCostMicrosPerQuestion: 10 }] };
+  const tracked = new Map([["web", new Set(["package.json", ".github/workflows/ci.yml", "evals/demo/q1.txt", "evals/demo/score.txt"])]]);
+  const scan = { repositories: [], setup: [], tests: [], checks: [], knowledge: [], sources: [], foundNotUsed: [], notes: [] };
+  const LIST = { version: 1, modelCalls: 0, ended: "failed", databases: [{ port: 5432, engine: "postgres" }], hosts: [], envVars: [] };
+  const evalWorld = async (dry?: (report: unknown, signal: AbortSignal) => Promise<unknown>, options: { files?: TrackedFilesVerdict[]; final?: string } = {}) => {
+    const t = await world({ final: options.final ?? block({ ...ANSWER, eval: EVAL }), ...(options.files === undefined ? {} : { files: options.files }) });
+    t.input.ports.beforeStart = async () => ({ scan, tracked });
+    t.input.evalImage = IMAGE;
+    t.input.discoverEvals = async () => ({ status: "found", candidates: [{ path: "evals/demo", label: "x", tool: "eval folder" }], omitted: [], message: "" });
+    if (dry !== undefined) t.input.evalDryRun = dry as never;
+    return t;
+  };
+  const kinds = (t: { w: World }) => t.w.callbacks.map((body) => (body as { kind: string }).kind);
+
+  it("sends the list once, right after the eval report, only for a report the broker took", async () => {
+    const seen: unknown[] = [];
+    const t = await evalWorld(async (report) => { seen.push(report); return LIST; });
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(kinds(t).slice(-2)).toEqual(["eval_discovery", "eval_dry_run"]);
+    expect(t.w.callbacks.at(-1)).toEqual({ kind: "eval_dry_run", list: LIST });
+    expect(seen).toHaveLength(1);
+    expect(SetupEvalDiscoveryReportSchema.safeParse(seen[0]).success).toBe(true);
+  });
+
+  it("runs nothing (and sends nothing) when the broker refused the report, the run drafted no eval, or the run ended without a proposal (mutant: the reported gate)", async () => {
+    let calls = 0;
+    const dry = async () => { calls += 1; return LIST; };
+    const refused = await evalWorld(dry);
+    const ports = refused.input.ports;
+    refused.input.ports = { ...ports, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") throw new Error("refused"); return ports.callback(body); } };
+    await runSetupAgent(refused.input);
+    for (const t of [await evalWorld(dry, { final: block(ANSWER) }), await evalWorld(dry, { files: [{ ok: false, reason: "tracked_files_changed" }] })]) {
+      await runSetupAgent(t.input);
+      expect(kinds(t)).not.toContain("eval_dry_run");
+    }
+    expect(calls).toBe(0);
+    expect(kinds(refused)).not.toContain("eval_dry_run");
+  });
+
+  it("a dry run that fails, finds nothing to say (undefined) or whose callback is refused leaves the run's result exactly as it was", async () => {
+    const plain = await evalWorld();
+    const base = await runSetupAgent(plain.input);
+    for (const dry of [async () => { throw new Error("boom"); }, async () => undefined]) {
+      const t = await evalWorld(dry);
+      const result = await runSetupAgent(t.input);
+      expect(result.setupRunSummary).toMatchObject({ stop: base.setupRunSummary.stop });
+      expect(result.setupProposal).toEqual(base.setupProposal);
+      expect(kinds(t)).not.toContain("eval_dry_run");
+    }
+    const t = await evalWorld(async () => LIST);
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, callback: async (body) => { if ((body as { kind: string }).kind === "eval_dry_run") throw new Error("refused"); return ports.callback(body); } };
+    const result = await runSetupAgent(t.input);
+    expect(result.setupRunSummary).toMatchObject({ stop: "proposed" });
+    expect(result.setupProposal).toBeDefined();
+  });
+
+  it("L4-E12-STOP: a person's Stop reaches the dry run (its signal aborts, a run that waits for it ends at once) and no list is sent for a stopped run", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let sawAborted = false;
+    // A dry run that would go on for ten minutes: it ends only when its signal says Stop.
+    const t = await evalWorld((_report, signal) => new Promise((resolve) => { signal.addEventListener("abort", () => { sawAborted = true; resolve(LIST); }, { once: true }); setTimeout(() => { void control?.abort(); }, 20); }));
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); } };
+    const started = Date.now();
+    await runSetupAgent(t.input);
+    expect(sawAborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(15_000);
+    // The dry run's answer arrived after the Stop: it is not sent (a stopped run reports nothing new).
+    expect(kinds(t)).not.toContain("eval_dry_run");
+  });
+
+  it("L4-E12-STOP: a Stop before the dry run starts means it never starts (mutant: the cancelled gate)", async () => {
+    let control: { abort(): Promise<void> } | undefined;
+    let calls = 0;
+    const t = await evalWorld(async () => { calls += 1; return LIST; });
+    const ports = t.input.ports;
+    t.input.ports = { ...ports, register: (c) => { control = c; return ports.register(c); }, callback: async (body) => { if ((body as { kind: string }).kind === "eval_discovery") await control?.abort(); return ports.callback(body); } };
+    await runSetupAgent(t.input);
+    expect(calls).toBe(0);
+    expect(kinds(t)).not.toContain("eval_dry_run");
+  });
+
+  it("without a dry-run host nothing changes: the callbacks are exactly the report's (a host that cannot run one sends nothing)", async () => {
+    const t = await evalWorld();
+    await runSetupAgent(t.input);
+    expect(kinds(t)).not.toContain("eval_dry_run");
+    expect(kinds(t).at(-1)).toBe("eval_discovery");
   });
 });
 

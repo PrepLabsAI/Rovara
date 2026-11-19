@@ -11,6 +11,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
+import { EvalOutputShapeSchema } from "./eval-wrapper.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
 import { modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
 
@@ -41,6 +42,9 @@ export function evalImageDigestOf(image: unknown): string | undefined {
 export const EVAL_PRODUCT_ROW = "gemini";
 export const EVAL_VERTEX_ROW = "vertex";
 export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google", [EVAL_VERTEX_ROW]: "google" });
+/** L4-T3: the words a person knows each row by. A row this install cannot run has no label (the card then says nothing about a provider). */
+const EVAL_PRODUCT_ROW_LABELS: Readonly<Record<string, string>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "Google Gemini", [EVAL_VERTEX_ROW]: "Vertex AI" });
+export const evalProductRowLabel = (row: unknown): string | undefined => (typeof row === "string" && Object.hasOwn(EVAL_PRODUCT_ROW_LABELS, row) ? EVAL_PRODUCT_ROW_LABELS[row] : undefined);
 /** The rows a setup draft may name for its eval's provider. Absent is `gemini`. */
 export const EVAL_DRAFT_PROVIDERS = ["gemini", "vertex"] as const;
 export type EvalDraftProvider = (typeof EVAL_DRAFT_PROVIDERS)[number];
@@ -85,6 +89,13 @@ export const EvalDiscoverySuiteSchema = z.object({
   questions: z.array(EvalDiscoveryQuestionSchema).min(1).max(EVAL_QUESTION_LIMIT),
   command: EvalCommandSchema,
   report: EvalReportPathSchema,
+  /** L4-EVW2 (DEC 254zzz20 D2): what the command writes at `report`, when it is not a file Rovara already reads (a `rows` file or a `custom` shape needs a wrapper the setup agent proposes as a pull request). Absent: readable as before. */
+  output: EvalOutputShapeSchema.optional(),
+  /**
+   * DEC 254zzz43: the setup run's dry-run of the wrapper in its own sandbox, against sample results in the shape it described (and a syntax check for a `custom` file): `passed` = the file read them and wrote the report.
+   * Only `passed` makes the file offered. Absent or `failed`: not offered. Informational for the card; never a hash and never trusted for spend.
+   */
+  wrapperDryRun: z.enum(["passed", "failed"]).optional(),
   /** The run's own fingerprint of `command` and `report`: refused unless it is the broker's `evalCommandFingerprintOf`. */
   commandFingerprint: hash,
   judge: EvalJudgeSchema,

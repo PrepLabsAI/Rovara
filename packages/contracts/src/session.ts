@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import { z } from "zod";
+import { SAVED_ENV_BUILDER_DIGEST, SAVED_ENV_BUILDER_IMAGE } from "./saved-env-build.js";
 import { SSM_GET_PARAMETERS_MAX_NAMES } from "./ssm-parameters.js";
 import { KEYED_MODEL_PROVIDERS, MODEL_FALLBACK_NONE, MODEL_FALLBACK_PATTERN, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
@@ -422,6 +423,11 @@ export const Ec2WorkerBootConfigSchema = z
     workerImage: z
       .string()
       .regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/, "worker image must be an ECR image pinned by digest"),
+    /** AGENTX_SAVED_ENV_BUILDER_IMAGE: reviewed rootless BuildKit, or this install's byte-identical mirror. */
+    savedEnvBuilderImage: z.union([
+      z.literal(SAVED_ENV_BUILDER_IMAGE),
+      z.string().regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/agentx-[a-z][a-z0-9-]{0,19}\/saved-env-builder@sha256:[0-9a-f]{64}$/).refine(image => image.endsWith(`@${SAVED_ENV_BUILDER_DIGEST}`)),
+    ]).default(SAVED_ENV_BUILDER_IMAGE),
     /** EXECUTOR_IMAGE: the browser executor image, an ECR image pinned by digest; set only once a release carries one. */
     executorImage: z
       .string()
@@ -462,6 +468,11 @@ export const Ec2WorkerBootConfigSchema = z
      */
     testServices: z.literal(true).optional(),
     /**
+     * AGENTX_SANDBOX_EGRESS=gateway (lane L4-NETG, DEC 254zzz77): the worker host walls its task sandboxes and devcontainers behind the egress gateway (packages/worker/ec2/sandbox-egress.sh), and the boot FAILS if it cannot.
+     * Absent for `bridge` (the default): nothing is added and the boot script is byte-identical to before.
+     */
+    sandboxEgress: z.literal("gateway").optional(),
+    /**
      * AGENTX_BOOT_STAGE2_SHA256: the SHA-256 of the stage 2 boot script (`boot-stage2.sh`) that the worker image carries at /opt/agentx/boot/stage2.sh.
      * boot.sh reads it out of the image it pulled by digest and runs it only if its hash is this. Required for a named environment, whose boot is
      * two stages; absent for the legacy deployment, whose single-file boot has no stage 2.
@@ -476,6 +487,11 @@ export const Ec2WorkerBootConfigSchema = z
   })
   .strict()
   .superRefine((config, context) => {
+    if (config.savedEnvBuilderImage !== SAVED_ENV_BUILDER_IMAGE) {
+      const environment = /^\/agentx\/([a-z][a-z0-9-]{0,19})\/worker$/u.exec(config.logGroupName)?.[1];
+      const expected = `${config.workerImage.split("/")[0]}/agentx-${environment ?? ""}/saved-env-builder@sha256:`;
+      if (environment === undefined || !config.savedEnvBuilderImage.startsWith(expected)) context.addIssue({ code: "custom", path: ["savedEnvBuilderImage"], message: "builder must be the same install's mirrored image" });
+    }
     if (config.environmentKind === "named" && config.bootStage2Sha256 === undefined) {
       context.addIssue({ code: "custom", path: ["bootStage2Sha256"], message: "a named environment's worker boots stage 2 from its image, so bootStage2Sha256 is required" });
     }
@@ -507,7 +523,9 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.modelProxyUrl) variables.push(["AGENTX_MODEL_PROXY_URL", parsed.modelProxyUrl]);
   if (parsed.environmentKind) variables.push(["AGENTX_ENVIRONMENT_KIND", parsed.environmentKind]);
   if (parsed.testServices) variables.push(["AGENTX_TEST_SERVICES", "1"]);
+  if (parsed.sandboxEgress) variables.push(["AGENTX_SANDBOX_EGRESS", parsed.sandboxEgress]);
   if (parsed.bootStage2Sha256) variables.push([AGENTX_BOOT_STAGE2_SHA256, parsed.bootStage2Sha256]);
+  if (parsed.savedEnvBuilderImage) variables.push(["AGENTX_SAVED_ENV_BUILDER_IMAGE", parsed.savedEnvBuilderImage]);
   if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
   if (parsed.modelFallback) variables.push(["AGENTX_MODEL_FALLBACK", parsed.modelFallback]);
   if (parsed.e2eQualification) {
@@ -543,7 +561,7 @@ export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: strin
 /** EC2's limit on user data before base64 encoding. */
 export const EC2_USER_DATA_MAX_BYTES = 16_384;
 
-export type Ec2WorkerBootConfig = z.infer<typeof Ec2WorkerBootConfigSchema>;
+export type Ec2WorkerBootConfig = z.input<typeof Ec2WorkerBootConfigSchema>;
 export type Ec2RuntimeBinding = z.infer<typeof Ec2RuntimeBindingSchema>;
 export type WorkspaceSessionState = z.infer<typeof WorkspaceSessionStateSchema>;
 export type WorkspaceSession = z.infer<typeof WorkspaceSessionSchema>;

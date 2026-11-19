@@ -5,7 +5,7 @@
 // left out: the flag answers it. The page shows the form as one screen; the terminal asks the four,
 // then ADVANCED_QUESTION (prompts.ts askForm).
 import { DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
-import { ENVIRONMENT_NAME_PATTERN, ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema } from "@agentx/contracts";
+import { ENVIRONMENT_NAME_PATTERN, ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema, operatorTrustProblem } from "@agentx/contracts";
 import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { InitFlags } from "./answers.js";
 import { estimateMonthlyCost, modelName, modelPriceLabel, money, suggestedBudgetUsd } from "./cost.js";
@@ -87,6 +87,11 @@ const appNameProblem = (value: string): string | undefined => (value === "" || v
 /** FR-047's budget answer (moved from answers.ts, unchanged). */
 export const budgetProblem = (value: string): string | undefined =>
   (/^(0|[1-9][0-9]{0,6})$/.test(value) && Number(value) <= MAX_BUDGET_USD) ? undefined : `must be a whole number of US dollars from 1 to ${MAX_BUDGET_USD}, or 0 for no budget`;
+/** The operator principal's own shape: one IAM role or user, never a whole account. (Another account's principal also needs an external id: refused where the account is known, answers.ts.) */
+const operatorPrincipalProblem = (value: string): string | undefined => {
+  if (value === "") return undefined;
+  return operatorTrustProblem({ principal: value, account: /^arn:aws[a-z-]*:iam::(\d{12}):/u.exec(value)?.[1] ?? "000000000000" });
+};
 const optionalArn = (pattern: RegExp, what: string) => (value: string): string | undefined => (value === "" || pattern.test(value) ? undefined : `must be ${what}`);
 const orEmpty = (check: (value: string) => string | undefined) => (value: string): string | undefined => (value === "" ? undefined : check(value));
 
@@ -135,7 +140,7 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
     unless(fixed ?? flags.workerModel ?? flags.workerProvider, advanced({ name: SETTINGS_FIELD.workerModel, question: "Worker model", flag: "--worker-model", defaultValue: DEFAULT.worker, choices: [...WORKER_MODEL_CHOICES, OTHER_MODEL] }));
   }
   unless(fixed ?? flags.permissionBoundary, advanced({ name: SETTINGS_FIELD.permissionBoundary, question: "Permission boundary policy ARN (Enter for AgentX's default boundary)", flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN") }));
-  unless(fixed ?? flags.operatorPrincipal, advanced({ name: SETTINGS_FIELD.operatorPrincipal, question: "IAM principal allowed to assume the AgentX operator role (Enter for this account)", flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN") }));
+  unless(fixed ?? flags.operatorPrincipal, advanced({ name: SETTINGS_FIELD.operatorPrincipal, question: "IAM principal allowed to assume the AgentX operator role (Enter for this account)", flag: "--operator-principal", defaultValue: "", validate: operatorPrincipalProblem }));
   // FR-023: empty is the estimate plus 20%; the amount for the recommended models is said in the
   // terminal's question (the terminal shows no hint) and in the page's hint.
   const suggested = suggestedBudgetUsd(estimateMonthlyCost(DEFAULT));

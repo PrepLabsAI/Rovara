@@ -25,12 +25,10 @@ import {
   NOW, OWNER_KEY, PARSER, REQUEST_A, REQUEST_B, TASK_ID, TOKEN, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, operationsOf, parserId, promptOf, report, seed, stateOf, taskOf, tokenId,
 } from "../support/task-actions-world.js";
 
-// The harness clock stands at this time; a step-up made now is fresh. Accepting a security finding is the web page's (DEC 236h), so most of these tests act as the page with a fresh step-up; the ones about a token say so.
-const STEP_UP_NOW = "2026-11-09T10:00:00.000Z";
-const FRESH = { at: STEP_UP_NOW, method: "email_code" };
+// Accepting a security finding is the web page's (DEC 236h), so most of these tests act as the web app's page (DEC 254zzz73: no step-up); the ones about a token say so.
 const pageActions = (deps: TaskFlowDeps, options?: TaskActionsOptions) => {
   const actions = createTaskActions(deps, options);
-  return { resolveFindings: (caller: TaskCaller, taskId: string, body: unknown, via: "page" | "api-token" = "page") => actions.resolveFindings({ ...caller, stepUp: FRESH, webApp: true }, taskId, body, via) };
+  return { resolveFindings: (caller: TaskCaller, taskId: string, body: unknown, via: "page" | "api-token" = "page") => actions.resolveFindings({ ...caller, webApp: true }, taskId, body, via) };
 };
 const both = () => blockedReview({}, [report("CRITIC", "FINDINGS", [PARSER]), report("SECURITY", "FINDINGS", [TOKEN])]);
 const answer = (findingId: string, action: "ACCEPT" | "FIX", note = action === "ACCEPT" ? "A footer we drop on purpose." : "Keep the footer line.") => ({ findingId, action, note });

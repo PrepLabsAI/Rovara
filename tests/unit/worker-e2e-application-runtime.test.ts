@@ -21,6 +21,20 @@ describe("worker application runtime configuration", () => {
       .toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs" });
   });
 
+  it("L4-NETG2: a gateway-mode worker's build commands are given the gateway's network and name server; any other worker is given none; a gateway-mode worker that lost them refuses", () => {
+    const gateway = { EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" };
+    expect(workflowE2EApplicationRuntimeConfig(gateway, "linux", "arm64")).toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs", buildEgress: { network: "rovara-snet", dns: "172.28.250.2" } });
+    // Bridge mode (no AGENTX_SANDBOX_EGRESS), a laptop (no AGENTX_RUNTIME=ec2) and an unknown value give no build egress.
+    for (const environment of [{ EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2" }, { EXECUTOR_IMAGE: image, AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "bridge" }, { ...gateway, AGENTX_RUNTIME: "local" }]) {
+      expect(workflowE2EApplicationRuntimeConfig(environment, "linux", "arm64")).not.toHaveProperty("buildEgress");
+    }
+    for (const lost of [{ AGENTX_SANDBOX_NETWORK: "" }, { AGENTX_SANDBOX_DNS: "" }, { AGENTX_SANDBOX_DNS: "not-an-ip" }]) {
+      expect(() => workflowE2EApplicationRuntimeConfig({ ...gateway, ...lost }, "linux", "arm64")).toThrow();
+    }
+    const deps = workflowE2EApplicationHostDeps(workflowE2EApplicationRuntimeConfig(gateway, "linux", "arm64"), new FakeDockerCli(), () => 0, { admission: {}, groupId: "g", candidateSourceDir: "/x" } as never);
+    expect(deps.buildEgress).toEqual({ network: "rovara-snet", dns: "172.28.250.2" });
+  });
+
   it("leaves the model socket path of a production run within the unix socket limit (a deeper run root fails here, not in a run)", () => {
     // The EC2 runner is linux/arm64; group run ids are UUIDs (contracts/e2e.ts), the longest the host's run id pattern allows being 64 characters.
     const { runRoot } = workflowE2EApplicationRuntimeConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64");

@@ -6,7 +6,7 @@
 // to THIS interface instead. Anything that implements it can sit under the adapters: Cloud's `GitHubAppCredentialProvider`, a client built on
 // `gh` or a personal token for the local runtime (L4), or a test fixture. The types below are copies of Cloud's declarations in `github-app.ts`
 // (same names, same fields); when a lane brings that client in, replace them with `export type { ... } from "../../../github-app.js"`.
-import type { HostScope, ReadBudget, RovaraCheckPayload } from "@agentx/contracts";
+import type { EvalWrapperPullRequestInput, HostScope, ReadBudget, RovaraCheckPayload } from "@agentx/contracts";
 import type { PullRequestStatus } from "../../../github-pull-status.js";
 import type { CheckRunFacts, LatestCheckRun, SeenCheckName } from "../../../github-check-facts.js";
 
@@ -136,6 +136,10 @@ export interface GitHubCodeHostProvider {
   getFileAtCommit(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { untilLine?: number; timeoutMs?: number; maxBytes?: number }): Promise<string | undefined>;
   /** Optional: a client that cannot tell a file from a directory leaves it out, and the adapter then has no `pathKind`. */
   getPathKindAtCommit?(repositoryUrl: string, path: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<"file" | "dir" | "symlink" | "none">;
+  /** Optional (L4-EVW6): the eval wrapper pull request (a new branch, one new file at a fixed path, one pull request; see `eval-wrapper-pr.ts`). A client without it leaves the adapter without `evalWrapperPullRequest`. */
+  openEvalWrapperPullRequest?(repositoryUrl: string, request: EvalWrapperPullRequestInput, scope: GitHubTokenScope): Promise<{ revision: string; number: number; url: string }>;
+  /** Optional (L4-EVW6): the pull request (any state) made from one of Rovara's eval wrapper branches. */
+  findEvalWrapperPullRequest?(repositoryUrl: string, branch: string, scope: GitHubTokenScope): Promise<{ number: number; url: string } | undefined>;
   /** Optional immutable tree read. Truncation is explicit; failures and rate limits throw. */
   listTreeAtCommit?(repositoryUrl: string, commitSha: string, scope: GitHubTokenScope, options?: { timeoutMs?: number }): Promise<{ truncated: boolean; entries: Array<{ path: string; mode: string; type: string; sha: string }> }>;
   /** Optional (wiki W0): the direct children of one directory at a commit, names and kinds only (`complete` false when GitHub cut the 1,000-entry listing). */

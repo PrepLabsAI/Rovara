@@ -1,9 +1,9 @@
 // Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` and `PUT .../setup-status/skips`.
 // Each row's state comes from fixture records; two companies never read or change each other's project; a member reads but cannot set skips; the existing route table is unchanged.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
+  AgentXError, IMPLICIT_COMPANY_ID, ProjectSetupChecklistSchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, ProjectSetupEvalNoneResponseSchema, ProjectSetupSkipResponseSchema, SETUP_STATUS_ROWS, evalCommandFingerprintOf, workspaceProjectIndexValue,
   type SetupEvalDiscoveryReport,
 } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -14,11 +14,12 @@ import {
   EVAL_ALREADY_CONFIRMED, EVAL_NONE_BODY, EVAL_NONE_NEEDS_SETUP, NOT_AN_EVAL_ADMIN, NOT_A_SETUP_ADMIN, SETUP_SKIPS_BODY, SETUP_SKIPS_STALE, SETUP_STATUS_UNREADABLE, readProjectSetupStatus, readSkips, setupEvalNoneKey, setupSkipsKey,
 } from "../../packages/broker/src/aws/project-setup-status.js";
 import { projectSettingsKey } from "../../packages/broker/src/aws/project-settings.js";
+import { setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { SETUP_AGENT_FAILURES } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { evalDiscoveryDigest, evalDiscoveryKey } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
 import { journalKey, setupAgentKey } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
-import { workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
+import { OPERATION_SK_PREFIX, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { CLIENT_MEMBERS_NOT_ALLOWED } from "../../packages/broker/src/aws/developer-routes.js";
 import { LinearConnections, linearConnectionKey, linearTeamKey } from "../../packages/broker/src/aws/linear-connections.js";
@@ -54,7 +55,7 @@ function harness(options: HarnessOptions = {}) {
     documentClient: db, tableName: "State", now: () => NOW,
     ...(options.companies === false ? {} : { companies: companyMembershipFromDynamo(db, "State") }),
     developer: {
-      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", clientRoutes: true, slackTeamId: TEAM,
+      issuer: "https://signin.example.test", env: "test", methods: { slack: true, oidc: true }, signInTableName: "SignIn", slackTeamId: TEAM,
       verifyAccessToken: async () => claims, channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
       ...(options.linear === true ? { linearConnect: linearWiring(db) } : {}),
     },
@@ -109,6 +110,47 @@ function setupRun(h: Harness, company: string, project: string, result: RunResul
   h.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: company, orgId: company, taskId, project, purpose: "setup_agent", workspaceId: "33333333-3333-4333-8333-333333333333", startingRevision: 1, ...(result === undefined ? {} : { setupAgentResult: result }) });
   return taskId;
 }
+/**
+ * L4-T2: the proposal row ("SETUP_APPLY") a person's "Use this setup" makes, with its candidate revision and the check's workspace. `state` is the row's; `check` is the check's own state: ready (workspace READY),
+ * checking (PREPARING), failed (PREPARATION_FAILED, with the worker's recorded error) or none (no workspace row at all). `madeAt` is when the row was made (default: after the setup run started).
+ */
+function setupApply(h: Harness, company: string, project: string, opts: { state: "checking" | "approved" | "rejected" | "discarded"; check: "ready" | "checking" | "failed" | "none"; madeAt?: string; row?: Record<string, unknown>; revision?: number; candidateGone?: true }) {
+  const workspaceId = randomUUID();
+  const revision = opts.revision ?? 2;
+  const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
+  const definition = { name: project, revision, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
+    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
+  // A rejected or discarded candidate's revision is deleted by the decision (apply.ts), so `candidateGone` is what a real rejected row looks like.
+  if (opts.candidateGone !== true) h.db.set({ ...projectRevisionKey(company, project, revision), entityType: "PROJECT", candidate: true, definition });
+  const at = opts.madeAt ?? new Date(NOW - 60_000).toISOString();
+  if (opts.check !== "none") {
+    const status = opts.check === "ready" ? "READY" : opts.check === "checking" ? "PREPARING" : "PREPARATION_FAILED";
+    h.db.set({ ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, status });
+    if (opts.check === "failed") h.db.set({ pk: workspaceKey(company, workspaceId).pk, sk: `${OPERATION_SK_PREFIX}${randomUUID()}`, kind: "prepare", error: "readiness check 0 (npm test) exited with 1", createdAt: at });
+  }
+  h.db.set({ ...setupApplyKey(company, project), entityType: "SETUP_APPLY", orgId: company, project, taskId: "11111111-1111-4111-8111-111111111111", requestId: randomUUID(), by: ADA, digest: "d".repeat(64), baseRevision: 1, candidateRevision: revision,
+    state: opts.state, check: { workspaceId, revision, startedAt: at, startedBy: ADA }, reply: {}, createdAt: at, ...(opts.state === "approved" ? { decidedAt: new Date(NOW - 30_000).toISOString(), decidedBy: ADA } : {}), ...opts.row });
+}
+/**
+ * L4-T2b: a setup a person approved earlier, as a rejected or still-waiting newer proposal's row leaves it: the approved revision (the project's latest, so what tasks use), the catalog row that names it and the project's own
+ * check mark (`setupCheck`, the mark a start reads), with `check` being that mark's workspace state. Returns the row field to merge into the newer proposal's row (`earlierApproval`).
+ */
+function earlierApproval(h: Harness, company: string, project: string, check: "ready" | "checking" | "failed" | "none", at = new Date(NOW - 3_600_000).toISOString()): { earlierApproval: { revision: number; at: string } } {
+  const command = (executable: string, args: string[]) => ({ cwd: "repo/api", executable, args, timeoutSeconds: 600 });
+  const definition = { name: project, revision: 2, setup: [command("npm", ["ci"])], readiness: [command("npm", ["test"])], orchestratorInstructions: "Delegate work.",
+    repositories: [{ name: "api", url: "https://github.com/acme/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "host-app" }] };
+  h.db.set({ ...projectRevisionKey(company, project, 2), entityType: "PROJECT", definition });
+  h.db.set({ ...orgProjectCatalogKey(company, project), entityType: "PROJECT_CATALOG", latestRevision: 2 });
+  const workspaceId = randomUUID();
+  if (check !== "none") {
+    const status = check === "ready" ? "READY" : check === "checking" ? "PREPARING" : "PREPARATION_FAILED";
+    h.db.set({ ...workspaceKey(company, workspaceId), entityType: "WORKSPACE", id: workspaceId, companyId: company, orgId: company, status });
+    if (check === "failed") h.db.set({ pk: workspaceKey(company, workspaceId).pk, sk: `${OPERATION_SK_PREFIX}${randomUUID()}`, kind: "prepare", error: "readiness check 0 (npm test) exited with 1", createdAt: at });
+  }
+  // The mark's start is recent so a check going reads as going (a preparation nobody finished for 50 minutes reads as failed).
+  h.db.set({ ...projectMetaKey(company, project), entityType: "PROJECT_META", status: "active", setupCheck: { workspaceId, revision: 2, startedAt: new Date(NOW - 60_000).toISOString(), startedBy: ADA } });
+  return { earlierApproval: { revision: 2, at } };
+}
 const READY = (over: Record<string, unknown> = {}) => ({ status: "ready", stop: "proposed", proposal: PROPOSAL(), summary: SUMMARY(), ...over });
 function journal(h: Harness, company: string, project: string, taskId: string, n: number, entry: Record<string, unknown>) {
   h.db.set({ ...journalKey({ orgId: company, project, taskId }, n), entityType: "SETUP_JOURNAL", orgId: company, project, taskId, entry: { n, source: "agent", command: "npm test", exitCode: 0, durationMs: 1000, timedOut: false, flagged: false, blockedHosts: [], tail: "", startedAt: TIME, ...entry } });
@@ -150,7 +192,7 @@ describe("the checklist's rows, each from its own records", () => {
     const h = companyA();
     const body = await h.ok();
     expect(body.repos).toEqual({ state: "done", count: 1, items: [{ name: "api", defaultBranch: "main", fullName: "acme/api" }] });
-    expect(body.setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect(body.setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
     expect(body.evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
     expect(body.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
     expect(body.slackChannel).toEqual({ state: "optional", channels: [] });
@@ -176,17 +218,17 @@ describe("the checklist's rows, each from its own records", () => {
   it("setup run: running", async () => {
     const h = companyA();
     setupRun(h, A, "alpha", undefined);
-    expect((await h.ok()).setupRun).toEqual({ state: "running", status: "running", startedAt: new Date(NOW - 120_000).toISOString() });
+    expect((await h.ok()).setupRun).toEqual({ state: "running", status: "running", approval: "none", startedAt: new Date(NOW - 120_000).toISOString() });
   });
 
-  it("setup run: ready is done, with the commands found, time, cost and the test outcome from the run's own journal", async () => {
+  it("setup run: ready with a proposal nobody used is Needs you (not done), with the commands found, time, cost and the test outcome from the run's own journal", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
     journal(h, A, "alpha", task, 1, { command: "npm ci" });
     journal(h, A, "alpha", task, 2, { command: "npm test", exitCode: 0 });
     const run = (await h.ok()).setupRun;
     expect(run).toEqual({
-      state: "done", status: "ready", startedAt: new Date(NOW - 120_000).toISOString(), elapsedMs: 91_000, costCents: 37, commandsRun: 4, partial: false, stop: "proposed",
+      state: "needs_you", status: "ready", approval: "none", startedAt: new Date(NOW - 120_000).toISOString(), elapsedMs: 91_000, costCents: 37, commandsRun: 4, partial: false, stop: "proposed",
       commandsFound: { setup: 1, tests: 1 }, testOutcome: "passed",
     });
     expect(run).not.toHaveProperty("failedCommand");
@@ -247,13 +289,13 @@ describe("the checklist's rows, each from its own records", () => {
     expect(run.failedCommand).toBeUndefined();
     expect(JSON.stringify(run)).not.toContain(CANARY);
     h.db.set({ ...(h.db.get(setupAgentKey(A, "alpha").pk, "AGENT") as object), orgId: B });
-    expect((await h.ok()).setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect((await h.ok()).setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
   });
 
   it("setup run: a timed-out command is the failing one; a failed run with no journal has none", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", { status: "failed", stop: "infrastructure", failure: SETUP_AGENT_FAILURES.infrastructure });
-    expect((await h.ok()).setupRun).toEqual({ state: "failed", status: "failed", startedAt: new Date(NOW - 120_000).toISOString(), testOutcome: "unknown", failure: SETUP_AGENT_FAILURES.infrastructure });
+    expect((await h.ok()).setupRun).toEqual({ state: "failed", status: "failed", approval: "none", startedAt: new Date(NOW - 120_000).toISOString(), testOutcome: "unknown", failure: SETUP_AGENT_FAILURES.infrastructure });
     journal(h, A, "alpha", task, 1, { command: "npm ci", exitCode: null, timedOut: true, tail: "still going" });
     expect((await h.ok()).setupRun.failedCommand).toEqual({ n: 1, command: "npm ci", exitCode: null, timedOut: true, lastLines: ["still going"] });
   });
@@ -262,7 +304,7 @@ describe("the checklist's rows, each from its own records", () => {
     const h = companyA();
     setupRun(h, A, "alpha", READY({ proposal: { version: 2, setup: "nope" } }));
     const run = (await h.ok()).setupRun;
-    expect(run.state).toBe("done");
+    expect(run.state).toBe("needs_you");
     expect(run).not.toHaveProperty("commandsFound");
     expect(run.testOutcome).toBe("unknown");
   });
@@ -288,6 +330,68 @@ describe("the checklist's rows, each from its own records", () => {
     evalReport(h, A, "alpha", latest, "confirmed");
     h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", latest).pk, evalDiscoveryKey(A, "alpha", latest).sk) as object), reportDigest: "0".repeat(64) });
     expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+  });
+
+  // L4-T5 (owner D9): the eval row is required only when evals were found. A finished run that found none leaves nothing to confirm, so the row is done by itself.
+  it("eval confirm (D9): a finished run that found no evals makes the row done by itself, and the first task can start", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    // L4-T2 (D1) + L4-T5 (D9) together: the eval row is done by itself on the proposal, but the first task still waits for the setup to be approved and checked.
+    const unapproved = await h.ok();
+    expect(unapproved.evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(unapproved.setupRun.state).toBe("needs_you");
+    expect(unapproved.firstTask.canStart).toBe(false);
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    const body = await h.ok();
+    expect(body.evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(body.firstTask.canStart).toBe(true);
+    expect(body.progress).toEqual({ done: 4, total: 8, percent: 50, nextRequired: "firstTask" });
+  });
+
+  it("eval confirm (D9): not before the setup run is done (blocked while it runs, failed, partial or never started), and never when evals WERE found", async () => {
+    for (const result of [undefined, { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used, summary: SUMMARY({ stop: "attempts_used", partial: true }) },
+      READY({ stop: "attempts_used", summary: SUMMARY({ stop: "attempts_used", partial: true }) })] as const) {
+      const h = companyA();
+      setupRun(h, A, "alpha", result);
+      expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
+    }
+    const never = companyA();
+    expect((await never.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
+    const found = companyA();
+    const task = setupRun(found, A, "alpha", READY());
+    evalReport(found, A, "alpha", task, "reported");
+    expect((await found.ok()).evalConfirm).toMatchObject({ state: "needs_you", report: "reported" });
+    expect((await found.ok()).firstTask.canStart).toBe(false);
+  });
+
+  it("eval confirm (D9): an eval report that is there but does not read back is NOT 'none found' (the row keeps waiting), and a report that is absent is", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
+    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", task).pk, evalDiscoveryKey(A, "alpha", task).sk) as object), reportDigest: "0".repeat(64) });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    h.db.set({ ...(h.db.get(evalDiscoveryKey(A, "alpha", task).pk, evalDiscoveryKey(A, "alpha", task).sk) as object), report: { nonsense: true } });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+  });
+
+  it("eval confirm (D9): another company's report for a project of the same name never counts, and does not hide this company's none-found", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    const theirs = setupRun(h, B, "alpha", READY(), "99999999-9999-4999-8999-999999999999");
+    evalReport(h, B, "alpha", theirs, "reported");
+    // A's run has no report of its own: done by itself. B's report (and B's task id) is a row in B's partition and is never read for A.
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
+    expect(task).not.toBe(theirs);
+    // A report row stored under A's partition for a task that is not A's current run does not count either.
+    evalReport(h, A, "alpha", "66666666-6666-4666-8666-666666666666", "reported");
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
+  });
+
+  it("eval confirm (D9): a person's 'no evals' for the run still reads as no_evals, not as none", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    expect((await h.call("PUT", EVAL_NONE(), { noEvals: true })).status).toBe(200);
+    expect((await h.ok()).evalConfirm).toMatchObject({ state: "done", report: "no_evals" });
   });
 
   it("AI and spend: the project's own budget, then the company's saved model, else the install's defaults", async () => {
@@ -376,8 +480,13 @@ describe("the checklist's rows, each from its own records", () => {
   it("can start needs the setup run, the eval confirm and AI and spend all done; 100% needs every row done or skipped", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
     expect((await h.ok()).firstTask.canStart).toBe(false);
     evalReport(h, A, "alpha", task, "confirmed");
+    // L4-T2: a proposal nobody approved is not a finished setup, so the first task cannot start yet.
+    expect((await h.ok()).firstTask).toEqual({ state: "needs_you", hasTask: false, canStart: false });
+    expect((await h.ok()).progress).toEqual({ done: 3, total: 8, percent: 38, nextRequired: "setupRun" });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
     expect((await h.ok()).firstTask).toEqual({ state: "needs_you", hasTask: false, canStart: true });
     expect((await h.ok()).progress).toEqual({ done: 4, total: 8, percent: 50, nextRequired: "firstTask" });
     realTask(h, A, "alpha", "5");
@@ -387,6 +496,261 @@ describe("the checklist's rows, each from its own records", () => {
     expect((await h.ok()).progress).toEqual({ done: 8, total: 8, percent: 100, nextRequired: null });
     expect(await h.call("PUT", SKIPS(), { row: "invites", skipped: false })).toMatchObject({ status: 200 });
     expect((await h.ok()).progress).toMatchObject({ done: 7, percent: 88 });
+  });
+});
+
+// L4-T2 (setup review D1, G1, G6): "Setup run: Done" means a person APPROVED the setup and its check on a fresh machine is ready.
+describe("Done means approved (L4-T2)", () => {
+  type Apply = Parameters<typeof setupApply>[3];
+  const table: Array<{ name: string; run: "ready" | "none" | "running"; apply?: Apply; state: string; approval: string; check?: string; reason?: RegExp; newer?: string }> = [
+    { name: "a proposal only (nobody used it)", run: "ready", state: "needs_you", approval: "none" },
+    { name: "no run and no setup", run: "none", state: "needs_you", approval: "none" },
+    { name: "a candidate whose check is ready, waiting for a decision", run: "ready", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
+    { name: "a candidate whose check is going on a fresh machine", run: "ready", apply: { state: "checking", check: "checking" }, state: "running", approval: "checking", check: "checking" },
+    { name: "a candidate whose check failed: needs you, with the reason", run: "ready", apply: { state: "checking", check: "failed" }, state: "needs_you", approval: "candidate", check: "failed", reason: /^test: npm test/u },
+    { name: "a candidate whose check has no workspace (stale)", run: "ready", apply: { state: "checking", check: "none" }, state: "needs_you", approval: "candidate", check: "unchecked" },
+    { name: "approved and its check ready", run: "ready", apply: { state: "approved", check: "ready" }, state: "done", approval: "approved", check: "ready" },
+    { name: "approved and its check failed: needs you, with the reason", run: "ready", apply: { state: "approved", check: "failed" }, state: "needs_you", approval: "approved", check: "failed", reason: /^test: npm test/u },
+    { name: "approved and its check going", run: "ready", apply: { state: "approved", check: "checking" }, state: "running", approval: "approved", check: "checking" },
+    { name: "approved with no readable check", run: "ready", apply: { state: "approved", check: "none" }, state: "needs_you", approval: "approved", check: "unchecked" },
+    { name: "rejected: the proposal is waiting again", run: "ready", apply: { state: "rejected", check: "ready" }, state: "needs_you", approval: "none" },
+    { name: "discarded: the proposal is waiting again", run: "ready", apply: { state: "discarded", check: "ready" }, state: "needs_you", approval: "none" },
+    // L4-T2b: tasks keep using the approved setup, so a re-run's proposal nobody has used yet is named, not a reason to leave done.
+    { name: "approved, then a newer run with a proposal nobody used: still done, the proposal named", run: "ready", apply: { state: "approved", check: "ready", madeAt: new Date(NOW - 600_000).toISOString() }, state: "done", approval: "approved", check: "ready", newer: "needs_you" },
+    { name: "approved with a failed check, then a newer run with a proposal nobody used: needs you for the check", run: "ready", apply: { state: "approved", check: "failed", madeAt: new Date(NOW - 600_000).toISOString() }, state: "needs_you", approval: "approved", check: "failed", reason: /^test: npm test/u, newer: "needs_you" },
+    { name: "approved with no run (a plan's setup update): done", run: "none", apply: { state: "approved", check: "ready" }, state: "done", approval: "approved", check: "ready" },
+    { name: "a candidate waiting while no run exists (a plan's setup update)", run: "none", apply: { state: "checking", check: "ready" }, state: "needs_you", approval: "candidate", check: "ready" },
+    { name: "a run going wins over an approved setup", run: "running", apply: { state: "approved", check: "ready" }, state: "running", approval: "approved", check: "ready" },
+  ];
+  for (const row of table) {
+    it(row.name, async () => {
+      const h = companyA();
+      if (row.run === "ready") setupRun(h, A, "alpha", READY());
+      if (row.run === "running") setupRun(h, A, "alpha", undefined);
+      if (row.apply !== undefined) setupApply(h, A, "alpha", row.apply);
+      const run = (await h.ok()).setupRun;
+      expect(run.state).toBe(row.state);
+      expect(run.approval).toBe(row.approval);
+      expect(run.check?.status).toBe(row.check);
+      if (row.reason === undefined) expect(run.check?.failedStep).toBeUndefined(); else expect(run.check?.failedStep).toMatch(row.reason);
+      expect(run.approvedAt !== undefined).toBe(row.approval === "approved");
+      expect(run.newerProposal).toBe(row.newer);
+    });
+  }
+
+  describe("an approval outlives a newer proposal (L4-T2b)", () => {
+    const rejected = (h: Harness, state: "rejected" | "discarded", earlier?: ReturnType<typeof earlierApproval>) =>
+      setupApply(h, A, "alpha", { state, check: "ready", revision: 3, candidateGone: true, ...(earlier === undefined ? {} : { row: earlier }) });
+
+    it("approved, then a re-run's proposal was rejected or discarded: still done, with the approval and ITS check, and the newer proposal named", async () => {
+      for (const state of ["rejected", "discarded"] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        const earlier = earlierApproval(h, A, "alpha", "ready");
+        rejected(h, state, earlier);
+        const run = (await h.ok()).setupRun;
+        expect(run, state).toMatchObject({ state: "done", status: "ready", approval: "approved", check: { status: "ready" }, approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
+        expect(run.check?.failedStep).toBeUndefined();
+      }
+    });
+
+    it("approved, then a re-run's candidate is still waiting: done, with the newer proposal needing you (whatever its own check says)", async () => {
+      for (const [check, newer] of [["ready", "needs_you"], ["failed", "needs_you"], ["none", "needs_you"], ["checking", "checking"]] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        setupApply(h, A, "alpha", { state: "checking", check, revision: 3, row: earlierApproval(h, A, "alpha", "ready") });
+        const run = (await h.ok()).setupRun;
+        expect(run, check).toMatchObject({ state: "done", approval: "approved", check: { status: "ready" }, newerProposal: newer });
+        // The candidate's failed check is not the setup tasks use: nothing of it shows as the row's check.
+        expect(run.check?.failedStep).toBeUndefined();
+      }
+    });
+
+    it("the row is exactly what tasks use: the approved setup's own check decides, whatever happened to the newer proposal", async () => {
+      for (const [check, state, status] of [["failed", "needs_you", "failed"], ["checking", "running", "checking"], ["none", "needs_you", "unchecked"], ["ready", "done", "ready"]] as const) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        rejected(h, "rejected", earlierApproval(h, A, "alpha", check));
+        const run = (await h.ok()).setupRun;
+        expect([run.state, run.approval, run.check?.status, run.newerProposal], check).toEqual([state, "approved", status, "rejected"]);
+        if (check === "failed") expect(run.check?.failedStep).toMatch(/^test: npm test/u);
+      }
+    });
+
+    it("never approved, then rejected: needs you, no approval; never approved with a candidate waiting: the candidate's own states", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      rejected(h, "rejected");
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      expect((await h.ok()).setupRun.newerProposal).toBeUndefined();
+      setupApply(h, A, "alpha", { state: "checking", check: "ready", revision: 3 });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "candidate" });
+    });
+
+    it("an earlier approval whose revision no longer reads back, or is another company's, is no approval", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      rejected(h, "rejected", { earlierApproval: { revision: 9, at: new Date(NOW - 1_000).toISOString() } });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      // Company B has revision 2 and a ready check under the same project name; company A's row naming revision 2 must not find them.
+      earlierApproval(h, B, "alpha", "ready");
+      rejected(h, "rejected", { earlierApproval: { revision: 2, at: new Date(NOW - 1_000).toISOString() } });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    });
+
+    it("a row naming another project or company carries no approval, and a stored revision that is not the one named is no approval", async () => {
+      for (const over of [{ project: "beta" }, { orgId: B }]) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        rejected(h, "rejected", { ...earlierApproval(h, A, "alpha", "ready"), ...over });
+        expect((await h.ok()).setupRun, JSON.stringify(over)).toMatchObject({ state: "needs_you", approval: "none" });
+      }
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      const earlier = earlierApproval(h, A, "alpha", "ready");
+      const stored = h.db.get(projectRevisionKey(A, "alpha", 2).pk, projectRevisionKey(A, "alpha", 2).sk) as { definition: Record<string, unknown> };
+      h.db.set({ ...projectRevisionKey(A, "alpha", 2), entityType: "PROJECT", definition: { ...stored.definition, revision: 9 } });
+      rejected(h, "rejected", earlier);
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    });
+
+    it("a re-run that started after the rejected candidate has its own unused proposal: that is the newer one named", async () => {
+      const h = companyA();
+      setupRun(h, A, "alpha", READY());
+      setupApply(h, A, "alpha", { state: "rejected", check: "ready", revision: 3, candidateGone: true, madeAt: new Date(NOW - 600_000).toISOString(), row: earlierApproval(h, A, "alpha", "ready") });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "done", approval: "approved", newerProposal: "needs_you" });
+    });
+
+    it("a malformed earlier approval is ignored, never guessed", async () => {
+      for (const bad of [{ revision: "2", at: "x" }, { revision: 2 }, { revision: -1, at: "x" }, { revision: 1.5, at: "x" }, { revision: 2, at: "" }, "approved", null]) {
+        const h = companyA();
+        setupRun(h, A, "alpha", READY());
+        earlierApproval(h, A, "alpha", "ready");
+        rejected(h, "rejected", { earlierApproval: bad } as never);
+        expect((await h.ok()).setupRun, JSON.stringify(bad)).toMatchObject({ state: "needs_you", approval: "none" });
+      }
+    });
+
+    it("the first task and the progress follow the kept approval, and a running run or a failed one still wins", async () => {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      evalReport(h, A, "alpha", task, "confirmed");
+      rejected(h, "rejected", earlierApproval(h, A, "alpha", "ready"));
+      const body = await h.ok();
+      expect([body.firstTask.canStart, body.progress.nextRequired, body.setupRun.state]).toEqual([true, "firstTask", "done"]);
+      const failed = companyA();
+      setupRun(failed, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+      rejected(failed, "rejected", earlierApproval(failed, A, "alpha", "ready"));
+      expect((await failed.ok()).setupRun).toMatchObject({ state: "failed", approval: "approved" });
+      const running = companyA();
+      setupRun(running, A, "alpha", undefined);
+      rejected(running, "rejected", earlierApproval(running, A, "alpha", "ready"));
+      expect((await running.ok()).setupRun).toMatchObject({ state: "running", approval: "approved" });
+    });
+
+    it("two companies: B's approved project reads done for B alone, and A's rejected project with the same name never borrows it", async () => {
+      const h = companyA();
+      h.join(CAT, B, "admin"); h.project("beta", B);
+      setupRun(h, B, "beta", READY());
+      const earlier = earlierApproval(h, B, "beta", "ready");
+      setupApply(h, B, "beta", { state: "rejected", check: "ready", revision: 3, candidateGone: true, row: earlier });
+      // A's own project: a rejected proposal, no approval of its own.
+      setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
+      setupApply(h, A, "alpha", { state: "rejected", check: "ready", revision: 3, candidateGone: true });
+      expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+      expect((await h.ok()).setupRun.approvedAt).toBeUndefined();
+      h.as(CAT, "s-cat");
+      expect((await h.ok(PATH("beta"))).setupRun).toMatchObject({ state: "done", approval: "approved", approvedAt: earlier.earlierApproval.at, newerProposal: "rejected" });
+    });
+  });
+
+  it("a failed or partial run stays failed whatever was approved before", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "failed", status: "failed", approval: "approved" });
+  });
+
+  it("the first task, the next required row and the progress follow the approval", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "confirmed");
+    for (const [apply, canStart, next] of [[undefined, false, "setupRun"], [{ state: "checking", check: "ready" }, false, "setupRun"], [{ state: "approved", check: "failed" }, false, "setupRun"], [{ state: "approved", check: "ready" }, true, "firstTask"]] as const) {
+      if (apply !== undefined) setupApply(h, A, "alpha", apply);
+      const body = await h.ok();
+      expect([body.firstTask.canStart, body.progress.nextRequired]).toEqual([canStart, next]);
+    }
+  });
+
+  it("the eval row still waits on the run's proposal, not on the approval, and no other row changes with it", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", READY());
+    evalReport(h, A, "alpha", task, "reported");
+    realTask(h, A, "alpha", "5");
+    const before = await h.ok();
+    expect(before.evalConfirm).toEqual({ state: "needs_you", report: "reported", suites: [{ selection: "evals/demo", questions: 2 }] });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    const after = await h.ok();
+    for (const row of ["repos", "evalConfirm", "aiAndSpend", "slackChannel", "linear", "invites", "firstTask", "viewer"] as const) expect(after[row], row).toEqual(before[row]);
+    expect(after.setupRun.state).toBe("done");
+    expect(before.setupRun.state).toBe("needs_you");
+  });
+
+  it("a proposal row of another project or company is no approval, and company B's approval never reaches company A", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    setupApply(h, A, "alpha", { state: "approved", check: "ready", row: { project: "beta" } });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready", row: { orgId: B } });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+    h.db.delete(setupApplyKey(A, "alpha").pk, setupApplyKey(A, "alpha").sk);
+    setupApply(h, B, "alpha", { state: "approved", check: "ready" });
+    expect((await h.ok()).setupRun).toMatchObject({ state: "needs_you", approval: "none" });
+  });
+
+  it("the check's reason is the broker's one redacted line, bounded", async () => {
+    const h = companyA();
+    setupRun(h, A, "alpha", READY());
+    setupApply(h, A, "alpha", { state: "checking", check: "failed" });
+    const step = (await h.ok()).setupRun.check?.failedStep ?? "";
+    expect(step.length).toBeLessThanOrEqual(300);
+    expect(step).not.toMatch(/[\n\r]/u);
+  });
+
+  describe("AI and spend: done only while a model call is possible (G6)", () => {
+    const read = async (modelCall?: () => Promise<boolean | null>) => {
+      const h = companyA();
+      const task = setupRun(h, A, "alpha", READY());
+      evalReport(h, A, "alpha", task, "confirmed");
+      setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+      return ProjectSetupChecklistSchema.parse(await readProjectSetupStatus({
+        documentClient: h.db, tableName: "State", now: () => NOW, companyId: A, project: "alpha", definition: { revision: 1, repositories: [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }] },
+        viewer: { companyRole: "admin", projectAdmin: false }, readers: { channels: async () => [], ...(modelCall === undefined ? {} : { modelCall }) },
+      }));
+    };
+    it("no key (the gateway says no call is possible): needs you, the first task cannot start, the AI row is the next required one", async () => {
+      const body = await read(async () => false);
+      expect(body.aiAndSpend).toEqual({ state: "needs_you", source: "default", companyModelSaved: false, modelBudgetUsd: null, modelCall: "none" });
+      expect(body.firstTask.canStart).toBe(false);
+      expect(body.progress.nextRequired).toBe("aiAndSpend");
+      expect(body.setupRun.state).toBe("done");
+    });
+    it("a call is possible: done", async () => {
+      const body = await read(async () => true);
+      expect(body.aiAndSpend).toMatchObject({ state: "done", modelCall: "possible" });
+      expect(body.firstTask.canStart).toBe(true);
+    });
+    it("the gateway could not say (null or a throw): not blocked on a guess, and said so", async () => {
+      for (const reader of [async () => null, async (): Promise<boolean> => { throw new Error("gateway down"); }]) {
+        const body = await read(reader);
+        expect(body.aiAndSpend).toMatchObject({ state: "done", modelCall: "unknown" });
+        expect(body.firstTask.canStart).toBe(true);
+      }
+    });
+    it("an install with no gateway to ask: as before, no field", async () => {
+      const body = await read();
+      expect(body.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
+    });
   });
 });
 
@@ -436,6 +800,7 @@ describe("who may read, and which company's project it is", () => {
     for (const [company, name] of [[B, "beta"], [B, "alpha"]] as const) {
       const task = setupRun(h, company, name, READY({ proposal: PROPOSAL({ setup: [`echo ${CANARY}`], tests: ["npm test"] }) }), company === B && name === "alpha" ? "88888888-8888-4888-8888-888888888888" : "99999999-9999-4999-8999-999999999999");
       evalReport(h, company, name, task, "confirmed");
+      setupApply(h, company, name, { state: "approved", check: "ready" });
       journal(h, company, name, task, 1, { command: `echo ${CANARY}`, exitCode: 1, tail: CANARY });
       h.db.set({ ...setupSkipsKey(company, name), entityType: "PROJECT_SETUP_SKIPS", companyId: company, project: name, skipped: ["linear", "invites", "slackChannel"], revision: 1 });
       h.db.set({ ...projectSettingsKey(company, name), entityType: "PROJECT_SETTINGS", companyId: company, projectName: name, overrides: { model_budget_usd: 99 }, revision: 1, updatedAt: TIME, updatedBy: CAT });
@@ -444,7 +809,7 @@ describe("who may read, and which company's project it is", () => {
     h.db.set({ ...modelSelectionPolicyKey(B), entityType: "MODEL_SELECTION_POLICY", orgId: B, version: 1, revision: 5, rankingVersion: "g3-v1", stepOverrides: {} });
     const seenByA = await h.ok();
     expect(JSON.stringify(seenByA)).not.toContain(CANARY);
-    expect(seenByA.setupRun).toEqual({ state: "needs_you", status: "none" });
+    expect(seenByA.setupRun).toEqual({ state: "needs_you", status: "none", approval: "none" });
     expect(seenByA.evalConfirm).toEqual({ state: "needs_you", report: "none", blockedBy: "setupRun" });
     expect(seenByA.aiAndSpend).toEqual({ state: "done", source: "default", companyModelSaved: false, modelBudgetUsd: null });
     expect(seenByA.firstTask.hasTask).toBe(false);
@@ -453,7 +818,7 @@ describe("who may read, and which company's project it is", () => {
     h.as(CAT, "s-cat");
     expect(await h.call("GET", PATH("alpha"))).toEqual(NOT_FOUND);
     const seenByB = await h.ok(PATH("beta"));
-    expect(seenByB.setupRun.state).toBe("done");
+    expect(seenByB.setupRun).toMatchObject({ state: "done", approval: "approved" });
     expect(seenByB.aiAndSpend).toMatchObject({ source: "project", modelBudgetUsd: 99 });
   });
 
@@ -610,6 +975,67 @@ describe("setting a skipped optional row", () => {
   });
 });
 
+// L4-T5: a run whose worker is dead no longer reads "running" for 26 hours. A live worker talks to the broker every few seconds (and the broker notes it on the task once a minute); a run silent for
+// 10 minutes reads as stopped, and a run that has not spoken yet gets an hour from its start (its machine is still being made).
+describe("a setup run whose worker stopped talking (L4-T5)", () => {
+  const MIN = 60_000;
+  /** A run with no result, started `startedAgoMin` ago, whose worker was last heard `seenAgoMin` ago (undefined: never). */
+  function runningRun(h: Harness, startedAgoMin: number, seenAgoMin: number | undefined, company = A) {
+    const taskId = setupRun(h, company, "alpha", undefined);
+    h.db.set({ ...(h.db.get(setupAgentKey(company, "alpha").pk, setupAgentKey(company, "alpha").sk) as object), startedAt: new Date(NOW - startedAgoMin * MIN).toISOString() });
+    if (seenAgoMin !== undefined) h.db.set({ ...(h.db.get(`DEVTASK#${taskId}`, "META") as object), setupAgentSeenAt: new Date(NOW - seenAgoMin * MIN).toISOString() });
+    return taskId;
+  }
+  const row = async (h: Harness) => (await h.ok()).setupRun;
+  const STOPPED = { state: "failed", status: "failed", testOutcome: "unknown", failure: "The setup run stopped before it finished. Start it again." };
+
+  it("a worker heard from within 10 minutes is running, however long the run has been going (a run waiting on an admin's answer for hours still polls)", async () => {
+    const h = companyA();
+    runningRun(h, 20 * 60, 0.25);
+    expect(await row(h)).toMatchObject({ state: "running", status: "running" });
+    const waiting = companyA();
+    runningRun(waiting, 3, 9.9);
+    expect(await row(waiting)).toMatchObject({ state: "running", status: "running" });
+  });
+
+  it("a worker silent for more than 10 minutes reads as stopped, with the fixed 'start it again' sentence, and a later word makes it run again", async () => {
+    const h = companyA();
+    const task = runningRun(h, 30, 10.1);
+    expect(await row(h)).toMatchObject(STOPPED);
+    expect(SETUP_AGENT_FAILURES.stale).toBe(STOPPED.failure);
+    h.db.set({ ...(h.db.get(`DEVTASK#${task}`, "META") as object), setupAgentSeenAt: new Date(NOW - 5_000).toISOString() });
+    expect(await row(h)).toMatchObject({ state: "running", status: "running" });
+  });
+
+  it("a run that never spoke gets an hour from its start, then reads as stopped", async () => {
+    const early = companyA();
+    runningRun(early, 59, undefined);
+    expect(await row(early)).toMatchObject({ state: "running", status: "running" });
+    const late = companyA();
+    runningRun(late, 61, undefined);
+    expect(await row(late)).toMatchObject(STOPPED);
+  });
+
+  it("the old bound still holds: a run that has gone on past its wall clock and the longest wait on an admin (with 1 hour to end) reads as stopped even if something keeps talking", async () => {
+    const h = companyA();
+    runningRun(h, 45 + 24 * 60 + 61, 0.1);
+    expect(await row(h)).toMatchObject(STOPPED);
+  });
+
+  it("only this company's run counts: a worker's word on a task that names another company changes nothing for this company's run", async () => {
+    const h = companyA();
+    const mine = runningRun(h, 30, 20);
+    // Another company's task carries a fresh word; this company's pointer names its own task, which stays silent.
+    const theirs = "99999999-9999-4999-8999-999999999999";
+    h.db.set({ pk: `DEVTASK#${theirs}`, sk: "META", entityType: "DEVELOPER_TASK", companyId: B, orgId: B, taskId: theirs, project: "alpha", purpose: "setup_agent", setupAgentSeenAt: new Date(NOW - 1_000).toISOString() });
+    expect(mine).not.toBe(theirs);
+    expect(await row(h)).toMatchObject(STOPPED);
+    // And a pointer of this company that names the other company's task never reads as running.
+    h.db.set({ ...(h.db.get(setupAgentKey(A, "alpha").pk, setupAgentKey(A, "alpha").sk) as object), taskId: theirs });
+    expect(await row(h)).toMatchObject({ state: "failed", status: "failed" });
+  });
+});
+
 describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
   const audits = (h: Harness) => h.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "project_setup_eval_none_changed");
   const record = (h: Harness, company = A, project = "alpha") => h.db.get(setupEvalNoneKey(company, project).pk, setupEvalNoneKey(company, project).sk);
@@ -617,7 +1043,9 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
   it("an admin confirms no evals for the finished setup run: the row is done and the first task can start; a repeat writes nothing", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", READY());
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    // L4-T5: with no eval found the row is already done; the answer is still taken (and bound to the run), and wins over nothing it contradicts.
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     const answer = await h.call("PUT", EVAL_NONE(), { noEvals: true });
     expect(answer).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: task } });
     expect(ProjectSetupEvalNoneResponseSchema.safeParse(answer.body).success).toBe(true);
@@ -630,6 +1058,21 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     const before = JSON.stringify(h.db.find(() => true));
     expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual(answer);
     expect(JSON.stringify(h.db.find(() => true))).toBe(before);
+  });
+
+  // DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 6): company isolation of the eval-none write. Company A's admin, with a grant on company B's same-shaped project, may not confirm "no evals" there;
+  // it answers like a missing project and writes nothing in either company.
+  it("another company's project (even with a grant on it), the implicit company's and an unknown one are the same 404, and nothing is written", async () => {
+    const h = companyA();
+    h.project("foreign", B); h.grant(ADA, "foreign", "administrator");
+    const task = setupRun(h, B, "foreign", READY());
+    setupApply(h, B, "foreign", { state: "approved", check: "ready" });
+    expect(task).toBeDefined();
+    h.project("legacy");
+    for (const project of ["foreign", "legacy", "nothing", CANARY]) expect(await h.call("PUT", EVAL_NONE(project), { noEvals: true }), project).toEqual(NOT_FOUND);
+    expect(record(h, B, "foreign")).toBeUndefined();
+    expect(record(h, A, "foreign")).toBeUndefined();
+    expect(audits(h)).toEqual([]);
   });
 
   it("the run's evals were found, but the person chooses none: done as no_evals, the suites still shown", async () => {
@@ -694,7 +1137,8 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     const first = setupRun(h, A, "alpha", READY());
     await h.call("PUT", EVAL_NONE(), { noEvals: true });
     const second = setupRun(h, A, "alpha", READY(), "77777777-7777-4777-8777-777777777777");
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    // The first run's answer does not carry over; the new run found no eval, so the row is done by itself (L4-T5), as "none" and not as the first run's "no_evals".
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     expect(await h.call("PUT", EVAL_NONE(), { noEvals: true })).toEqual({ status: 200, body: { project: "alpha", noEvals: true, taskId: second } });
     expect(record(h)).toMatchObject({ taskId: second, revision: 2 });
     expect(audits(h).map((row) => String(row.taskId)).sort()).toEqual([first, second].sort());
@@ -712,7 +1156,7 @@ describe("\"no evals\" for the eval confirm row (L2-5 c)", () => {
     expect(record(h)).toBeUndefined();
     expect(audits(h).map((row) => row.noEvals)).toEqual(expect.arrayContaining([true, false]));
     expect(audits(h).find((row) => row.noEvals === false)).toMatchObject({ taskId: task });
-    expect((await h.ok()).evalConfirm).toEqual({ state: "needs_you", report: "none" });
+    expect((await h.ok()).evalConfirm).toEqual({ state: "done", report: "none" });
     const before = JSON.stringify(h.db.find(() => true));
     expect((await h.call("PUT", EVAL_NONE(), { noEvals: false })).status).toBe(200);
     expect(JSON.stringify(h.db.find(() => true))).toBe(before);
@@ -805,6 +1249,10 @@ describe("what did not change", () => {
     expect(existing).toHaveLength(DEV_ROUTES.length - 4);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
+    // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
+    const switchRows = existing.filter((row) => row.includes("/lessons/local-tools "));
+    expect(switchRows).toEqual(["GET /v1/dev/company/lessons/local-tools full", "PUT /v1/dev/company/lessons/local-tools full", "GET /v1/dev/projects/{project}/lessons/local-tools full", "PUT /v1/dev/projects/{project}/lessons/local-tools full"]);
+    expect(createHash("sha256").update(existing.filter((row) => !switchRows.includes(row)).join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST_BEFORE_JA7);
   });
 
   it("the project read, the members route and the code settings keep their answers; other methods on the new paths are not routes", async () => {
@@ -853,7 +1301,17 @@ describe("what did not change", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin d036ff79418d38716e0e2487692bc4bacce9e4974f24e701b257d72b36591711.
-const EXISTING_ROUTES_DIGEST = "f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b";
+// Owner DEC 254zzz73 (rule D): re-pinned for the ONE removed row GET /v1/dev/me/sign-in-factors (full; the step-up confirmation email and passkeys, removed with the step-up). Nothing else
+// changed: putting exactly that row back where it stood (after DELETE /v1/dev/company/members/{personId}/sign-ins/{method}) gives the previous pin f0b1596216b1311864017ac1cc0c52761487654d42780c6daa737e89b9ef958b.
+// Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full). Removing exactly those two rows gives #1086's pin f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
+// L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
+// removing exactly those 4 rows gives back the pin below.
+const EXISTING_ROUTES_DIGEST_BEFORE_JA7 = "4b0f394e66e38d3893d41b95bfd4a1c2f1f3dc6cb9ac0e9d9082086c90997852";
+// Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives a3cfc661.
+// Batch b20 (rule D): plus #1108's 2 hand-over rows; removing exactly those gives 9716249e (the pin before #1108).
+const EXISTING_ROUTES_DIGEST = "8145868a423d0fba18874b42e09323e82155cb658bb034d4b736421ea3026467";
+// (#1108) DEC 254zzz101 (rule D): plus #1100's two new rows (GET company/members/handovers, POST company/members/{personId}/handover). Added, none changed: removing exactly those 2 rows gives back
+// f116b191b61148567f889eb123e054dae473e9d80c3a61b601445af9d6e081b8.
 // L4-WK (rule D): re-pinned for the one new row GET /v1/dev/projects/{project}/lessons/tuning (full; added, none changed; removing exactly that row still gives e585a614...).
 
 // Audit gap 11c (2026-11-18): the checklist's Linear row reads the project's picked Linear team where the install wires Linear (it was a seam nobody filled, so the row never turned done).
@@ -945,19 +1403,40 @@ describe("a project's members, for a live company owner or admin without a proje
     expect((await h.call("GET", MEMBERS())).status).toBe(200);
   });
 
+  // DEC 254zzz81 (review High): the routes are always on, so a project-admin GRANT on another company's project (or the implicit company's) counts for nothing: it reads as missing, and nothing is written.
+  it("a project-admin grant on another company's project, or on one with no company, does not open its members: 404, no write", async () => {
+    const h = companyA();
+    h.join(ADA, A, "member");
+    h.project("beta", B); h.grant(ADA, "beta", "administrator");
+    h.project("legacy"); h.grant(ADA, "legacy", "administrator");
+    for (const project of ["beta", "legacy"]) {
+      expect(await h.call("GET", MEMBERS(project)), project).toEqual(NOT_FOUND);
+      expect(await h.call("PUT", `${MEMBERS(project)}/${CAT}`), project).toEqual(NOT_FOUND);
+      expect(await h.call("DELETE", `${MEMBERS(project)}/${ADA}`), project).toEqual(NOT_FOUND);
+    }
+    expect(h.db.find((item) => item.pk === `MEMBER#${CAT}`)).toEqual([]);
+    expect(h.db.find((item) => item.pk === `MEMBER#${ADA}` && item.sk === "PROJECT#beta")).toHaveLength(1);
+    // A project that does not exist reads the same (a 404 never tells another company's name apart from a missing one).
+    expect(await h.call("GET", MEMBERS("nothing"))).toEqual(NOT_FOUND);
+    // The same grant on the caller's own company's project still works.
+    h.grant(ADA, "alpha", "administrator");
+    expect((await h.call("GET", MEMBERS())).status).toBe(200);
+  });
+
   it("refuses an owner of another company, and a project with no company (the implicit company's, never the caller's)", async () => {
     const h = companyA();
     h.join(ADA, A, "owner");
     h.project("beta", B);
     h.project("legacy");
-    expect(await h.call("GET", MEMBERS("beta"))).toEqual(REFUSED);
-    expect(await h.call("PUT", `${MEMBERS("beta")}/${CAT}`)).toEqual(REFUSED);
-    expect(await h.call("GET", MEMBERS("legacy"))).toEqual(REFUSED);
+    // DEC 254zzz81: another company's project, and one with no company, read as missing (as on every other /{project} row), no longer as a 403.
+    expect(await h.call("GET", MEMBERS("beta"))).toEqual(NOT_FOUND);
+    expect(await h.call("PUT", `${MEMBERS("beta")}/${CAT}`)).toEqual(NOT_FOUND);
+    expect(await h.call("GET", MEMBERS("legacy"))).toEqual(NOT_FOUND);
     // Company B's owner manages B's project, and not A's.
     h.join(CAT, B, "owner");
     h.as(CAT, "s-cat");
     expect((await h.call("GET", MEMBERS("beta"))).status).toBe(200);
-    expect(await h.call("GET", MEMBERS())).toEqual(REFUSED);
+    expect(await h.call("GET", MEMBERS())).toEqual(NOT_FOUND);
   });
 
   it("refuses a removed owner, and anyone where the install has no company layer", async () => {

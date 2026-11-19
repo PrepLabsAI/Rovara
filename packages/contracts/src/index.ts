@@ -178,6 +178,9 @@ export * from "./agent-directory-view.js";
 export * from "./app-projects.js";
 export * from "./public-suffix.js";
 export * from "./default-allow-domains.js";
+// L4-NETG: the sandbox-side registry deny list and the worker sandbox egress setting. Additive.
+export * from "./sandbox-deny-domains.js";
+export * from "./worker-sandbox-egress.js";
 export * from "./egress.js";
 export * from "./refusal-words.js";
 export * from "./agent-sessions-node.js";
@@ -309,6 +312,7 @@ export * from "./test-services-usage.js";
 export * from "./service-catalog.js";
 export * from "./service-catalog-images.js";
 export * from "./catalog-trust.js";
+export * from "./gcp-pack-images.js";
 export * from "./owner-image-list.js";
 export * from "./owner-starter-images.js";
 export * from "./test-service-mirror.js";
@@ -397,6 +401,7 @@ export * from "./wiki-corrections.js";
 export * from "./answers.js";
 export * from "./answer-keys.js";
 export * from "./slack-answers.js";
+export * from "./slack-model-access.js";
 // Lead 4 J3: the web start box's path suggestion (the Slack intake's first look and classifier, for the web).
 export * from "./start-suggest.js";
 export * from "./answer-feedback.js";
@@ -462,9 +467,13 @@ export * from "./eval-plan-delivery.js";
 export * from "./eval-environment.js";
 export * from "./eval-health-run.js";
 export * from "./eval-run-diagnostic.js";
+export * from "./eval-dependency-list.js";
 // DEC 253j(1): the trusted EVAL_PLAN record (stored next to EVAL_SPEND, bound by its digest).
 export * from "./eval-plan-record.js";
+export * from "./eval-stand-in-version.js";
 export * from "./eval-discovery-report.js";
+export * from "./eval-wrapper.js";
+export * from "./eval-wrapper-templates.js";
 export * from "./eval-proof-basis.js";
 
 export * from "./model-gateway-token.js";
@@ -472,18 +481,27 @@ export * from "./payer.js";
 export * from "./ports/company-log.js";
 export * from "./service-contract.js";
 export * from "./service-contract-mock.js";
+export * from "./standin-writer.js";
 export * from "./general-fakes.js";
 export * from "./plan-setup-changes.js";
 export * from "./general-fakes-set.js";
 export * from "./openapi-fake.js";
+export * from "./eval-standin-engine.js";
+export * from "./eval-standin-set.js";
+export * from "./eval-telemetry-hosts.js";
+export * from "./eval-stand-in-descriptor.js";
+export * from "./eval-standin-pool.js";
+export * from "./eval-standin-cassettes.js";
 export * from "./agent-model-choice.js";
 export * from "./company-engine-model.js";
+export * from "./company-learning-model.js";
 export * from "./report-keys.js";
 export * from "./cost-report.js";
 export * from "./upkeep.js";
 export * from "./prompt-locations.js";
 export * from "./ai-markers.js";
 export * from "./company-egress-addresses.js";
+export * from "./saved-env-registry-outputs.js";
 
 export * from "./charge-receipt.js";
 

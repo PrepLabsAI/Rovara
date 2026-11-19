@@ -16,6 +16,8 @@ import type { DockerCli } from "./swebench/containers.js";
 import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
 import { runEvalHealthJob, type EvalHealthJobPorts } from "./verification/eval-health-job.js";
 import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";
+import { createEvalServicesStarter } from "./verification/eval-services.js";
+import { testServicesConfigFromEnvironment } from "./test-services-run.js";
 
 /** The job's own deadline: inside the broker's window, with room to post. */
 export const EVAL_HEALTH_JOB_MS = EVAL_HEALTH_RUN_MAX_MS - 10 * 60_000;
@@ -75,7 +77,9 @@ async function measure(deps: EvalHealthRiderDeps, job: { requestId: string; clai
   const environment = evalEnvironmentWithGateway(deps.environment ?? process.env, invocation.payload.evalGatewayUrl);
   const ports = deps.ports !== undefined ? deps.ports(invocation) : (() => {
     const sources = evalHostSourcesFor({ workspaceId: invocation.workspaceId, operationId: invocation.operationId, callbackCapability: invocation.callbackCapability },
-      { controlPlaneUrl: deps.controlPlaneUrl, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }), fresh: { environment, docker: deps.docker, workspaceKey: () => setupWorkspaceKey(deps.rootPath) } });
+      { controlPlaneUrl: deps.controlPlaneUrl, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }), fresh: { environment, docker: deps.docker, standIns: { dependencies: invocation.payload.testServices?.dependencies }, workspaceKey: () => setupWorkspaceKey(deps.rootPath),
+        // L4-E12 (E1): the baseline's three runs each get their own copy of the task's services, when this worker offers them.
+        services: () => createEvalServicesStarter({ config: testServicesConfigFromEnvironment(environment, deps.docker), dependencies: invocation.payload.testServices?.dependencies }) } });
     const bound = evalFinalCheckForTask({ requested: true, environment, controlPlaneUrl: deps.controlPlaneUrl, capability: invocation.callbackCapability, sources, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }) });
     // Only a fresh check sandbox measures a baseline: a host that cannot start one reads "not connected", before any hold.
     return bound === undefined || bound.roundKind !== "check_unsealed" ? undefined : bound;

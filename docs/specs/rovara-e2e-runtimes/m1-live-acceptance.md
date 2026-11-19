@@ -125,7 +125,7 @@ Security hotfix shipped to production the same day (worker git hardening, H3/H3b
 
 M1.4 is accepted when a live web scenario with an `agent` step finds the renamed export button on a real candidate through the governed model route, the deterministic CSV assertion decides PASS, the verified round replays without the model, and the evidence is recorded. This section is the operator runbook for Task 4.9 steps 3 to 7 (`m1-4-plan.md`); the pass criteria are in that plan's "M1.4 live acceptance" section and are not repeated here. The cost of each step is in `m1-4-cost-estimate.md`.
 
-Facts this runbook uses: TEST installation `agentxlivetest123`, account `944937319445`, `us-east-1`; provider Amazon Bedrock; model Claude Haiku 5.5 through the inference profile `us.anthropic.claude-haiku-5-5` (model agreement `AVAILABLE`); fixture project `rovara-web-fixture` (repo `abhishek255/rovara-orders-web-fixture`, Slack `#rovara-web-fixture`). Qualification uses the route `rovara-scripted/v1`, which calls no provider and costs no model spend. The replay (Task 4.6b) runs with no model.
+Facts this runbook uses: TEST installation `agentxlivetest123`, the release/staging account (`<release-account-id>`, in the private release runbook), `us-east-1`; provider Amazon Bedrock; model Claude Haiku 5.5 through the inference profile `us.anthropic.claude-haiku-5-5` (model agreement `AVAILABLE`); fixture project `rovara-web-fixture` (repo `abhishek255/rovara-orders-web-fixture`, Slack `#rovara-web-fixture`). Qualification uses the route `rovara-scripted/v1`, which calls no provider and costs no model spend. The replay (Task 4.6b) runs with no model.
 
 ### Owner-approval gates
 

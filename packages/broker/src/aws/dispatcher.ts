@@ -24,7 +24,7 @@ import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
-import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
+import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
@@ -335,6 +335,10 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 /** Authority-only reads/fences do not silently consume retry time from the shared SDK client. */
 const taskAuthorityDocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({ ...awsClientConfiguration, maxAttempts: 1 }));
 const kms = new KMSClient(awsClientConfiguration);
+/** The project's own per-task limit as the dispatcher reads it (the company rules service, through this function's own signer): the one reader its Admission and automatic fixing's cap (L4-TA6) share. Built per call; unusable settings refuse. */
+function dispatcherProjectTaskCapOf(): ReturnType<typeof dispatcherProjectTaskCap> {
+  return dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms);
+}
 const sfn = new SFNClient(awsClientConfiguration);
 export const taskPersonProofLambdaClient = new LambdaClient({ ...awsClientConfiguration, maxAttempts: 1 });
 
@@ -765,11 +769,16 @@ export const handler = withCoreDispatch(workflowHandler, {
           });
         },
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
-        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env), projectTaskCap: dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms) /* L2-5 (b), CORE-DISPATCH-HOOK-SIGNER-20261117: the project's limit through the company rules service, as the broker resolves it (this function's own signer over the policy hook key); unusable: refused */ }), ...gatewayModelKeysModules(process.env)],
+        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env), projectTaskCap: dispatcherProjectTaskCapOf() /* L2-5 (b), CORE-DISPATCH-HOOK-SIGNER-20261117: the project's limit through the company rules service, as the broker resolves it (this function's own signer over the policy hook key); unusable: refused */ }), ...gatewayModelKeysModules(process.env)],
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
           const read = readHostedAdmissionSettings(process.env);
           return createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, now: () => new Date() });
+        },
+        // L4-TA6: automatic fixing's per-task dollar cap is the task's live cap, read the way the dispatcher's own Admission reads it (the install's task cap lowered to the project's own limit, through the same reader as above); unreadable asks.
+        taskCapUsd: (registry, companyId) => {
+          const read = readHostedAdmissionSettings(process.env);
+          return hostedTaskCapUsd({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, projectTaskCap: dispatcherProjectTaskCapOf() });
         },
         log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)
       }).host;

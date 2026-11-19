@@ -5,9 +5,9 @@
 // container is MEDIUM. Low and medium: a live company owner or admin, or the project's maintainer (the broker's `administrator` grant). High: a live company owner or admin only. A project developer, a
 // non-member, a revoked member and a person of another company decide nothing. Every role is read LIVE at the act (never from a token or a body).
 //
-// HOW: a fresh step-up, checked by the route on the verified access token and passed in; then a proof of exactly this act from the deployment's approvers point (`TestEnvironmentProofIssuer`), presented
+// HOW (DEC 254zzz73: no step-up): the signed-in person the route authenticated; then a proof of exactly this act from the deployment's approvers point (`TestEnvironmentProofIssuer`), presented
 // to the gate, whose Approvers seam verifies it again. L4-B3b wires it live: the hosted approvers point (core-host/hosted-approvers.ts) accepts the `test-environment` subject with its own marked
-// proof (`issueTestEnvironmentStepUpApproval`), and test-environment-approval.ts builds the decision over it. The same rule is read again INSIDE the gate's decision (the subject's `approval`),
+// proof (`issueTestEnvironmentApprovalProof`), and test-environment-approval.ts builds the decision over it. The same rule is read again INSIDE the gate's decision (the subject's `approval`),
 // after the proof is verified, so a role lost between the route's check and the act refuses. A host that wires no issuer answers `not_wired` (fixed words): nothing is approved on AWS by any other path.
 //
 // What is bound: the project, the proposal's digest, the revision approving it makes, and the request id the person saw. A proposal that changed, was not proved, or is not the one shown is refused
@@ -23,10 +23,10 @@ import { liveGrant, liveMemberRole, type DeployedPeople } from "./deployed-decis
 /** The approval kind the test environment subject asks the approvers point about (environment.ts: `kind: "setting"`). */
 export const TEST_ENVIRONMENT_APPROVAL_KIND = "setting";
 
-/** The proof seam: the deployment's approvers point issues a proof of exactly this act (hosted-approvers.ts `issueTestEnvironmentStepUpApproval`). Throws on an input it cannot bind. */
+/** The proof seam: the deployment's approvers point issues a proof of exactly this act (hosted-approvers.ts `issueTestEnvironmentApprovalProof`). Throws on an input it cannot bind. */
 export interface TestEnvironmentProofIssuer {
   issue(input: {
-    companyId: OrgId; personId: string; stepUp: { at: string; method: string }; requestId: string; kind: typeof TEST_ENVIRONMENT_APPROVAL_KIND;
+    companyId: OrgId; personId: string; requestId: string; kind: typeof TEST_ENVIRONMENT_APPROVAL_KIND;
     project: string; revision: number; artifactDigest: string; outcome: "approve"; card: ApprovalCardRef;
   }): { method: string; token: string };
 }
@@ -75,7 +75,7 @@ export interface HostedTestEnvironmentDecisionOptions {
 }
 
 export interface HostedTestEnvironmentDecider {
-  approve(input: { personId: string; stepUp: { at: string; method: string } | undefined; project: string; approval: { requestId: string; revision: number; artifactDigest: string } }): Promise<HostedTestEnvironmentDecision>;
+  approve(input: { personId: string; project: string; approval: { requestId: string; revision: number; artifactDigest: string } }): Promise<HostedTestEnvironmentDecision>;
 }
 
 export function createHostedTestEnvironmentDecision(options: HostedTestEnvironmentDecisionOptions): HostedTestEnvironmentDecider {
@@ -88,8 +88,6 @@ export function createHostedTestEnvironmentDecision(options: HostedTestEnvironme
       const { project, approval } = input;
       if (typeof project !== "string" || !PROJECT.test(project) || typeof approval?.artifactDigest !== "string" || !DIGEST.test(approval.artifactDigest)
         || typeof approval.requestId !== "string" || !REQUEST_ID.test(approval.requestId) || !Number.isSafeInteger(approval.revision) || approval.revision < 1) return refuse("not_found");
-      // The step-up is the route's check; without one nothing is issued.
-      if (input.stepUp === undefined) return refuse("not_allowed");
       // Who, live, with the deployed decisions' own readers: this company's membership (a well-formed person id, a known role; another company's, revoked or a failed read is none) and the project grant
       // (a failed read is no grant).
       const companyRole = await liveMemberRole(people, companyId, input.personId);
@@ -108,7 +106,7 @@ export function createHostedTestEnvironmentDecision(options: HostedTestEnvironme
       let credential: { method: string; token: string };
       try {
         credential = proofs.issue({
-          companyId, personId: input.personId, stepUp: input.stepUp, requestId: approval.requestId, kind: TEST_ENVIRONMENT_APPROVAL_KIND, project,
+          companyId, personId: input.personId, requestId: approval.requestId, kind: TEST_ENVIRONMENT_APPROVAL_KIND, project,
           revision: approval.revision, artifactDigest: approval.artifactDigest, outcome: "approve", card: testEnvironmentCardOf(project, approval.artifactDigest),
         });
       } catch {

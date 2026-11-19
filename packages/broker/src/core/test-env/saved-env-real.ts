@@ -1,4 +1,4 @@
-// Saved project images: the registry's real bindings, built only while the install's saved-environments switch is on. Nothing here makes a decision: the rules are in `saved-env.ts` and its siblings.
+// Saved project images: the registry's real bindings. Hosted cleanup retains disabled bindings while use is off. Nothing here makes a decision: the rules are in `saved-env.ts` and its siblings.
 //   store            the document-store adapter (`saved-env-store.ts`), with the audit sink;
 //   session          the `image-registry` port with the install's environment name; without a registry that can do something the registry's decisions say so (`registry_cannot_build`);
 //   approved / proveHolds  the project's newest approved test environment (its digest is `testEnvDigest`) and the Prove report recorded for that digest;
@@ -48,8 +48,8 @@ export interface SavedEnvWiring {
   /** The adapter registry, read for the `build-system` point's key-file globs. */
   adapters: Pick<RegistryView, "get" | "names">;
   /** The code host's side of the key (a tree listing and a file read at a commit). Without a listing no key is worked out. */
-  keyHost(orgId: string): KeyHost;
-  headOf(orgId: string, repository: { name: string; url: string; defaultBranch: string }): Promise<string>;
+  keyHost(orgId: string, project: string): KeyHost;
+  headOf(orgId: string, repository: { name: string; url: string; defaultBranch: string }, project: string): Promise<string>;
   /** The digest of the image the project's commands run in (the worker image), or undefined (then no key). */
   baseImageDigest(): Promise<string | undefined>;
   /** The environment name in repository names. Default `local`. */
@@ -65,6 +65,12 @@ export interface SavedEnvWiring {
 export function createSavedEnvDeps(wiring: SavedEnvWiring): SavedEnvDeps | undefined {
   const env = wiring.env ?? process.env;
   if (!savedEnvEnabled(env)) return undefined;
+  return createSavedEnvCleanupDeps(wiring);
+}
+
+/** Internal hosted binding: cleanup remains reachable while build/use guards stay off. */
+export function createSavedEnvCleanupDeps(wiring: SavedEnvWiring): SavedEnvDeps {
+  const env = wiring.env ?? process.env;
   const keyCache = new KeyListingCache();
   const now = (): number => wiring.test.now();
   const approved = async (orgId: string, project: string) => {
@@ -75,7 +81,7 @@ export function createSavedEnvDeps(wiring: SavedEnvWiring): SavedEnvDeps | undef
   const deps: SavedEnvDeps = {
     store: documentSavedEnvStore({ store: wiring.test.store, audit: wiring.test.audit, now }),
     session: {
-      config: { enabled: true, env: wiring.envName ?? "local" },
+      config: { enabled: savedEnvEnabled(env), env: wiring.envName ?? "local" },
       ports: {
         registry: wiring.registry,
         readApproved: approved,
@@ -96,9 +102,9 @@ export function createSavedEnvDeps(wiring: SavedEnvWiring): SavedEnvDeps | undef
       const found = await wiring.flow.projects.latest(project);
       if (found === undefined) return undefined;
       const repositories = workerProjectDefinition(found.definition).repositories.map((repository) => ({ name: repository.name, url: repository.url }));
-      return expectedEnvironmentKey(wiring.keyHost(orgId), { orgId, repositories, commits: heads, detectorGlobs: inputs.detectorGlobs, testEnvRevision: inputs.revision, secretNames: inputs.secretNames, baseImageDigest: inputs.baseImageDigest }, keyCache);
+      return expectedEnvironmentKey(wiring.keyHost(orgId, project), { orgId, repositories, commits: heads, detectorGlobs: inputs.detectorGlobs, testEnvRevision: inputs.revision, secretNames: inputs.secretNames, baseImageDigest: inputs.baseImageDigest }, keyCache);
     },
-    defaultHeads: (orgId, project) => savedEnvDefaultHeads({ projects: wiring.flow.projects, headOf: (repository) => wiring.headOf(orgId, repository) }, project),
+    defaultHeads: (orgId, project) => savedEnvDefaultHeads({ projects: wiring.flow.projects, headOf: (repository) => wiring.headOf(orgId, repository, project) }, project),
     keep: wiring.keep ?? (async () => SAVED_ENV_KEEP_DEFAULT),
     lightAfterIdleDays: wiring.lightAfterIdleDays ?? (async () => SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT),
     now,
