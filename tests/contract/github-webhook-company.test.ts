@@ -196,13 +196,43 @@ it.each(["github/tools?repository=demo", "connectors/github/tools"])("the GitHub
   db.set({ pk: "SLACK_BINDING#T0123456789", sk: "CHANNEL#C0123456789", teamId: "T0123456789", channelId: "C0123456789", projectName: "demo", projectRevision: 1, updatedAt: NOW });
   db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", deploymentMode: "ec2-ebs", id: workspaceId, ownerKey, projectName: "demo", projectRevision: 1,
     environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, createdAt: NOW, updatedAt: NOW });
-  // DEC 254zzz80 (lane 2): the grant of a project of named company B lives in B's own partition.
-  db.set({ pk: `ORG#org_bbbbbbbbbbbbbbbbbbbb#MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  // DEC 254zzz98 (one rule): this route reads the project's legacy revision, so the grant it reads is the legacy row beside it (whatever company the revision row names).
+  db.set({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
   db.set({ pk: "PROJECT#demo", sk: "REV#000000000001", companyId: "org_bbbbbbbbbbbbbbbbbbbb", definition: { name: "demo", revision: 1,
     repositories: [{ name: "demo", url: "https://github.com/example/demo.git", credentialRef: "github" }], integrations: { githubMcp: { tools: [{ name: "get_me", access: "read" }] } } } });
   const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/${path}`, service: { principal: orchestratorPrincipal, thread, slackUser: "U0123456789" } });
   if (path.startsWith("github/")) expect(response.body).toMatchObject({ error: { code: "GITHUB_NOT_CONNECTED" } });
   expect(minted).toBe(0);
+});
+
+it.each(["github/tools?repository=demo", "connectors/github/tools"])("DEC 254zzz98, two companies: a grant in a company's own partition never opens the legacy project these MCP routes read: %s", async (path) => {
+  const { GithubInstallationBindings } = await import("../../packages/broker/src/aws/github-credentials.js");
+  const { ownerKeyForSubject } = await import("../../packages/broker/src/aws/lambda.js");
+  const { call, orchestratorPrincipal } = await import("../support/slack-broker.js");
+  const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
+  const db = new FakeDynamoDb(); const bindings = new GithubInstallationBindings(db, "state");
+  await bindings.backfill(async () => []);
+  await bindings.claim(A, 77, "shared-account", "operator");
+  let minted = 0;
+  const { handler } = createBroker({ extra: { documentClient: db, githubBindings: bindings,
+    githubPullRequests: { installationIdFor: async () => 77 }, githubMcp: { credentials: async () => { minted++; throw new Error("mint reached"); } } } });
+  const workspaceId = "550e8400-e29b-41d4-a716-446655440011";
+  const thread = "T0123456789/C0123456789/1758240000.000200";
+  const ownerKey = ownerKeyForSubject("slack-thread", thread);
+  db.set({ pk: "SLACK_BINDING#T0123456789", sk: "CHANNEL#C0123456789", teamId: "T0123456789", channelId: "C0123456789", projectName: "demo", projectRevision: 1, updatedAt: NOW });
+  db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", deploymentMode: "ec2-ebs", id: workspaceId, ownerKey, projectName: "demo", projectRevision: 1,
+    environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, createdAt: NOW, updatedAt: NOW });
+  // Company A's project "demo" (its legacy revision, A's GitHub connectors). The caller holds grants on "demo" only in company layouts: A's own and B's (a same-named project).
+  db.set({ pk: "PROJECT#demo", sk: "REV#000000000001", companyId: A, definition: { name: "demo", revision: 1,
+    repositories: [{ name: "demo", url: "https://github.com/example/demo.git", credentialRef: "github" }], integrations: { githubMcp: { tools: [{ name: "get_me", access: "read" }] } } } });
+  db.set({ pk: `ORG#${B}#MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  db.set({ pk: `ORG#${A}#MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  const request = () => call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/${path}`, service: { principal: orchestratorPrincipal, thread, slackUser: "U0123456789" } });
+  expect((await request()).body).toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect(minted).toBe(0);
+  // Control: the legacy grant beside the legacy revision is what opens it (the route then reaches its own checks, never "not found").
+  db.set({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  expect((await request()).body).not.toMatchObject({ error: { code: "NOT_FOUND" } });
 });
 
 it("bounds registry enumeration and reports additional companies", async () => {

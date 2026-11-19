@@ -4,7 +4,7 @@ import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/con
 import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREATE_TEXT, CompanyInviteCodeHashSchema, CompanyInviteCodeIdSchema, CompanyInviteListSchema, CompanySelfCreateBodySchema, companyInviteCodeHash, newCompanyInviteLink, type CompanyInviteList, type CompanyPreapprovalCreated, type CompanySelfCreateResponse } from "@agentx/contracts";
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, ownPartitionRow, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
-import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived } from "./company-layout.js";
+import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived, slackChannelBindingPkFor } from "./company-layout.js";
 import type { CallerStepUp } from "./step-up-check.js"; import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
@@ -1003,9 +1003,13 @@ async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWor
   const bindings: SlackChannelBinding[] = [];
   for (const scope of scopes) {
     if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
-    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, channelBindingPartition(SLACK_CHANNEL, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
+    // DEC 254zzz98 (review M1): a NAMED company's channel bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`, slackChannelBindingPkFor), as the Slack
+    // ingress, the dispatcher and the channel-link writer read and write them; a legacy row on its team is never this company's. A row there naming another company is dropped.
+    // The built-in company keeps the legacy partition, byte for byte.
+    const named = namedCompany(scope.companyId);
+    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, slackChannelBindingPkFor(scope.companyId, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
     if (rows.some((row) => row.teamId !== scope.teamId)) throw new SlackWorkspaceRefused();
-    bindings.push(...rows);
+    bindings.push(...(named === undefined ? rows : rows.filter((row) => ownPartitionRow(row as unknown as Record<string, unknown>, named))));
   }
   return bindings;
 }
@@ -1425,13 +1429,19 @@ function memberActions(deps: DeveloperRouteDependencies) {
 }
 
 /** Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string): Promise<{ name: string; projectMember: boolean } | undefined> {
+async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string): Promise<{ name: string; projectMember: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
-  // DEC 254zzz80: the grant is read where the person's LIVE company keeps it; a person with no live company holds no grant.
+  const name = person.displayName ?? "Unknown";
+  // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
+  // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
+  // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
+  if ((deps.companies ?? deps.developer.companies) === undefined) return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined };
   let company: string | undefined;
-  try { company = await liveNamedCompany(deps, developerId); } catch { return { name: person.displayName ?? "Unknown", projectMember: false }; }
-  return { name: person.displayName ?? "Unknown", projectMember: await projectGrant(memberActions(deps), project, developerId, company) !== undefined };
+  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false }; }
+  const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
+  if (owning !== company) return { name, projectMember: false };
+  return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, owning) !== undefined };
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
@@ -2137,7 +2147,7 @@ export function developerTaskRouteDependencies(
         throw error;
       }
     },
-    taskReaderPerson: (developerId, project) => taskReaderPerson(deps, developerId, project),
+    taskReaderPerson: (developerId, project, taskCompany) => taskReaderPerson(deps, developerId, project, taskCompany),
     ...(!companySlackMode(deps) ? {} : { workspaceForTask: taskWorkspace, workspaceForProject }),
     channelMember: async (slackUserId, channelId, workspace) => {
       if (companySlackMode(deps) && (workspace === undefined || await callerWorkspace(deps, caller, { companyId: workspace.companyId }, workspace.teamId) === undefined)) throw new SlackWorkspaceRefused();

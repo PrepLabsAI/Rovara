@@ -369,12 +369,16 @@ export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: stri
   };
 }
 
-/** DEC 254zzz80: a grant reader that reads each person's grant in the company of their LIVE membership (none: the legacy row, as before). A membership read that fails throws. */
+/**
+ * DEC 254zzz80: a grant reader that reads each person's grant in the company of their LIVE membership (none: the legacy row, as before). A membership read that fails throws.
+ * Review L3: a caller that has just checked the person's live membership passes that company (`checkedCompany`), so the grant is read in the company it checked and membership is
+ * not read a second time (a person moved between two reads can never have another company's same-named grant counted).
+ */
 export function liveCompanyGrantRole(
   membershipOf: (personId: string) => Promise<{ companyId: OrgId } | undefined>,
   role: (personId: string, project: string, companyId?: string) => Promise<"developer" | "administrator" | undefined>,
-): (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> {
-  return async (personId, project) => role(personId, project, (await membershipOf(personId))?.companyId);
+): (personId: string, project: string, checkedCompany?: string) => Promise<"developer" | "administrator" | undefined> {
+  return async (personId, project, checkedCompany) => role(personId, project, checkedCompany ?? (await membershipOf(personId))?.companyId);
 }
 
 /**
@@ -425,11 +429,11 @@ export const NO_PROJECT_GRANT = "You do not have access to this project.";
  * Guided onboarding L2-3: a person's standing on a project's setup run in this company, read live: PR 16's rule (`lifecycleAccess`) over the person's membership and project grant.
  * A person who is not a live member of THIS company is `none`, whatever grant they hold.
  */
-export function setupRunStandingFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding> {
+export function setupRunStandingFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string, checkedCompany?: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding> {
   return async (personId, companyId, project) => {
     const membership = await people.membershipOf(personId);
     if (membership === undefined || membership.companyId !== companyId) return { access: "none" };
-    const access = lifecycleAccess(membership.role, await people.projectGrantRole(personId, project));
+    const access = lifecycleAccess(membership.role, await people.projectGrantRole(personId, project, membership.companyId));
     if (access !== "manage") return { access };
     return { access, basis: membership.role === "owner" ? "company-owner" : membership.role === "admin" ? "company-admin" : "project-admin" };
   };
@@ -439,12 +443,12 @@ export function setupRunStandingFrom(people: { membershipOf: (personId: string) 
  * Lead 4 C1: a person's role on a project for the wiki's corrections, read live. Only a live member of THIS company has one: a company owner or admin is a `maintainer` of every project (as
  * `app-projects.ts` says); otherwise the project grant gives `maintainer` or `contributor`; no grant, no role. (A role the install knows only as `viewer` would read but not correct.)
  */
-export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<ProjectRole | undefined> {
+export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrantRole: (personId: string, project: string, checkedCompany?: string) => Promise<"developer" | "administrator" | undefined> }): (personId: string, companyId: OrgId, project: string) => Promise<ProjectRole | undefined> {
   return async (personId, companyId, project) => {
     const membership = await people.membershipOf(personId);
     if (membership === undefined || membership.companyId !== companyId) return undefined;
     if (membership.role === "owner" || membership.role === "admin") return "maintainer";
-    return projectRoleOf(await people.projectGrantRole(personId, project));
+    return projectRoleOf(await people.projectGrantRole(personId, project, membership.companyId));
   };
 }
 
@@ -452,7 +456,9 @@ export function wikiProjectRoleFrom(people: { membershipOf: (personId: string) =
 export { hostedSystemRunsFor };
 
 export function hostedTaskAccess(inputs: {
-  membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>; projectGrant: (personId: string, project: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
+  membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>;
+  /** The person's grant; `checkedCompany` is the company whose live membership the caller just checked (review L3: the grant is read there, membership is not read again). */
+  projectGrant: (personId: string, project: string, checkedCompany?: string) => Promise<boolean>; companyId: OrgId; storage?: () => Promise<DocumentStore>; people?: TaskPeopleDependencies;
   /** Guided onboarding L2-3: the setup run's own rule. With it (and `storage`), a step of a setup-run task is allowed only while the person it runs for still manages the project's setup (DEC 254n 3); any other task's step keeps the project-grant rule. */
   setupRunStanding?: (personId: string, companyId: OrgId, project: string) => Promise<SetupRunStanding>;
   /** L4-P1 (owner DEC 254zzl): whether this company's SystemRuns flag is on, read now. With it, a project's SYSTEM OWNER is accepted for the closed list of system purposes (core/system-runs/access.ts) and for nothing else; members' rules are unchanged. Absent: never. */
@@ -491,7 +497,7 @@ export function hostedTaskAccess(inputs: {
       if (await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }) !== undefined) return undefined;
       return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
     }
-    if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project)) return undefined;
+    if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project, inputs.companyId)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
   };
   const owner = (principal: Principal, task: { developerId: string; project: string; taskId?: string }) => resolve(principal, task, ["owner"]);
@@ -500,7 +506,7 @@ export function hostedTaskAccess(inputs: {
       // A system owner (by its id shape or its provider) is decided by the system rule alone: it is never a member and never falls through to the member rules.
       if (isSystemPrincipal(principal)) return systemStartVerdict({ companyId: inputs.companyId, systemRunsOn: await settledOn(inputs.systemRunsOn), upkeepOn: purpose === "setup_agent" ? await settledUpkeep(project) : undefined }, principal, project, purpose, origin).allowed ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: SYSTEM_OWNER_NOT_ALLOWED };
       if (principal.companyId !== inputs.companyId || (await liveMember(principal.personId)) === undefined) return { allowed: false, code: "FORBIDDEN", message: NOT_A_MEMBER_HERE };
-      return (await inputs.projectGrant(principal.personId, project)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
+      return (await inputs.projectGrant(principal.personId, project, inputs.companyId)) ? { allowed: true } : { allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT };
     },
     async canAct(principal, task) {
       return await owner(principal, task) !== undefined;
@@ -548,7 +554,7 @@ export function hostedTaskAccess(inputs: {
           return (await inputs.setupRunStanding(task.developerId, inputs.companyId, task.project)).access === "manage" ? { allowed: true } : { allowed: false, message: denied };
         }
       }
-      return (await inputs.projectGrant(task.developerId, task.project)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
+      return (await inputs.projectGrant(task.developerId, task.project, inputs.companyId)) ? { allowed: true } : { allowed: false, message: NO_PROJECT_GRANT };
     },
   };
 }
@@ -680,7 +686,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const projectTaskCap: ProjectTaskCap = projectTaskCapReader({ documentClient: inputs.documentClient, tableName: inputs.stateTableName, now: () => now().getTime() }, engineHook);
   // L4-HW3d: one cached, company-scoped source for every company's CI mode (its cache is per company and project).
   const policySource = inputs.policySource ?? inputs.hostedPolicySource?.(engineHook);
-  const projectGrant = async (personId: string, project: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project));
+  const projectGrant = async (personId: string, project: string, checkedCompany?: string): Promise<boolean> => mayUseProject(await projectGrantRole(personId, project, checkedCompany));
   // Guided onboarding L2-3: who may manage a project's setup run (PR 16's rule over live membership and the grant), for the routes and every step of a run.
   const setupRunStanding = setupRunStandingFrom({ membershipOf, projectGrantRole });
   const wikiProjectRole = wikiProjectRoleFrom({ membershipOf, projectGrantRole });
@@ -1166,7 +1172,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           displayName: (companyId, personId) => lessonsPeople(companyId).displayName(companyId, personId),
           isErased: (companyId, personId) => lessonsPeople(companyId).isErased(companyId, personId),
         },
-        projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project))),
+        projectRole: async (companyId, project, personId) => ((await membershipOf(personId))?.companyId !== companyId ? undefined : projectRoleOf(await projectGrantRole(personId, project, companyId))),
         wikiTaskUse: async (companyId, project, taskId) => {
           try {
             const registry = await app.registry();

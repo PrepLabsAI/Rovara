@@ -37,13 +37,20 @@ it("project senders retain the verified thread; a named company's project is the
   for (const [companyId, teamId] of [[A, "T0AAAAAAA"], [B, "T0BBBBBBB"]] as const) {
     const db = new FakeDynamoDb();
     db.set(companyProjectRow(companyId, "payments", 1));
-    db.set({ pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
+    // DEC 254zzz98: a named company's channel binding lives in its own partition (the layout the Slack link writer uses); a legacy row on its team is not its binding.
+    db.set({ pk: `ORG#${companyId}#SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
     const getProject = vi.fn(async () => ({ companyId }));
     const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", now: Date.now, tasks: {} as never,
       companies: { companyOf: async () => companyId }, workspaces: { requireCompany: async () => companyId, getProject },
       developer: { slackTeamId: "T0INSTALL" } as never,
     }, { developerId: "a".repeat(64) } as never, { teamId, channelId: "C0SHARED", threadTs: "1700000000.000001" });
     expect(await deps.workspaceForProject!("payments")).toEqual({ companyId, teamId });
+    // A legacy binding row on the company's team is never the company's (review M1): with only that row, the project has no channel.
+    const own = db.get(`ORG#${companyId}#SLACK_BINDING#${teamId}`, "CHANNEL#C0SHARED")!;
+    db.delete(String(own.pk), String(own.sk));
+    db.set({ ...own, pk: `SLACK_BINDING#${teamId}` });
+    await expect(deps.workspaceForProject!("payments")).rejects.toThrow("This Slack workspace is not available.");
+    db.delete(`SLACK_BINDING#${teamId}`, "CHANNEL#C0SHARED"); db.set(own);
     // The legacy lookup (T4a's, `PROJECT#<name>`) is not this company's partition: what it says no longer decides.
     getProject.mockResolvedValue({ companyId: companyId === A ? B : A });
     expect(await deps.workspaceForProject!("payments")).toEqual({ companyId, teamId });
@@ -59,7 +66,7 @@ it.each(["missing dependencies", "no binding", "ambiguous binding"])("project ac
   db.set(companyProjectRow(A, "payments", 1));
   if (kind === "ambiguous binding") for (const teamId of ["T0AAAAAAA", "T0BBBBBBB"]) {
     db.set({ pk: `ORG#${A}#SLACK_WORKSPACES`, sk: `TEAM#${teamId}`, entityType: "COMPANY_SLACK_WORKSPACE_VIEW", companyId: A, teamId, boundAt: "2026-11-15T00:00:00.000Z", boundBy: "operator" });
-    db.set({ pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
+    db.set({ pk: `ORG#${A}#SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0SHARED", teamId, channelId: "C0SHARED", projectName: "payments", updatedAt: "2026-11-15T00:00:00.000Z" });
   }
   const deps = developerTaskRouteDependencies({ documentClient: db, tableName: "state", now: Date.now,
     companies: { companyOf: async () => A }, developer: {} as never,

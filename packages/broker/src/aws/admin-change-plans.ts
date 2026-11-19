@@ -20,7 +20,6 @@ import { hashJson } from "./broker-shared.js";
 import type { CredentialRegistry } from "./credentials.js";
 import { COMPANY_IMPORT_MEMBERS_MAX, IMPLICIT_COMPANY_ID, companyInviteCodeId, type CompanyImportPreview } from "@agentx/contracts";
 import { resolveCompany } from "./company-check.js";
-import { namedCompany } from "./company-layout.js";
 import { planCompanyImport, planCompanyImportUndo, type CompanyImportReads } from "./install-company-import.js";
 
 export interface AdminChangeHandlers {
@@ -357,8 +356,9 @@ const planGrant: Planner = async (deps, identity, input) => {
   await deps.handlers.requireAdministrator(identity, input.project);
   const adminCompany = await resolveCompany(deps.actions.companies, identity.ownerKey);
   const resolved = await resolveDeveloper(deps.actions, input.developer, adminCompany);
-  // DEC 254zzz80: the grant is read and changed where the administrator's LIVE company keeps it (a named company's own partition).
-  const grantCompany = namedCompany(adminCompany);
+  // DEC 254zzz98 (one rule): a grant lives where its project's revision lives. These admin routes find the project by its legacy revision (projectMustExist) and check the
+  // administrator's legacy grant, so the grant they read and change is the legacy row too, never one keyed by the administrator's own company (review M2).
+  const grantCompany = undefined;
   const current = await projectGrant(deps.actions, input.project, resolved.developerId, grantCompany);
   if (current?.role === "developer") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already has a grant for ${input.project}; there is nothing to change`);
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
@@ -382,8 +382,9 @@ const planRevoke: Planner = async (deps, identity, input) => {
   await deps.handlers.requireAdministrator(identity, input.project);
   const adminCompany = await resolveCompany(deps.actions.companies, identity.ownerKey);
   const resolved = await resolveDeveloper(deps.actions, input.developer, adminCompany);
-  // DEC 254zzz80: the grant is read and changed where the administrator's LIVE company keeps it (a named company's own partition).
-  const grantCompany = namedCompany(adminCompany);
+  // DEC 254zzz98 (one rule): a grant lives where its project's revision lives. These admin routes find the project by its legacy revision (projectMustExist) and check the
+  // administrator's legacy grant, so the grant they read and change is the legacy row too, never one keyed by the administrator's own company (review M2).
+  const grantCompany = undefined;
   const current = await projectGrant(deps.actions, input.project, resolved.developerId, grantCompany);
   // An administrator row is never a grant: revoking never removes an administrator.
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);

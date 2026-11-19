@@ -2348,9 +2348,9 @@ async function registerProject(
    * registrant to administer the project already; an instance administrator who does not can take it over only by asking explicitly, with a reason.
    * Judged against the project as it is now, and again on every attempt, so a registrant who lost a race for the first revision is refused on the next one.
    */
-  // DEC 254zzz80: the registrant's grant lives where the project's company keeps grants (a named company's own partition, company-layout.ts): the company the stored
-  // revision names (once read on an attempt), else the caller's own.
-  let grantCompanyId = grantCompany(dependencies, companyId);
+  // DEC 254zzz98 (one rule; review L1): the registrant's grant lives where this revision is stored. The revision's key is `revisionKeyFor(companyId, …)`, so the grant's is
+  // `grantKeyFor(companyId, …)`: never the company a stamped legacy row names (a registration with no company writes the legacy revision, so its grant is the legacy row).
+  const grantCompanyId = grantCompany(dependencies, companyId);
   const judgeAuthority = async (newestRevision: number): Promise<"first" | "administrator" | "takeover"> => {
     await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
     if (newestRevision === 0) return "first";
@@ -2378,7 +2378,6 @@ async function registerProject(
   }
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   const firstSnapshot = await readCatalogSnapshot();
-  grantCompanyId = grantCompany(dependencies, storedCompanyOf(firstSnapshot.newest) ?? companyId); // DEC 254zzz80: the stored revision's company, as each attempt below decides it again
   await judgeAuthority(firstSnapshot.newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight, { companyId, budget: companyBudget });
   const now = new Date().toISOString(); const nameClaimWrites = checked?.nameClaim === undefined ? [] : companyNameClaimWrites(dependencies.tableName, { companyId, name: checked.nameClaim.name, projectId: definition.name, revision: definition.revision, by: identity.ownerKey, at: now }); // L2-1: in the same transaction
@@ -2430,8 +2429,7 @@ async function registerProject(
       if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
       record.companyId = storedCompany;
     } else if (record.companyId !== undefined && companyId === undefined) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
-    // DEC 254zzz80: the grant this attempt reads and writes is in the company the revision is stored for.
-    grantCompanyId = grantCompany(dependencies, record.companyId);
+    // DEC 254zzz98: the grant this attempt reads and writes is beside the revision (grantCompanyId, from the revision key's company).
     membership = membershipRecord(identity.ownerKey, definition.name, "administrator", grantCompanyId);
     membershipKey = grantKeyFor(grantCompanyId, identity.ownerKey, definition.name);
     // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
@@ -15114,8 +15112,11 @@ async function requireMembership(
   ownerKey: string,
   projectName: string,
 ): Promise<MembershipRecord> {
-  // DEC 254zzz80: the grant is read in the company the project's stored revision names (a named company's own partition); none or the built-in company: the legacy row.
-  const membership = await getMembership(dependencies, ownerKey, projectName, grantCompany(dependencies, await storedProjectCompany(dependencies, projectName)));
+  // DEC 254zzz98 (one rule; review M1, the feature 007 and connector MCP routes): a grant is read beside the revision the route reads. Every caller here (the workflow
+  // workspace routes: resolveWorkspace's requireProject, the MCP routes' requireLatestProject, the workspace actions) reads the project's LEGACY revision `PROJECT#<name>`,
+  // so the grant is the legacy `MEMBER#<person>` row, whatever company a stamped legacy row names (as requireAdministratorGrant reads it). A named company's own-partition
+  // grant never opens a legacy revision here; a named company's revoke also removes its legacy row (admin-actions.ts revokeProjectAccess).
+  const membership = await getMembership(dependencies, ownerKey, projectName, undefined);
   if (!membership) throw agentXError("NOT_FOUND", "project not found");
   return membership;
 }
@@ -15147,14 +15148,6 @@ function storedCompanyOf(record: unknown): string | undefined {
   return typeof company === "string" ? company : undefined;
 }
 
-/** The company the project's newest legacy revision names (`companyId`), or undefined (none stored, or no revision): where a name-only route reads its grant. */
-async function storedProjectCompany(dependencies: AwsBrokerDependencies, projectName: string): Promise<string | undefined> {
-  const response = await dependencies.documentClient.send(new QueryCommand({
-    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${projectName}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: Array<{ companyId?: unknown }> };
-  return storedCompanyOf(response.Items?.[0]);
-}
 
 /**
  * A name-only admin project route's check: the claim, the name-keyed administrator grant, then (DEC 254zzz6 D2) a refusal when a named company also has a project of

@@ -291,7 +291,7 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string };
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }>;
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
-  taskReaderPerson?(developerId: string, project: string): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
   workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;

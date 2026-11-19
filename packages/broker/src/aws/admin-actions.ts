@@ -194,23 +194,31 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
 
 /** DEC 254zzz80: revoked where the grant lives for `companyId` (the caller's LIVE membership): a named company's own partition, so nothing of the grant is left behind there. */
 export async function revokeProjectAccess(deps: AdminActionDependencies, project: string, developerId: string, companyId?: string): Promise<{ revoked: boolean }> {
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Delete: {
-        TableName: deps.tableName,
-        Key: grantKeyFor(companyId, developerId, project),
-        // Only a grant: an administrator row is never removed by revoking a developer's access.
-        ConditionExpression: "#role = :developer",
-        ExpressionAttributeNames: { "#role": "role" },
-        ExpressionAttributeValues: { ":developer": "developer" },
-      } },
-      { Delete: { TableName: deps.tableName, Key: projectMemberKey(project, developerId, companyId) } },
-    ] }));
-    return { revoked: true };
-  } catch (error) {
-    if (conditionFailed(error)) return { revoked: false };
-    throw error;
-  }
+  const revokeAt = async (company: string | undefined): Promise<boolean> => {
+    try {
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Delete: {
+          TableName: deps.tableName,
+          Key: grantKeyFor(company, developerId, project),
+          // Only a grant: an administrator row is never removed by revoking a developer's access.
+          ConditionExpression: "#role = :developer",
+          ExpressionAttributeNames: { "#role": "role" },
+          ExpressionAttributeValues: { ":developer": "developer" },
+        } },
+        { Delete: { TableName: deps.tableName, Key: projectMemberKey(project, developerId, company) } },
+      ] }));
+      return true;
+    } catch (error) {
+      if (conditionFailed(error)) return false;
+      throw error;
+    }
+  };
+  const revoked = await revokeAt(companyId);
+  // DEC 254zzz98 (review M1): a NAMED company's revoke leaves nothing in either layout. A legacy developer grant of that person on that name (pre-R2-F1 data, or a row the
+  // backfill copied from and kept) still opens the routes that read the legacy revision (broker.ts requireMembership), so it goes too, with its legacy reverse row. A legacy
+  // administrator row is never removed by a revoke, as before. The built-in company and none: the one legacy delete above, byte for byte.
+  const legacyRevoked = namedCompany(companyId) === undefined ? false : await revokeAt(undefined);
+  return { revoked: revoked || legacyRevoked };
 }
 
 /** E19, FR-053: the setting the broker reads at each workspace creation. */

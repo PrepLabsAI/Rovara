@@ -397,6 +397,22 @@ describe("R2-F1 review: a named company's registration in its own partition", ()
     expect(h.projectRows()).toEqual([]);
   });
 
+  it("review L1 (DEC 254zzz98): a registration with no company over a legacy row stamped with a named company keeps its grant beside the legacy revision, never in that company", async () => {
+    // No company: a broker without GitHub installation bindings (with them, a registration with no company is refused before anything is stored).
+    const h = await world({ bindings: false });
+    // Pre-R2-F1 data: the legacy revision 1, stamped with company A, and its legacy administrator grant.
+    h.db.set({ pk: "PROJECT#web", sk: rev(1), entityType: "PROJECT", companyId: A, definition: definition(1), runtimeBinding: BINDING, registeredBy: PERSON, registeredAt: "2026-11-01T00:00:00.000Z" });
+    h.db.set({ pk: `MEMBER#${PERSON}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "web", role: "administrator" });
+    expect((await register(h, 2, null)).duplicate).toBe(false);
+    expect(h.db.get("PROJECT#web", rev(2))).toMatchObject({ companyId: A, definition: { revision: 2 } });
+    // The grant read (the administrator check) and anything written are the legacy rows: nothing lands in A's own partition.
+    expect(h.db.find((item) => String(item.pk).startsWith(`ORG#${A}#MEMBER#`) || String(item.pk).startsWith(`ORG#${A}#PROJECT_MEMBERS#`))).toEqual([]);
+    // Without the legacy grant, the same caller is not this project's administrator (an A grant does not count for a legacy revision).
+    h.db.delete(`MEMBER#${PERSON}`, "PROJECT#web");
+    h.db.set({ pk: `ORG#${A}#MEMBER#${PERSON}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: PERSON, projectName: "web", role: "administrator" });
+    await expect(register(h, 3, null)).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
   it("the admin change plan's duplicate check reads the registering company's own revision", async () => {
     const h = await world();
     await register(h, 1);

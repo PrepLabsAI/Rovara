@@ -356,3 +356,50 @@ describe("R2-F1 e2e: the staging shape, company sign-in on, the whole journey", 
     expect(w.db.find((item) => String(item.pk).startsWith(`ORG#${IMPLICIT_COMPANY_ID}#`))).toEqual([]);
   });
 });
+
+describe("R2-F1 follow-up (DEC 254zzz106): the review's legacy-row and race findings", () => {
+  it("M1: a named company's revoke also removes a legacy developer grant of that person (and its reverse row), never a legacy administrator row", async () => {
+    const w = world();
+    // Pre-R2-F1 rows on the same name: the member's legacy developer grant and reverse row, the admin's legacy administrator row.
+    w.db.set({ pk: `MEMBER#${MEMBER}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: MEMBER, projectName: "demo-tasklog", role: "developer", grantedAt: TIME });
+    w.db.set({ pk: "PROJECT_MEMBERS#demo-tasklog", sk: `DEVELOPER#${MEMBER}`, developerId: MEMBER, projectName: "demo-tasklog", role: "developer", grantedAt: TIME });
+    w.db.set({ pk: `MEMBER#${ADMIN}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: ADMIN, projectName: "demo-tasklog", role: "administrator", grantedAt: TIME });
+    // A legacy-only grant is revoked too (the company layout holds none for the member yet).
+    expect((await w.removeMember(OWNER, "demo-tasklog", MEMBER)).body).toMatchObject({ outcome: "revoked" });
+    expect(grantRowsOf(w, MEMBER)).toEqual([]);
+    // Granted in the company layout and present again in the legacy one: one revoke removes both.
+    w.db.set({ pk: `MEMBER#${MEMBER}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey: MEMBER, projectName: "demo-tasklog", role: "developer", grantedAt: TIME });
+    expect((await w.addMember(OWNER, "demo-tasklog", MEMBER)).body).toMatchObject({ outcome: "granted" });
+    expect((await w.removeMember(OWNER, "demo-tasklog", MEMBER)).body).toMatchObject({ outcome: "revoked" });
+    expect(grantRowsOf(w, MEMBER)).toEqual([]);
+    // The legacy administrator row is never removed by a revoke.
+    await w.removeMember(OWNER, "demo-tasklog", ADMIN);
+    expect(w.db.get(`MEMBER#${ADMIN}`, "PROJECT#demo-tasklog")).toMatchObject({ role: "administrator" });
+  });
+
+  it("M1 golden: the built-in company's revoke is the one legacy delete, as before", async () => {
+    const w = world();
+    w.db.set({ pk: `MEMBER#${OWNER}`, sk: "PROJECT#old-app", entityType: "MEMBERSHIP", ownerKey: OWNER, projectName: "old-app", role: "developer", grantedAt: TIME });
+    const { revokeProjectAccess } = await import("../../packages/broker/src/aws/admin-actions.js");
+    const sent: string[] = [];
+    const client = { send: async (command: unknown) => { sent.push((command as { constructor: { name: string } }).constructor.name); return w.db.send(command as never); } };
+    expect(await revokeProjectAccess({ documentClient: client, tableName: "State" } as never, "old-app", LEGACY, IMPLICIT_COMPANY_ID)).toEqual({ revoked: true });
+    expect(sent).toEqual(["TransactWriteCommand"]);
+    expect(grantRowsOf(w, LEGACY)).toEqual([]);
+    // The same delete for a person of the built-in company never touches a named company's rows.
+    expect(w.db.get(`MEMBER#${OWNER}`, "PROJECT#old-app")).toBeDefined();
+  });
+
+  it("L3: a person moved between the core's membership check and its grant read never has another company's same-named grant counted", async () => {
+    const w = world();
+    const { hostedTaskAccess: access, liveCompanyGrantRole: live, projectGrantRoleFromDynamo: role } = await import("../../packages/broker/src/aws/core-engine-root.js");
+    // Bob holds a grant on demo-tasklog only in BETA. Membership answers DEMO to the first read (the start's member check), BETA after that.
+    let reads = 0;
+    const membershipOf = async () => (reads++ === 0 ? { companyId: DEMO, role: "member" as const } : { companyId: BETA, role: "member" as const });
+    const grantRole = live(membershipOf as never, role(w.db, "State"));
+    const projectGrant = async (personId: string, name: string, checkedCompany?: string) => mayUseProject(await grantRole(personId, name, checkedCompany));
+    const verdict = await access({ companyId: DEMO, membershipOf: membershipOf as never, projectGrant }).checkStart({ companyId: DEMO, personId: BOB, displayName: "b", roles: [], provider: "cloud" }, "demo-tasklog", undefined, undefined);
+    expect(verdict).toEqual({ allowed: false, code: "FORBIDDEN", message: NO_PROJECT_GRANT });
+    expect(reads).toBe(1);
+  });
+});
