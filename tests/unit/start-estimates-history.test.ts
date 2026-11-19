@@ -33,7 +33,7 @@ describe("normalized run history for start quotes", () => {
   const { startQuote: _startQuote, ...missingQuote } = valid;
   void _startQuote;
   for (const invalid of [missingQuote, { ...valid, unexpected: true }, { ...valid, calls: [{ ...valid.calls[0], price: av({ ...price, hash: "bad" }) }] }]) {
-  const samples: JsonValue[] = [...[1, 2, 3, 4].map(i => sample(i)), invalid as JsonValue];
+  const samples: JsonValue[] = [...[1, 2, 3, 4].map(i => sample(i)), invalid];
   expect((await read(samples)).options[0].basis.kind).toBe("default");
   }
  });
