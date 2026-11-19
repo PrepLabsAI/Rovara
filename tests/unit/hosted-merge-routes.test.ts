@@ -15,8 +15,8 @@ const T0 = Date.parse("2026-11-18T12:00:00.000Z");
 const OWNER = "owner-1", CO_OWNER = "co-owner-1", MAINTAINER = "maint-1", DEVELOPER = "dev-1", STRANGER = "stranger-1", ADMIN = "admin-1";
 const TASK = "11111111-2222-4333-8444-555555555555";
 const HEAD = "a".repeat(40), OTHER_HEAD = "b".repeat(40);
-const REPO_URL = "https://github.com/acme/app";
 type Body = Record<string, any>;
+type ErrorBody = { error: { code: string; message: string } };
 
 function taskDoc(overrides: { companyId?: OrgId; stage?: string; state?: string; headSha?: string; prState?: string; extraPull?: boolean } = {}) {
   const pull = (repositoryId: string, number: number) => ({ repositoryId, number, url: `https://github.com/acme/${repositoryId}/pull/${String(number)}`, headSha: overrides.headSha ?? HEAD, candidateDigest: "c".repeat(64), required: true, state: overrides.prState ?? "OPEN" });
@@ -30,7 +30,7 @@ function greenStatus(overrides: Partial<ChangeRequestStatus> = {}): ChangeReques
   return {
     id: "7", state: "open", draft: false, headRevision: HEAD, targetBranch: "main", mergeableState: "clean", mergeable: true,
     checks: [{ name: "ci", state: "completed", conclusion: "success", required: true, url: "https://github.com/acme/app/runs/1" } as never],
-    requiredChecks: [{ name: "ci" } as never], reviews: [], targetHasRequiredChecks: true, headDefinesChecks: true, requestedReviewers: 0, ...overrides,
+    requiredChecks: [{ name: "ci" }], reviews: [], targetHasRequiredChecks: true, headDefinesChecks: true, requestedReviewers: 0, ...overrides,
   };
 }
 
@@ -217,7 +217,7 @@ describe("hosted Merge button: only when Rovara's checks are green and GitHub sa
       expect(w.merges).toEqual([]);
       expect(w.audited).toEqual([]);
       const view = await w.call("GET");
-      expect(view.body).toEqual({ mayMerge: true, ready: false, message: words, pullRequests: expect.any(Array) });
+      expect(view.body).toEqual({ mayMerge: true, ready: false, message: words, pullRequests: expect.any(Array) as unknown });
       // The lock was never taken: a good press goes through once the cause is gone.
       expect(await w.store.get({ pk: `ORG#${COMPANY_A}#HOSTED_MERGE`, sk: `${TASK}#LOCK` })).toBeUndefined();
     });
@@ -226,7 +226,7 @@ describe("hosted Merge button: only when Rovara's checks are green and GitHub sa
   it("with two pull requests, the refusal names the repository", async () => {
     const w = world({ task: taskDoc({ extraPull: true }), status: () => (w.statusReads.length === 2 ? greenStatus({ mergeableState: "blocked" }) : greenStatus()) });
     const answer = await w.call("POST", press());
-    expect(answer.body.error.message).toBe(M.repository("lib", HOSTED_MERGE_WORDS.blocked));
+    expect((answer.body as ErrorBody).error.message).toBe(M.repository("lib", HOSTED_MERGE_WORDS.blocked));
     expect(w.merges).toEqual([]);
   });
 
@@ -240,7 +240,7 @@ describe("hosted Merge button: only when Rovara's checks are green and GitHub sa
 
   it("a code host without merge says merging is not set up", async () => {
     const w = world({ hostedMergeAbsent: true });
-    expect((await w.call("POST", press())).body.error.message).toBe(HOSTED_MERGE_WORDS.notSetUp);
+    expect(((await w.call("POST", press())).body as ErrorBody).error.message).toBe(HOSTED_MERGE_WORDS.notSetUp);
   });
 
   it("an install without the wiring says merging is not set up, before reading the task", async () => {
@@ -261,7 +261,7 @@ describe("hosted Merge button: GitHub's answer", () => {
     const w = world({ merge: { outcome: "refused", reason: "forbidden", hostMessage: "Resource not accessible by integration ghs_secret" } });
     const answer = await w.call("POST", press());
     expect(answer.status).toBe(409);
-    expect(answer.body.error.message).toBe(M.notMerged("app", "Rovara's GitHub App is not allowed to merge it"));
+    expect((answer.body as ErrorBody).error.message).toBe(M.notMerged("app", "Rovara's GitHub App is not allowed to merge it"));
     expect(JSON.stringify(answer)).not.toContain("ghs_");
     expect(w.audited.map((event) => [event.action, event.details?.["outcome"]])).toEqual([[MERGE_PRESSED_AUDIT, undefined], [MERGE_RESULT_AUDIT, "refused"]]);
     expect(await w.store.get({ pk: `ORG#${COMPANY_A}#HOSTED_MERGE`, sk: `${TASK}#LOCK` })).toBeUndefined();
@@ -285,7 +285,7 @@ describe("hosted Merge button: GitHub's answer", () => {
   it("two pull requests merge in repository order", async () => {
     const w = world({ task: taskDoc({ extraPull: true }) });
     expect((await w.call("POST", press())).body).toEqual({ status: "MERGED", pullRequests: [{ repositoryId: "app", number: 7 }, { repositoryId: "lib", number: 8 }] });
-    expect(w.merges.map((m) => (m.ref as Body).repository.url)).toEqual(["https://github.com/acme/app", "https://github.com/acme/lib"]);
+    expect(w.merges.map((m) => (m.ref as { repository: { url: string } }).repository.url)).toEqual(["https://github.com/acme/app", "https://github.com/acme/lib"]);
   });
 });
 
