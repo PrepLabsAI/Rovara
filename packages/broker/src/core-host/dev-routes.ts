@@ -1,3 +1,5 @@
+import { parsePreviewRequestV2 } from "@agentx/contracts";
+import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
 import { readTaskMoney } from "../core/cost/task-money.js";
 import type { TaskMoneyV1 } from "@agentx/contracts";
 // Engine host (lane E2): the core's own handlers, mountable on the deployed developer API behind the switch (`ROVARA_CORE_ENGINE`, default off).
@@ -115,6 +117,7 @@ const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const TASK_ANSWERS = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
+const START_ESTIMATES = /^\/v1\/dev\/projects\/([a-z][a-z0-9-]{0,62})\/start-estimates$/u;
 const SAVED_ENV_IMAGE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/environment-image$/u;
 const TEST_ENVIRONMENT = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment$/u;
 /** L4-B3b: approving the proposal that waits (a POST). */
@@ -171,6 +174,7 @@ export interface CompanyMembership {
 
 /** What the deployment wires for one company. Each part is optional; a missing one answers `NOT_ON_THE_CORE_YET`. */
 export interface CoreDevWiring {
+  startEstimates?: (project: string) => Promise<PreviewContext>;
   /** The session levels from the company's own records (lanes ID and T). Without it the session routes are not served (the laptop's default is the sole owner). */
   members?: SessionMembers;
   /** The decision cards' sources and performer (each checks the caller's live authority). An act reaches the performer only after the route checked a fresh step-up. */
@@ -294,6 +298,7 @@ function tokenIdOf(raw: string): string {
 function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
+  if (START_ESTIMATES.test(path)) return method === "POST";
   if (TASK_ANSWERS.test(path)) return method === "POST";
   if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
@@ -778,6 +783,16 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             request, path, companyId: target.runtime.companyId, role: membership.role, developerId: developerIdOf(caller.principal),
             store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
           });
+        }
+        const preview = START_ESTIMATES.exec(path);
+        if (preview !== null) {
+          if (target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          const project = preview[1]!;
+          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          const parsed = parsePreviewRequestV2(jsonBodyOf(request));
+          if (parsed === undefined) throw agentXError("CONFIG_INVALID", "invalid start estimate request");
+          const context = await target.wiring.startEstimates?.(project) ?? { policyRevision: "unavailable", stages: {}, limits: [] };
+          return json(200, await startEstimates({ store: target.runtime.flow.deps.store }, { orgId: companyId, project, request: parsed, asOf: new Date(nowOf(target)).toISOString(), context }));
         }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {

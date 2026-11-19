@@ -949,3 +949,54 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
     expect(await (await app.runtimeFor(OTHER)).flow.deps.store.get({ pk: `ORG#${OTHER}#CIEVAL#payments`, sk: "CHECK" })).toBeUndefined();
   });
 });
+
+
+describe("read-only start-estimates", () => {
+ it("serves the negotiated comparison with live company/project checks and never creates a hold or task", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const caller = remember(FAKE_COMPANY);
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false }) });
+  const writes = vi.spyOn(world.store, "transact");
+  const put = vi.spyOn(world.store, "put");
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), caller);
+  expect(result?.statusCode).toBe(200);
+  expect(JSON.parse(result!.body)).toMatchObject({ quoteVersion: 2, orgId: FAKE_COMPANY, options: [{ path: "QUICK" }, { path: "FULL" }] });
+  expect(writes).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
+  const denied = remember(OTHER, "member");
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), denied))?.statusCode).toBe(404);
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2, companyId: OTHER }), caller))?.statusCode).toBe(400);
+ });
+});
+
+
+describe("start-estimates history and refresh boundary", () => {
+ it("labels five historical runs, preserves unknown optional increments, refreshes changed options and discloses blocking held room", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const { recordRunCost } = await import("../../packages/broker/src/core/cost/estimate.js");
+  const { parsePreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
+  for (let i = 0; i < 5; i++) {
+   const taskId = `history-${i}`;
+   await world.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", companyId: FAKE_COMPANY } });
+   await recordRunCost({ store: world.store }, { orgId: FAKE_COMPANY, project: "payments", taskId, path: "QUICK", endedAt: "2026-11-17T00:00:00.000Z", costUsd: 0.5 + i / 2 });
+  }
+  const av = <T>(value: T) => ({ state: "available" as const, value });
+  const un = { state: "unavailable" as const, reason: "not_measured" as const };
+  const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5_000_000, limits: [{ scope: "engine_day" as const, maximumMicros: av(5_000_000), availableMicros: av(1_000_000), heldMicros: av(4_000_000), resetAt: un }] };
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false, startEstimates: async () => context }) });
+  const caller = remember(FAKE_COMPANY);
+  const read = async (body: unknown) => parsePreviewV2(JSON.parse((await routes.route(post("/v1/dev/projects/payments/start-estimates", body), caller))!.body))!;
+  const q = await read({ quoteVersion: 2 });
+  expect(q.options[0].basis).toMatchObject({ kind: "history", modelPriced: false, samples: 5 });
+  expect(q.options[0].range).toEqual(av({ lowMicros: 1_500_000, highMicros: 2_000_000 }));
+  expect(q.options[1].range).toEqual(av({ lowMicros: 4_000_000, highMicros: 10_000_000 }));
+  expect(q.options[1].planningAllowanceMicros).toEqual(av(6_000_000));
+  expect(q.options[1].initialHoldMicros).toEqual(av(5_000_000));
+  expect(q.options[0].firstBindingLimit).toMatchObject({ state: "available", value: { scope: "engine_day", appliesAt: "start", blocked: true, reason: "held" } });
+  const refreshed = await read({ quoteVersion: 2, options: { eval: true } });
+  expect(refreshed.inputsDigest).not.toBe(q.inputsDigest);
+  expect(refreshed.quoteId).not.toBe(q.quoteId);
+  expect(refreshed.options[0].range).toEqual(un);
+  expect(refreshed.options[0].stages.find(s => s.stage === "legacy_aggregate")?.range).toEqual(q.options[0].range);
+  expect(refreshed.options[0].limitCoverage).toBe("partial");
+ });
+});

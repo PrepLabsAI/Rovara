@@ -74,3 +74,19 @@ describe("the task.start admission request", () => {
     expect(started.duplicate).toBe(false);
   });
 });
+
+it("captures the server quote once on the real idempotent start", async () => {
+ const { startEstimates } = await import("../../packages/broker/src/core/cost/start-estimates.js");
+ let captures = 0;
+ const h = createHarness({ understandFirst: false, extra: () => ({ captureStartComparison: async ({ project, inputText }: { project: string; inputText: string }) => {
+  captures++;
+  return startEstimates({ store: h.store }, { orgId: h.deps.companyId, project, request: { quoteVersion: 2, inputText }, asOf: "2026-11-09T10:00:00.000Z", context: { policyRevision: "test-policy", stages: {}, limits: [] } });
+ } }) });
+ await h.registerProject();
+ const body = { requestId: newRequestId(), project: "payments", instructions: "Rename the flag", workflow: true as const, workflowPath: "QUICK" as const };
+ const first = await h.flow.start(h.owner, body);
+ const row = await h.store.get({ pk: `DEVTASK#${first.task.taskId}`, sk: "META" });
+ expect(row?.["startComparison"]).toMatchObject({ selectedPath: "QUICK", quoteVersion: 2, policyRevision: "test-policy", options: [{ path: "QUICK" }, { path: "FULL" }] });
+ expect((await h.flow.start(h.owner, body)).duplicate).toBe(true);
+ expect(captures).toBe(1);
+});
