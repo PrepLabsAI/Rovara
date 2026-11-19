@@ -15,6 +15,29 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       ],
     },
+    "CompanySignInSwitchOn6E5AE93A": {
+      "Fn::Equals": [
+        {
+          "Ref": "CompanySignIn",
+        },
+        "enabled",
+      ],
+    },
+    "CompanySignInSwitchSelfServeOnC579A03A": {
+      "Fn::And": [
+        {
+          "Condition": "CompanySignInSwitchOn6E5AE93A",
+        },
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "CompanySelfServe",
+            },
+            "enabled",
+          ],
+        },
+      ],
+    },
     "OpenAIEnabled": {
       "Fn::Not": [
         {
@@ -256,6 +279,36 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "enabled: administrators can register channel adapters (spec 062) and the channel API accepts their signed requests",
       "Type": "String",
     },
+    "CompanySelfServe": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: a person with an invite code may create their own company, only while CompanySignIn is enabled too; disabled: self-serve create is refused",
+      "Type": "String",
+    },
+    "CompanySignIn": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack); disabled: it is off and no company-only grant exists. Close self-serve and migrate the members first",
+      "Type": "String",
+    },
+    "DeveloperGithubClientId": {
+      "AllowedPattern": "^[A-Za-z0-9._-]{0,64}$",
+      "Default": "",
+      "Description": "Client ID of the GitHub OAuth app for developer sign-in",
+      "Type": "String",
+    },
+    "DeveloperGithubSince": {
+      "AllowedPattern": "^[0-9]{1,12}$",
+      "Default": "0",
+      "Description": "When GitHub sign-in was last turned on, in epoch seconds; GitHub sessions started before it are refused",
+      "Type": "String",
+    },
     "DeveloperOidcClientId": {
       "Default": "",
       "Description": "Client ID of the company OIDC app for developer sign-in",
@@ -291,6 +344,15 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "AllowedPattern": "^[0-9]{1,12}$",
       "Default": "0",
       "Description": "When company sign-in was last turned on, in epoch seconds; company sessions started before it are refused",
+      "Type": "String",
+    },
+    "DeveloperSignInGithub": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "disabled",
+      "Description": "enabled: developers may sign in with GitHub (only with company sign-in on); disabled: they may not",
       "Type": "String",
     },
     "DeveloperSignInSlack": {
@@ -413,6 +475,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       ],
       "Default": "disabled",
       "Description": "enabled: Slack conversations go through the channel API as the built-in Slack adapter (spec 062 Phase 7); disabled: Slack's own queue, as before",
+      "Type": "String",
+    },
+    "StepUpEmailSender": {
+      "AllowedPattern": "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$",
+      "Default": "",
+      "Description": "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)",
+      "MaxLength": 254,
       "Type": "String",
     },
     "TaskPeopleChangesEnabled": {
@@ -650,8 +719,24 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "Arn",
               ],
             },
+            "COMPANY_SECRETS_ROLE_ARN": {
+              "Fn::GetAtt": [
+                "CompanySecretsRole63E074C9",
+                "Arn",
+              ],
+            },
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
+              ],
+            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
+            },
+            "DEVELOPER_GITHUB_SINCE": {
+              "Ref": "DeveloperGithubSince",
             },
             "DEVELOPER_IDENTITY_FUNCTION_ARN": {
               "Fn::GetAtt": [
@@ -664,6 +749,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "DEVELOPER_OIDC_SINCE": {
               "Ref": "DeveloperOidcSince",
+            },
+            "DEVELOPER_SIGNIN_GITHUB": {
+              "Ref": "DeveloperSignInGithub",
             },
             "DEVELOPER_SIGNIN_SLACK": {
               "Ref": "DeveloperSignInSlack",
@@ -792,6 +880,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::Lambda::Function",
     },
     "BrokerEventInvokeConfig7F5E47E2": {
+      "DependsOn": [
+        "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+      ],
       "Properties": {
         "DestinationConfig": {
           "OnFailure": {
@@ -1720,6 +1811,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                       "Arn",
                     ],
                   },
+                  {
+                    "Fn::GetAtt": [
+                      "SessionsReconcilerServiceRole4A19455A",
+                      "Arn",
+                    ],
+                  },
                 ],
               },
               "Resource": "*",
@@ -2232,6 +2329,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "CHANNEL_STATE_TABLE_NAME": {
               "Ref": "ChannelApiStateE5478A65",
+            },
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
+              ],
             },
             "SHARED_TASKS": "disabled",
             "SLACK_ADAPTER_TEAM_ID": {
@@ -3046,6 +3150,423 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::KMS::Key",
       "UpdateReplacePolicy": "Delete",
     },
+    "CompanySecretsRole63E074C9": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession",
+              ],
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "rovara:org",
+                  ],
+                },
+                "Null": {
+                  "aws:RequestTag/rovara:org": "false",
+                  "aws:TagKeys": "false",
+                },
+                "StringLike": {
+                  "aws:RequestTag/rovara:org": "org_????????????????????",
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "BrokerServiceRole1938BCC9",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "The broker acting for one company: that company's secrets only (session tag rovara:org)",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "CompanySecretsRoleDefaultPolicyF6DA40BF": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+                "secretsmanager:PutSecretValue",
+              ],
+              "Condition": {
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "UseOwnCompanySecrets",
+            },
+            {
+              "Action": "secretsmanager:DeleteSecret",
+              "Condition": {
+                "Bool": {
+                  "secretsmanager:ForceDeleteWithoutRecovery": "false",
+                },
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "DeleteOwnCompanySecretsRecoverably",
+            },
+            {
+              "Action": "secretsmanager:CreateSecret",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "aws:TagKeys": [
+                    "rovara:org",
+                  ],
+                },
+                "Null": {
+                  "aws:PrincipalTag/rovara:org": "false",
+                },
+                "StringEquals": {
+                  "aws:RequestTag/rovara:org": "\${aws:PrincipalTag/rovara:org}",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-connectors/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":secretsmanager:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":secret:agentx/production/org-hooks/\${aws:PrincipalTag/rovara:org}/*",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "CreateOwnCompanySecrets",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "CompanySecretsRoleDefaultPolicyF6DA40BF",
+        "Roles": [
+          {
+            "Ref": "CompanySecretsRole63E074C9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CompanySignInSwitchBrokerCompanyMemberships050A22BC": {
+      "Condition": "CompanySignInSwitchOn6E5AE93A",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "COMPANY_MEMBER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "company-signin-brokercompanymemberships",
+        "Roles": [
+          {
+            "Ref": "BrokerServiceRole1938BCC9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CompanySignInSwitchSignInCompanyGrants87369E9E": {
+      "Condition": "CompanySignInSwitchOn6E5AE93A",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:ConditionCheckItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "COMPANY_MEMBER#*",
+                    "COMPANY_SELF_SERVE",
+                    "DEVELOPER#*",
+                    "SESSION#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#MEMBERS",
+                    "ORG#org_????????????????????#PREAPPROVAL",
+                    "COMPANY_INVITE_CODES",
+                    "SIGNIN_LINKS#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:DeleteItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "SIGNIN_LINKS#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/org-signin/*/oidc-??????",
+                  ],
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "company-signin-signincompanygrants",
+        "Roles": [
+          {
+            "Ref": "DeveloperSignInFunctionServiceRole47322E59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "CompanySignInSwitchSlackWorkspaceTokens2CAD7A63": {
+      "Condition": "CompanySignInSwitchOn6E5AE93A",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "secretsmanager:CreateSecret",
+                "secretsmanager:PutSecretValue",
+                "secretsmanager:GetSecretValue",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/slack-workspaces/*",
+                  ],
+                ],
+              },
+              "Sid": "WriteSlackWorkspaceTokens",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "company-signin-slackworkspacetokens",
+        "Roles": [
+          {
+            "Ref": "DeveloperSignInFunctionServiceRole47322E59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "ConnectorBrokenAlarmBE25C37B": {
       "Properties": {
         "AlarmActions": [
@@ -3164,6 +3685,64 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::ApiGatewayV2::Route",
     },
+    "DeveloperSignInBrokerCompanyImportReadsD3ED3C08": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#COMPANY",
+                    "ORG#org_????????????????????#SIGNIN_ISSUER",
+                    "ORG#org_????????????????????#EMAIL#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:Query",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#MEMBERS",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "DeveloperSignInBrokerCompanyImportReadsD3ED3C08",
+        "Roles": [
+          {
+            "Ref": "BrokerServiceRole1938BCC9",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "DeveloperSignInDevRoute4BB932E2": {
       "Properties": {
         "ApiId": {
@@ -3263,6 +3842,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "COMPANY_SELF_SERVE": {
+              "Fn::If": [
+                "CompanySignInSwitchSelfServeOnC579A03A",
+                "enabled",
+                "disabled",
+              ],
+            },
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
+              ],
+            },
+            "DEVELOPER_GITHUB_CLIENT_ID": {
+              "Ref": "DeveloperGithubClientId",
+            },
+            "DEVELOPER_GITHUB_SECRET_ID": "agentx/production/developer-github",
+            "DEVELOPER_GITHUB_SINCE": {
+              "Ref": "DeveloperGithubSince",
+            },
             "DEVELOPER_OIDC_CLIENT_ID": {
               "Ref": "DeveloperOidcClientId",
             },
@@ -3281,6 +3881,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "DEVELOPER_OIDC_SECRET_ID": "agentx/production/developer-oidc",
             "DEVELOPER_OIDC_SINCE": {
               "Ref": "DeveloperOidcSince",
+            },
+            "DEVELOPER_PASSKEYS": "enabled",
+            "DEVELOPER_SIGNIN_GITHUB": {
+              "Ref": "DeveloperSignInGithub",
             },
             "DEVELOPER_SIGNIN_SLACK": {
               "Ref": "DeveloperSignInSlack",
@@ -3325,6 +3929,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_VIA_CHANNEL": {
               "Ref": "SlackViaChannel",
+            },
+            "STEP_UP_EMAIL_FROM": {
+              "Ref": "StepUpEmailSender",
             },
           },
         },
@@ -3488,6 +4095,87 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
             },
             {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":secretsmanager:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":secret:agentx/production/developer-github-??????",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "ses:SendEmail",
+              "Condition": {
+                "StringEquals": {
+                  "ses:FromAddress": {
+                    "Ref": "StepUpEmailSender",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ses:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":identity/",
+                    {
+                      "Ref": "StepUpEmailSender",
+                    },
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:Query",
+                "dynamodb:DeleteItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PASSKEYS#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": [
                 "secretsmanager:GetSecretValue",
                 "secretsmanager:DescribeSecret",
@@ -3558,6 +4246,44 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "PayloadFormatVersion": "2.0",
       },
       "Type": "AWS::ApiGatewayV2::Integration",
+    },
+    "DeveloperSignInSignInCompanyImportUndo0D26C2D1": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "dynamodb:DeleteItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ORG#org_????????????????????#COMPANY",
+                    "ORG#org_????????????????????#MEMBERS",
+                    "COMPANY_MEMBER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "DeveloperSignInSignInCompanyImportUndo0D26C2D1",
+        "Roles": [
+          {
+            "Ref": "DeveloperSignInFunctionServiceRole47322E59",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "DeveloperSignInTable26CE739E": {
       "DeletionPolicy": "Retain",
@@ -3724,6 +4450,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
+              ],
+            },
             "CONTROL_PLANE_URL": {
               "Fn::GetAtt": [
                 "HttpApi",
@@ -4339,6 +5072,37 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::SQS::Queue",
       "UpdateReplacePolicy": "Delete",
+    },
+    "DispatchDeadLettersAlarmD83FF202": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "A worker dispatch job exhausted its receives and is in the dispatch dead-letter queue. Check the dispatcher logs for its operation ID, then redrive or purge the queue.",
+        "AlarmName": "AgentXDispatchDeadLetters",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "DispatchDeadLetterQueue3E30F4B8",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
     },
     "DispatchQueue898EB017": {
       "DeletionPolicy": "Delete",
@@ -7609,12 +8373,65 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "AGENTX_METRICS_NAMESPACE": "AgentX",
+            "BUILT_IN_ADAPTER": {
+              "Ref": "SlackViaChannel",
+            },
+            "BUILT_IN_ADAPTER_CALLBACK_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-events",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_CHANNEL": "slack",
+            "BUILT_IN_ADAPTER_COMMANDS_URL": {
+              "Fn::Join": [
+                "",
+                [
+                  {
+                    "Fn::GetAtt": [
+                      "HttpApi",
+                      "ApiEndpoint",
+                    ],
+                  },
+                  "/v1/slack/channel-commands",
+                ],
+              ],
+            },
+            "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
+            "CALLBACK_SIGNING_KEY_SECRET_ID": "agentx/production/callback-key",
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
+              ],
+            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
             "ENVIRONMENT_TAG": "production",
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
+            },
+            "SLACK_ADAPTER_TEAM_ID": {
+              "Ref": "SlackTeamId",
+            },
+            "SLACK_SECRET_ARN": {
+              "Ref": "SlackSecretEA96F13F",
+            },
+            "SLACK_THREADS_TABLE_NAME": {
+              "Ref": "SlackThreads36E14C1E",
+            },
+            "SLACK_VIA_CHANNEL": {
+              "Ref": "SlackViaChannel",
             },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
@@ -8091,6 +8908,55 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
               "Sid": "QuarantineOwnVolumes",
             },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "activeTurn",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "THREAD#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackThreads36E14C1E",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadThreadWaiters",
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "SlackSecretEA96F13F",
+              },
+              "Sid": "PostUnwaitedTaskNote",
+            },
+            {
+              "Action": [
+                "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "ChannelApiSlackAdapterSecret5DDDDC01",
+              },
+            },
           ],
           "Version": "2012-10-17",
         },
@@ -8549,6 +9415,90 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::IAM::Policy",
     },
+    "SessionsStuckCancelsAlarmF9D26618": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The reconciler found a task whose cancel never reached its worker, and queued the cancel again or ended the task (or failed to). Check the reconciler's logs for stuck_cancel events: a retried cancel that finishes, or an ended task, needs no action; repeated ones point at a dispatch or worker fault.",
+        "AlarmName": "AgentXStuckCancels",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)",
+            "Id": "expr_1",
+            "Label": "Stuck cancels retried, ended, failed or unretried",
+            "ReturnData": true,
+          },
+          {
+            "Id": "retries",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerStuckCancelRetries",
+                "Namespace": "AgentX",
+              },
+              "Period": 900,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "ended",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerStuckCancelsEnded",
+                "Namespace": "AgentX",
+              },
+              "Period": 900,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "interrupted",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerStuckCancelsInterrupted",
+                "Namespace": "AgentX",
+              },
+              "Period": 900,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "failures",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerStuckCancelFailures",
+                "Namespace": "AgentX",
+              },
+              "Period": 900,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "unretried",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerStuckCancelsUnretried",
+                "Namespace": "AgentX",
+              },
+              "Period": 900,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "SessionsStuckProvisioningAlarm53058404": {
       "Properties": {
         "AlarmActions": [
@@ -8564,6 +9514,54 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Namespace": "AgentX",
         "Period": 900,
         "Statistic": "Maximum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SessionsUnwaitedTaskFailuresAlarm622E7972": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The reconciler could not check or cancel Slack tasks idle over 24 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
+        "AlarmName": "AgentXUnwaitedTaskFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 2,
+        "Metrics": [
+          {
+            "Expression": "FILL(cancels, 0) + FILL(reads, 0)",
+            "Id": "expr_1",
+            "Label": "Unwaited task cancel and read failures",
+            "ReturnData": true,
+          },
+          {
+            "Id": "cancels",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerUnwaitedTaskFailures",
+                "Namespace": "AgentX",
+              },
+              "Period": 600,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+          {
+            "Id": "reads",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "ReconcilerUnwaitedTaskReadFailures",
+                "Namespace": "AgentX",
+              },
+              "Period": 600,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+        ],
         "Threshold": 1,
         "TreatMissingData": "notBreaching",
       },
@@ -8683,6 +9681,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Fn::GetAtt": [
                 "HttpApi",
                 "ApiEndpoint",
+              ],
+            },
+            "COMPANY_SIGNIN": {
+              "Fn::If": [
+                "CompanySignInSwitchOn6E5AE93A",
+                "enabled",
+                "disabled",
               ],
             },
             "SHARED_TASKS": "enabled",
@@ -12583,6 +13588,24 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
 
 exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] = `
 {
+  "Conditions": {
+    "ClassifierOnBedrock": {
+      "Fn::Equals": [
+        {
+          "Ref": "GateClassifierProvider",
+        },
+        "amazon-bedrock",
+      ],
+    },
+    "OrchestratorOnBedrock": {
+      "Fn::Equals": [
+        {
+          "Ref": "ModelProvider",
+        },
+        "amazon-bedrock",
+      ],
+    },
+  },
   "Description": "Hosted AgentX Slack orchestrator on ECS Fargate",
   "Outputs": {
     "ClusterName": {
@@ -12672,6 +13695,10 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Description": "Optional Secrets Manager ARN containing the raw OpenRouter API key",
       "Type": "String",
     },
+    "OperatorAlertsTopicArn": {
+      "Description": "The environment's alert topic, the control plane's OperatorAlertsTopicArn output",
+      "Type": "String",
+    },
     "OrchestratorImageRepositoryName": {
       "AllowedPattern": "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
       "Description": "ECR repository containing the selected Slack image",
@@ -12708,6 +13735,13 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "MinLength": 3,
       "Type": "String",
     },
+    "SlowTurnMinutes": {
+      "Default": 5,
+      "Description": "A turn slower than this many minutes raises the SlowTurns alarm (alerts.slowTurnMinutes)",
+      "MaxValue": 60,
+      "MinValue": 1,
+      "Type": "Number",
+    },
     "TaskRoleArn": {
       "AllowedPattern": "^arn:aws(-[^:]+)?:iam::[0-9]{12}:role/.+$",
       "Description": "SlackOrchestratorTaskRoleArn output of AgentXControlPlane",
@@ -12727,6 +13761,84 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
     },
   },
   "Resources": {
+    "BedrockThrottlingAlarm709CDF3A": {
+      "Condition": "OrchestratorOnBedrock",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "Amazon Bedrock throttled the orchestrator model at least 5 times in 5 minutes. Ask for a higher quota in Service Quotas, or choose another model.",
+        "AlarmName": "AgentXBedrockThrottling",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "ModelId",
+            "Value": {
+              "Ref": "ModelId",
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "InvocationThrottles",
+        "Namespace": "AWS/Bedrock",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 5,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "CheckerFailuresAlarmC6E35EC0": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "The action gate could not check a call and refused it. Check the classifier model's access and the Slack service logs.",
+        "AlarmName": "AgentXCheckerFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "GateCheckerFailed",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "ClassifierThrottlingAlarmDD39AA12": {
+      "Condition": "ClassifierOnBedrock",
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "Amazon Bedrock throttled the classifier model at least 5 times in 5 minutes. Ask for a higher quota in Service Quotas, or choose another model.",
+        "AlarmName": "AgentXClassifierThrottling",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "ModelId",
+            "Value": {
+              "Ref": "GateClassifierModelId",
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "InvocationThrottles",
+        "Namespace": "AWS/Bedrock",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 5,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "Cluster": {
       "Properties": {
         "ClusterSettings": [
@@ -12846,6 +13958,38 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       },
       "Type": "AWS::Logs::MetricFilter",
     },
+    "LogsGateCheckerFailedMetricEC327A71": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "GateCheckerFailed") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "GateCheckerFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsSlackDeliveryFailedMetric16B60712": {
+      "Properties": {
+        "FilterPattern": "{ $.event = "request.abandoned" }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "SlackDeliveryFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
     "LogsToolSchemaErrorMetric416461BE": {
       "Properties": {
         "FilterPattern": "{ ($.event = "metric") && ($.metric = "ToolSchemaError") }",
@@ -12900,6 +14044,22 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       },
       "Type": "AWS::Logs::MetricFilter",
     },
+    "LogsTurnDurationMsMetricED476331": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "metric") && ($.metric = "TurnDurationMs") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnDurationMs",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
     "LogsTurnEmptyResponseMetric2057D718": {
       "Properties": {
         "FilterPattern": "{ ($.event = "metric") && ($.metric = "TurnEmptyResponse") }",
@@ -12911,6 +14071,22 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
             "MetricName": "TurnEmptyResponse",
             "MetricNamespace": "AgentX",
             "MetricValue": "$.count",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
+    "LogsTurnFailedMetricED90BAB8": {
+      "Properties": {
+        "FilterPattern": "{ $.event = "task.failed" }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "TurnFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "1",
           },
         ],
       },
@@ -13009,6 +14185,64 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
         },
       },
       "Type": "AWS::ECS::Service",
+    },
+    "SlackDeliveryFailedAlarm16CEA92A": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "A Slack request was given up after its last attempt, so the member got no answer. Check the Slack service logs for request.abandoned.",
+        "AlarmName": "AgentXSlackDeliveryFailed",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "SlackDeliveryFailed",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "SlowTurnsAlarmC5F38B31": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "A turn took longer than alerts.slowTurnMinutes. Export recent turns with agentx admin turns export --since 1h.",
+        "AlarmName": "AgentXSlowTurns",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "Metrics": [
+          {
+            "Expression": "slowest / 60000",
+            "Id": "expr_1",
+            "Label": "Slowest turn in minutes",
+            "ReturnData": true,
+          },
+          {
+            "Id": "slowest",
+            "MetricStat": {
+              "Metric": {
+                "MetricName": "TurnDurationMs",
+                "Namespace": "AgentX",
+              },
+              "Period": 300,
+              "Stat": "Maximum",
+            },
+            "ReturnData": false,
+          },
+        ],
+        "Threshold": {
+          "Ref": "SlowTurnMinutes",
+        },
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
     },
     "TaskDefinition": {
       "Properties": {
@@ -13174,6 +14408,46 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
         },
       },
       "Type": "AWS::ECS::TaskDefinition",
+    },
+    "TestAlarm5A9EF6BD": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "agentx alerts test sets this alarm to ALARM and back to OK. It never fires on its own.",
+        "AlarmName": "AgentXTestAlarm",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "TestAlarmNeverEmitted",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "TurnErrorsAlarm88205A44": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsTopicArn",
+          },
+        ],
+        "AlarmDescription": "An orchestrator turn failed. Export recent turns with agentx admin turns export --since 1h.",
+        "AlarmName": "AgentXTurnErrors",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "TurnFailed",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
     },
   },
   "Rules": {

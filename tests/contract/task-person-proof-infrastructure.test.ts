@@ -307,8 +307,11 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "legacy",
         template: legacy,
-        withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
-        withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
+        // #1129: the company layer, sign-in extras and company-secrets role in the legacy template too.
+        // #1131: re-pinned for the reliability parts the legacy (production) template now has (core-engine-infrastructure.test.ts lists them).
+        withRoute: "376d38a9b564ba885a7a73c36a9f907312faf78fd46e15c6afa8e9fed9511adc",
+        withoutRoute: "6aa70db72494852156fa030e24d566f76699312ccdbbd3f9ca0655b2cbf82d5f",
+        // DEC 254zzz180: the legacy (production) template keeps #1129's step-up and passkeys; DEC 254zzz73's removal is named and foreign only.
         beforeStepUpRemoval: undefined,
       },
     ] as const;
@@ -353,7 +356,7 @@ describe("the named TEST proof-only installation gate", () => {
         expect(parentRemainderDigest(restored), `${label} with the step-up's removed parts put back`).toBe(beforeStepUpRemoval.withRoute);
         delete restored.Resources?.ProjectSetupExecutionReadRoute;
         expect(parentRemainderDigest(restored), `${label} with the step-up's parts put back and the route removed`).toBe(beforeStepUpRemoval.withoutRoute);
-      } else expect(JSON.stringify(pinned), "legacy never had the step-up's parts").not.toContain("StepUpEmailSender");
+      } else expect(JSON.stringify(pinned), "legacy keeps #1129's step-up parts (DEC 254zzz180)").toContain("StepUpEmailSender");
     }
   });
 

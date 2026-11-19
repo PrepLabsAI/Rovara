@@ -52,14 +52,20 @@ beforeAll(() => {
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
-describe("(a) no step-up email (DEC 254zzz73)", () => {
-  it("declares no StepUpEmailSender parameter and gives the sign-in function no STEP_UP_EMAIL_FROM, in either template", () => {
+describe("(a) no step-up email in named environments (DEC 254zzz73); the legacy deployment keeps #1129's (DEC 254zzz180)", () => {
+  it("declares no StepUpEmailSender parameter and gives the sign-in function no STEP_UP_EMAIL_FROM in a named environment", () => {
     expect(named.Parameters.StepUpEmailSender).toBeUndefined();
-    expect(legacy.Parameters.StepUpEmailSender).toBeUndefined();
     expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toBeUndefined();
     expect(JSON.stringify(named)).not.toContain("StepUpEmailSender");
     expect(JSON.stringify(named)).not.toContain("STEP_UP_EMAIL_FROM");
-    expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
+  });
+
+  it("declares StepUpEmailSender in the legacy deployment (#1129), empty by default, one address or empty", () => {
+    const parameter = legacy.Parameters.StepUpEmailSender!;
+    expect(parameter).toMatchObject({ Type: "String", Default: "", MaxLength: 254 });
+    const pattern = new RegExp(parameter.AllowedPattern as string, "u");
+    for (const ok of ["", "codes@example.com", "step-up.codes@mail.example.co"]) expect(pattern.test(ok), ok).toBe(true);
+    for (const bad of ["Codes <codes@example.com>", "codes@example", "a b@example.com", "codes@@example.com", "*@example.com"]) expect(pattern.test(bad), bad).toBe(false);
   });
 
   it("lets the sign-in function send no email: the only SES right in the stack is the attention email sender's own", () => {
@@ -76,7 +82,16 @@ describe("(a) no step-up email (DEC 254zzz73)", () => {
       Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
       Sid: "AttentionEmailSend",
     }]);
-    expect(JSON.stringify(legacy)).not.toContain("ses:");
+    // #1129 (DEC 254zzz180): the legacy deployment has exactly the sign-in function's statement, and no other role may send.
+    const sends = [{
+      Action: "ses:SendEmail", Effect: "Allow",
+      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "StepUpEmailSender" }]] },
+      Condition: { StringEquals: { "ses:FromAddress": { Ref: "StepUpEmailSender" } } },
+    }];
+    expect(statementsOfRole(legacy, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")))).toEqual(sends);
+    expect(ofType(legacy, "AWS::IAM::Policy").flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
+      .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))))).toHaveLength(1);
+    expect(envOf(legacy, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toEqual({ Ref: "StepUpEmailSender" });
   });
 });
 
@@ -91,11 +106,12 @@ describe("(a) the default boundary's SES statement", () => {
   });
 });
 
-describe("(b) no passkeys (DEC 254zzz73)", () => {
-  it("turns no passkeys on, and the function's Query and DeleteItem reach only the sign-in clients' partition and the company grants, never PASSKEYS#", () => {
+describe("(b) no passkeys in named environments (DEC 254zzz73); the legacy deployment keeps #1129's (DEC 254zzz180)", () => {
+  it("turns no passkeys on in a named environment, and the function's Query and DeleteItem reach only the sign-in clients' partition and the company grants, never PASSKEYS#", () => {
     expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBeUndefined();
     expect(JSON.stringify(named)).not.toContain("DEVELOPER_PASSKEYS");
-    expect(JSON.stringify(legacy)).not.toContain("DEVELOPER_PASSKEYS");
+    // #1129: the legacy deployment turns passkeys on.
+    expect(envOf(legacy, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBe("enabled");
     expect(JSON.stringify(named)).not.toContain("PASSKEYS#");
     const all = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action === "dynamodb:Query" || action === "dynamodb:DeleteItem"));
     // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here).
@@ -183,9 +199,14 @@ describe("(d) company reads and (g) the outbox", () => {
 describe("(h) the company-secrets role (T6)", () => {
   const role = () => ofType(named, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "CompanySecretsRole")!;
 
-  it("exists in named environments only, and the broker gets its ARN", () => {
+  it("exists (the legacy deployment too since #1129, under agentx/production/), and the broker gets its ARN", () => {
     expect(role()).toBeDefined();
-    expect(JSON.stringify(legacy)).not.toContain("CompanySecrets");
+    const legacyRole = ofType(legacy, "AWS::IAM::Role").find(([id]) => withoutHash(id) === "CompanySecretsRole")!;
+    expect(legacyRole).toBeDefined();
+    expect(envOf(legacy, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ "Fn::GetAtt": [legacyRole[0], "Arn"] });
+    const legacyPaths = JSON.stringify(ofType(legacy, "AWS::IAM::Policy").filter(([id]) => id.startsWith("CompanySecretsRoleDefaultPolicy")));
+    expect(legacyPaths).toContain(":secret:agentx/production/org-connectors/${aws:PrincipalTag/rovara:org}/*");
+    expect(legacyPaths).toContain(":secret:agentx/production/org-hooks/${aws:PrincipalTag/rovara:org}/*");
     // ENV-ROOM: the role's name packed; the broker builds its ARN in the environment's role path (tests/contract/broker-environment.test.ts).
     expect(envOf(named, "Broker").COMPANY_SECRETS_ROLE_ARN).toEqual({ Ref: role()[0] });
   });

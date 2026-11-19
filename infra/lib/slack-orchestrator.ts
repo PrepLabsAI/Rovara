@@ -271,9 +271,9 @@ export class SlackOrchestratorStack extends Stack {
       metricName: "EvalBatchWatcherFailed",
       metricValue: "1",
     });
-    // FR-045, environment naming only, so the legacy template stays byte-identical. The topic is
-    // the control plane's; its policy already lets any alarm in this account publish.
-    if (naming.env !== undefined) {
+    // FR-045: the Slack service's alarms. The topic is the control plane's; its policy already lets any alarm in
+    // this account publish. #1131: every deployment, production (the legacy template) included.
+    {
       const alertsTopicArn = new CfnParameter(this, "OperatorAlertsTopicArn", {
         type: "String",
         description: "The environment's alert topic, the control plane's OperatorAlertsTopicArn output",

@@ -63,7 +63,8 @@ describe("Slack company mode's switch (18a)", () => {
   });
 
   it("does not exist in the deployment that predates environments", () => {
-    expect(JSON.stringify(legacy)).not.toMatch(/SlackCompany|SLACK_COMPANY_WORKSPACES|slack-workspaces/u);
+    // #1129: the legacy deployment has company sign-in (whose Add to Slack writes slack-workspaces tokens, under CompanySignIn), but not Slack company mode.
+    expect(JSON.stringify(legacy)).not.toMatch(/SlackCompany|SLACK_COMPANY_WORKSPACES/u);
   });
 
   it("grants only through policies under its condition, one per consumer", () => {
