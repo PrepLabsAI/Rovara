@@ -7,7 +7,7 @@ const av = <T>(value: T) => ({ state: "available" as const, value });
 const un = { state: "unavailable" as const, reason: "not_measured" as const };
 const context = { policyRevision: "1", stages: {}, limits: [{ scope: "engine_day" as const, maximumMicros: av(5_000_000), availableMicros: av(1_000_000), heldMicros: av(4_000_000), resetAt: un }], initialHoldCeilingMicros: 5_000_000 };
 const input = { orgId, project: "web", request: { quoteVersion: 2 as const }, asOf, context };
-const store = { query: async () => ({ items: [] }) };
+const store: Parameters<typeof startEstimates>[0]["store"] = { query: async () => ({ items: [] }) };
 describe("advisory start comparison", () => {
  it("returns distinct default estimates, planning exposure and the start blocker without any writable capability", async () => {
   const quote = await startEstimates({ store }, input);
@@ -22,7 +22,7 @@ describe("advisory start comparison", () => {
   expect(Object.keys(store)).toEqual(["query"]);
  });
  it("labels the existing five-sample switch as history, never as model-priced or calibrated", async () => {
-  const history = { query: async () => ({ items: [1, 2, 3, 4, 5].map(costUsd => ({ pk: "x", sk: "x", costUsd })) }) };
+  const history: Parameters<typeof startEstimates>[0]["store"] = { query: async () => ({ items: [1, 2, 3, 4, 5].map(costUsd => ({ pk: "x", sk: "x", costUsd })) }) };
   const q = await startEstimates({ store: history }, input);
   expect(q.options[0].range).toEqual(av({ lowMicros: 3_000_000, highMicros: 4_000_000 }));
   expect(q.options[0].basis).toMatchObject({ kind: "history", samples: 5, effectiveSamples: 5, modelPriced: false, interval: un });
@@ -31,7 +31,7 @@ describe("advisory start comparison", () => {
   const quote = await startEstimates({ store }, { ...input, request: { quoteVersion: 2, options: { eval: true } } });
   expect(quote.options[0].range.state).toBe("unavailable");
   expect(quote.options[0].stages.find(s => s.stage === "eval")).toMatchObject({ optional: true, included: true, range: { state: "unavailable" } });
-  expect(quote.options[0].stages[0].range).toEqual(av({ lowMicros: 1_000_000, highMicros: 3_000_000 }));
+  expect(quote.options[0]?.stages[0]?.range).toEqual(av({ lowMicros: 1_000_000, highMicros: 3_000_000 }));
  });
  it("refreshes identity for text, options, source, model, policy and price changes even at the same timestamp", async () => {
   const original = await startEstimates({ store }, input);
