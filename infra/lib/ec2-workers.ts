@@ -107,8 +107,9 @@ export class Ec2WorkerFoundation extends Construct {
         resources: [`arn:${Aws.PARTITION}:ecr:${Aws.REGION}:${Aws.ACCOUNT_ID}:repository/${naming.pullThroughPrefix}/*`],
       }));
     }
-    // DEC 254zm: a named environment holds its own copies of the test-service starter images, which its workers read (test-service-mirror.ts).
-    if (naming.env !== undefined) new TestServiceMirror(this, "TestServiceMirror", { env: naming.env, workerRole: this.instanceRole });
+    // DEC 254zm: the install holds its own copies of the test-service starter images, which its workers read (test-service-mirror.ts).
+    // #1159: the legacy deployment (production) too, as `production`: its workers' log group is /agentx/production/worker, which the boot's test-services stage reads the environment from.
+    new TestServiceMirror(this, "TestServiceMirror", { env: naming.env ?? "production", workerRole: this.instanceRole });
     this.instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "BedrockModelInvocation",
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],

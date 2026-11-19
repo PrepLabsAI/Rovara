@@ -14482,6 +14482,117 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
             },
             {
               "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-production--test-services/postgres-16/postgres",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-production--test-services/postgres-17/postgres",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-production--test-services/mysql-8/mysql",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-production--test-services/redis-7/redis",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ecr:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":repository/agentx-production--test-services/mongo-7/mongo",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "TestServiceImageRead",
+            },
+            {
+              "Action": [
                 "bedrock:InvokeModel",
                 "bedrock:InvokeModelWithResponseStream",
               ],
@@ -14741,6 +14852,131 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
         "ToPort": 8080,
       },
       "Type": "AWS::EC2::SecurityGroupEgress",
+    },
+    "Ec2WorkersTestServiceMirrorRepository060FE5D57": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-production--test-services/postgres-16/postgres",
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "postgres-16",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository1A4EF4724": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-production--test-services/postgres-17/postgres",
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "postgres-17",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository2D96037C1": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-production--test-services/mysql-8/mysql",
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "mysql-8",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository33264DADD": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-production--test-services/redis-7/redis",
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "redis-7",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "Ec2WorkersTestServiceMirrorRepository4E241B2C0": {
+      "DeletionPolicy": "Retain",
+      "Properties": {
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256",
+        },
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true,
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "RepositoryName": "agentx-production--test-services/mongo-7/mongo",
+        "Tags": [
+          {
+            "Key": "Purpose",
+            "Value": "test-service-starter-copy",
+          },
+          {
+            "Key": "Starter",
+            "Value": "mongo-7",
+          },
+        ],
+      },
+      "Type": "AWS::ECR::Repository",
+      "UpdateReplacePolicy": "Retain",
     },
     "Ec2WorkersWorkerLogsFFDA1567": {
       "DeletionPolicy": "Delete",
