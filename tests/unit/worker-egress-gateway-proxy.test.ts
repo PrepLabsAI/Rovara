@@ -151,12 +151,13 @@ describe("the daemon proxy: what it is for", () => {
   });
 
   it("refuses S3 in every spelling (any bucket is a place to send data), except ECR's own layer bucket, which a registry pull needs", async () => {
-    hostResolver({ "prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com": ["52.218.1.1"], "ok-bucket.s3.us-west-2.amazonaws.com": ["52.218.1.2"], "s3.amazonaws.com": ["52.218.1.3"] });
     const site = await fakeSite();
     const { port } = await startProxy();
     const refused = ["ok-bucket.s3.us-west-2.amazonaws.com", "s3.amazonaws.com", "s3.us-west-2.amazonaws.com", "s3-us-west-2.amazonaws.com", "bucket.s3-us-west-2.amazonaws.com", "bucket.s3.dualstack.us-west-2.amazonaws.com", "bucket.s3-accelerate.amazonaws.com",
       "bucket.s3-website-us-east-1.amazonaws.com", "bucket.s3express-use1-az1.us-east-1.amazonaws.com", "x.s3-accesspoint.us-west-2.amazonaws.com", "prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com.evil.example.org.s3.us-west-2.amazonaws.com",
       "evil-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-evil-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-us-east-1-starport-layer-bucket.s3.us-west-2.amazonaws.com", "prod-x-starport-layer-bucket.evil.s3.us-west-2.amazonaws.com", "bucket.s3.cn-north-1.amazonaws.com.cn"];
+    // The resolver ANSWERS every one of them (so the refusal below is the S3 rule, not an unknown name).
+    hostResolver({ "prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com": ["52.218.1.1"], ...Object.fromEntries(refused.map((name) => [name, ["52.218.1.2"]])) });
     for (const name of refused) expect(statusOf(await raw(port, connectLine(`${name}:443`))), name).toBeGreaterThanOrEqual(400);
     expect(site.dialed).toEqual([]);
     expect(statusOf(await raw(port, connectLine("prod-us-west-2-starport-layer-bucket.s3.us-west-2.amazonaws.com:443")))).toBe(200);
