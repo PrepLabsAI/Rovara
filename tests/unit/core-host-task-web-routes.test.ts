@@ -3,7 +3,7 @@
 //     for the task's owner or a People co-owner (DEC 254zzz73: no step-up); anyone else is refused and nothing is written.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -12,6 +12,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { HOSTED_MERGE_WORDS } from "../../packages/broker/src/core-host/hosted-merge-routes.js";
 import { blockedReview, code, plain, report, TOKEN, tokenId } from "../support/task-actions-world.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -287,5 +288,59 @@ describe("DEC 254zzz44 (a): only the core rule's 'no such task' falls back to th
     const { routes, remember, taskId } = await started({ access, wiring: { taskRules: { route: vi.fn(), readsAsReader } } });
     await expect(routes.route(get(`/v1/dev/tasks/${taskId}`), remember(FAKE_COMPANY, "member", "person-reader-00000000006"))).rejects.toThrow("people store down");
     expect(readsAsReader).not.toHaveBeenCalled();
+  });
+});
+
+describe("DEC 254zzz94: the Merge button through the dev routes", () => {
+  const MERGE = (taskId: string) => `/v1/app/tasks/${taskId}/merge`;
+  const mergeWiring = () => {
+    // The merge core's seams: a spy that throws (the install cannot build them), so a request that reaches past WHERE and WHO says "not set up" and one refused earlier never asks.
+    const repository = vi.fn(() => { throw new Error("no seams in this test"); });
+    return { repository, wiring: { merge: { projectGrantRole: async () => undefined, merge: repository, afterMerge: async () => undefined } } };
+  };
+
+  it("a script token never reaches it (it reads like a missing route), and nothing is read for it", async () => {
+    const { repository, wiring } = mergeWiring();
+    const { routes, own, taskId } = await started({ wiring });
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
+      const answer = await routes.route(request, { ...own, webApp: true, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+      expect(answer?.statusCode).toBe(404);
+      expect(errorOf(answer).message).toBe("route not found");
+    }
+    expect(repository).not.toHaveBeenCalled();
+  });
+
+  it("a press from the CLI's token is refused with the website words; the web app's own client reaches the merge rules", async () => {
+    const { repository, wiring } = mergeWiring();
+    const { routes, own, taskId } = await started({ wiring });
+    for (const caller of [{ ...own }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never }] as DeployedCaller[]) {
+      const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), caller);
+      expect(answer?.statusCode).toBe(403);
+      expect(errorOf(answer).message).toBe(ON_THE_WEBSITE_MESSAGE);
+    }
+    expect(repository).not.toHaveBeenCalled();
+    // The owner on the website reaches the merge core (here: seams the install cannot build, so "not set up"), for the press and the read alike.
+    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
+    expect(errorOf(page)).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(errorOf(await routes.route(get(MERGE(taskId)), own))).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(repository).toHaveBeenCalledTimes(2);
+  });
+
+  it("another company's member reads 'no such task' for this company's task", async () => {
+    const { wiring } = mergeWiring();
+    const { routes, remember, taskId } = await started({ wiring });
+    const other = remember(OTHER, "owner");
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
+      const answer = await routes.route(request, { ...other, webApp: true });
+      expect(answer?.statusCode).toBe(404);
+      expect(errorOf(answer).code).toBe("TASK_NOT_FOUND");
+    }
+  });
+
+  it("an install that does not wire it says merging from Rovara is not set up", async () => {
+    const { routes, own, taskId } = await started();
+    const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
+    expect(answer?.statusCode).toBe(404);
+    expect(errorOf(answer).message).toBe(HOSTED_MERGE_WORDS.notSetUp);
   });
 });

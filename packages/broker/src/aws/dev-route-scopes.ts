@@ -374,6 +374,10 @@ export const APP_ROUTES: readonly DevRoute[] = [
   // DEC 254zzz39 (6): the task owner's "Accept findings" on the web page, the one route that may accept a SECURITY finding on a core task (core-host/dev-routes.ts TASK_PAGE_FINDINGS): full access only, then the
   // web app's own client and the task's owner. Additive: no existing row changed.
   { method: "POST", path: "/v1/app/tasks/{taskId}/review-findings", requires: "full" },
+  // DEC 254zzz94: the Merge button on a finished task (core-host/hosted-merge-routes.ts). Reading whether it would merge is a task read; the press is full access only, then the web app's own client
+  // (DEC 254zzz91), the task owner / co-owner / project admin / company admin rule, Rovara's checks and GitHub's mergeable state. Additive: no existing row changed.
+  { method: "GET", path: "/v1/app/tasks/{taskId}/merge", requires: "tasks:read" },
+  { method: "POST", path: "/v1/app/tasks/{taskId}/merge", requires: "full" },
   // Script tokens are long-lived credentials, and a person erase deletes a removed person's records: full access only (and a live owner or admin to make a token or erase).
   { method: "GET", path: "/v1/app/script-tokens", requires: "full" },
   { method: "POST", path: "/v1/app/script-tokens", requires: "full" },
