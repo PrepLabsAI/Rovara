@@ -59,7 +59,7 @@ async function world(options: { installCompany: string; legacyInstall?: boolean;
   const starts: Array<Record<string, unknown>> = [];
   const route = vi.fn<(request: { body?: string }, caller?: unknown) => Promise<{ statusCode: number; headers: Record<string, string>; body: string }>>(async (request) => { starts.push(JSON.parse(request.body ?? "{}") as Record<string, unknown>); return { statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: TASK } }) }; });
   // `core: false`: the core declines the start (a company the core does not cover answers undefined, engine-boundary.ts), so the legacy start answers it.
-  const entry: CoreTaskEntry = { route: (options.core === false ? (async () => undefined) : route) as CoreTaskEntry["route"], recordThread: vi.fn(async () => true) };
+  const entry: CoreTaskEntry = { route: options.core === false ? async () => undefined : route, recordThread: vi.fn(async () => true) };
   const module = await loadSlackBroker();
   const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => members.get(id) },
     ...(options.legacyInstall === false ? {} : { slackWorkspaceLegacyTeamId: SLACK_TEAM }),
