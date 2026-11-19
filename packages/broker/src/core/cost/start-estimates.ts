@@ -9,7 +9,7 @@ const unreadable = { state: "unavailable", reason: "unreadable" } as const;
 export interface PreviewContext { expiresAt?: string; workflowVersion?: string; policyRevision: string; stages: Record<string, Pick<StageQuote, "model" | "source" | "price">>; limits: QuoteLimit[]; initialHoldCeilingMicros?: number }
 const digest = (v: unknown): string => createHash("sha256").update(JSON.stringify(v)).digest("hex");
 /** Read-only capabilities by construction: no admission, writable store or model transport. */
-export async function startEstimates(deps: { store: Pick<DocumentStore, "query"> }, input: { orgId: OrgId; project: string; request: PreviewRequestV2; asOf: string; context: PreviewContext }): Promise<PreviewV2> {
+export async function startEstimates(deps: { store: Pick<DocumentStore, "query"> }, input: { orgId: OrgId; project: string; request: PreviewRequestV2; asOf: string; context: PreviewContext }): Promise<Omit<PreviewV2, "options"> & { options: [PathQuote & { path: "QUICK" }, PathQuote & { path: "FULL" }] }> {
  const { orgId, project, request, asOf, context } = input;
  const options: PathQuote[] = [];
  let usage: Awaited<ReturnType<typeof startUsageHistory>> = [];
@@ -55,5 +55,5 @@ export async function startEstimates(deps: { store: Pick<DocumentStore, "query">
  const inputsDigest = digest({ orgId, project, inputText: request.inputText ?? "", options: { designReview: request.options?.designReview ?? false, secondReview: request.options?.secondReview ?? false, eval: request.options?.eval ?? false }, context: identityContext, paths: ["QUICK", "FULL"] });
  const quote = parsePreviewV2({ quoteVersion: 2, kind: "comparison", orgId, project, quoteId: digest({ inputsDigest, asOf, options }), asOf, expiresAt: new Date(Math.min(Date.parse(asOf) + 60_000, rateExpiresAt === undefined ? Infinity : Date.parse(rateExpiresAt))).toISOString(), inputsDigest, policyRevision: context.policyRevision, currency: "USD", options });
  if (quote === undefined) throw new Error("start estimate could not be read");
- return quote;
+ return quote as Omit<PreviewV2, "options"> & { options: [PathQuote & { path: "QUICK" }, PathQuote & { path: "FULL" }] };
 }

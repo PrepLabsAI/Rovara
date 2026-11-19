@@ -107,3 +107,17 @@ it("the actual start persists learning's quote before dispatch, and a retry keep
   expect((await h.flow.start(h.owner, request)).task.taskId).toBe(started.task.taskId);
   expect((await h.store.get({ pk: `DEVTASK#${started.task.taskId}`, sk: "META" }))?.["usageStartQuote"]).toEqual(row?.["usageStartQuote"]);
 });
+
+
+it("uses full stored comparisons for learning and falls back safely for a restricted member comparison", async () => {
+ const { startEstimates } = await import("../../packages/broker/src/core/cost/start-estimates.js");
+ const { restrictPreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
+ const store = new MemoryDocumentStore();
+ const full = await startEstimates({ store }, { orgId: companyId, project: "web", request: { quoteVersion: 2 }, asOf: at, context: { policyRevision: "1", stages: {}, limits: [], initialHoldCeilingMicros: 0 } });
+ const task = { companyId, project: "web", taskId: "task", workflow: { path: "QUICK" } };
+ expect((await captureStartQuote({ store }, { ...task, startComparison: { ...full, selectedPath: "QUICK" } }, at)).inputs.optionsVersion.state).toBe("available");
+ const restricted = restrictPreviewV2(full);
+ const fallback = await captureStartQuote({ store }, { ...task, startComparison: { ...restricted, selectedPath: "QUICK" } }, at);
+ expect(fallback.range).toEqual(available({ lowMicros: 1_000_000, highMicros: 3_000_000 }));
+ expect(fallback.inputs.optionsVersion.state).toBe("unavailable");
+});

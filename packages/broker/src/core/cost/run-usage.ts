@@ -52,8 +52,8 @@ export async function captureStartQuote(deps: { store: Pick<DocumentStore, "quer
   const comparison = task.startComparison;
   if (comparison !== undefined && comparison.orgId === task.companyId && comparison.project === task.project && comparison.selectedPath === path && Date.parse(comparison.asOf) <= Date.parse(asOf) && Date.parse(comparison.expiresAt) > Date.parse(asOf)) {
     const selected = comparison.options.find((option) => option.path === path);
-    const aggregate = selected?.stages.find((stage) => stage.stage === "legacy_aggregate");
-    if (selected !== undefined) {
+    if (selected !== undefined && "stages" in selected) {
+      const aggregate = selected.stages.find((stage) => stage.stage === "legacy_aggregate");
       const options = Object.fromEntries(selected.stages.filter((stage) => stage.optional).map((stage) => [stage.stage, stage.included]));
       const parsed = RunStartQuoteSchema.safeParse({ asOf: comparison.asOf, path, range: selected.range, basis: selected.basis.kind, modelPriced: false, inputs: {
         model: aggregate?.model ?? unknown, source: aggregate?.source ?? unknown, price: aggregate?.price ?? unknown, optionsVersion: available(previewOptionsVersion(options)),
