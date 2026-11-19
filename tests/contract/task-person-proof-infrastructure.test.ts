@@ -264,8 +264,9 @@ describe("the named TEST proof-only installation gate", () => {
       {
         label: "legacy",
         template: legacy,
-        withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
-        withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
+        // #1129: the company layer, sign-in extras and company-secrets role in the legacy template too.
+        withRoute: "3dd122cc14eb7270b2ff39696c621a268c0ca906f2f1635dd499dacf16b3e4b7",
+        withoutRoute: "067c918e1119c3b5699c756ddba763345510852de37683c153812740d1b66a7d",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();

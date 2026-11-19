@@ -156,7 +156,7 @@ export class ControlPlaneStack extends Stack {
     });
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
-    const signInParameters = developerSignInParameters(this, { tasks: true, named: naming.env !== undefined });
+    const signInParameters = developerSignInParameters(this, { tasks: true });
     const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
       type: "String",
       default: "false",
@@ -978,13 +978,14 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ChannelEventQueueUrl", { value: channelAdapters.events.queueUrl });
     // Spec 025 phase 25a: developer sign-in and tasks, in every deployment; the legacy one is named production.
     const taskParameters = signInParameters.tasks;
-    // DEC 254zg (a): the company layer's switch (CompanySignIn), named environments only; every function that reads COMPANY_SIGNIN gets it from here, and every company-only
-    // grant is a policy under its condition (company-signin.ts).
-    const companySignIn = naming.env === undefined || signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
+    // DEC 254zg (a): the company layer's switch (CompanySignIn); every function that reads COMPANY_SIGNIN gets it from here, and every company-only grant is a policy under its
+    // condition (company-signin.ts). #1129: the legacy deployment (production) too, off by default, so production can make invite codes once it is switched on.
+    const companySignIn = signInParameters.company === undefined ? undefined : new CompanySignInSwitch(this, "CompanySignInSwitch", signInParameters.company);
     // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
     // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
     // sign-in, so its grants and its "enabled" exist only with both switches on.
-    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    // #1129: still named environments only; the legacy deployment's Slack stays on its one workspace, with or without company sign-in.
+    const slackCompany = companySignIn === undefined || naming.env === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
     if (slackCompany !== undefined) {
       // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
       // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
@@ -1077,9 +1078,10 @@ export class ControlPlaneStack extends Stack {
       // Migration plan v3.2 lane E2: the core engine's switch (stack parameter CoreEngine, default off), its dispatch queue and its scheduled jobs (core-engine.ts).
       // Named environments only: the legacy (production) template has none of it, and this block now also runs for the legacy deployment.
       if (naming.env !== undefined) new CoreEngine(this, "CoreEngineJobs", { naming, env: naming.env, broker, dispatcher, notifyOperator });
-      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets. Named environments only; nothing assumes it yet.
-      if (naming.env !== undefined) {
-        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
+      // Lane T6 (DEFERRED T6-SECRETS-IAM-20261114-v2): the role the broker will assume for one company's secrets; nothing assumes it yet. #1129: the legacy deployment
+      // (production) too, its secrets under agentx/production/.
+      {
+        const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env ?? "production", brokerRole: broker.role! }).role;
         addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
       }
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
