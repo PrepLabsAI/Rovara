@@ -38,6 +38,10 @@ const sample = (path: string) => path.replace(/\{[A-Za-z]+\}/g, "x1");
 // ---- The table ----
 
 describe("the /v1/app route table", () => {
+  it("admits the read-only start estimate on the dev boundary with the read scope", () => {
+    expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")).toMatchObject({ requires: "tasks:read" });
+    for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
+  });
   it("gives every row a named scope or full access, never `none`, and one row per method and path, all under /v1/app/", () => {
     expect([...CLIENT_SCOPES].sort()).toEqual([...NAMED].sort());
     for (const route of APP_ROUTES) {

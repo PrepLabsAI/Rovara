@@ -139,7 +139,7 @@ import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
 import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
-import type { CoreTaskEntry } from "./engine-boundary.js";
+import { coreAnswerValue, type CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
@@ -2535,6 +2535,14 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  // The preview is read-only; the core resolves live company membership and project access.
+  if (/^\/v1\/dev\/projects\/([^/]+)\/start-estimates$/u.test(url.pathname)) {
+    const core = deps.developer.coreTasks;
+    if (core === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+    const answer = await core.route({ method: request.method, path: request.path, headers: {}, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
+    if (answer === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+    return coreAnswerValue(answer);
+  }
   const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
   if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
   const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);

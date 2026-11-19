@@ -1,3 +1,4 @@
+import type { PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
@@ -218,6 +219,8 @@ export interface DesignReviewSteps {
 }
 
 export interface TaskFlowDeps {
+  /** Advisory snapshot captured by the host; never supplied as browser authority. */
+  captureStartComparison?: (input: { project: string; inputText: string }) => Promise<PreviewV2>;
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
   companyId: OrgId;
   store: DocumentStore;
