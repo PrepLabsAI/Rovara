@@ -38,6 +38,8 @@ export type WebApiProbeRunnerDeps = Readonly<{
   executorImage: string;
   /** The pinned build image; normally `WEB_API_BUILD_IMAGE`. */
   buildImage: string;
+  /** Lane L4-NETG2: on a gateway-mode worker, the host resolvers the probes' (trusted fixture) build commands are given as `--dns` on their own build bridge (see `buildDnsFromEnvironment`). */
+  buildDns?: readonly string[];
   /** A directory on the Docker host at the same path inside this process; each probe stages its candidate and its run files there. */
   runRoot: string;
   /** The pre-created private directory the retained probe evidence is written under. */
@@ -92,6 +94,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
       const retainsSandbox = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === probeId)?.chromiumSandbox === true;
       const host = createDockerApplicationHost({ docker: deps.docker, executorImage: deps.executorImage, buildImage: deps.buildImage, runRoot: deps.runRoot, now,
         admission: plan.plan.admission, groupId: plan.plan.groupId, candidateSourceDir: staged,
+        ...(deps.buildDns === undefined ? {} : { buildDns: deps.buildDns }),
         ...(driver.agent === undefined ? {} : { modelChannel: deps.modelChannelFor!({ probeId, runId, script: driver.agent.script, goal: WEB_API_AGENT_PROBE_GOAL, modelRoute: { ...WEB_API_AGENT_PROBE_ROUTE },
           allowedSteps: e2eApplicationGroupAgentSteps(plan.compiled) }) }),
         ...(driver.defect ? { ownedFiles: { "defect.json": await readFile(join(staged, "defects", driver.defect)) } } : {}),
