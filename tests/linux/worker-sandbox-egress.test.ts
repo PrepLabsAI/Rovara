@@ -755,7 +755,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       // shared namespace and ALL production executor security/resource flags.
       // DNS is an actual bounded lookup of the namespace's configured resolver;
       // HTTPS to the allowed name separately exercises its required TLS path.
-      const targets = { raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: "https://ghcr.io/v2/", peer: peerUrl(remoteName), stale: peerUrl(staleName), otherSandbox: peerUrl(otherName), inner: peerUrl(innerName), host: hostUrl, gatewayOuter: gatewayUrl, metadata: metadataUrl, daemonProxy: "http://172.28.251.2:3128/", allowed: "https://registry.npmjs.org/" };
+      const targets = { raw1: "https://1.1.1.1/", raw2: "https://8.8.8.8/", registry: `https://${REGISTRY_HOST}/v2/`, peer: peerUrl(remoteName), stale: peerUrl(staleName), otherSandbox: peerUrl(otherName), inner: peerUrl(innerName), host: hostUrl, gatewayOuter: gatewayUrl, metadata: metadataUrl, daemonProxy: "http://172.28.251.2:3128/", allowed: "https://registry.npmjs.org/" };
       const probeScript = `const {openEvidenceChromium}=require('/opt/agentx/packages/verifier/dist/executor/browser-evidence-chromium.js');
 (async()=>{
   const dns=require('dns').promises;const resolver=new dns.Resolver({timeout:4000,tries:2});const out={};
