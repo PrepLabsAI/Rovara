@@ -70,6 +70,46 @@ it("resends only a live pending invite for the live admin's company and replaces
   expect(h.identity.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "company-preapproval-resend")).toHaveLength(1);
 });
 
+it.each(["both", "preapproval", "link"] as const)("refuses resend after the clock passes expiry (%s expired), without writes or a resend audit", async (expired) => {
+  const h = await registeredInviteWorld(true, true);
+  expect((await h.send("POST", path, { email, role: "member", expiresInHours: 1 })).statusCode).toBe(200);
+  const approvalKey = preapprovalHashKey(A, hash);
+  const approval = h.identity.db.get(approvalKey.pk, approvalKey.sk)!;
+  const linkKey = inviteLinkKey(A, approval.inviteHash as string);
+  // Keep the other row live to exercise each expiry guard independently.
+  const later = Math.floor(h.identity.now() / 1000) + 2 * 3600;
+  if (expired === "preapproval") h.identity.db.set({ ...h.identity.db.get(linkKey.pk, linkKey.sk)!, expiresAt: later });
+  if (expired === "link") h.identity.db.set({ ...approval, expiresAt: later });
+  h.identity.tick(3_600_001);
+  const before = structuredClone([...h.identity.db.items.values()]);
+  const answer = await h.send("POST", `${path}/${hash}/resend`, { expiresInHours: 24 });
+  expect(answer.statusCode).toBe(404);
+  expect(JSON.parse(answer.body)).toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect(h.forwarded[1]).toMatchObject({ kind: "company-preapproval-resend", companyId: A, emailHash: hash });
+  expect([...h.identity.db.items.values()]).toEqual(before);
+  expect(h.identity.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "company-preapproval-resend")).toHaveLength(0);
+});
+
+it("refuses resend of an accepted invite consumed through real sign-in, without writes or a resend audit", async () => {
+  const h = await registeredInviteWorld(true, true);
+  const posted = await h.send("POST", path, { email, role: "member", expiresInHours: 24 });
+  expect(posted.statusCode).toBe(200);
+  const { invite } = JSON.parse(posted.body) as { invite: { secret: string } };
+  const sign = await h.identity.signInCompany(A, "accepted-invite", email, { invite: invite.secret });
+  expect(new URL(sign.headers.location!).searchParams.get("code")).toBeTruthy();
+  const approvalKey = preapprovalHashKey(A, hash);
+  expect(h.identity.db.get(approvalKey.pk, approvalKey.sk)).toMatchObject({ status: "used" });
+  const linkKey = inviteLinkKey(A, companyInviteCodeHash(invite.secret));
+  expect(h.identity.db.get(linkKey.pk, linkKey.sk)).toMatchObject({ status: "used" });
+  const before = structuredClone([...h.identity.db.items.values()]);
+  const answer = await h.send("POST", `${path}/${hash}/resend`, { expiresInHours: 24 });
+  expect(answer.statusCode).toBe(404);
+  expect(JSON.parse(answer.body)).toMatchObject({ error: { code: "NOT_FOUND" } });
+  expect(h.forwarded[1]).toMatchObject({ kind: "company-preapproval-resend", companyId: A, emailHash: hash });
+  expect([...h.identity.db.items.values()]).toEqual(before);
+  expect(h.identity.db.find((row) => row.entityType === "COMPANY_LOG" && row.event === "company-preapproval-resend")).toHaveLength(0);
+});
+
 it("refuses resend for members, another company's admins, and non-pending invites", async () => {
   const h = await registeredInviteWorld(true, true);
   h.member(A, "admin");

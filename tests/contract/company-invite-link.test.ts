@@ -91,7 +91,7 @@ describe("invite link secret (DEC 254h)", () => {
     expect((await w.access((await w.signIn("U0INVITE1", { slackTeam: OTHER, company: B, invite: forB.secret })).access)).body).toMatchObject({ companyId: B });
   });
 
-  it("resend kills the old link, preserves its email binding, and gives the new link a full expiry window", async () => {
+  it("resend kills the old link, retains its preapproval association, and gives the new bearer link a full expiry window", async () => {
     const { w, owner } = await ready();
     const old = await mint(w, owner, "resend@example.test", 1);
     const emailHash = emailIndexKey("resend@example.test").pk.slice(6);
