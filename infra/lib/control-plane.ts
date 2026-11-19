@@ -177,8 +177,8 @@ export class ControlPlaneStack extends Stack {
       // named environments. Adding a TTL to an existing table is an in-place update. 25c note 2: the
       // sharing items, NOTICE and CHANNEL_OPERATION, expire on it too; they exist only in named
       // environments (D14). No other State item carries indexExpiresAt (a test pins the files that
-      // name it). The legacy table stays as it is.
-      ...(naming.env === undefined ? {} : { timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE }),
+      // name it). #1131: production's table too (in place; checked 2026-11-19: 60 of its 83,560 items carry the attribute, none yet due).
+      timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE,
     });
 
     const artifacts = new s3.Bucket(this, "Artifacts", {
@@ -187,8 +187,8 @@ export class ControlPlaneStack extends Stack {
       enforceSSL: true,
       // M1.3 Task 3.7b, owner decision D4: a browser or API round's screenshots expire 30 days after they are written. A lifecycle filter matches the start of a key, and a screenshot's
       // key starts like every other private object's, so the rule matches the tag the broker puts on a screenshot and on nothing else. The bucket is not versioned: expiry deletes.
-      // Named environments only: the legacy production template stays as it is.
-      ...(naming.env === undefined ? {} : { lifecycleRules: [
+      // #1131: every deployment, production included (checked 2026-11-19: no production object carries the retention tag yet, and nightly-maps/ is empty).
+      lifecycleRules: [
         { id: "ExpireE2EScreenshots", expiration: Duration.days(E2E_ARTIFACT_RETENTION_DAYS), tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: E2E_ARTIFACT_RETENTION_TAG_VALUE } },
         // Stored evidence expires by class, on the same tag key: evidence-short is video and trace (14 days), evidence-std is screenshots, API samples, output tails and the stored pack
         // (30 days). The days are the live rules' exactly and are not configurable here: S3 applies a lifecycle rule to objects already stored, so a shorter rule would delete older
@@ -200,7 +200,7 @@ export class ControlPlaneStack extends Stack {
         { id: "ExpireEvidenceRecord", expiration: Duration.days(EVIDENCE_RECORD_RETENTION_DAYS), prefix: "private/", tagFilters: { [E2E_ARTIFACT_RETENTION_TAG_KEY]: "evidence-record" } },
         // The nightly run's coverage maps (`nightly-maps/<company>/<project>/<digest>.json`, NIGHTLY_MAPS_PREFIX) expire after 30 days; selection reads a map no older than 7 days.
         { id: "ExpireNightlyMaps", prefix: "nightly-maps/", expiration: Duration.days(30) },
-      ] }),
+      ],
       // Retained: the broker's operation artifacts must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
     });
@@ -1258,7 +1258,8 @@ export class ControlPlaneStack extends Stack {
     broker.addEnvironment("EC2_WORKER_SUBNETS", foundationParameter("Ec2WorkerSubnets"));
     broker.addEnvironment("EC2_WORKER_LAUNCH_TEMPLATE_ID", foundationParameter("Ec2WorkerLaunchTemplateId"));
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
-    if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
+    // #1131: every deployment (production's State table has the TTL too).
+    sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
     // Issue 195: the alarm for stuck cancels. A stuck cancel on a live worker is queued again with the
     // signing key the backstop below gives the reconciler. #1131: every deployment, production included.
     sessions.connectStuckCancelAlarm();

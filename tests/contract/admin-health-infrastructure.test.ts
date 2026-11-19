@@ -317,11 +317,12 @@ describe("the health route's grants (A13)", () => {
     expect(retry).not.toContain("indexExpiresAt");
   });
 
-  it("gives the legacy template (production) the same health grants, and leaves its State table's expiry as it was", () => {
+  // #1131: production's State table expires index items by TTL too.
+  it("gives the legacy template (production) the same health grants, and the State table's TTL", () => {
     expect(brokerStatements(legacy).some((statement) => statement.Action === "cloudwatch:DescribeAlarms")).toBe(true);
     expect(brokerStatements(legacy).some((statement) => statement.Action === "sqs:GetQueueAttributes")).toBe(true);
     const legacyTables = Object.values(legacy.findResources("AWS::DynamoDB::Table") as Record<string, { Properties: { StreamSpecification?: unknown; TimeToLiveSpecification?: unknown } }>);
-    expect(legacyTables.find((table) => table.Properties.StreamSpecification !== undefined)?.Properties.TimeToLiveSpecification).toBeUndefined();
+    expect(legacyTables.find((table) => table.Properties.StreamSpecification !== undefined)?.Properties.TimeToLiveSpecification).toEqual({ AttributeName: "indexExpiresAt", Enabled: true });
     expect(brokerEnvironment(legacy)).toHaveProperty("AGENTX_ALARM_PREFIX");
     expect(brokerEnvironment(legacy)).toHaveProperty("HEALTH_DEAD_LETTER_QUEUES");
   });

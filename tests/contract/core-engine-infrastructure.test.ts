@@ -606,7 +606,8 @@ describe("L1a broker environment derivation", () => {
     // Batch 14: measured on the combined tree (batch 13 + the machine size stack); the legacy synth differs from batch 13's head only in the three machine size places above.
     // #1131: re-pinned. The legacy (production) template gains the reliability parts named environments had: the DispatchDeadLetters, StuckCancels and UnwaitedTaskFailures
     // alarms, the reconciler's idle Slack backstop (its settings, ReadThreadWaiters, PostUnwaitedTaskNote, the Slack poster) and callback key read, and the hand-off grant's ordering.
-    expect(digest(legacy.toJSON())).toBe("4297570874bc81732f06704e9888f0c7c0d9f776813c3fc78d86f503e930e7a5");
+    // #1131 (expiry): and the State table's TTL on indexExpiresAt and the artifact bucket's lifecycle rules.
+    expect(digest(legacy.toJSON())).toBe("fde37c4ba3957e6b5eab52ef07757c3ffb0b233490eacf344448fbb826bfc452");
   });
 });
 import { createHash } from "node:crypto";

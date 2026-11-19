@@ -265,8 +265,8 @@ describe("the named TEST proof-only installation gate", () => {
         label: "legacy",
         template: legacy,
         // #1131: re-pinned for the reliability parts the legacy (production) template now has (core-engine-infrastructure.test.ts lists them).
-        withRoute: "c86648232729411307e72fc4a30b8b8092934f0753b2761a2bccc8735a54987e",
-        withoutRoute: "bea35ed7cea53655ca8a203060fc9b75ae0da4b23080d11aeceed3ddeba6cb26",
+        withRoute: "f3516a87e9c222bd6953dffc64a1aaef395a9f441244d0efab9b749d7e9deac6",
+        withoutRoute: "39f13b63850e0c6fade8469e2730d59c312edccea16c5dfbee9a8e773516d9ab",
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();

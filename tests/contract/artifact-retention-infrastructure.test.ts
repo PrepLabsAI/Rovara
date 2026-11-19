@@ -55,11 +55,13 @@ describe("the retention of workflow screenshots is a rule on the bucket the brok
     }
   });
 
-  it("is not added to the legacy production template, which stays as it is", () => {
+  // #1131: production (the legacy template) expires the same tagged objects, on its artifact bucket only.
+  it("is on the legacy (production) artifact bucket too, with the same rules, and on no other bucket there", () => {
     const legacy = Template.fromStack(new ControlPlaneStack(new App(), "RetentionLegacyControlPlane"));
-    for (const bucket of Object.values(legacy.findResources("AWS::S3::Bucket") as Record<string, Bucket>)) {
-      expect((bucket.Properties.LifecycleConfiguration?.Rules ?? []).filter((rule) => rule.TagFilters !== undefined)).toEqual([]);
-    }
+    const tagged = Object.entries(legacy.findResources("AWS::S3::Bucket") as Record<string, Bucket>)
+      .filter(([, bucket]) => (bucket.Properties.LifecycleConfiguration?.Rules ?? []).some((rule) => rule.TagFilters !== undefined));
+    expect(tagged.map(([id]) => id)).toEqual([expect.stringMatching(/^Artifacts[0-9A-F]{8}$/u)]);
+    expect(tagged[0]![1].Properties.LifecycleConfiguration!.Rules.map((rule) => rule.Id)).toEqual(["ExpireE2EScreenshots", "ExpireEvidenceShort", "ExpireEvidenceStd", "ExpireEvidenceRecord", "ExpireNightlyMaps"]);
   });
 
   it("is not on the access stack's release-artifact bucket, which the broker never writes screenshots to", () => {

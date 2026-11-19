@@ -506,6 +506,63 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
           ],
         },
+        "LifecycleConfiguration": {
+          "Rules": [
+            {
+              "ExpirationInDays": 30,
+              "Id": "ExpireE2EScreenshots",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "e2e-screenshot",
+                },
+              ],
+            },
+            {
+              "ExpirationInDays": 14,
+              "Id": "ExpireEvidenceShort",
+              "Prefix": "private/",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "evidence-short",
+                },
+              ],
+            },
+            {
+              "ExpirationInDays": 30,
+              "Id": "ExpireEvidenceStd",
+              "Prefix": "private/",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "evidence-std",
+                },
+              ],
+            },
+            {
+              "ExpirationInDays": 365,
+              "Id": "ExpireEvidenceRecord",
+              "Prefix": "private/",
+              "Status": "Enabled",
+              "TagFilters": [
+                {
+                  "Key": "rovara-retention",
+                  "Value": "evidence-record",
+                },
+              ],
+            },
+            {
+              "ExpirationInDays": 30,
+              "Id": "ExpireNightlyMaps",
+              "Prefix": "nightly-maps/",
+              "Status": "Enabled",
+            },
+          ],
+        },
         "PublicAccessBlockConfiguration": {
           "BlockPublicAcls": true,
           "BlockPublicPolicy": true,
@@ -7687,6 +7744,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "SessionsDeleterB48741EA",
             },
             "ENVIRONMENT_TAG": "production",
+            "INDEX_EXPIRY": "ttl",
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
             },
@@ -10123,6 +10181,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "StreamSpecification": {
           "StreamViewType": "NEW_AND_OLD_IMAGES",
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "indexExpiresAt",
+          "Enabled": true,
         },
       },
       "Type": "AWS::DynamoDB::Table",
