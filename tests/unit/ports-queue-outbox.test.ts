@@ -1,6 +1,6 @@
 // Port lane W0: the in-memory queue passes the queue conformance suite, and the generic outbox passes the outbox suite over the
 // in-memory store and queue.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OUTBOX_PENDING_INDEX, type QueueService } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
@@ -41,6 +41,23 @@ describe("outbox failures", () => {
     const row = (await store.query({ pk: `ORG#${COMPANY}#OUTBOX#m1` })).items[0]!;
     expect(row).toMatchObject({ status: "DEAD", attempts: 3 });
     expect(row.outboxState).toBeUndefined();
+  });
+
+  it("logs why a hand-over failed: the error name and cause only, never the payload, URL or provider text", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const store = new MemoryDocumentStore({ indexes: [OUTBOX_PENDING_INDEX] });
+      const queues: QueueService = { queue: async () => {
+        throw Object.assign(new Error("private body and https://sqs.example/123456789012/q"), { name: "QueueFailure", cause: Object.assign(new Error("private provider text"), { name: "InvalidAttributeName" }) });
+      } };
+      const outbox = createTransactionalOutbox({ store, queues, now: () => new Date("2026-11-19T10:00:00Z") });
+      await store.transact([outbox.stage({ companyId: COMPANY, id: "op-log", queue: "dispatch", body: "private payload" })]);
+      expect(await outbox.relay({ companyId: COMPANY })).toEqual({ delivered: 0, failed: 1, dead: 0 });
+      expect(warning).toHaveBeenCalledTimes(1);
+      const entry: unknown = JSON.parse(String(warning.mock.calls[0]![0]));
+      expect(entry).toEqual({ event: "outbox.relay_failed", companyId: COMPANY, outboxId: "op-log", queue: "dispatch", operation: "enqueue", error: "QueueFailure", cause: "InvalidAttributeName" });
+      expect(warning.mock.calls.flat().join(" ")).not.toMatch(/private|https:|123456789012/u);
+    } finally { warning.mockRestore(); }
   });
 
   it("reads only its own company's pending partition", async () => {

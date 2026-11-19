@@ -1,3 +1,4 @@
+import { gatewayResolverMount, gatewayWorkerDirectory } from "./gateway-name-files.js";
 import { lstatSync, readlinkSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -237,6 +238,10 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
         if (equals === -1 || arg.slice(equals + 1) !== "false") return "--privileged";
       } else if (ALWAYS_REFUSED.has(name)) {
         return name;
+      } else if (name === "--sysctl") {
+        // No repository net.* sysctl is explicitly allowed. Docker accepts slash separators too.
+        const key = value().split("=", 1)[0]!.trim().replaceAll("/", ".");
+        if (key === "net" || key.startsWith("net.")) return "--sysctl (repository network sysctls are refused)";
       } else if (name === "--cap-add") {
         if (!ALLOWED_CAPABILITY.test(value())) return "--cap-add";
       } else if (context.walledNetwork !== undefined && (name === "--network" || name === "--net")) {
@@ -406,6 +411,7 @@ function hostPathAllowed(path: string, root: string, options: { allowRoot: boole
 
 /** The parts of `docker inspect` that say what a container was given. */
 export interface ContainerInspection {
+  Config?: { Labels?: Readonly<Record<string, string>> | null };
   HostConfig?: {
     Privileged?: boolean;
     CapAdd?: readonly string[] | null;
@@ -421,7 +427,7 @@ export interface ContainerInspection {
     VolumesFrom?: readonly string[] | null;
     DeviceRequests?: readonly unknown[] | null;
   };
-  Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string }> | null;
+  Mounts?: ReadonlyArray<{ Type?: string; Name?: string; Source?: string; Destination?: string; RW?: boolean }> | null;
   /** Every network the container is attached to, by name. */
   NetworkSettings?: { Networks?: Readonly<Record<string, unknown>> | null };
 }
@@ -469,8 +475,10 @@ export function containerProblems(
   const mounts = inspection.Mounts ?? [];
   let dataVisible = false;
   let stateVisible = false;
+  const gatewayResolver = context.walledNetwork === undefined ? undefined : gatewayResolverMount(inspection, gatewayWorkerDirectory(context.rootPath));
   for (const mount of mounts) {
     if (mount.Type !== "bind") continue;
+    if (gatewayResolver !== undefined && mount.Destination === "/etc/resolv.conf" && gatewayResolver === mount.Source) continue;
     const source = mount.Source === undefined ? undefined : resolvePath(resolve(mount.Source));
     if (source === undefined || !hostPathAllowed(source, root, { allowRoot: true })) {
       problems.push(`a bind mount of ${mount.Source ?? "an unknown path"}`);

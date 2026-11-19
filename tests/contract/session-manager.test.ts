@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding } from "../../packages/contracts/src/session.js";
 import { SessionManager, sessionFromItem, type SessionManagerDependencies } from "../../packages/broker/src/aws/sessions.js";
+import { createSessionStepsHandler } from "../../packages/broker/src/aws/session-steps.js";
+import { sessionMachineId } from "../../packages/broker/src/aws/worker-machines/session-worker-machines.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { BINDING, COMPANY_A, COMPANY_B, createSessionMachinesWorld } from "../support/session-machines-world.js";
 
 const PROVISIONER = "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner";
 const DELETER = "arn:aws:states:us-east-1:111122223333:stateMachine:deleter";
@@ -56,6 +59,83 @@ async function provisionToReady(sessions: SessionManager, workspaceId: string) {
 }
 
 describe("session manager: first provisioning", () => {
+  // Catches a Lambda-local first-instance cache in either recordInstance branch.
+  it.each([false, true])("one session-steps handler records each workspace/generation's own identity (typed launch: %s)", async (typed) => {
+    const { sessions, workspaceId: workspaceA } = setup();
+    const workspaceB = randomUUID();
+    const unused = () => { throw new Error("recording must not use launch/probe dependencies"); };
+    const handler = createSessionStepsHandler({
+      sessions, workerSettings: unused, invokePublicKey: unused, bootScript: unused,
+      controlPlaneUrl: "https://control.example.invalid", logGroupName: "/test/worker", ping: unused,
+    });
+    const launched = typed ? { instanceType: "m6g.large", machineFallback: null } : {};
+    await sessions.ensureSession({ workspaceId: workspaceA, binding });
+    await sessions.ensureSession({ workspaceId: workspaceB, binding });
+    await handler({ action: "recordInstance", workspaceId: workspaceA, generation: 1, instanceId: "i-aaaaaaaaaaaaaaaaa", privateIp: "10.42.0.11", ...launched });
+    await handler({ action: "recordInstance", workspaceId: workspaceB, generation: 1, instanceId: "i-bbbbbbbbbbbbbbbbb", privateIp: "10.42.0.12", ...launched });
+    expect(await sessions.get(workspaceA)).toMatchObject({ workspaceId: workspaceA, generation: 1, instanceId: "i-aaaaaaaaaaaaaaaaa", privateIp: "10.42.0.11" });
+    const recordedB = await sessions.get(workspaceB);
+    expect(recordedB).toMatchObject({ workspaceId: workspaceB, generation: 1, instanceId: "i-bbbbbbbbbbbbbbbbb", privateIp: "10.42.0.12" });
+
+    await sessions.markFailed(workspaceA, 1, "retry with a new generation");
+    await sessions.ensureSession({ workspaceId: workspaceA, binding });
+    await handler({ action: "recordInstance", workspaceId: workspaceA, generation: 2, instanceId: "i-ccccccccccccccccc", privateIp: "10.42.0.13", ...launched });
+    expect(await sessions.get(workspaceA)).toMatchObject({ workspaceId: workspaceA, generation: 2, instanceId: "i-ccccccccccccccccc", privateIp: "10.42.0.13" });
+    expect(await sessions.get(workspaceB)).toEqual(recordedB);
+  });
+
+  it("keeps each workspace's session and provisioning idempotency name separate", async () => {
+    const { db, sessions, startExecution, workspaceId } = setup();
+    const otherWorkspaceId = randomUUID();
+
+    await sessions.ensureSession({ workspaceId, binding });
+    await sessions.ensureSession({ workspaceId: otherWorkspaceId, binding });
+
+    expect(startExecution.mock.calls.map(([call]) => call.name)).toEqual([
+      `ws-${workspaceId}-gen-1`,
+      `ws-${otherWorkspaceId}-gen-1`,
+    ]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "SESSION")).toMatchObject({ workspaceId, generation: 1 });
+    expect(db.get(`WORKSPACE#${otherWorkspaceId}`, "SESSION")).toMatchObject({ workspaceId: otherWorkspaceId, generation: 1 });
+  });
+
+  it.each([COMPANY_A, COMPANY_B])("provisions B independently after A is READY, including A's restart while B stays READY (%s)", async (companyOfB) => {
+    const world = createSessionMachinesWorld();
+    const workspaceA = world.workspace(COMPANY_A);
+    const workspaceB = world.workspace(companyOfB);
+    const ensure = (workspaceId: string) => world.sessions.ensureSession({ workspaceId, binding: BINDING });
+
+    await ensure(workspaceA);
+    await world.settle();
+    const firstA = (await world.sessions.get(workspaceA))!;
+    expect(firstA).toMatchObject({ workspaceId: workspaceA, state: "READY", generation: 1 });
+    expect(world.instances.get(firstA.instanceId!)).toMatchObject({ workspaceId: workspaceA, generation: 1, running: true });
+
+    expect(await ensure(workspaceB)).toEqual({ ready: false, generation: 1, state: "PROVISIONING" });
+    expect(await world.sessions.get(workspaceB)).toMatchObject({ workspaceId: workspaceB, state: "PROVISIONING", generation: 1 });
+    expect(world.executions.map(({ name }) => name)).toEqual([`ws-${workspaceA}-gen-1`, `ws-${workspaceB}-gen-1`]);
+    await world.settle();
+    const readyB = (await world.sessions.get(workspaceB))!;
+    expect(readyB).toMatchObject({ workspaceId: workspaceB, state: "READY", generation: 1 });
+    expect(world.instances.get(readyB.instanceId!)).toMatchObject({ workspaceId: workspaceB, generation: 1, running: true });
+    expect(readyB.instanceId).not.toBe(firstA.instanceId);
+    expect(readyB.privateIp).not.toBe(firstA.privateIp);
+    expect(await ensure(workspaceB)).toEqual({ ready: true, generation: 1, privateIp: readyB.privateIp });
+
+    await world.machinesFor(COMPANY_A).stop(sessionMachineId(workspaceA));
+    expect(await world.sessions.get(workspaceA)).toMatchObject({ state: "STOPPED", generation: 1 });
+    expect(await ensure(workspaceA)).toEqual({ ready: false, generation: 2, state: "PROVISIONING" });
+    await world.settle();
+    const restartedA = (await world.sessions.get(workspaceA))!;
+    expect(restartedA).toMatchObject({ workspaceId: workspaceA, state: "READY", generation: 2 });
+    expect(world.instances.get(restartedA.instanceId!)).toMatchObject({ workspaceId: workspaceA, generation: 2 });
+    expect(new Set([firstA.instanceId, readyB.instanceId, restartedA.instanceId]).size).toBe(3);
+    expect(new Set([firstA.privateIp, readyB.privateIp, restartedA.privateIp]).size).toBe(3);
+    expect(world.executions.map(({ name }) => name)).toEqual([`ws-${workspaceA}-gen-1`, `ws-${workspaceB}-gen-1`, `ws-${workspaceA}-gen-2`]);
+    expect(await world.sessions.get(workspaceB)).toEqual(readyB);
+    expect(await ensure(workspaceA)).toEqual({ ready: true, generation: 2, privateIp: restartedA.privateIp });
+  });
+
   it("starts generation 1 in the chosen zone, parks the dispatched record and indexes the state", async () => {
     const { db, sessions, startExecution, workspaceId, session } = setup();
     const { outboxId } = seedOperation(db, workspaceId);

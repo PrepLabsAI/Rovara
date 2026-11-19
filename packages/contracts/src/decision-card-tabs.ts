@@ -26,7 +26,7 @@ export const DecisionDigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 
 /** A group of evidence lines a medium card shows in its panel: what the person must see that is NOT already on the front (names, not counts). `tab` names the document on a card with tabs. */
 export const DecisionDetailGroupSchema = z
-  .object({ tab: DecisionTabIdSchema.optional(), title: line(60), lines: z.array(line(200)).min(1).max(20) })
+  .object({ tab: DecisionTabIdSchema.optional(), title: line(60), lines: z.array(line(600)).min(1).max(20) })
   .strict();
 export type DecisionDetailGroup = z.infer<typeof DecisionDetailGroupSchema>;
 export const DECISION_DETAIL_GROUPS_MAX = 12;

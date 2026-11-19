@@ -1306,6 +1306,7 @@ describe("native developer task workflow", () => {
 
     const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
     const workflow = record.workflow;
+    // This fixture calls the route directly on an install with no company layer.
     const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions, now: () => Date.now() };
     const expected = { workflowRevision: workflow.revision, candidateDigest: candidate.digest };
     const origin = { taskPageUrl: taskPageUrl(DEV_ISSUER, taskId), ownerAccess: { peopleRevision: 1 } };

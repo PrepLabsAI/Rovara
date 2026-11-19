@@ -25,6 +25,8 @@ flowchart LR
 
 ## Isolation and persistence
 
+**Isolation invariant:** the cross-task boundary is one VM per task workspace. Any design that packs tasks onto a shared worker must first add per-task networks with inter-container traffic off.
+
 Each workspace has a SESSION record naming its EC2 instance, EBS volume, availability zone and
 session generation. The project binding supplies the launch template, private subnets and volume
 settings. A volume stays in its original availability zone across replacement instances.

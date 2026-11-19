@@ -55,6 +55,61 @@ for (const fifo of [false, true]) {
 // ---- What a queue is: modes, options read back from SQS ----
 
 describe("the SQS adapter reads a queue's policy from SQS and declares what it can do", () => {
+  it("the SQS double rejects an explicit FIFO-only attribute on standard queues and accepts it on FIFO queues", async () => {
+    const fake = new FakeSqs();
+    fake.createQueue(urlOf("standard"));
+    fake.createQueue(urlOf("fifo", true));
+    for (const AttributeNames of [["FifoQueue"], ["QueueArn", "FifoQueue"], ["All", "FifoQueue"]] as const) {
+      await expect(fake.send(new GetQueueAttributesCommand({ QueueUrl: urlOf("standard"), AttributeNames: [...AttributeNames] })))
+        .rejects.toMatchObject({ name: "InvalidAttributeName", message: "Unknown Attribute FifoQueue", $fault: "client" });
+    }
+    await expect(fake.send(new GetQueueAttributesCommand({ QueueUrl: urlOf("fifo", true), AttributeNames: ["QueueArn", "FifoQueue"] })))
+      .resolves.toMatchObject({ Attributes: { FifoQueue: "true" } });
+    const standard = await fake.send(new GetQueueAttributesCommand({ QueueUrl: urlOf("standard"), AttributeNames: ["All"] })) as { Attributes: Record<string, string> };
+    expect(standard.Attributes.QueueArn).toBeDefined();
+    expect(standard.Attributes).not.toHaveProperty("FifoQueue");
+  });
+
+  it.each([false, true])("opens a queue and its redrive target of the same kind (FIFO: %s)", async (fifo) => {
+    const fake = new FakeSqs();
+    const url = urlOf("main", fifo);
+    const deadLetterUrl = urlOf("dead", fifo);
+    fake.createQueue(deadLetterUrl);
+    fake.createQueue(url, { maxReceiveCount: 3, deadLetterUrl });
+    const queues = new SqsQueueService({ client: fake, queues: { q: { url, deadLetterUrl } } });
+    expect((await queues.queue("q", { maxReceiveCount: 3 })).capabilities.ordered).toBe(fifo);
+  });
+
+  it.each([false, true])("refuses a dead-letter queue of the other kind (main FIFO: %s)", async (fifo) => {
+    const fake = new FakeSqs();
+    const url = urlOf("main", fifo);
+    const deadLetterUrl = urlOf("dead", !fifo);
+    fake.createQueue(deadLetterUrl);
+    fake.createQueue(url, { maxReceiveCount: 3, deadLetterUrl });
+    const queues = new SqsQueueService({ client: fake, queues: { q: { url, deadLetterUrl } } });
+    await expect(queues.queue("q")).rejects.toThrow(/same kind/);
+  });
+
+  it.each([false, true])("refuses a dead-letter queue whose returned kind differs from its URL's (main FIFO: %s)", async (fifo) => {
+    const fake = new FakeSqs();
+    const url = urlOf("main", fifo);
+    const deadLetterUrl = urlOf("dead", fifo);
+    fake.createQueue(deadLetterUrl);
+    fake.createQueue(url, { maxReceiveCount: 3, deadLetterUrl });
+    // The URL suffix passes the up-front check; only the read-back FifoQueue attribute disagrees.
+    const client = { send: async (command: Parameters<FakeSqs["send"]>[0]) => {
+      const out = await fake.send(command);
+      if (command instanceof GetQueueAttributesCommand && command.input.QueueUrl === deadLetterUrl) {
+        const attributes = { ...(out as { Attributes?: Record<string, string> }).Attributes };
+        if (fifo) delete attributes.FifoQueue; else attributes.FifoQueue = "true";
+        return { ...(out as object), Attributes: attributes };
+      }
+      return out;
+    } };
+    const queues = new SqsQueueService({ client, queues: { q: { url, deadLetterUrl } } });
+    await expect(queues.queue("q")).rejects.toThrow(/not a queue of the same kind/);
+  });
+
   it("says what a standard queue and a FIFO queue guarantee", async () => {
     const world = sqsWorld();
     const standard = await world.provisioning(false).queue("a");

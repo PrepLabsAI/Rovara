@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
-import { companyMembershipFromDynamo, companyMembershipFromStore } from "../../packages/broker/src/aws/company-check.js";
+import { companyMembershipFromDynamo, companyMembershipFromStore, readTaskLegacyProject } from "../../packages/broker/src/aws/company-check.js";
 import { companyRouteHarness, COMPANY_CHECKED_ROUTES, PERSON, TASK, TIME } from "../support/company-route-harness.js";
 import { dynamoWorld } from "../support/ports/dynamodb-harness.js";
 
@@ -392,4 +392,28 @@ it("refuses without repeating a cursor when the first remaining task cannot fit 
   expect(result.statusCode).toBe(400);
   expect(bodyOf(result.body).nextCursor).toBeUndefined();
   expect(bodyOf(result.body).error).toEqual({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
+});
+
+
+describe("legacy task project ownership", () => {
+  it.each([undefined, IMPLICIT_COMPANY_ID])("treats %s as built-in and keeps the original result", async (companyId) => {
+    const row = { definition: { name: "shared-project" } };
+    const read = vi.fn(async () => row);
+    expect(await readTaskLegacyProject({ companyId }, read)).toBe(row);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+  it.each([null, "", "bad-company", 0, {}])("refuses malformed task company %j before any read", async (companyId) => {
+    const read = vi.fn(async () => ({ companyId: IMPLICIT_COMPANY_ID }));
+    await expect(readTaskLegacyProject({ companyId }, read)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("keeps two named companies distinct while allowing the task's own row", async () => {
+    const task = { companyId: COMPANY_A.orgId };
+    const own = { companyId: COMPANY_A.orgId };
+    expect(await readTaskLegacyProject(task, async () => own)).toBe(own);
+    for (const row of [{}, { companyId: COMPANY_B.orgId }, { companyId: null }]) {
+      await expect(readTaskLegacyProject(task, async () => row)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    }
+    await expect(readTaskLegacyProject({}, async () => own)).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
 });

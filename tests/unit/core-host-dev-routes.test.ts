@@ -1010,6 +1010,19 @@ it("inventories exactly four worker-only saved image callbacks without exposing 
 });
 
 
+describe("known-failing hosted route ownership", () => {
+  it("owns only GET and Undo POST, refuses writes while verification is off", async () => {
+    const { app, companyOf, remember } = await world2();
+    const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
+    const caller = remember(FAKE_COMPANY);
+    const path = "/v1/app/projects/payments/known-failing";
+    expect((await routes.route(get(path), caller))?.statusCode).toBe(404);
+    expect((await routes.route(post(path, { action: "mark", tests: ["invented"] }), caller))?.statusCode).toBe(404);
+    expect(await routes.route({ ...get(path), method: "PUT" }, caller)).toBeUndefined();
+    expect(await routes.route(get(`${path}/extra`), caller)).toBeUndefined();
+  });
+});
+
 it("shows task money only to its stored owner or a live company admin, never a reader, co-owner or second company", async () => {
  const { world, app, companyOf, remember } = await world2();
  const owner = remember(FAKE_COMPANY, "member", "task-owner");
