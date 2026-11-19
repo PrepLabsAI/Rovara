@@ -14,7 +14,8 @@
 //     its request id; the same request id answers the stored result again without asking GitHub, and a request id another person used is refused. The core also claims each pull request on its tracking item.
 //   - AUDIT: `task.merge_pressed` is recorded BEFORE the merge core runs (no record, no merge), and `task.merge_result` after; each attempt has its own event id. The core stages `pull_request.merge_requested` with
 //     each claim. After a merge the task's tracking row is made due now, so the next sweep records the merge in the workflow.
-//   - Refusals are the merge core's fixed words or this file's; nothing a caller sent, no GitHub text and no token is echoed.
+//   - Refusals are the merge core's fixed words or this file's; nothing a caller sent and no token is echoed. The core's "didn't merge" words may carry GitHub's own reason, cleaned and cut by the
+//     GitHub client (`githubReasonOf`), shown only to someone who may merge this task.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -62,8 +63,8 @@ export const HOSTED_MERGE_WORDS = {
 export interface HostedMergeWiring {
   /** The person's grant on a project, through the root's existing grant reader (never raw keys here). `administrator` is a project admin (maintainer). A read that throws is "no grant". */
   projectGrantRole(personId: string, project: string): Promise<"developer" | "administrator" | undefined>;
-  /** The merge core's dependencies for this company (every gate's seam; `requirePassingCi` on). Throws when the install cannot build them (the route then says not set up). */
-  merge(): MergeDependencies;
+  /** The merge core's dependencies for this company (every gate's seam; `requirePassingCi` on), with this request's audit sink. Throws when the install cannot build them (the route then says not set up). */
+  merge(audit: AuditSink): MergeDependencies;
   /** Makes the task's tracking row due now (`wakeMergeTracking`), after a merge. Best effort. */
   afterMerge(taskId: string): Promise<void>;
 }
@@ -122,8 +123,8 @@ function openPullRequestsOf(task: TaskRecord): Array<{ repositoryId: string; num
   return requiredPullRequests(task.workflow).filter((entry) => entry.state !== "MERGED").slice(0, MAX_PULL_REQUESTS).map((entry) => ({ repositoryId: entry.repositoryId, number: entry.number, url: entry.url }));
 }
 
-function depsOf(wiring: HostedMergeWiring): MergeDependencies {
-  try { return wiring.merge(); } catch { throw agentXError("NOT_FOUND", HOSTED_MERGE_WORDS.notSetUp); }
+function depsOf(wiring: HostedMergeWiring, audit: AuditSink): MergeDependencies {
+  try { return wiring.merge(audit); } catch { throw agentXError("NOT_FOUND", HOSTED_MERGE_WORDS.notSetUp); }
 }
 
 /** The merge core's view for this person, from what tracking last read (nothing is read from GitHub here), with the scope hold the press also checks. */
@@ -141,6 +142,10 @@ async function readinessView(input: HostedMergeInput, deps: MergeDependencies, r
   const shown = { ...(view.risk === undefined ? {} : { risk: view.risk.level }), heads };
   return view.ready ? { ready: true, ...shown } : { ready: false, ...(view.message === undefined ? {} : { message: view.message }), ...shown };
 }
+
+/** Whether a refusal is the core's half merge (some pull request merged, another did not). */
+const HALF_MERGED = M.halfMerged("\u0000", "\u0001", "\u0002").split("\u0000")[1]!.split("\u0001")[0]!;
+const halfMerged = (error: AgentXError): boolean => error.code === "MERGE_NOT_READY" && wordsOf(error).includes(HALF_MERGED);
 
 const lockKey = (companyId: OrgId, taskId: string): DocumentKey => ({ pk: companyScoped(companyId, "HOSTED_MERGE"), sk: `${taskId}#LOCK` });
 const resultKey = (companyId: OrgId, taskId: string, requestId: string): DocumentKey => ({ pk: companyScoped(companyId, "HOSTED_MERGE"), sk: `${taskId}#REQUEST#${requestId}` });
@@ -160,7 +165,7 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
     if (!done.success || done.data.personId !== personId) throw agentXError("IDEMPOTENCY_CONFLICT", HOSTED_MERGE_WORDS.requestReused);
     return json(200, { status: "MERGED", pullRequests: done.data.pullRequests });
   }
-  const deps = depsOf(wiring);
+  const deps = depsOf(wiring, input.audit);
   const now = input.now();
   const lock = await flow.store.put({
     item: { ...lockKey(companyId, taskId), entityType: "HOSTED_MERGE_LOCK", companyId, taskId, requestId, personId, until: now + MERGE_LOCK_MS },
@@ -187,8 +192,8 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
   } catch (error) {
     await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: error instanceof AgentXError ? error.code : "failed" })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
     await release();
-    // The core's half merge has told the task's people; tracking finds out what GitHub holds now.
-    await wiring.afterMerge(taskId).catch(() => undefined);
+    // After a half merge (some pull request merged) tracking finds out what GitHub holds now; a plain refusal changed nothing, so nothing is woken.
+    if (error instanceof AgentXError && halfMerged(error)) await wiring.afterMerge(taskId).catch(() => undefined);
     if (error instanceof AgentXError) throw error.code === "NOT_FOUND" ? taskNotFound() : error;
     input.log?.({ event: "hosted_merge.failed", error: error instanceof Error ? error.name : "unknown" });
     throw agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_WORDS.unavailable);
@@ -219,7 +224,7 @@ export async function routeHostedMerge(input: HostedMergeInput): Promise<BrokerR
     if (!pressing) {
       const pullRequests = openPullRequestsOf(task);
       if (may === undefined) return json(200, { mayMerge: false, ready: false, pullRequests });
-      const view = await readinessView(input, depsOf(wiring), task);
+      const view = await readinessView(input, depsOf(wiring, input.audit), task);
       return json(200, { mayMerge: true, ...view, pullRequests });
     }
     if (may === undefined) throw agentXError("FORBIDDEN", HOSTED_MERGE_WORDS.notAllowed);

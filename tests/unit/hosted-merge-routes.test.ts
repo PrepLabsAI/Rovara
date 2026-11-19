@@ -19,13 +19,13 @@ type Body = Record<string, any>;
 type ErrorBody = { error: { code: string; message: string } };
 
 /** The fake host, counting the merges sent to it (and able to refuse them). */
-function countingHost(model: FakeHostModel, calls: Array<{ revision: string }>, refuse: { value: boolean }): CodeHost {
+function countingHost(model: FakeHostModel, calls: Array<{ revision: string }>, refuse: { value: boolean; from?: number }): CodeHost {
   const fake = new FakeCodeHost(model);
   return Object.create(fake, {
     kind: { value: "github" },
     merge: { value: async (...args: Parameters<NonNullable<CodeHost["merge"]>>) => {
       calls.push({ revision: args[1].revision });
-      if (refuse.value) return { outcome: "refused" as const, reason: "forbidden" as const, hostMessage: "Resource not accessible by integration ghs_secret" };
+      if (refuse.value || (refuse.from !== undefined && calls.length >= refuse.from)) return { outcome: "refused" as const, reason: "forbidden" as const, hostMessage: "Resource not accessible by integration ghs_secret" };
       return fake.merge(...args);
     } },
   }) as CodeHost;
@@ -35,12 +35,13 @@ interface Options { minApprovers?: number; mergeWait?: string; changeAfterPrepar
 
 async function hosted(options: Options = {}) {
   const merges: Array<{ revision: string }> = [];
-  const refuse = { value: false };
+  const refuse: { value: boolean; from?: number } = { value: false };
   const world: MergeWorld = await mergeWorld({ allowSelfApproval: options.allowSelfApproval ?? true, codeHost: (model) => countingHost(model, merges, refuse), ...(options.pullRequests === undefined ? {} : { pullRequests: options.pullRequests }) });
   await world.seedTracking();
   // The flow reads the task as the hosted core keeps it: its company and its own person.
   await world.store.update({ key: taskRecordKey(TASK_ID), ops: [change.set(["companyId"], ORG), change.set(["developerId"], OWNER)] });
   const woken: string[] = [];
+  const auditsGiven: unknown[] = [];
   const audited: AuditEvent[] = [];
   const audit = { stage: () => [], record: async (event: AuditEvent) => { if (options.audit === "fail") throw new Error("audit down"); audited.push(event); } };
   const flow = {
@@ -52,7 +53,8 @@ async function hosted(options: Options = {}) {
   } as never;
   const wiring: HostedMergeWiring = {
     projectGrantRole: async (personId, project) => (project !== "web" ? undefined : personId === MAINTAINER ? "administrator" : personId === DEVELOPER ? "developer" : undefined),
-    merge: () => {
+    merge: (given) => {
+      auditsGiven.push(given);
       if (options.mergeThrows === true) throw new Error("no ci mode");
       const store = options.scopeUnreadable !== true ? world.store : wrapStore(world.store, { get: async (key: { pk: string; sk: string }) => { if (key.sk === "SCOPE_QUESTION") throw new Error("unreadable"); return world.store.get(key); } });
       // `changeAfterPrepare`: the task as it reads from the second read on (the core reads it once to prepare and once more right before the merge).
@@ -80,7 +82,7 @@ async function hosted(options: Options = {}) {
     });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
   };
-  return { world, call, merges, refuse, audited, woken };
+  return { world, call, merges, refuse, audited, woken, audit, auditsGiven };
 }
 const press = (requestId: string = randomUUID()) => ({ requestId });
 const lockOf = (world: MergeWorld) => world.store.get({ pk: `ORG#${ORG}#HOSTED_MERGE`, sk: `${TASK_ID}#LOCK` });
@@ -109,6 +111,8 @@ describe("hosted Merge button: who may merge", () => {
       expect(h.world.audit.events.some((event: AuditEvent) => event.action === "pull_request.merge_requested" && event.actor.id === person && event.details?.["approvedBy"] === "rovara-website-press")).toBe(true);
       expect(h.woken).toEqual([TASK_ID]);
       expect(await lockOf(h.world)).toBeUndefined();
+      // The core is given this request's own audit sink (the stamped one), never another.
+      expect(h.auditsGiven).toEqual([h.audit]);
     });
   }
 
@@ -272,6 +276,16 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     expect(h.merges).toEqual([]);
   });
 
+  it("a half merge (the first merged, the second refused) wakes tracking so the workflow records what merged", async () => {
+    const h = await hosted({ pullRequests: [{ repositoryId: "app", number: 1 }, { repositoryId: "lib", number: 1 }] });
+    h.refuse.from = 2;
+    const answer = await h.call("POST", press());
+    expect(answer.status).toBe(409);
+    expect((answer.body as ErrorBody).error.message).toContain(" merged, but ");
+    expect(h.merges).toHaveLength(2);
+    expect(h.woken).toEqual([TASK_ID]);
+  });
+
   it("a refusal from GitHub is told in the core's words and the lock is given back", async () => {
     const h = await hosted();
     h.refuse.value = true;
@@ -279,6 +293,8 @@ describe("hosted Merge button: every merge-core gate holds (H1)", () => {
     expect(answer.status).toBe(409);
     expect(h.merges).toHaveLength(1);
     expect(h.audited.map((event) => [event.action, event.details?.["outcome"]])).toEqual([[MERGE_PRESSED_AUDIT, undefined], [MERGE_RESULT_AUDIT, "MERGE_NOT_READY"]]);
+    // A plain refusal changed nothing on GitHub: tracking is not woken for it.
+    expect(h.woken).toEqual([]);
     expect(await lockOf(h.world)).toBeUndefined();
   });
 });

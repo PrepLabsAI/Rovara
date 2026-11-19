@@ -9,7 +9,7 @@
 //   - while the install has a company rules service (the policy hook), nothing is built: that service is asked only at an approver's verdict, which a website press does not make, so a press there would
 //     merge without the company's rules. The route then says merging from Rovara is not set up (the person merges on GitHub). Asking the service for a person's press is a follow-up.
 // No CI mode reader on the runtime (an invalid or missing wiring): throws, and the route says merging is not set up.
-import type { AdapterRegistry, CodeSettings, OrgId } from "@agentx/contracts";
+import type { AdapterRegistry, AuditSink, CodeSettings, OrgId } from "@agentx/contracts";
 import { agentXError } from "@agentx/contracts";
 import type { CoreRuntime } from "../core-host/core-runtime.js";
 import type { MergeDependencies } from "../core/merge/merge.js";
@@ -25,7 +25,7 @@ import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
 
 export const HOSTED_MERGE_SETTINGS_REFUSED = "the project's merge rules could not be read";
 
-export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean }): MergeDependencies {
+export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean; audit?: AuditSink | undefined }): MergeDependencies {
   const { runtime, registry, now } = input;
   if (input.policyHook) throw new Error("the company rules service is not asked for a website press yet");
   const companyId: OrgId = runtime.companyId;
@@ -50,7 +50,8 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
       requireSyncForMerge: async (task) => { await wakeMergeTracking(store, task.taskId, now()); },
     },
     approvers: registry.require("approvers"),
-    audit: flow.audit,
+    // The request's own sink when the route gives it (it names the client the press came through), else the flow's.
+    audit: input.audit ?? flow.audit,
     people: createIdentityMergePeople(registry.require("identity"), { hostProvider: "github" }),
     identity: registry.require("identity"),
     settings,

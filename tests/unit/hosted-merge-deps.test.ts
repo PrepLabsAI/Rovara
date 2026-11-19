@@ -10,7 +10,7 @@ import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId, B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
 const TASK = "11111111-2222-4333-8444-555555555555";
 
-function build(options: { ciMode?: false; policyHook?: boolean; mergeWait?: (task: unknown) => string | undefined } = {}) {
+function build(options: { ciMode?: false; policyHook?: boolean; mergeWait?: (task: unknown) => string | undefined; audit?: unknown } = {}) {
   const store = new MemoryDocumentStore();
   const settingsAsked: string[] = [];
   const projectsAsked: string[] = [];
@@ -20,7 +20,7 @@ function build(options: { ciMode?: false; policyHook?: boolean; mergeWait?: (tas
     flow: { deps: { store, companyId: A, audit: { stage: () => [], record: async () => undefined }, projects: { revision: async (project: string) => { projectsAsked.push(project); return undefined; } }, ...(options.mergeWait === undefined ? {} : { secondReview: { mergeWait: options.mergeWait } }) } },
     ...(options.ciMode === false ? {} : { ciReporting: { honest: true, ciMode: async () => "their_ci_fix" } }),
   } as never;
-  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000, policyHook: options.policyHook === true });
+  const deps = () => hostedMergeDependencies({ runtime, registry, settings: { read: async (orgId: OrgId, project: string) => { settingsAsked.push(`${orgId}/${project}`); return { ...DEFAULT_CODE_SETTINGS, mergeMethod: "merge" }; } }, defaults: DEFAULT_CODE_SETTINGS, now: () => 1_000, policyHook: options.policyHook === true, ...(options.audit === undefined ? {} : { audit: options.audit as never }) });
   return { store, deps, settingsAsked, projectsAsked };
 }
 
@@ -64,6 +64,12 @@ describe("hosted merge dependencies", () => {
     expect(d.mergeWait!(task!)).toBe("wait");
     expect(seen[0]).toMatchObject({ secondOpinion: { status: "did_not_run" }, secondReviewAcknowledged: ["k"] });
     expect(typeof d.repositoryEdges).toBe("function");
+  });
+
+  it("the core's claim audit goes to the request's own (stamped) sink when the route gives one", () => {
+    const stamped = { stage: () => [], record: async () => undefined };
+    expect(build({ audit: stamped }).deps().audit).toBe(stamped);
+    expect(build().deps().audit).not.toBe(stamped);
   });
 
   it("builds nothing without the runtime's CI mode reader", () => {
