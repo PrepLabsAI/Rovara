@@ -223,6 +223,11 @@ export const REMOVAL_RETRY_MS = 15 * 60_000;
 const CLOCK_SKEW_MS = 60_000;
 
 /** A finished removal's answer: who the hand-over went to (the successor named, or the one an owner or admin finished it to, DEC 254zzz101). */
+/** Whether this removal's own remover ended the membership after the removal started (so its hand-over is this removal's to finish). */
+function endedBy(membership: z.infer<typeof Membership> | undefined, record: MemberRemovalRecord | undefined): boolean {
+  return record !== undefined && membership?.revokedAt !== undefined && membership.revokedBy === record.by && Date.parse(membership.revokedAt) >= Date.parse(record.startedAt) - CLOCK_SKEW_MS;
+}
+
 const done = (record: MemberRemovalRecord, moved: NonNullable<MemberRemovalRecord["moved"]>) => ({ removalId: record.removalId, state: "DONE" as const, successorId: record.handedTo ?? record.successorId, moved });
 
 /**
@@ -243,7 +248,9 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
   if (target.revokedAt !== undefined) {
     // Ended before this request began, or by anyone but this removal's remover: "already removed", as before. A repeat retries a GitHub link a failed cleanup
     // left behind. Only the membership THIS removal ended (its remover, after it started) has its hand-over finished here.
-    if (record === undefined || target.revokedBy !== record.by || Date.parse(target.revokedAt) < Date.parse(record.startedAt) - CLOCK_SKEW_MS) {
+    if (!endedBy(target, record)) {
+      // This request's own STARTED record (someone else ended the membership first) is dropped, with its pending row, so it never blocks the one that did.
+      if (record?.state === "STARTED") await dropStartedRemoval(handOver, record);
       await dropGithubLink(ctx, companyId, leaverId);
       throw agentXError("MEMBER_ALREADY_REMOVED", MEMBER_REVOKED);
     }
@@ -262,11 +269,14 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
       if (record.state === "DONE" && record.moved !== undefined) return done(record, record.moved);
     }
     const revoked = await ctx.members.revoke(caller, { companyId, personId: leaverId, expectedRole: request.expectedRole, successorId: request.successorId });
-    // A refused removal leaves no STARTED record that could end the membership later.
-    if (!revoked.ok && revoked.error !== "unavailable") await dropStartedRemoval(handOver, record);
-    // ("Already removed" is not a refusal of THIS removal: another attempt with the same request id may have ended the membership just now.)
-    else if (!revoked.ok && "message" in revoked && revoked.message !== MEMBER_REVOKED) await dropStartedRemoval(handOver, record);
-    unwrap(revoked);
+    // "Already removed" or "changed" may be THIS removal's own other attempt (the same request id) that ended the membership just now: then go on to the hand-over.
+    // Any other refusal, or a membership ended by someone else, leaves no STARTED record (and no pending row naming it) that could end the membership later.
+    const ownRace = !revoked.ok && "message" in revoked && (revoked.message === MEMBER_REVOKED || revoked.message === MEMBER_CHANGED)
+      && endedBy(await membershipOf(ctx, leaverId).catch(() => undefined), record);
+    if (!ownRace) {
+      if (!revoked.ok && (revoked.error !== "unavailable" || "message" in revoked)) await dropStartedRemoval(handOver, record);
+      unwrap(revoked);
+    }
     await dropGithubLink(ctx, companyId, leaverId);
   }
   if (record === undefined) throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);
@@ -298,8 +308,11 @@ async function listPendingHandOvers(ctx: CompanyMemberRouteContext, companyId: s
   let pending: MemberRemovalRecord[];
   try { pending = await pendingHandOvers(handOverContext(ctx), companyId, PENDING_HANDOVERS_MAX); } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
   // Only people whose membership has ended: a removal whose revoke never happened is not a hand-over to finish.
-  const removed = (await Promise.all(pending.map(async (record) => ((await membershipOf(ctx, record.leaverId).catch(() => undefined))?.revokedAt === undefined ? undefined : record))))
-    .filter((record): record is MemberRemovalRecord => record !== undefined);
+  let removed: MemberRemovalRecord[];
+  try {
+    removed = (await Promise.all(pending.map(async (record) => ((await membershipOf(ctx, record.leaverId))?.revokedAt === undefined ? undefined : record))))
+      .filter((record): record is MemberRemovalRecord => record !== undefined);
+  } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
   const handovers = await Promise.all(removed.map(async (record) => {
     const name = await personName(ctx, record.leaverId);
     return { personId: record.leaverId, ...(name === undefined ? {} : { name }), removalId: record.removalId, startedAt: record.startedAt, removedBy: record.by, successorId: record.successorId };
@@ -318,6 +331,8 @@ async function finishStuckHandOver(ctx: CompanyMemberRouteContext, me: z.infer<t
   const finished = async (): Promise<ReturnType<typeof done> | undefined> => {
     const receipt = await finishReceipt(handOver, companyId, request.requestId);
     if (receipt === undefined) return undefined;
+    // A person back in the company since has nothing finished for them now.
+    if (target.revokedAt === undefined) throw agentXError("NOT_FOUND", NO_PENDING_HANDOVER);
     if (receipt.leaverId !== leaverId || receipt.by !== me.personId || receipt.successorId !== request.successorId) throw agentXError("IDEMPOTENCY_CONFLICT", REQUEST_REUSED);
     const record = await readRemoval(handOver, companyId, receipt.removalId);
     if (record?.state !== "DONE" || record.moved === undefined) throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE);

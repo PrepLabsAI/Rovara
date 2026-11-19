@@ -14,11 +14,11 @@ import {
   FINISH_BODY, HANDOVER_IN_PROGRESS, HANDOVER_UNFINISHED, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, NO_PENDING_HANDOVER, NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, PREVIEW_QUERY, REMOVAL_CHANGED, REQUEST_REUSED, SUCCESSOR_INVALID, TOO_MUCH_WORK, routeCompanyMembers,
   type CompanyMemberRouteContext,
 } from "../../packages/broker/src/aws/company-member-routes.js";
-import { HANDOVER_LIMITS, HANDOVER_TOO_BIG, memberRemovalKey, pendingHandOverKey } from "../../packages/broker/src/aws/company-member-handover.js";
+import { HANDOVER_LIMITS, HANDOVER_TOO_BIG, memberRemovalKey, pendingHandOverKey, startRemoval } from "../../packages/broker/src/aws/company-member-handover.js";
 import { grantKeyFor, projectMemberRowKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
-import { MEMBER_LAST_OWNER, MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
+import { MEMBER_CHANGED, MEMBER_LAST_OWNER, MEMBER_REVOKED } from "../../packages/broker/src/developer/company-member-contract.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -456,6 +456,9 @@ describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
     h.as(ADMIN);
     expect((await h.remove(LEAVER, removal)).body).toMatchObject({ state: "DONE", successorId: ADMIN });
     expect(h.audits(A)).toHaveLength(1);
+    // Back in the company since: the finish request's replay finishes nothing for them now.
+    h.as(OWNER); h.join(LEAVER, A, "member");
+    expect(await h.finish(LEAVER, { requestId, successorId: ADMIN })).toEqual(refusal(404, "NOT_FOUND", NO_PENDING_HANDOVER));
   });
 
   it("only from the website, only an owner or admin, only in the person's own company, only for a removed person with a hand-over waiting", async () => {
@@ -506,6 +509,38 @@ describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
     h.db.set({ ...memberRemovalKey(A, "99999999-9999-4999-8999-999999999999"), entityType: "COMPANY_MEMBER_REMOVAL", companyId: A, removalId: "99999999-9999-4999-8999-999999999999", leaverId: PEER, successorId: ADMIN, expectedRole: "member", by: ADMIN, startedAt: TIME, state: "STARTED" });
     h.join(PEER, A, "member");
     expect((await h.pending()).body["handovers"]).toEqual([]);
+  });
+
+  it("two admins removing the same person at once: the one who ended the membership hands over; the other's attempt leaves nothing behind", async () => {
+    const h = world(); h.agent(A, "agt_one", LEAVER);
+    const second = { requestId: randomUUID(), expectedRole: "member", successorId: OWNER };
+    const helper = h.ctx.members;
+    h.ctx.members = { ...helper, revoke: async (caller, request) => {
+      // The owner's removal starts before the admin's revoke and asks after it.
+      await startRemoval({ documentClient: h.db, tableName: "State", now: () => NOW }, { companyId: A, removalId: second.requestId, leaverId: LEAVER, successorId: OWNER, expectedRole: "member", by: OWNER });
+      const answer = await helper.revoke(caller, request);
+      h.ctx.members = helper; h.as(OWNER);
+      expect(await h.remove(LEAVER, second)).toEqual(refusal(409, "MEMBER_ALREADY_REMOVED", MEMBER_REVOKED));
+      h.as(ADMIN);
+      return answer;
+    } };
+    const first = await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER });
+    expect(first).toMatchObject({ status: 200, body: { state: "DONE", successorId: PEER } });
+    expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(PEER);
+    expect(h.record(A, second.requestId)).toBeUndefined(); expect((await h.pending()).body["handovers"]).toEqual([]);
+  });
+
+  it("a double submit (the same request id twice at once): the loser's refusal never drops the winner's record", async () => {
+    const h = world(); h.agent(A, "agt_one", LEAVER);
+    const body = { requestId: randomUUID(), expectedRole: "member", successorId: PEER };
+    const helper = h.ctx.members;
+    let raced = false;
+    h.ctx.members = { ...helper, revoke: async (caller, request) => {
+      if (!raced) { raced = true; await helper.revoke(caller, request); return { ok: false as const, error: "unavailable" as const, message: MEMBER_CHANGED }; }
+      return helper.revoke(caller, request);
+    } };
+    expect(await h.remove(LEAVER, body)).toMatchObject({ status: 200, body: { state: "DONE" } });
+    expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(PEER);
   });
 
   it("a second removal racing the first never re-stamps an ended membership", async () => {
