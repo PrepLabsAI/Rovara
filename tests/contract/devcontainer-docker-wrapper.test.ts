@@ -123,6 +123,12 @@ describe("the devcontainer docker wrapper", () => {
       mkdirSync(join(home, ".docker"));
       writeFileSync(join(home, ".docker", "config.json"), '{ "aliases" : { "builder" : "buildx" } }');
       expect(run(["build", "."], { ...GATEWAY, HOME: home }).status).toBe(125);
+      // Spellings docker's JSON decoder accepts for the same key: another case, a \u escape.
+      for (const text of ['{ "Aliases": { "builder": "buildx" } }', '{ "ALIASES": {} }', '{ "\\u0061liases": { "builder": "buildx" } }']) {
+        const odd = mkdtempSync(join(tmpdir(), "dc-config-odd-"));
+        writeFileSync(join(odd, "config.json"), text);
+        expect(run(["build", "."], { ...GATEWAY, DOCKER_CONFIG: odd }).status, text).toBe(125);
+      }
       // Commands that do not build are not affected by the alias.
       expect(run(["run", "image"], { ...GATEWAY, DOCKER_CONFIG: dir }).status).toBe(0);
       const plain = mkdtempSync(join(tmpdir(), "dc-config-ok-"));
@@ -143,15 +149,16 @@ describe("the devcontainer docker wrapper", () => {
       const files: string[] = [];
       const walk = (dir: string): void => {
         for (const name of readdirSync(dir)) {
-          if (name === "node_modules" || name === "dist" || name === "ec2") continue;
+          if (name === "node_modules" || name === "dist") continue;
           const full = join(dir, name);
           if (statSync(full).isDirectory()) walk(full);
           else if (/\.(ts|tsx|js|mjs|cjs|sh)$/u.test(name) && !/\.d\.ts$/u.test(name)) files.push(full);
         }
       };
       walk(root);
-      const naming = files.filter((file) => /["'`]buildx["'`]|docker-buildx|--builder\b|DOCKER_BUILDKIT\s*=\s*["']?1/u.test(readFileSync(file, "utf8"))).map((file) => relative(root, file)).sort();
-      expect(naming).toEqual(["worker/src/saved-env/build.ts"]);
+      const naming = files.filter((file) => /["'`]buildx["'`]|docker-buildx|--builder\b|DOCKER_BUILDKIT\s*=\s*["']?1|docker buildx/u.test(readFileSync(file, "utf8"))).map((file) => relative(root, file)).sort();
+      // (The ec2 boot scripts are scanned too, comments included: the wrapper names buildx to refuse it, and nothing else may.)
+      expect(naming).toEqual(["worker/ec2/devcontainer-docker.sh", "worker/src/saved-env/build.ts"]);
       // And the wrapper itself never runs the real docker with a buildx verb: the one case that names it refuses.
       for (const line of wrapper.split("\n").filter((entry) => /REAL_DOCKER/u.test(entry))) expect(line, line).not.toMatch(/(?<![_\w])buildx(?![_\w])/u);
       expect(wrapper).toMatch(/\n {2}buildx\) echo [^\n]*exit 125 ;;/u);

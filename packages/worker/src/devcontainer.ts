@@ -913,7 +913,8 @@ export function createDevcontainerCli(options: { dockerPath?: string; environmen
   const docker = dockerPath ?? "docker";
   const run: DevcontainerCli["run"] = (args, runOptions) => runCollected(process.execPath, [
     script,
-    ...(dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", dockerPath, ...args.slice(1)]),
+    // A gateway-mode worker also tells the tool never to use BuildKit (`--buildkit never`), on top of the wrapper's own refusal of buildx: the classic builder is the only one that takes the walled network.
+    ...(dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", dockerPath, ...(gateway !== undefined && (args[0] === "up" || args[0] === "build") ? ["--buildkit", "never"] : []), ...args.slice(1)]),
   ], runOptions);
   return {
     run,

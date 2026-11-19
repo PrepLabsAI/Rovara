@@ -40,8 +40,9 @@ no_buildx_option() {
 }
 # `docker buildx install` makes `docker build` run buildx by an alias in the docker config; a config with any alias builds nothing.
 no_alias_config() {
-  local config="${DOCKER_CONFIG:-${HOME:-/nonexistent}/.docker}/config.json"
-  if [[ -e "$config" ]] && grep -q '"aliases"' "$config" 2>/dev/null; then echo "devcontainer-docker: the docker configuration has an alias (buildx may be the default builder), so nothing was built" >&2; exit 125; fi
+  # Docker reads config.json with a decoder that ignores the case of field names and decodes \u escapes, so both are refused as well (a config of the worker's own never has either). With no HOME, docker uses the passwd home: that one is checked too.
+  local config="${DOCKER_CONFIG:-${HOME:-$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)}/.docker}/config.json"
+  if [[ -e "$config" ]] && grep -qiE 'aliases|\\u' "$config" 2>/dev/null; then echo "devcontainer-docker: the docker configuration has an alias (buildx may be the default builder), so nothing was built" >&2; exit 125; fi
   return 0
 }
 # `--network`/`--net` anywhere in the arguments of a build: the options a repository's build.options can add.

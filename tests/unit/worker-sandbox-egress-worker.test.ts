@@ -153,6 +153,14 @@ describe("the devcontainer on a gateway-mode worker", () => {
     // The caller's own docker path is replaced by the wrapper.
     expect(captured.calls[0]!.slice(1, 4)).toEqual(["up", "--docker-path", DEVCONTAINER_GATEWAY_DOCKER]);
     expect(captured.calls[0]).not.toContain("/usr/bin/docker");
+    // And the tool is told never to use BuildKit (defence in depth over the wrapper's refusal of buildx), for the commands that build.
+    expect(captured.calls[0]!.slice(4, 6)).toEqual(["--buildkit", "never"]);
+    captured.calls.length = 0;
+    await createDevcontainerCli({ environment: GATEWAY_ENV, dockerPath: "/usr/bin/docker" }).run(["read-configuration", "--workspace-folder", "/w"], {});
+    expect(captured.calls[0]).not.toContain("--buildkit");
+    captured.calls.length = 0;
+    await createDevcontainerCli({ environment: {} }).run(["up"], {});
+    expect(captured.calls[0]).not.toContain("--buildkit");
   });
 
   it("is untouched when the gateway is off: no walled network, the caller's docker path or none", async () => {
