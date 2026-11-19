@@ -248,7 +248,7 @@ describe("hydrateBrokerEnvironment: what it cannot read stops the broker, in fix
 });
 
 describe("hydrateBrokerEnvironment: the legacy install's packed broker (#1149)", () => {
-  const legacy = (): MutableEnvironment => ({ AWS_REGION: "us-east-1", AGENTX_ACCOUNT_ID: "944937319445", AGENTX_ENV: "production", AGENTX_NAMES: "ts=AgentXControlPlane-State-X", AGENTX_SETTINGS: "ly=legacy,ss=disabled", AGENTX_ALARM_PREFIX: "AgentX" });
+  const legacy = (): MutableEnvironment => ({ AWS_REGION: "us-east-1", AGENTX_ACCOUNT_ID: "123456789012", AGENTX_ENV: "production", AGENTX_NAMES: "ts=AgentXControlPlane-State-X", AGENTX_SETTINGS: "ly=legacy,ss=disabled", AGENTX_ALARM_PREFIX: "AgentX" });
 
   it("derives only the variables marked legacy, which are production's own values, and adds none of the others", () => {
     const env = legacy();
