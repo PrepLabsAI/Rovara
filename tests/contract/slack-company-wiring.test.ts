@@ -6,7 +6,7 @@ import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment, slackCompanyModeRequested } from "../../packages/broker/src/aws/slack-company-wiring.js";
 import { slackIngressTeam, splitBySlackIngressTeam } from "../../packages/broker/src/aws/slack-company-split.js";
-import { slackLinkNotice } from "../../packages/broker/src/aws/slack-person.js";
+import { slackCompanyProject, slackLinkNotice } from "../../packages/broker/src/aws/slack-person.js";
 import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-workspace-tokens.js";
 import { createWorkspaceSlackDirectory } from "../../packages/broker/src/aws/developer-identity.js";
 
@@ -40,6 +40,34 @@ describe("the factory", () => {
     send.mockClear();
     for (const bad of ["", "a#b", "x".repeat(201), 7 as unknown as string]) expect(await wiring.workspaces.getProject(bad)).toBeUndefined();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("DEC 254zzz80 (R2-F1 lane 1 review M2): a NAMED company's project is read from its own revisions, keys plus companyId and candidate only (the IAM grant's exact attributes)", async () => {
+    const rows: Record<string, unknown[]> = {
+      [`ORG#${A}#PROJECT#payments`]: [{ pk: `ORG#${A}#PROJECT#payments`, sk: "REV#000000000003", candidate: true }, { pk: `ORG#${A}#PROJECT#payments`, sk: "REV#000000000002" }],
+      [`ORG#${A}#PROJECT#drift`]: [{ pk: `ORG#${A}#PROJECT#drift`, sk: "REV#000000000001", companyId: B }],
+      [`ORG#${A}#PROJECT#waiting`]: [{ pk: `ORG#${A}#PROJECT#waiting`, sk: "REV#000000000001", candidate: true }],
+    };
+    const send = vi.fn(async (command: never): Promise<unknown> => ({ Items: rows[String((command as { input: { ExpressionAttributeValues: Record<string, unknown> } }).input.ExpressionAttributeValues[":pk"])] ?? [] }));
+    const wiring = slackCompanyDependenciesFromEnvironment(ON, clients(send))!;
+    expect(await wiring.workspaces.getProject("payments", A)).toEqual({ companyId: A });
+    const input = (send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0].input;
+    expect(input).toMatchObject({ ProjectionExpression: "pk, sk, companyId, candidate", ScanIndexForward: false, ConsistentRead: true, ExpressionAttributeValues: { ":pk": `ORG#${A}#PROJECT#payments`, ":revision": "REV#" } });
+    // Another company's partition holds nothing; a row naming another company and a project with only a waiting candidate are not the company's.
+    expect(await wiring.workspaces.getProject("payments", B)).toBeUndefined();
+    expect(await wiring.workspaces.getProject("drift", A)).toBeUndefined();
+    expect(await wiring.workspaces.getProject("waiting", A)).toBeUndefined();
+    // The built-in company and no company: the legacy read exactly as before.
+    send.mockClear();
+    await wiring.workspaces.getProject("payments", IMPLICIT_COMPANY_ID);
+    expect((send.mock.calls[0] as unknown as [{ input: Record<string, unknown> }])[0].input).toMatchObject({ ProjectionExpression: "pk, sk, companyId", Limit: 1, ExpressionAttributeValues: { ":pk": "PROJECT#payments" } });
+  });
+
+  it("DEC 254zzz80: a team's project check asks for the project in the team's company (its own partition for a named company)", async () => {
+    const getProject = vi.fn(async (_name: string, companyId?: string) => (companyId === A ? { companyId: A } : undefined));
+    const deps = { workspaces: { requireCompany: async () => A, getProject } } as unknown as Parameters<typeof slackCompanyProject>[0];
+    expect(await slackCompanyProject(deps, OTHER, "payments")).toBe(true);
+    expect(getProject).toHaveBeenCalledWith("payments", A);
   });
 
   it("reads the token from this environment's per-company secret, through the team's binding, never the install token", async () => {

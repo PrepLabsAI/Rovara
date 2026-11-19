@@ -124,7 +124,8 @@ export function createSlackLinkCodes(deps: SlackPersonDependencies) {
  * deliberately a separate optional dependency: an absent reader means unlinked. */
 export interface SlackWorkspaceAccess extends SlackWorkspaceDelivery {
   store: DocumentStore;
-  getProject(name: string): Promise<unknown>;
+  /** The project's company record: the legacy newest revision's; for a NAMED `companyId` (DEC 254zzz80), its own partition's (a `{ companyId }` when it holds the project). */
+  getProject(name: string, companyId?: string): Promise<unknown>;
   linkUrl(code: string): string;
   /** L2-2 PR 18c: a consumer without State writes (the Slack Lambda, #126) asks the broker for the notice; the broker runs slackLinkNotice with its own store. */
   linkNotice?(teamId: string, userId: string): Promise<string | undefined>;
@@ -162,7 +163,7 @@ export async function slackCompanyProject(deps: SlackCompanyDependencies, teamId
   if (deps.workspaces === undefined) return deps.slackInstallTeamOnly === undefined || teamId === deps.slackInstallTeamOnly;
   try {
     const company = await deps.workspaces.requireCompany(teamId);
-    return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name), company);
+    return OrgIdSchema.safeParse(company).success && recordInCompany(await deps.workspaces.getProject(name, company), company);
   } catch { return false; }
 }
 

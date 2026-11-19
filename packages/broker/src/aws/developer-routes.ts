@@ -233,7 +233,7 @@ export interface DeveloperApiConfiguration {
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
-  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string): Promise<unknown> };
+  workspaces?: Pick<SlackWorkspaceBindings, "requireCompany"> & { getProject?(name: string, companyId?: string): Promise<unknown> };
   workspace?: SlackWorkspaceScope;
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   policyHook?: ProjectSettingsHook;

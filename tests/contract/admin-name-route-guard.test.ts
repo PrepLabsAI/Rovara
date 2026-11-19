@@ -56,23 +56,6 @@ describe("D2 (1): a name-only admin route and a named company's project of the s
     }
   });
 
-  it("R2-F1: ANOTHER named company's own-partition project of that name (its install-wide reservation, or its catalog row for a company the core lists) is a collision too", async () => {
-    for (const held of [IMPLICIT_COMPANY_ID, undefined] as const) {
-      const reserved = await world({ [ADMIN_KEY]: held });
-      reserved.db.set({ pk: "PROJECT_NAME_RESERVATION#payments", sk: "RESERVATION", entityType: "PROJECT_NAME_RESERVATION", companyId: COMPANY_B, name: "payments" });
-      expect(await reserved.prepare()).toMatchObject(FIXED);
-      expect(reserved.workspaces()).toHaveLength(0);
-      const listed = await world({ [ADMIN_KEY]: held });
-      listed.db.set({ pk: "CORE_ENGINE_IN_USE", sk: `ORG#${COMPANY_B}`, entityType: "CORE_ENGINE_IN_USE", orgId: COMPANY_B });
-      listed.companyCatalog(COMPANY_B);
-      expect(await listed.prepare()).toMatchObject(FIXED);
-      // Control: the implicit company's own reservation is no collision.
-      const own = await world({ [ADMIN_KEY]: held });
-      own.db.set({ pk: "PROJECT_NAME_RESERVATION#payments", sk: "RESERVATION", entityType: "PROJECT_NAME_RESERVATION", companyId: IMPLICIT_COMPANY_ID, name: "payments" });
-      expect((await own.prepare()).status).toBe(202);
-    }
-  });
-
   it("collision (caller's company): the administrator's named company has its own project called 'payments'; the legacy route is refused with the fixed answer, nothing written", async () => {
     const broker = await world({ [ADMIN_KEY]: COMPANY_A });
     broker.companyCatalog(COMPANY_A);

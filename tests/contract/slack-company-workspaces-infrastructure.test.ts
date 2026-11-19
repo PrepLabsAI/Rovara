@@ -114,6 +114,24 @@ describe("Slack company mode's switch (18a)", () => {
     expect(JSON.stringify(legacy)).not.toContain("#SLACK_BINDING#");
   });
 
+  it("gives the Slack Lambda and the channel API a NAMED company's project revisions: Query, keys plus companyId and candidate, the exact company-id shape (R2-F1 lane 1 review M2)", () => {
+    const state = tableArn(named, "State");
+    for (const [id, fn] of [["SlackIngressCompanyProjects", "SlackIngress"], ["ChannelApiCompanyProjects", "ChannelApiIngress"]] as const) {
+      const resource = policy(named, id);
+      expect(roleOf(resource)).toEqual([roleOfFunction(named, fn)]);
+      expect(resource.Condition).toBe(on);
+      expect(statementsOf(resource)).toStrictEqual([{ Sid: "ReadCompanyProjectRevisions", Effect: "Allow", Action: "dynamodb:Query", Resource: state,
+        Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#PROJECT#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId", "candidate"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } }]);
+    }
+    const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/gu, "\\$&").replaceAll("*", ".*").replaceAll("?", ".")}$`, "u");
+    const allowed = (key: string) => glob("ORG#org_????????????????????#PROJECT#*").test(key);
+    expect(allowed("ORG#org_jckf8av6ri11rszcdjsa#PROJECT#demo-tasklog")).toBe(true);
+    for (const key of ["PROJECT#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT_CATALOG", "ORG#org_jckf8av6ri11rszcdjsa#PROJECT_MEMBERS#demo-tasklog", "ORG#org_jckf8av6ri11rszcdjsa#MEMBER#e46d",
+      "ORG#org_short#PROJECT#demo-tasklog"]) expect(allowed(key), key).toBe(false);
+    expect(JSON.stringify(legacy)).not.toContain("ReadCompanyProjectRevisions");
+  });
+
   it("never lets the Slack Lambda write the State table, switch on or off (#126)", () => {
     const role = roleOfFunction(named, "SlackIngress");
     const stateId = byPrefix(named, "State", "AWS::DynamoDB::Table")[0];

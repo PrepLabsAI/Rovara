@@ -18,6 +18,12 @@ export const SLACK_BINDING_READ_KEYS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING
  */
 export const COMPANY_SLACK_CHANNEL_BINDING_KEYS = ["ORG#org_????????????????????#SLACK_BINDING#*"] as const;
 
+/**
+ * DEC 254zzz80 (R2-F1 lane 1 review M2; NEW IAM, needs the owner's OK): a NAMED company's project revisions, `ORG#<company>#PROJECT#<name>` / `REV#...`. The Slack Lambda and the
+ * channel API ask only whether the company holds the project (slack-company-wiring.ts getProject): Query, keys plus `companyId` and `candidate`, never a definition.
+ */
+export const COMPANY_PROJECT_REVISION_KEYS = ["ORG#org_????????????????????#PROJECT#*"] as const;
+
 export interface SlackCompanyWorkspacesProps {
   readonly naming: AgentXNaming;
   /** DEC 254zg (a), 254zk: the company sign-in condition; the switch is on only while this holds too. */

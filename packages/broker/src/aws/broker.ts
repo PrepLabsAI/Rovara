@@ -300,7 +300,7 @@ import { createGitHubAppCredentials, filterInstallationsFor, githubBindingRefusa
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse, type LinearWebhookWiring } from "./linear-app-webhook.js";
 import { linearCompanyWiring } from "./linear-wiring.js";
 import { boundedCompanyReads, ownPartitionRow, recordInCompany, type CompanyMembershipReader } from "./company-check.js";
-import { grantKeyFor, namedCompany, projectNameHolder, projectNameReservationWrite, revisionKeyFor } from "./company-layout.js";
+import { grantKeyFor, namedCompany, revisionKeyFor } from "./company-layout.js";
 import { refuseNamedCompanyName } from "./admin-name-collision.js";
 import { githubRecoveryPartition, listGithubWebhookCompanies, readGithubRecoveryContinuation, readGithubWebhookEvent } from "./github-webhooks.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
@@ -2290,9 +2290,6 @@ async function registerProject(
   if (ownCompany !== undefined && (definition.e2e !== undefined || setupApproval !== undefined)) throw agentXError("FORBIDDEN", NAMED_COMPANY_SETUP_APPROVAL_REFUSED);
   /** A stored revision is this registration's company's: by its own partition for a named company (a row there may leave its company out), else by its stored company. */
   const inCompany = (row: unknown) => ownCompany !== undefined ? row !== null && typeof row === "object" && ownPartitionRow(row as Record<string, unknown>, ownCompany) : recordInCompany(row, companyId);
-  // R2-F1 review H1: a name a named company holds install-wide (its reservation) is no other company's to register, nor the legacy namespace's; an unreadable holder refuses.
-  const holder = await projectNameHolder(companyBudget.client, dependencies.tableName, definition.name);
-  if (holder !== undefined && holder !== ownCompany) throw agentXError("NOT_FOUND", "registered project not found");
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
@@ -2485,8 +2482,6 @@ async function registerProject(
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
       ...corePlan.writes, ...nameClaimWrites,
-      // R2-F1 review H1: a named company's registration claims (or keeps) its project's name install-wide, in the same transaction.
-      ...(ownCompany === undefined ? [] : [projectNameReservationWrite(dependencies.tableName, ownCompany, definition.name, now)]),
       ] }));
       if (authority === "takeover") {
         ownershipTakenOver = true;
@@ -14782,10 +14777,7 @@ function clientProjectRouteDependencies(dependencies: AwsBrokerDependencies): Pi
     ExpressionAttributeValues: { ":pk": pk, ":rev": "REV#" }, Limit: 1, ConsistentRead: true,
   })) as { Items?: unknown[] }).Items ?? []).length > 0;
   // DEC 254zzz80: a named company's fresh id must be free in its own partition (any revision, a candidate too) as well as globally.
-  // R2-F1 review H1: and a name any named company holds install-wide (its reservation; an unreadable one counts as held) is in use too, until grants carry their company.
-  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`)
-    || await projectNameHolder(dependencies.documentClient, dependencies.tableName, name) !== undefined
-    || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
+  const projectExists = async (name: string, owner?: string) => await revisionIn(`PROJECT#${name}`) || (namedCompany(owner) !== undefined && await revisionIn(revisionKeyFor(owner, name, 1).pk)); const names = companyProjectNaming(projectExists, (company, name) => companyNameTaken(dependencies.documentClient, dependencies.tableName, company, name)); // L2-1
   // DEC 254zzz80: today's global names (id == name) created for a named company are registered in its own partition, so a name it already holds there is taken too.
   const nameTaken_ = async (owner: string | undefined, companyId: string | undefined, name: string) => await names.taken(owner, name) || (owner === undefined && namedCompany(companyId) !== undefined && await projectExists(name, companyId));
   /**

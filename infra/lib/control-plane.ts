@@ -46,7 +46,7 @@ import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { REQUALIFY_CONTEXT_KEY, REQUALIFY_DEFAULT_HOUR_UTC, RuntimeRequalify } from "./runtime-requalify.js";
 import { swebenchNames } from "./swebench-eval.js";
-import { COMPANY_SLACK_CHANNEL_BINDING_KEYS, SLACK_BINDING_READ_KEYS, SLACK_COMPANY_WORKSPACES_VARIABLE, SlackCompanyWorkspaces } from "./slack-company-workspaces.js";
+import { COMPANY_PROJECT_REVISION_KEYS, COMPANY_SLACK_CHANNEL_BINDING_KEYS, SLACK_BINDING_READ_KEYS, SLACK_COMPANY_WORKSPACES_VARIABLE, SlackCompanyWorkspaces } from "./slack-company-workspaces.js";
 import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
@@ -1003,6 +1003,13 @@ export class ControlPlaneStack extends Stack {
       // install team (its operator binding names the company) and every company-mode team. GetItem only, exact company-id shape, the Null guard; its own policy under the switch's
       // condition (nothing while company mode is off), so no existing statement changes.
       slackCompany.grant("SlackIngressCompanyBindings", slackIngress.role!, [slackCompany.stateReads(state, "ReadCompanySlackChannelBindings", COMPANY_SLACK_CHANNEL_BINDING_KEYS)]);
+      // DEC 254zzz80 (R2-F1 lane 1 review M2; new IAM for the owner's OK): whether a NAMED company holds a project, from its own revisions (slack-company-wiring.ts getProject).
+      // Query only, keys plus companyId and candidate, the exact company-id shape; its own policy per consumer under the switch's condition, so no existing statement changes.
+      for (const [id, fn] of [["SlackIngressCompanyProjects", slackIngress], ["ChannelApiCompanyProjects", channelAdapters.ingress]] as const) {
+        slackCompany.grant(id, fn.role!, [new iam.PolicyStatement({ sid: "ReadCompanyProjectRevisions", actions: ["dynamodb:Query"], resources: [state.tableArn],
+          conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [...COMPANY_PROJECT_REVISION_KEYS] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId", "candidate"] },
+            StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } })]);
+      }
       // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
       slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));

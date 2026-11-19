@@ -3,8 +3,7 @@
 // legacy rows exactly. The company is the caller's LIVE membership. These tests seed the staging shape (company-layout revisions, catalog rows and META, no
 // legacy project rows) through the deployed developer API.
 //
-// Grants are lane 2's (`grantKeyFor`). On this branch the grant readers still read `MEMBER#<person>`, so `grant()` writes the grant at BOTH the key lane 2
-// reads (`grantKeyFor(company, person, project)`) and the key read today; once lane 2 lands, the legacy copy is ignored and the same assertions hold.
+// Grants are lane 2's (DEC 254zzz98, merged here): `grant()` writes only `grantKeyFor(company, person, project)`, exactly the staging shape (no legacy rows at all).
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError, IMPLICIT_COMPANY_ID, WORKSPACE_PROJECT_INDEX, orgProjectCatalogKey, orgProjectNameClaimKey, projectMetaKey, workspaceProjectIndexValue } from "@agentx/contracts";
@@ -55,11 +54,10 @@ function world() {
     db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", latestRevision: revisions });
     for (let revision = 1; revision <= revisions; revision += 1) db.set({ ...revisionKeyFor(companyId, name, revision), entityType: "PROJECT", registeredAt: TIME, registeredBy: OWNER, definition: definition(name, revision, owner) });
   };
-  /** A grant: at lane 2's key (staging's `ORG#<company>#MEMBER#<person>` rows) and at the key this branch's grant readers read (see the file comment). */
+  /** A grant at lane 2's key (staging's `ORG#<company>#MEMBER#<person>` rows). */
   const grant = (companyId: string, id: string, name: string, role = "developer") => {
     const row = { entityType: "MEMBERSHIP", ownerKey: id, projectName: name, role, projectRole: "maintainer", grantId: `g-${name}`, grantedAt: TIME, grantedBy: { developerId: OWNER } };
     db.set({ ...grantKeyFor(companyId, id, name), ...row });
-    db.set({ pk: `MEMBER#${id}`, sk: `PROJECT#${name}`, ...row });
   };
   const deps: DeveloperRouteDependencies = {
     documentClient: db, tableName: "State", now: () => NOW, companies: companyMembershipFromDynamo(db, "SignIn"),
@@ -234,23 +232,27 @@ describe("R2-F1 lane 1: a named company's revisions come from its own partition"
     expect((await members(OWNER, "legacy-only")).status).toBe(404);
   });
 
-  it("H1 probe: A's owner adds a member to A's project; B's owner (no such project in B: the name is A's install-wide) never lists them, and a member moved to B sees nothing", async () => {
+  it("H1 probe (two companies, one name, with lane 2's company grants): B's owner never lists A's member of A's project", async () => {
     const w = world();
     w.join(BOB, B, "owner");
-    w.project(A, "demo-tasklog", 1);
-    w.db.set({ pk: "PROJECT_NAME_RESERVATION#demo-tasklog", sk: "RESERVATION", entityType: "PROJECT_NAME_RESERVATION", companyId: A, name: "demo-tasklog" });
+    w.project(A, "demo-tasklog", 1); w.project(B, "demo-tasklog", 1);
     expect((await w.call(OWNER, "PUT", `/v1/dev/client/projects/demo-tasklog/members/${MEMBER}`)).status).toBe(200);
-    const listed = await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/members");
-    expect(listed.status).toBe(200);
+    expect(JSON.stringify((await w.call(OWNER, "GET", "/v1/dev/client/projects/demo-tasklog/members")).body)).toContain(MEMBER);
     const bob = await w.call(BOB, "GET", "/v1/dev/client/projects/demo-tasklog/members");
-    expect(bob.status).not.toBe(200);
+    expect(bob.status).toBe(200);
     expect(JSON.stringify(bob.body)).not.toContain(MEMBER);
-    // The member, granted on A's project, moves to company B: B has no demo-tasklog, so nothing is listed or readable for them.
+  });
+
+  it("H1 probe (moved person): a member of A's project, moved to B, has no access to B's project of the same name", async () => {
+    const w = world();
+    w.project(A, "demo-tasklog", 1); w.project(B, "demo-tasklog", 1);
+    expect((await w.call(OWNER, "PUT", `/v1/dev/client/projects/demo-tasklog/members/${MEMBER}`)).status).toBe(200);
     expect(names((await w.projects(MEMBER)).body)).toEqual(["demo-tasklog"]);
     w.join(MEMBER, B, "member");
     expect((await w.projects(MEMBER)).body.projects).toEqual([]);
     expect((await w.access(MEMBER)).body.projects).toEqual([]);
     expect((await w.read(MEMBER, "demo-tasklog")).status).toBe(404);
+    await expect(checkProjectAccess(w.deps, { developerId: MEMBER }, "demo-tasklog")).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
   });
 
   it("L2: a catalog pointer that names an unusable row is not a project a change can be fenced on: not found, never stale forever", async () => {
