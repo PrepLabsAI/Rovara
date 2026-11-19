@@ -21,6 +21,8 @@ const BEFORE = [
 ];
 /** What packing adds, and nothing else: the account (ARNs and URLs are built from it), the names parameter's pointer and revision (and the names read from it), the settings, and the layout. */
 const PACKING = ["AGENTX_ACCOUNT_ID", "AGENTX_INSTALL_LAYOUT", "AGENTX_NAMES", "AGENTX_NAMES_PARAMETER", "AGENTX_NAMES_REVISION", "AGENTX_SETTINGS"];
+/** #1171: Slack company mode's switch (packed `cw`), "disabled" while off. */
+const SLACK_COMPANY = ["SLACK_COMPANY_WORKSPACES"];
 /** #1148: what the core engine brought to the legacy install, on purpose: its switches and model settings, its queues and attention email (derived), the keys and the saved environments' roles. */
 const CORE = [
   "ATTENTION_EMAIL_FUNCTION_NAME", "COMPANY_READS", "CORE_DISPATCH_DEAD_LETTER_URL", "CORE_DISPATCH_QUEUE_URL", "CORE_LESSONS_REFLECT_DEAD_LETTER_URL", "CORE_LESSONS_REFLECT_QUEUE_URL",
@@ -109,7 +111,8 @@ describe("production's broker, packed (#1149)", () => {
       const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
-      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE].sort());
+      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY].sort());
+      expect(env.SLACK_COMPANY_WORKSPACES).toBe("disabled");
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
       expect(env.AGENTX_ENV).toBe("production");
       expect(env.COMPANY_SIGNIN).toBe(companySignIn);

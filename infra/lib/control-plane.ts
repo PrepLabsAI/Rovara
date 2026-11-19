@@ -983,8 +983,8 @@ export class ControlPlaneStack extends Stack {
     // DEC 254o (b), L2-2 PR 18a: Slack company mode's switch (stack parameter SlackCompanyWorkspaces, default disabled). Named environments only; every grant it adds is a
     // separate policy under its condition, so nothing is granted while it is off (slack-company-workspaces.ts). DEC 254zg (a), 254zk: its condition also requires company
     // sign-in, so its grants and its "enabled" exist only with both switches on.
-    // #1129: still named environments only; the legacy deployment's Slack stays on its one workspace, with or without company sign-in.
-    const slackCompany = companySignIn === undefined || naming.env === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
+    // #1171: the legacy deployment (production) too, off by default (owner 2026-11-19: no named-only features); off, its Slack stays on its one workspace, as before.
+    const slackCompany = companySignIn === undefined ? undefined : new SlackCompanyWorkspaces(this, "SlackCompanyMode", { naming, requires: companySignIn.isOn });
     if (slackCompany !== undefined) {
       // The Slack Lambda and the channel API's Slack router: the team's binding and company, the linked person (company-scoped link row, sign-in membership below), the
       // project's revisions (company check) and the company's token. Reads only: link notices and codes are written by the broker (#126 holds).
@@ -1011,7 +1011,7 @@ export class ControlPlaneStack extends Stack {
             StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } })]);
       }
       // L2-2 PR 18c: the Slack Lambda's company factory needs the environment's name (the token path) and the install's team (always the legacy path); "" while off.
-      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      slackIngress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
       slackIngress.addEnvironment("SLACK_TEAM_ID", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, signInParameters.slackTeamId.valueAsString, "")));
       // DEC 254zk: the switch's conditioned value (enabled only with company sign-in on too), as every other consumer gets it.
       addBrokerSetting(broker, naming, "slackCompanyWorkspaces", slackCompany.flag);
@@ -1022,7 +1022,7 @@ export class ControlPlaneStack extends Stack {
       slackCompany.grant("Broker", broker.role!, [slackCompany.tokenRead(),
         new iam.PolicyStatement({ sid: "ReadInstallSlackToken", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] })]);
       // DEC 254zk: the channel API's company factory needs the environment's name too (it already has STATE_TABLE_NAME and SLACK_ADAPTER_TEAM_ID); "" while off.
-      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      channelAdapters.ingress.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
@@ -1134,7 +1134,7 @@ export class ControlPlaneStack extends Stack {
         slackCompany.grant("DeveloperTaskNotifier", notifier.function.role!, [slackCompany.tokenRead(),
           slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", [...SLACK_BINDING_READ_KEYS, "ORG#org_????????????????????#WORKSPACE#*"])]);
         notifier.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+        notifier.function.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
         // DeveloperIdentity already reads the token family (Add to Slack); its directory needs the team's binding, on the State table it otherwise never reads.
         slackCompany.grant("DeveloperIdentity", developerSignIn.function.role!, [slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
         developerSignIn.function.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
@@ -1308,7 +1308,7 @@ export class ControlPlaneStack extends Stack {
       // The reconciler already reads and writes the State table; it needs only the company's token for its thread notes.
       slackCompany.grant("SessionReconciler", sessions.reconciler.role!, [slackCompany.tokenRead()]);
       sessions.reconciler.addEnvironment(SLACK_COMPANY_WORKSPACES_VARIABLE, slackCompany.value);
-      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env!, "")));
+      sessions.reconciler.addEnvironment("AGENTX_ENV", Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, naming.env ?? "production", "")));
       // The hosted Slack service (ECS): the team's binding and the company's token for its posts. Its container gets the switch from the slack stack.
       slackCompany.grant("SlackOrchestrator", slackOrchestratorRole, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)]);
       // L2-2 PR 18d: the Slack service's inputs, handed to the slack stack by the deploy (parameters.ts optionalOutputs). DEC 254zk: always there, so that agentx config set

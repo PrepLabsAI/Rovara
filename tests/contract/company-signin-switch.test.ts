@@ -152,9 +152,10 @@ describe("CompanySignIn and CompanySelfServe: the parameters", () => {
     expect(variablesOf(on, onlyId(on, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("disabled");
     expect(grantsSlackWorkspaceWrite(on).map(({ statement }) => JSON.stringify(statement.Resource))).toEqual([expect.stringContaining("secret:agentx/production/slack-workspaces/*")]);
     expect(variablesOf(deployed(legacy, { CompanySignIn: "enabled", CompanySelfServe: "enabled" }), onlyId(on, "DeveloperSignInFunction")).COMPANY_SELF_SERVE).toBe("enabled");
-    // Slack company mode stays named-only: the legacy Slack stack has no copy of the switch.
-    expect(Object.keys(legacySlack.Parameters)).not.toContain("CompanySignIn");
-    expect(JSON.stringify(legacySlack)).not.toMatch(/COMPANY_SIGNIN|COMPANY_SELF_SERVE|company-signin-/u);
+    // #1171: Slack company mode in the legacy deployment too: the legacy Slack stack has the switch's copy (default disabled, kept across releases), and its service reads it.
+    expect(legacySlack.Parameters.CompanySignIn).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
+    expect(JSON.stringify(legacySlack)).toContain("\"Name\":\"COMPANY_SIGNIN\",\"Value\":{\"Ref\":\"CompanySignIn\"}");
+    expect(JSON.stringify(legacySlack)).not.toMatch(/COMPANY_SELF_SERVE|company-signin-/u);
   });
 
   it("drive two conditions: on exactly when CompanySignIn is enabled, and self-serve only with both", () => {
