@@ -67,7 +67,7 @@ const task = (overrides: Partial<Omit<DeveloperTaskRecord, "companyId">> & { com
   createdAt: CREATED, updatedAt: CREATED, companyId: COMPANY_A,
   workflow: { revision: 7, stage: "PLAN_REVIEW", state: "WAITING" } as never,
   ...overrides,
-} as DeveloperTaskRecord);
+});
 
 const slackRow = (personId: string, slackUserId: string, name: string) => ({
   pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: developerIdForSlackUser(slackUserId),
@@ -249,7 +249,9 @@ describe("the web proof: all four rules, read live, no Slack call", () => {
     ["a null company id on the stored task", { companyId: null }, {}],
     ["a caller's copy naming another company", {}, { companyId: COMPANY_B }],
   ])("rule 3: refuses %s", async (_label, storedOverride, givenOverride) => {
-    const stored = task(storedOverride);
+    const stored = task();
+    // Model malformed persisted data without widening the typed fixture helper.
+    Object.assign(stored, storedOverride);
     const h = harness({ tasks: [stored] });
     h.seed(webRow(), subjectRow(P_GALE, GALE_ID));
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, { ...stored, ...givenOverride }, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");

@@ -364,8 +364,10 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     return { w, taskId, task, workspaceId: String(task.workspaceId) };
   }
 
-  it("taskAnswerWorkspace refuses the latest namesake in a real Slack task's own thread", async () => {
-    const { w, taskId } = await startedLegacy();
+  it.each([true, false])("taskAnswerWorkspace refuses the latest namesake in a real Slack task's own thread (pointer: %s)", async (pointer) => {
+    const { w, taskId, workspaceId: id } = await startedLegacy();
+    // Old task threads may outlive their workspace pointer; the binding still checks every answer read.
+    if (!pointer) w.db.delete(`WORKSPACE#${id}`, "DEVELOPER_TASK");
     const taskThread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1700000000.000001`;
     w.db.set(foreignRevision(2));
     const before = structuredClone(w.db.find(() => true));

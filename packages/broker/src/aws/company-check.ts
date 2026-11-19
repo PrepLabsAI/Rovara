@@ -76,6 +76,27 @@ export function recordInCompany(record: unknown, companyId: string | undefined):
   return company.success && company.data === companyId;
 }
 
+function taskProjectCompany(task: { companyId?: unknown }): string {
+  const company = OrgIdSchema.safeParse(task.companyId);
+  if (!company.success) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  return company.data;
+}
+
+/** A task's legacy project read must match the task's persisted, valid company, never a same-name row from another layout. */
+export function assertTaskProjectCompany(task: { companyId?: unknown }, projectRow: unknown): void {
+  if (!recordInCompany(projectRow, taskProjectCompany(task))) {
+    throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  }
+}
+
+/** Read one legacy revision for a persisted task. Missing rows retain the reader's existing handling; present rows must belong to the task before use. */
+export async function readTaskLegacyProject<T>(task: { companyId?: unknown }, read: () => Promise<T>): Promise<T> {
+  taskProjectCompany(task); // Invalid or absent scope must refuse before model/integration reads.
+  const project = await read();
+  if (project !== undefined) assertTaskProjectCompany(task, project);
+  return project;
+}
+
 /** A row in a company's own partition: the partition key (`ORG#<company>#...`) already names its company, so the row may leave `companyId`/`orgId` out (Code's own writers and the
  * switch-over move do). A row that names a company must name THIS one: a present, different (or malformed) owner is drift, never this company's data. */
 export function ownPartitionRow(row: Record<string, unknown>, companyId: string): boolean {

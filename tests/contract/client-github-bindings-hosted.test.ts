@@ -15,7 +15,7 @@ import { createBroker, loadSlackBroker, registerSlackProject } from "../support/
 const STAGING_COMPANY = "org_stagingshape00000000";
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb";
 // DEC 254zzz80 (#1106, batch b21): a named company's project revision lives in that company's own partition (company-layout.ts revisionKeyFor).
-const revisionOf = (db: { get: (pk: string, sk: string) => Record<string, unknown> | undefined }, companyId: string | undefined, name: string) => { const key = revisionKeyFor(companyId, name, 1); return db.get(key.pk as string, key.sk as string); };
+const revisionOf = (db: { get: (pk: string, sk: string) => Record<string, unknown> | undefined }, companyId: string | undefined, name: string) => { const key = revisionKeyFor(companyId, name, 1); return db.get(key.pk, key.sk); };
 const STAGING_INSTALLATION = 700001;
 const OTHER_INSTALLATION = 88;
 const repo = (fullName: string, id: number) => ({ fullName, githubRepositoryId: id, private: true, defaultBranch: "main" });
