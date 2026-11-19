@@ -83,12 +83,13 @@ describe("the core root with the hosted people port", () => {
     expect(built.mock.calls.map(([company]) => company)).toEqual([A]);
   });
 
-  it("with the switch on, the team record and its knowledge search are built for the company too (defined, not 'not wired')", async () => {
+  it("with the switch on, the team record and its knowledge search are built for the company too; context sources stay off on the hosted core (hotfix 0.5.33)", async () => {
     const { root } = await setup({ lessons: "on" });
     expect(root.lessons).toBeDefined();
     const runtime = await root.app.runtimeFor(A);
     expect(runtime.flow.deps.learned).toBeDefined();
-    expect(runtime.flow.deps.contextSources).toBeDefined();
+    // Hotfix 0.5.33 (DEC 254zzz207): the hosted core does not advertise context sources (no route for the worker's source list yet).
+    expect(runtime.flow.deps.contextSources).toBeUndefined();
   });
 
   it("does not build lessons while the lessons switch is off, with the port given", async () => {

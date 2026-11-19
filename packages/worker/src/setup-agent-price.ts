@@ -3,6 +3,16 @@
 // match (regional profiles of one model) the dearest wins. A model with no entry has NO price, and a setup run does not start for it: money is never estimated from a guess.
 import { E2E_AGENT_ELIGIBLE_MODELS, canonicalModelName } from "@agentx/contracts";
 
+/**
+ * Hotfix 0.5.33 (DEC 254zzz207): whether this run's model spend is metered by the broker. On a laptop that is the boot-time model proxy (`AGENTX_MODEL_PROXY_URL`); on a hosted worker
+ * (EC2) there is no such variable, and the broker hands the invocation its own `modelRoute`, which the worker calls through the control plane's model-access route (task-model.ts, design-review-sessions.ts
+ * `operationModelProxy`). Either one meters the spend on the broker's ledger. Neither means the run does not start: no other way in.
+ */
+export function modelSpendIsMetered(environment: NodeJS.ProcessEnv, payload: { modelRoute?: unknown }): boolean {
+  const proxy = environment["AGENTX_MODEL_PROXY_URL"];
+  return (proxy !== undefined && proxy !== "") || payload.modelRoute !== undefined;
+}
+
 export interface ModelPrice { inputPerMTok: number; outputPerMTok: number }
 
 export function setupModelPrice(model: { provider: string; modelId: string }): ModelPrice | undefined {

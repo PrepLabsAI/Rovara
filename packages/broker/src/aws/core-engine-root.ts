@@ -34,7 +34,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   HostedSavedEnvRegistryAuthSchema,
   DEFAULT_CODE_SETTINGS,
-  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS, isContextSourceStage,
+  CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_LESSONS_REFLECT_QUEUE_URL_VARIABLE, CORE_LESSONS_REFLECT_DEAD_LETTER_URL_VARIABLE, LESSONS_REFLECT_QUEUE, IMPLICIT_COMPANY_ID, evalStandInsOn, codeRepositoriesOf, OrgRoleSchema, agentXError, WIKI_BUILD_WORDS,
   when, isSystemOwnerId, type PolicySource, type AdapterRegistry, type HostedPolicyHookSettings, type ProjectRole, type DocumentStore, type OrgId, type OrgRole, type Principal,
 } from "@agentx/contracts";
 import { wakeMergeTracking } from "../services/merge-tracking.js";
@@ -111,7 +111,6 @@ import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { createLocalAfterMerge } from "../local/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
 import { createHostedReviewers } from "../core-host/hosted-reviewers.js";
-import { createHostedDesignReview } from "../core-host/hosted-design-review.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";
 import { applyHostedPolicyHook } from "../core/policy-hook/hosted.js";
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
@@ -884,7 +883,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       ciReporting: inputs.ciReporting === undefined ? policyCiReporting(policySource) : inputs.ciReporting,
       services: (flow, wiring) => {
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
-        createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task), env, blobs: registry.require("object-storage") });
+        // HOTFIX 0.5.33 (DEC 254zzz207), stopgap: the hosted design review is NOT wired. Its reviewer worker reads `GET /v1/internal/design-review/packet`, which has no API Gateway route and
+        // needs a gateway-stamped `x-rovara-workspace` header a hosted worker never sends. With no `flow.designReview` a hosted task never enters the design-review stage (the flow's own "no design review" path).
+        // The proper fix (route + hosted check) is its own lane; the laptop's design review (local/app/design-review.ts) is unchanged. `createHostedDesignReview` stays for that lane.
         const choice = modelChoices.choiceFor(companyId);
         if (choice !== undefined) {
           // Validate immediately before broker-side dispatch handoff, including start, callbacks and scheduled relays.
@@ -946,7 +947,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
             // context sources' `teamSearch`; only this company's eligible stages advertise it.
             teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
-            flow.deps.contextSources = { stageHasSources: async (_task, mode) => isContextSourceStage(mode) && teamRecords.has(companyId) };
+            // HOTFIX 0.5.33 (DEC 254zzz207), stopgap: `flow.deps.contextSources` is NOT set on the hosted core, so no hosted stage asks the worker for the source list (`GET /v1/internal/context-tools`:
+            // no API Gateway route, and a gateway-stamped header a hosted worker never sends, so the stage failed CALLBACK_FORBIDDEN). Hosted stages run without Team record search until the proper fix lane.
+            // The Team record itself (attach, `teamRecords`) is unchanged; the laptop wires its own `contextSources` (local/app/connections.ts).
           }
         }
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
