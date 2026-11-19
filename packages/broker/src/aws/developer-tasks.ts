@@ -1754,6 +1754,7 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
     ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }) } }),
     ...(pulls.length === 0 ? {} : { pullRequests: pulls }),
     ...(spent === undefined ? {} : { costUsd: spent }),
+    ...(money?.money === undefined ? {} : { money: money.money }),
     ...(money === undefined ? {} : { runLimitUsd: money.runLimitUsd }),
   };
   // Only a detail the contract holds goes out (a stored value outside it is left out whole, never cut).

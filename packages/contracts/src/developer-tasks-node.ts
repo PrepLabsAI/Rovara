@@ -1,3 +1,4 @@
+import { TaskMoneyV1Schema } from "./task-money-schema.js";
 import { sharedNoticeKey, type SlackThread, slackThreadSubject } from "./slack.js";
 import { z } from "zod";
 import type { DeveloperTaskShareSchema, ChannelTurnSchema, DeveloperTaskStatusSchema, DeveloperTaskFailureCategorySchema, DeveloperTaskFailureStageSchema, DeveloperTaskFailureSchema, DeveloperTaskRunViewSchema} from "./developer-tasks.js";
@@ -300,6 +301,7 @@ export type DeveloperTaskListItem = z.infer<typeof DeveloperTaskListItemSchema>;
  * recorded, what the task has cost in dollars, and the run limit it is held to (a core task's cap; a workflow task names none). Never a guess.
  */
 export const DeveloperTaskListDetailSchema = z.object({
+  money: TaskMoneyV1Schema.optional(),
   workflow: z.object({ stage: z.string().min(1).max(40), state: z.string().min(1).max(40), revision: z.number().int().nonnegative(), path: z.string().min(1).max(40), blockReason: z.string().max(1000).optional() }).strict().optional(),
   pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048), state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]) }).strict()).max(32).optional(),
   costUsd: z.number().nonnegative().optional(),

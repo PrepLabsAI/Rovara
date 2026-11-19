@@ -181,8 +181,11 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
   it("answers the task's owner with the owner round's own cap and spend, and nobody else; a cap that cannot be read gives nothing", async () => {
     const roundCap = vi.fn(async () => ({ limitUsd: 12, spentUsd: 3.5 }));
     const { routes, own, remember, taskId } = await started({ wiring: { taskActions: { roundCap } } });
-    expect(await routes.taskMoney(own, taskId)).toEqual({ costUsd: 3.5, runLimitUsd: 12 });
-    expect(roundCap).toHaveBeenCalledTimes(1);
+    const read = await routes.taskMoney(own, taskId);
+    expect(read).toMatchObject({ costUsd: 3.5, runLimitUsd: 12, money: { version: 1, taskId, state: "unavailable", stop: { taskMaximumMicros: { state: "available", value: 12_000_000 } } } });
+    const detail = (JSON.parse((await routes.route(get(`/v1/dev/tasks/${taskId}`), own))!.body) as { task: { money?: unknown } }).task;
+    expect(detail.money).toEqual(read?.money);
+    expect(roundCap).toHaveBeenCalledTimes(2);
     roundCap.mockClear();
     // A member of the same company who is not the owner, another company's caller, a script token, a malformed or missing id: nothing, and the cap is never read.
     for (const caller of [remember(FAKE_COMPANY, "admin", "person-admin-000000000004"), remember(OTHER), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }]) expect(await routes.taskMoney(caller, taskId)).toBeUndefined();
@@ -191,9 +194,11 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
     expect(roundCap).not.toHaveBeenCalled();
     // An unknown spend: the limit alone; a throwing or unwired cap: nothing.
     const unknownSpend = await started({ wiring: { taskActions: { roundCap: async () => ({ limitUsd: 4, spentUsd: undefined }) } } });
-    expect(await unknownSpend.routes.taskMoney(unknownSpend.own, unknownSpend.taskId)).toEqual({ runLimitUsd: 4 });
+    expect(await unknownSpend.routes.taskMoney(unknownSpend.own, unknownSpend.taskId)).toMatchObject({ runLimitUsd: 4, money: { state: "unavailable" } });
     const failing = await started({ wiring: { taskActions: { roundCap: async () => { throw new Error("ledger down"); } } } });
     expect(await failing.routes.taskMoney(failing.own, failing.taskId)).toBeUndefined();
+    const noCap = (JSON.parse((await failing.routes.route(get(`/v1/dev/tasks/${failing.taskId}`), failing.own))!.body) as { task: { money: unknown } }).task;
+    expect(noCap.money).toMatchObject({ stop: { taskMaximumMicros: { state: "unavailable" } } });
     const unwired = await started({ wiring: { taskActions: undefined } });
     expect(await unwired.routes.taskMoney(unwired.own, unwired.taskId)).toBeUndefined();
   });

@@ -500,7 +500,7 @@ describe("the AWS readers see only workflow rows", () => {
   });
 
   it("?detail=1 adds each row's detail (Cloud #188 item 5): a core task's workflow stage and state, its cost and run limit from the core's own money read, as its owner; nothing is written", async () => {
-    const { db, task, dev, workspaceReads } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 7.5, spentUsd: 1.25 }) });
+    const { db, task, dev, coreTasks, workspaceReads } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 7.5, spentUsd: 1.25 }) });
     db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
     const row = { pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-11-15T00:00:00.000Z#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: "2026-11-15T00:00:00.000Z", updatedAt: "2026-11-15T00:00:00.000Z" };
     db.set(row);
@@ -508,9 +508,10 @@ describe("the AWS readers see only workflow rows", () => {
     db.onWrite((change) => writes.push(change));
     const listed = await dev(MAYA, "GET", "/v1/dev/tasks?detail=1");
     expect(listed.status).toBe(200);
+    const projected = await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId);
     expect(DeveloperTaskDetailedListResponseSchema.parse(listed.body)).toEqual({ tasks: [{
       taskId: task.taskId, title: "Core work", project: "payments", status: "RUNNING", shared: false, createdAt: row.createdAt, updatedAt: row.updatedAt,
-      workflow: { stage: task.workflow!.stage, state: task.workflow!.state, revision: task.workflow!.revision, path: "QUICK" }, costUsd: 1.25, runLimitUsd: 7.5,
+      workflow: { stage: task.workflow!.stage, state: task.workflow!.state, revision: task.workflow!.revision, path: "QUICK" }, costUsd: 1.25, runLimitUsd: 7.5, money: projected?.money,
     }] });
     expect(writes).toEqual([]);
     expect(workspaceReads()).toEqual([]);
@@ -546,7 +547,7 @@ describe("the AWS readers see only workflow rows", () => {
 
   it("the core's money read for a list row answers only the task's owner in their own company; anyone else gets nothing", async () => {
     const { task, coreTasks, routes, owner } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 9, spentUsd: 2 }) });
-    expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toEqual({ costUsd: 2, runLimitUsd: 9 });
+    expect(await coreTasks.taskMoney!({ developerId: MAYA.developerId, sessionId: "s", name: "Maya" }, task.taskId)).toMatchObject({ costUsd: 2, runLimitUsd: 9, money: { taskId: task.taskId, state: "unavailable" } });
     // Another company's owner, a caller the core does not know, a malformed id and a missing task: nothing.
     expect(await coreTasks.taskMoney!({ developerId: OMAR.developerId, sessionId: "s", name: "Omar" }, task.taskId)).toBeUndefined();
     expect(await coreTasks.taskMoney!({ developerId: "nobody", sessionId: "s", name: "x" }, task.taskId)).toBeUndefined();
