@@ -22,11 +22,15 @@ export const LINEAR_GRAPHQL_URL = "https://api.linear.app/graphql";
  *   read             read an issue, what is asked for now, the workspace and its teams (every app needs it);
  *   write            edit Rovara's own comment in the ticket thread (`commentUpdate`); Linear's comments:create is creation only;
  *   comments:create  post Rovara's answer on an issue (`commentCreate`);
- *   issues:create    move an issue to a named status (`issueUpdate`): Linear's issues:create covers creating AND updating issues.
+ *   issues:create    move an issue to a named status (`issueUpdate`): Linear's issues:create covers creating AND updating issues;
+ *   app:assignable   people can assign (delegate) an issue to Rovara, like a teammate (Linear agents; needs actor=app, as here);
+ *   app:mentionable  people can @mention Rovara in issues, documents and comments (Linear agents; needs actor=app).
+ *                    Owner 2026-11-19: asked for now, before workspaces connect, so a later assign/mention feature needs no re-authorization.
+ *                    Assignments and mentions arrive as Linear "Agent session events" webhooks; until Rovara handles them they change nothing.
  * The targeted scopes stay beside `write` so the consent screen still says what Rovara does. Never `admin` (refused with actor=app, and nothing Rovara does needs it).
  * Linear takes the scopes comma-separated in the authorize address (`LINEAR_SCOPES.join(",")` below). Adding a scope later forces every connected workspace to authorize again, so it is added before workspaces connect.
  */
-export const LINEAR_SCOPES = ["read", "write", "comments:create", "issues:create"] as const;
+export const LINEAR_SCOPES = ["read", "write", "comments:create", "issues:create", "app:assignable", "app:mentionable"] as const;
 
 const TIMEOUT_MS = 10_000;
 const ANSWER_MAX_BYTES = 1_000_000;

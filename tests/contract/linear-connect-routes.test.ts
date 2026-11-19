@@ -96,11 +96,11 @@ describe("connect start", () => {
     const url = new URL(answer.body.authorizeUrl as string);
     expect(`${url.origin}${url.pathname}`).toBe("https://linear.app/oauth/authorize");
     expect(Object.fromEntries(url.searchParams)).toEqual({
-      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,write,comments:create,issues:create", state, actor: "app", prompt: "consent",
+      client_id: LINEAR_CLIENT_ID, redirect_uri: LINEAR_REDIRECT, response_type: "code", scope: "read,write,comments:create,issues:create,app:assignable,app:mentionable", state, actor: "app", prompt: "consent",
       code_challenge: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) as string, code_challenge_method: "S256",
     });
     expect(LINEAR_SCOPES).not.toContain("admin");
-    expect(LINEAR_SCOPES).toEqual(["read", "write", "comments:create", "issues:create"]);
+    expect(LINEAR_SCOPES).toEqual(["read", "write", "comments:create", "issues:create", "app:assignable", "app:mentionable"]);
     expect(answer.body.expiresAt).toBe(new Date(Date.parse(TIME) + 600_000).toISOString());
     expect(w.db.get(linearStateKey(state).pk, "META")).toMatchObject({ companyId: A, personId: PERSON, provider: "linear", status: "live", indexExpiresAt: Date.parse(TIME) / 1000 + 600 + 86_400 });
     expect(w.stored()).not.toContain(state);
