@@ -344,6 +344,9 @@ describe("hosted Merge button: one merge, one answer per request", () => {
       const h = await hosted();
       expect(await h.call("POST", undefined, { raw })).toEqual({ status: 400, body: { error: { code: "CONFIG_INVALID", message: HOSTED_MERGE_WORDS.body } } });
       expect(h.merges).toEqual([]);
+      // Refused before the lock and the audit: neither is left behind.
+      expect(h.audited).toEqual([]);
+      expect(await lockOf(h.world)).toBeUndefined();
     }
   });
 
