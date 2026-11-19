@@ -1,6 +1,7 @@
 import { previewRateReaderFromEnvironment } from "../core-host/start-estimates-rate-read.js";
 import { startEstimates } from "../core/cost/start-estimates.js";
 import { hostedPreviewContext } from "../core-host/start-estimates.js";
+import { recordClosedRunUsage } from "../core/cost/run-usage.js";
 // Engine host (migration plan v3.2 lane E2, step 6): the core engine's composition root on the deployed BROKER. The dispatcher's half is aws/worker-machines/dispatcher-core.ts.
 //
 // One object per function container, built at module load. It reads the switch (ROVARA_CORE_ENGINE) once through the core host app (core-host/app.ts): while the switch is OFF (the default)
@@ -801,6 +802,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
         });
         log({ component: "cost", event: "cost.run_recorded", outcome });
+        try { await recordClosedRunUsage({ store }, task, closedAt); }
+        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
       },
       // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },

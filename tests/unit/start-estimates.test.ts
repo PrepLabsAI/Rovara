@@ -39,7 +39,7 @@ describe("advisory start comparison", () => {
    { request: { quoteVersion: 2 as const, inputText: "changed" } },
    { request: { quoteVersion: 2 as const, options: { secondReview: true } } },
    { context: { ...context, policyRevision: "2" } },
-   ...["model", "source", "price"].map(key => ({ context: { ...context, stages: { code: { [key]: av(key === "model" ? { provider: "anthropic", modelId: "changed" } : key === "source" ? { kind: "rovara_ai", id: "r", name: "R", provider: "anthropic", connectionRevision: "2" } : { authority: "gateway", version: "2", hash: "abc", fetchedAt: asOf }) } } } })),
+   ...["model", "source", "price"].map(key => ({ context: { ...context, stages: { code: { model: un, source: un, price: un, [key]: av(key === "model" ? { provider: "anthropic", modelId: "changed" } : key === "source" ? { kind: "rovara_ai", id: "r", name: "R", provider: "anthropic", connectionRevision: "2" } : { authority: "gateway", version: "2", hash: "abc", fetchedAt: asOf }) } } } })),
   ]) {
    const next = await startEstimates({ store }, { ...input, ...change });
    expect(next.inputsDigest).not.toBe(original.inputsDigest);

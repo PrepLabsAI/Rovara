@@ -1,17 +1,9 @@
 import { z } from "zod";
-import { OrgIdSchema, type QuoteModel, type QuoteSource, type QuotePrice } from "@agentx/contracts";
+import { RateQuoteV1Schema, OrgIdSchema, type QuoteModel, type QuoteSource, type QuotePrice } from "@agentx/contracts";
 import { boundedText, signServiceToken, type OfferedModelsHttpInputs } from "./offered-models-http.js";
 import { readGatewayUrl } from "./gateway-model-access.js";
 import type { TokenSigner } from "../developer/tokens.js";
-const text = z.string().min(1).max(512), nat = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), iso = z.iso.datetime();
-const rates = z.object({ input: nat, output: nat, cacheRead: nat, cacheWrite5m: nat, cacheWrite1h: nat }).strict();
-const value = z.object({ version: z.literal(1), currency: z.literal("USD"), unit: z.literal("micros_per_million_tokens"),
- model: z.object({ provider: text, modelId: text }).strict(), source: z.object({ kind: z.enum(["rovara_ai", "company_key"]), id: text, name: text, provider: text, connectionRevision: text }).strict(),
- ref: z.object({ authority: z.enum(["gateway", "local_provider"]), version: text, hash: z.string().regex(/^[a-f0-9]{64}$/u), fetchedAt: iso }).strict(), region: text, asOf: iso, expiresAt: iso, base: rates,
- longContext: z.array(z.object({ aboveInputTokens: nat.positive(), rates }).strict()).max(16),
- derived: z.array(z.object({ aboveInputTokens: nat, components: z.array(z.enum(["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h"])).max(5).refine(a => new Set(a).size === a.length) }).strict()).max(17),
-}).strict();
-const envelope = z.object({ state: z.literal("available"), value }).strict();
+const envelope = z.object({ state: z.literal("available"), value: RateQuoteV1Schema }).strict();
 export interface PreviewRateQuote { model: QuoteModel; source: QuoteSource; ref: QuotePrice; expiresAt: string }
 export type PreviewRateReader = (companyId: string, model: string) => Promise<PreviewRateQuote | undefined>;
 /** E's existing read only: no model invocation, reservation, key read or new IAM permission. */
@@ -27,7 +19,7 @@ export function previewRateQuoteReader(input: OfferedModelsHttpInputs): PreviewR
    const parsed = envelope.safeParse(JSON.parse(await boundedText(response, 65_536)));
    if (!parsed.success) return undefined;
    const q = parsed.data.value, now = input.now?.() ?? Date.now();
-   if (Date.parse(q.asOf) > now || Date.parse(q.expiresAt) <= now || Date.parse(q.expiresAt) <= Date.parse(q.asOf) || Date.parse(q.ref.fetchedAt) > Date.parse(q.asOf) || !q.longContext.every((b,i,a) => i === 0 || a[i-1]!.aboveInputTokens < b.aboveInputTokens) || !q.derived.every((b,i,a) => (i === 0 || a[i-1]!.aboveInputTokens < b.aboveInputTokens) && (b.aboveInputTokens === 0 || q.longContext.some(c => c.aboveInputTokens === b.aboveInputTokens)))) return undefined;
+   if (Date.parse(q.asOf) > now || Date.parse(q.expiresAt) <= now) return undefined;
    return { model: q.model, source: q.source, ref: q.ref, expiresAt: q.expiresAt };
   };
   try { return await Promise.race([read(), timeout]); } catch { return undefined; }

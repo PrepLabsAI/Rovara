@@ -1,3 +1,4 @@
+import { recordClosedRunUsage } from "../../core/cost/run-usage.js";
 import { OPERATION_SK_PREFIX } from "../../core/task-flow/keys.js";
 import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L9-wire: the wiring. `createLocalApp` joins what the wave-1 lanes built, over the registry `rovara up` made (the lanes know the ports, not each other):
@@ -484,6 +485,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
         ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
       });
       log({ component: "cost", event: "cost.run_recorded", outcome });
+      try { await recordClosedRunUsage({ store }, task, closedAt); }
+      catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
     },
     // Every step runs on the install's one model, so the plan check says the model that wrote the plan checked it.
     installModel: async () => { const choice = await chosen(); return choice === undefined ? undefined : { provider: choice.provider, modelId: choice.model }; },

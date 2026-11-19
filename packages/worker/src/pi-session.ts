@@ -1,3 +1,5 @@
+import type { RunUsageCallV1 } from "@agentx/contracts";
+import { callsOfEntries } from "./usage-calls.js";
 import { createHash } from "node:crypto";
 import { mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -99,7 +101,7 @@ export interface PiSessionHandle {
   /** Pi's own resolved level, even one outside AgentX's six (Pi's "max"); for artifacts only, never telemetry. */
   piThinkingLevel?(): string | undefined;
   /** `costFromProvider` is set only when some usage was priced: true when every priced usage carries the provider's own billed total (Pi 1.5 `cost.totalFromProvider`), as OpenRouter's does. */
-  getSessionStats(): SessionStats & { costFromProvider?: boolean };
+  getSessionStats(): SessionStats & { costFromProvider?: boolean; calls?: RunUsageCallV1[] };
   /** The system prompt pi is using for its next model call, complete with whatever sections the harness adds (cwd, date, project context). Design review records it as what was actually sent. */
   systemPromptText?(): string;
   /** What this session loaded and left out so far, as references only (K1 C5a). Absent for sessions that load no knowledge. */
@@ -809,12 +811,12 @@ function withoutStructuredContent<T>(event: T): T {
   return { ...event, result: kept };
 }
 
-function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats & { costFromProvider?: boolean } {
+function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats & { costFromProvider?: boolean; calls?: RunUsageCallV1[] } {
   // Pi counts every message entry, as getSessionStats does, so the system ones are counted the same way.
   const system = entries.filter((entry) => entry.type === "message" && entry.message.role === "system").length;
   const priced = pricedUsages(entries);
   // Pi's own rule for a sum: provider-reported only when every part is. Left out when nothing was priced, so an unpriced session's stats keep their keys.
-  return { ...stats, totalMessages: stats.totalMessages - system, ...(priced.length === 0 ? {} : { costFromProvider: priced.every((usage) => usage.cost.totalFromProvider === true) }) };
+  return { ...stats, calls: callsOfEntries(entries), totalMessages: stats.totalMessages - system, ...(priced.length === 0 ? {} : { costFromProvider: priced.every((usage) => usage.cost.totalFromProvider === true) }) };
 }
 
 /** Every usage Pi adds to a session's cost that has a price: model messages, tool-result usage, summaries and usage entries. */

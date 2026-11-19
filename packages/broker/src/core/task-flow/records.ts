@@ -1,5 +1,4 @@
-import type { PreviewV2 } from "@agentx/contracts";
-import type { WorkOrigin } from "@agentx/contracts";
+import type { PreviewV2, WorkOrigin, RunStartQuote } from "@agentx/contracts";
 // Lane L6a, task flow core: the records the flow keeps in the document store, and the plain-JSON conversion that goes with them.
 import type {
   DesignReviewBinding,
@@ -25,6 +24,8 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
   /** Server-written on new tasks; absent on records made before task-token support. */
   origin?: WorkOrigin;
   startComparison?: PreviewV2 & { selectedPath: "QUICK" | "FULL" };
+  /** Immutable advisory range captured before any execution; learning only. */
+  usageStartQuote?: RunStartQuote;
   provider: string;
   charge: WorkspaceCharge;
   companyId: string;
