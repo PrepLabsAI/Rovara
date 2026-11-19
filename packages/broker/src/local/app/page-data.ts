@@ -328,7 +328,7 @@ export function createPageExtraActions(deps: Pick<PageDataDeps, "flow" | "compan
           const pending = await getModeChange(deps.secondReview.deps.store, deps.companyId, input.changeId);
           if (pending === undefined || pending.orgId !== deps.companyId) return { ok: false, reason: "not_found", message: "No such proposal." };
           const request = modeApprovalRequest(deps.secondReview.deps, pending);
-          await deps.secondReview.apply(deps.owner, { ...input, proof: context.proof(request) });
+          await deps.secondReview.apply(deps.owner, { ...input, proof: context.proof(request) }, { fresh: context.fresh });
         } else {
           await deps.secondReview.apply(deps.owner, input.action === "mode" && input.scope === "company" ? { action: "mode", scope: "company", mode: input.mode } : input, { fresh: context.fresh });
         }

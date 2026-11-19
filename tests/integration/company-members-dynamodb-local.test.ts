@@ -1,13 +1,14 @@
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { CreateTableCommand, DeleteTableCommand, DynamoDBClient, waitUntilTableExists } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { companyScoped } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 
-// Set this only to a local DynamoDB endpoint. This focused integration test is
-// intentionally skipped when DynamoDB Local is not available.
-const endpoint = process.env.COMPANY_MEMBERS_DYNAMODB_LOCAL_ENDPOINT;
+// Set DYNAMODB_LOCAL_ENDPOINT only to a local DynamoDB endpoint (the older
+// company-specific name remains a fallback). The real-store race is skipped
+// when DynamoDB Local is not available; the waiter regression still runs.
+const endpoint = process.env.DYNAMODB_LOCAL_ENDPOINT ?? process.env.COMPANY_MEMBERS_DYNAMODB_LOCAL_ENDPOINT;
 const endpointIsLoopback = (() => {
   if (endpoint === undefined) return false;
   try {
@@ -21,6 +22,19 @@ const ownerA = "a".repeat(64), ownerB = "b".repeat(64);
 const tableName = `owner-stepdown-${process.pid}`;
 const client = !endpointIsLoopback || endpoint === undefined ? undefined : new DynamoDBClient({ endpoint, region: "us-east-1", credentials: { accessKeyId: "local", secretAccessKey: "local" } });
 const documentClient = client === undefined ? undefined : DynamoDBDocumentClient.from(client);
+const tableWaiterOptions = { maxWaitTime: 20, minDelay: 1, maxDelay: 1 };
+
+it("the local table waiter accepts an already active table", async () => {
+  // Exercise the installed SDK's configuration validation without any network I/O.
+  const probe = new DynamoDBClient({ region: "us-east-1", credentials: { accessKeyId: "local", secretAccessKey: "local" } });
+  const send = vi.spyOn(probe, "send").mockResolvedValue({ Table: { TableStatus: "ACTIVE" }, $metadata: {} } as never);
+  try {
+    expect((await waitUntilTableExists({ client: probe, ...tableWaiterOptions }, { TableName: tableName })).state).toBe("SUCCESS");
+  } finally {
+    send.mockRestore();
+    probe.destroy();
+  }
+});
 
 beforeAll(async () => {
   if (client === undefined) return;
@@ -30,8 +44,8 @@ beforeAll(async () => {
     AttributeDefinitions: [{ AttributeName: "pk", AttributeType: "S" }, { AttributeName: "sk", AttributeType: "S" }],
     KeySchema: [{ AttributeName: "pk", KeyType: "HASH" }, { AttributeName: "sk", KeyType: "RANGE" }],
   }));
-  await waitUntilTableExists({ client, maxWaitTime: 20 }, { TableName: tableName });
-});
+  await waitUntilTableExists({ client, ...tableWaiterOptions }, { TableName: tableName });
+}, 30_000);
 
 afterAll(async () => {
   if (client === undefined) return;
