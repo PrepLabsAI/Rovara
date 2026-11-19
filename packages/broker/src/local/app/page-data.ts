@@ -1,3 +1,4 @@
+import { taskMoneyWords } from "@agentx/contracts";
 import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
 // Lane L9-wire: what the local review pages read (L8's `LocalPageData`) and the one write the task flow owns that the pages ask for (a comment on a plan), over the task flow's
 // records. The pages know nothing of these records; this is the only place that does.
@@ -14,7 +15,7 @@ import { currentDocumentType, waitingDocumentDigest } from "../../core/decisions
 import type { ApprovalOffer, AttentionView, CommentView, LocalActionResult, LocalPageActions, LocalPageData, PendingItemView, PlanPageView, PlanVersionView, ProofReportView } from "../../core/local-pages/views.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask, workspaceOperations } from "../../core/task-flow/reads.js";
-import { costLine, type CostLedger } from "../../core/cost/ledger.js";
+import { readTaskMoney, type CostLedger } from "../../core/cost/ledger.js";
 import { fromDocument, type OperationRecord, type TaskRecord } from "../../core/task-flow/records.js";
 import { iso } from "../../core/task-flow/support.js";
 import { createFeatureStore, type FeatureStoreDeps } from "../../core/report/feature-store.js";
@@ -136,8 +137,8 @@ async function costAndModelsOfPlanPage(deps: PageDataDeps, task: TaskRecord): Pr
     lines.push(`Expected cost: about ${formatRunLimitUsd(estimate.lowUsd)} to ${formatRunLimitUsd(estimate.highUsd)} (${estimate.basis === "history" ? `from ${String(estimate.samples)} earlier runs of this kind` : "the default for this kind of task, until there are enough earlier runs"}). Run limit: ${formatRunLimitUsd(estimate.runLimitUsd)}.`);
   }
   if (deps.cost !== undefined) {
-    const spent = await deps.cost.taskCost(deps.companyId, task.taskId).catch(() => undefined);
-    if (spent !== undefined && spent.entries > 0) lines.push(`Spent so far: ${costLine(spent)}.`);
+    const money = await readTaskMoney({ store: deps.flow.store, companyId: deps.companyId, task, revealPayer: true });
+    lines.push(`Spent so far: ${taskMoneyWords(money)}.`);
   }
   const newest = new Map<string, string>();
   for (const operation of await workspaceOperations(deps.flow, task.workspaceId).catch(() => [])) {

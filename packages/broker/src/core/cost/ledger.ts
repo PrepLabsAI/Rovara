@@ -138,7 +138,7 @@ export function createCostLedger(deps: { store: DocumentStore; metering: Meterin
           { op: "add", path: ["micros"], amount: adds ? result.cost!.micros : 0 },
           { op: "add", path: ["tokensInput"], amount: tokens.input }, { op: "add", path: ["tokensOutput"], amount: tokens.output },
           { op: "add", path: ["tokensCacheRead"], amount: tokens.cacheRead }, { op: "add", path: ["tokensCacheWrite"], amount: tokens.cacheWrite },
-          { op: "add", path: ["entries"], amount: calls }, { op: "add", path: ["unpricedEntries"], amount: adds ? 0 : calls },
+          { op: "add", path: ["revision"], amount: 1 }, { op: "add", path: ["entries"], amount: calls }, { op: "add", path: ["unpricedEntries"], amount: adds ? 0 : calls },
           ...(accounting === undefined ? [] : [{ op: "add" as const, path: ["provisionalCalls"] as const, amount: calls }]), { op: "set", path: ["updatedAt"], value: at.toISOString() },
         ],
         // The total's currency was read above: the update holds only while it is still what that read saw.
@@ -206,3 +206,5 @@ export function taskCostFromTotal(taskId: string, total: StoredDocument | undefi
     entries: number("entries"), unpricedEntries: number("unpricedEntries"), ...(typeof total["updatedAt"] === "string" ? { updatedAt: total["updatedAt"] } : {}),
   };
 }
+
+export { readTaskMoney } from "./task-money.js";

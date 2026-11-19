@@ -1,3 +1,5 @@
+import { readTaskMoney } from "../core/cost/task-money.js";
+import type { TaskMoneyV1 } from "@agentx/contracts";
 // Engine host (lane E2): the core's own handlers, mountable on the deployed developer API behind the switch (`ROVARA_CORE_ENGINE`, default off).
 //
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
@@ -371,6 +373,15 @@ interface Mounted {
   actions?: TaskActions;
 }
 
+/** Task-level payer detail is read only for someone who may act on this task. Scope budgets never leave this read. */
+async function moneyOf(target: Mounted, task: TaskRecord, caller: DeployedCaller, knownCap?: { limitUsd: number }): Promise<TaskMoneyV1> {
+  let revealPayer = false;
+  try { revealPayer = caller.scriptToken === undefined && await target.runtime.flow.deps.access.canAct(caller.principal, task); } catch { /* restricted */ }
+  const cap = revealPayer ? knownCap ?? await target.wiring.taskActions?.roundCap?.(task).catch(() => undefined) : undefined;
+  const maximum = cap === undefined ? undefined : Math.round(cap.limitUsd * 1_000_000);
+  return readTaskMoney({ store: target.runtime.flow.deps.store, companyId: target.runtime.companyId, task, hosted: true, revealPayer, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) });
+}
+
 export interface CoreDevRoutes {
   route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>;
   /**
@@ -383,7 +394,7 @@ export interface CoreDevRoutes {
    * live membership's, the task must be one this caller may act on (the owner moves' rule), and the money is the owner round's own read (`taskActions.roundCap`). `undefined` for anything else (switch off, no member
    * company, another company's task, not theirs, no money wiring, a read that fails): the row then carries no money, never a guess.
    */
-  taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>;
   /**
    * Understand's round on the task list (`GET /v1/dev/tasks?detail=1`, `round`), in process: whether the core's own task read (`GET /v1/dev/tasks/{id}`: the owner, a co-owner, or a reader of its People list) would show this
    * caller the task. The company is the caller's live membership's; the task must be one of that company's. `false` for anything else (switch off, no member company, another company's task, a script token, a malformed or
@@ -450,7 +461,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const cap = await roundCap(record);
         if (cap === undefined || typeof cap.limitUsd !== "number" || !Number.isFinite(cap.limitUsd) || cap.limitUsd < 0) return undefined;
         const spent = cap.spentUsd;
-        return { runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
+        return { money: await moneyOf(target, record, caller, cap), runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
       } catch {
         return undefined;
       }
@@ -523,7 +534,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // same request id answers the first task. The answer is the developer task view, as the old start's.
           const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller)) });
         }
         const task = TASK_READ.exec(path);
         if (task !== null) {
@@ -539,7 +550,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
               return shared;
             })
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller)) });
         }
         const evidence = TASK_EVIDENCE.exec(path);
         if (evidence !== null) {
@@ -557,7 +568,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
           // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
           const stopped = await stopTaskOnRequest(target.runtime.flow.deps, { ...taskCaller, companyRole: membership.role }, cancel[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs) });
+          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs, undefined, await moneyOf(target, stopped.task, caller)) });
         }
         const action = TASK_ACTION.exec(path);
         if (action !== null) {
@@ -573,7 +584,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           else if (action[2] === "workflow/review-findings") await target.actions.resolveFindings(taskCaller, taskId, body, "api-token");
           else await target.actions.continue(taskCaller, taskId, body);
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller)) });
         }
         const rule = coreTaskRuleOf(path, request.method);
         if (rule !== undefined) {
@@ -600,7 +611,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`); a refusal writes nothing.
           await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller)) });
         }
         if (isHostedMergePath(path, request.method)) {
           // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
@@ -617,7 +628,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Only the task's owner (People owners count; a company admin who is not one does not). Anyone who may not read the task gets the missing task's answer whatever they sent; a
           // reader who is not its owner gets fixed words. One request id is one answer, and the round asked is checked.
           const answered = await answerTaskOnRequest(target.runtime.flow.deps, taskCaller, answers[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(answered.task, await taskViewOf(target.runtime.flow.deps, answered.task), target.blobs) });
+          return json(200, { task: await developerTaskView(answered.task, await taskViewOf(target.runtime.flow.deps, answered.task), target.blobs, undefined, await moneyOf(target, answered.task, caller)) });
         }
         if (DECISIONS.test(path)) {
           if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);

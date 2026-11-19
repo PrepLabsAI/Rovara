@@ -1,6 +1,6 @@
 // Lane L9-wire: the task as the clients read it (`DeveloperTaskView`, which the MCP tools and the CLI parse), over the task flow's own smaller view (L6a's `TaskView`). Only what the records
 // hold is filled; the optional parts (events, summary, proof, evidence, testing, run limits) are left out until their lanes are wired.
-import type { ObjectStorage } from "@agentx/contracts";
+import type { TaskMoneyV1, ObjectStorage } from "@agentx/contracts";
 import type { DeveloperTaskListItem } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
@@ -14,7 +14,7 @@ const PLAN_CONTENT_MAX_BYTES = 32_768;
 /** What the task view says of the second review: the lines, and whether the owner must acknowledge on the task page. The acknowledgement is the owner's act on the local page, never a token's. */
 export interface SecondReviewViewPart { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean }
 
-export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage, secondReview?: SecondReviewViewPart): Promise<Record<string, unknown>> {
+export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage, secondReview?: SecondReviewViewPart, money?: TaskMoneyV1): Promise<Record<string, unknown>> {
   const workflow = task.workflow;
   let planContent: string | undefined;
   if (workflow !== undefined && workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
@@ -26,7 +26,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     if (loaded !== undefined) planContent = loaded.markdown.slice(0, PLAN_CONTENT_MAX_BYTES);
   }
   return JSON.parse(JSON.stringify({
-    taskId: task.taskId, ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
+    taskId: task.taskId, ...(money === undefined ? {} : { money }), ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
     ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
