@@ -11,7 +11,7 @@ import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-c
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";
 import {
-  FINISH_BODY, HANDOVER_UNFINISHED, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, NO_PENDING_HANDOVER, NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, PREVIEW_QUERY, REMOVAL_CHANGED, REQUEST_REUSED, SUCCESSOR_INVALID, TOO_MUCH_WORK, routeCompanyMembers,
+  FINISH_BODY, HANDOVER_IN_PROGRESS, HANDOVER_UNFINISHED, MEMBERS_UNAVAILABLE, MEMBER_NOT_FOUND, NO_PENDING_HANDOVER, NOT_FOUND, OWNER_ONLY, OWN_MEMBERSHIP, PREVIEW_QUERY, REMOVAL_CHANGED, REQUEST_REUSED, SUCCESSOR_INVALID, TOO_MUCH_WORK, routeCompanyMembers,
   type CompanyMemberRouteContext,
 } from "../../packages/broker/src/aws/company-member-routes.js";
 import { HANDOVER_LIMITS, HANDOVER_TOO_BIG, memberRemovalKey, pendingHandOverKey } from "../../packages/broker/src/aws/company-member-handover.js";
@@ -432,12 +432,15 @@ describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
     expect(await h.remove(LEAVER, body)).toEqual(refusal(409, "SUCCESSOR_INVALID", SUCCESSOR_INVALID));
     h.ctx.members = helper;
     expect(h.revoked(LEAVER)).toBe(true); expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(LEAVER);
+    // Stuck for a while: anyone with the right role may finish it now (before, only its remover).
+    const key = memberRemovalKey(A, body.requestId);
+    h.db.set({ ...h.db.get(key.pk, key.sk)!, startedAt: new Date(NOW - 3 * 60_000).toISOString() });
     return body;
   };
 
   it("lists the stuck hand-over; an owner finishes it to another live member; everything moves once, audited; the pending entry goes", async () => {
     const h = world(); const removal = await stuck(h);
-    expect((await h.pending()).body["handovers"]).toEqual([{ personId: LEAVER, name: "Lee", removalId: removal.requestId, startedAt: new Date(NOW).toISOString(), removedBy: ADMIN, successorId: PEER }]);
+    expect((await h.pending()).body["handovers"]).toEqual([{ personId: LEAVER, name: "Lee", removalId: removal.requestId, startedAt: new Date(NOW - 3 * 60_000).toISOString(), removedBy: ADMIN, successorId: PEER }]);
     h.as(OWNER);
     const requestId = randomUUID();
     const answer = await h.finish(LEAVER, { requestId, successorId: ADMIN });
@@ -488,6 +491,30 @@ describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
     h.db.set({ ...pendingHandOverKey(A, LEAVER), entityType: "COMPANY_MEMBER_HANDOVER_PENDING", companyId: A, leaverId: LEAVER, removalId: removal.requestId });
     expect(await h.finish(LEAVER, { requestId: randomUUID(), successorId: OWNER })).toEqual(refusal(404, "NOT_FOUND", NO_PENDING_HANDOVER));
     expect(h.ownerOf(agentKey(A, "agt_one", "META"))).toBe(ADMIN);
+  });
+
+  it("a removal still being made is its remover's to finish for a few minutes; a person never removed is not listed", async () => {
+    const h = world(); const removal = await stuck(h);
+    const key = memberRemovalKey(A, removal.requestId);
+    h.db.set({ ...h.db.get(key.pk, key.sk)!, startedAt: new Date(NOW - 30_000).toISOString() });
+    h.as(OWNER);
+    expect(await h.finish(LEAVER, { requestId: randomUUID(), successorId: OWNER })).toEqual(refusal(409, "CHANGE_STALE", HANDOVER_IN_PROGRESS));
+    h.as(ADMIN);
+    expect((await h.finish(LEAVER, { requestId: randomUUID(), successorId: ADMIN })).status).toBe(200);
+    // A STARTED record whose revoke never happened (the person is still a member) is not offered.
+    h.db.set({ ...pendingHandOverKey(A, PEER), entityType: "COMPANY_MEMBER_HANDOVER_PENDING", companyId: A, leaverId: PEER, removalId: "99999999-9999-4999-8999-999999999999" });
+    h.db.set({ ...memberRemovalKey(A, "99999999-9999-4999-8999-999999999999"), entityType: "COMPANY_MEMBER_REMOVAL", companyId: A, removalId: "99999999-9999-4999-8999-999999999999", leaverId: PEER, successorId: ADMIN, expectedRole: "member", by: ADMIN, startedAt: TIME, state: "STARTED" });
+    h.join(PEER, A, "member");
+    expect((await h.pending()).body["handovers"]).toEqual([]);
+  });
+
+  it("a second removal racing the first never re-stamps an ended membership", async () => {
+    const h = world();
+    const store = new CompanySignInStore({ documentClient: h.db, tableName: "SignIn", now: () => NOW });
+    expect(await store.setRevoked(A, LEAVER, true, ADMIN, { expectedRole: "member", successorId: ADMIN })).toBe(true);
+    const before = h.db.get(membershipKey(LEAVER).pk, "COMPANY");
+    await expect(store.setRevoked(A, LEAVER, true, OWNER, { expectedRole: "member", successorId: OWNER })).rejects.toMatchObject({ response: { message: MEMBER_REVOKED } });
+    expect(h.db.get(membershipKey(LEAVER).pk, "COMPANY")).toEqual(before);
   });
 
   it("an owner's stuck hand-over is finished only by an owner", async () => {

@@ -53,6 +53,10 @@ export const SUCCESSOR_INVALID = MEMBER_SUCCESSOR_INVALID;
 export const REMOVAL_CHANGED = MEMBER_CHANGED;
 export const REQUEST_REUSED = "this request id was already used for another removal; start the removal again";
 export const FINISH_BODY = "send a request id and who takes over";
+export const FINISH_UNFINISHED = "the hand-over could not be finished just now; try again with the same request";
+export const HANDOVER_IN_PROGRESS = "this removal is still being made; try again in a few minutes";
+/** How long a hand-over stays its remover's to finish before any owner or admin may (DEC 254zzz101). */
+export const FINISH_AFTER_MS = 2 * 60_000;
 export const NO_PENDING_HANDOVER = "this person has no hand-over waiting to be finished";
 export const HANDOVER_UNFINISHED = "the person was removed but the hand-over did not finish; try the removal again with the same request";
 export const LIST_QUERY = "the list takes an optional cursor this list gave and a limit from 1 to 100";
@@ -260,7 +264,8 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
     const revoked = await ctx.members.revoke(caller, { companyId, personId: leaverId, expectedRole: request.expectedRole, successorId: request.successorId });
     // A refused removal leaves no STARTED record that could end the membership later.
     if (!revoked.ok && revoked.error !== "unavailable") await dropStartedRemoval(handOver, record);
-    else if (!revoked.ok && "message" in revoked) await dropStartedRemoval(handOver, record);
+    // ("Already removed" is not a refusal of THIS removal: another attempt with the same request id may have ended the membership just now.)
+    else if (!revoked.ok && "message" in revoked && revoked.message !== MEMBER_REVOKED) await dropStartedRemoval(handOver, record);
     unwrap(revoked);
     await dropGithubLink(ctx, companyId, leaverId);
   }
@@ -292,7 +297,10 @@ async function removeWithHandOver(ctx: CompanyMemberRouteContext, caller: Develo
 async function listPendingHandOvers(ctx: CompanyMemberRouteContext, companyId: string) {
   let pending: MemberRemovalRecord[];
   try { pending = await pendingHandOvers(handOverContext(ctx), companyId, PENDING_HANDOVERS_MAX); } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
-  const handovers = await Promise.all(pending.map(async (record) => {
+  // Only people whose membership has ended: a removal whose revoke never happened is not a hand-over to finish.
+  const removed = (await Promise.all(pending.map(async (record) => ((await membershipOf(ctx, record.leaverId).catch(() => undefined))?.revokedAt === undefined ? undefined : record))))
+    .filter((record): record is MemberRemovalRecord => record !== undefined);
+  const handovers = await Promise.all(removed.map(async (record) => {
     const name = await personName(ctx, record.leaverId);
     return { personId: record.leaverId, ...(name === undefined ? {} : { name }), removalId: record.removalId, startedAt: record.startedAt, removedBy: record.by, successorId: record.successorId };
   }));
@@ -322,7 +330,9 @@ async function finishStuckHandOver(ctx: CompanyMemberRouteContext, me: z.infer<t
   let record: MemberRemovalRecord | undefined;
   try { record = await pendingHandOver(handOver, companyId, leaverId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", MEMBERS_UNAVAILABLE); }
   if (record === undefined) throw agentXError("NOT_FOUND", NO_PENDING_HANDOVER);
-  if (record.expectedRole === "owner" && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
+  if ((record.expectedRole === "owner" || target.role === "owner") && me.role !== "owner") throw agentXError("FORBIDDEN", OWNER_ONLY);
+  // A removal still being made (its remover between the revoke and the hand-over) is its remover's to finish for a while; only a stuck one is anyone's.
+  if (record.by !== me.personId && ctx.now() - Date.parse(record.startedAt) < FINISH_AFTER_MS) throw agentXError("CHANGE_STALE", HANDOVER_IN_PROGRESS);
   await liveSuccessor(ctx, companyId, request.successorId, leaverId);
   const takeover = { successorId: request.successorId, by: me.personId, requestId: request.requestId };
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -332,15 +342,18 @@ async function finishStuckHandOver(ctx: CompanyMemberRouteContext, me: z.infer<t
       return done({ ...record, handedTo: request.successorId }, moved);
     } catch (error) {
       if (error instanceof HandOverRaced) {
-        const now = await finished().catch(() => undefined);
+        // This request may have finished it (its receipt answers), another may have (nothing is pending any more), or a row moved (plan again).
+        const now = await finished().catch((failure: unknown) => { if (failure instanceof AgentXError && failure.code === "IDEMPOTENCY_CONFLICT") throw failure; return undefined; });
         if (now !== undefined) return now;
+        const still = await pendingHandOver(handOver, companyId, leaverId).catch(() => record);
+        if (still?.removalId !== record.removalId) throw agentXError("NOT_FOUND", NO_PENDING_HANDOVER);
         continue;
       }
       if (error instanceof HandOverTooBig) throw agentXError("CONFIG_INVALID", HANDOVER_TOO_BIG);
       break;
     }
   }
-  throw agentXError("RUNTIME_UNAVAILABLE", HANDOVER_UNFINISHED);
+  throw agentXError("RUNTIME_UNAVAILABLE", FINISH_UNFINISHED);
 }
 
 // ---- the member list

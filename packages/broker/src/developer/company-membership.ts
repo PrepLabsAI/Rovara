@@ -327,6 +327,8 @@ export class CompanySignInStore {
     await this.checkActor(companyId, createdBy);
     const member = await this.membership(personId);
     if (member === undefined || member.companyId !== companyId) return false;
+    // DEC 254zzz84 (5): a fenced removal never ends a membership that has already ended (a second removal racing the first refuses, it does not re-stamp it).
+    if (revoked && (fence.expectedRole !== undefined || fence.successorId !== undefined) && member.revokedAt !== undefined) throw new CompanyMemberRefusal({ ok: false, error: "unavailable", message: MEMBER_REVOKED });
     const next = { ...member };
     if (revoked) { next.revokedAt = this.iso(); next.revokedBy = createdBy ?? "operator"; }
     else { delete next.revokedAt; delete next.revokedBy; }
