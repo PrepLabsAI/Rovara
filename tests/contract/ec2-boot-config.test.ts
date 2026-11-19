@@ -140,11 +140,11 @@ describe("EC2 worker user data", () => {
     expect(() => ec2WorkerUserData(config, incompressible)).toThrow(/worker user data is \d+ bytes compressed; EC2 allows less than 16384/);
   });
 
-  it("exports exactly the variables the boot script requires", () => {
+  it("exports the required boot variables and the reviewed builder default", () => {
     const required = /for name in ([\s\S]*?); do/.exec(bootScript)?.[1]?.split(/[\s\\]+/).filter(Boolean) ?? [];
     const exported = [...ec2WorkerBootScript(config, bootScript).matchAll(/^export (\w+)=/gm)].map((match) => match[1]);
     expect(required.length).toBeGreaterThan(0);
-    expect(exported.sort()).toEqual(required.sort());
+    expect(exported.sort()).toEqual([...required, "AGENTX_SAVED_ENV_BUILDER_IMAGE"].sort());
   });
 
   it("gives the worker the host's Docker and keeps Docker's data on the workspace volume (#121)", () => {
@@ -755,5 +755,25 @@ exec /bin/dd "\${a[@]}"`);
       const huge = failureOf({ padBytes: 200_000, failureFile: `{"pad":"__PAD__","reasons":["probe-wrong-cause:late"],"stage":"qualification-rejected"}` }).status.failure!;
       expect(huge).toEqual({ codes: [] });
     });
+  });
+});
+
+
+describe("saved environment builder boot field", () => {
+  const savedEnvBuilderImage = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-test/saved-env-builder@sha256:${"c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"}`;
+  it("defaults the boot field to the verified rootless digest and renders it explicitly", () => {
+    const image = "moby/buildkit:v0.34.2-rootless@sha256:c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1";
+    expect(Ec2WorkerBootConfigSchema.parse(config).savedEnvBuilderImage).toBe(image);
+    expect(ec2WorkerBootScript(config, bootScript)).toContain(`AGENTX_SAVED_ENV_BUILDER_IMAGE='${image}'`);
+    expect(() => Ec2WorkerBootConfigSchema.parse({ ...config, savedEnvBuilderImage: image.replace("-rootless", "") })).toThrow();
+  });
+  it("carries a digest-pinned same-install mirror into the worker boot", () => {
+    const input = { ...config, logGroupName: "/agentx/test/worker", savedEnvBuilderImage };
+    expect(ec2WorkerBootScript(input, bootScript)).toContain(`AGENTX_SAVED_ENV_BUILDER_IMAGE='${savedEnvBuilderImage}'`);
+  });
+  it("refuses tags, foreign registries and repositories outside the worker's install", () => {
+    for (const image of [savedEnvBuilderImage.replace("@sha256:", ":"), savedEnvBuilderImage.replace("111122223333", "999999999999"), savedEnvBuilderImage.replace("agentx-test", "other"), "moby/buildkit:latest"]) {
+      expect(() => Ec2WorkerBootConfigSchema.parse({ ...config, savedEnvBuilderImage: image })).toThrow();
+    }
   });
 });

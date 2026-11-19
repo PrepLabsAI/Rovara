@@ -20,13 +20,14 @@ export const CLOSED_SETTLE_MS = 24 * 3_600_000;
 const NOT_REPORTED: ReadonlySet<string> = new Set(["test_run"]);
 
 /** Where a task started, as the report says it. */
-export function reportOriginOf(origin: WorkOrigin | undefined): ReportOrigin {
+export function reportOriginOf(origin: WorkOrigin | undefined, ticketSystem?: string): ReportOrigin {
   switch (origin) {
     case "app": return "web";
     case "cli": case "mcp": return "tool";
     case "slack": return "slack";
     case "linear": return "linear";
     case "jira": return "jira";
+    case "tracker": return ticketSystem === "linear" ? "linear" : ticketSystem === "jira" ? "jira" : "other";
     default: return "other";
   }
 }
@@ -55,6 +56,8 @@ export interface ReportStartInput {
   project: string;
   title: string;
   origin: WorkOrigin | undefined;
+  /** The tracker system recorded on the task when it started. */
+  ticket?: { system: string } | undefined;
   /** Set for a task that is not ordinary work (a setup run). */
   purpose?: string | undefined;
   /** The start's time, as `toISOString` writes it. */
@@ -72,7 +75,7 @@ export function reportStartItems(input: ReportStartInput): TransactItem[] {
     if (!startIsReported(input)) return [];
     const key = reportTaskKey(input.companyId, input.receivedAt, input.taskId);
     const row: StoredDocument = {
-      ...key, entityType: "REPORT_TASK", companyId: input.companyId, taskId: input.taskId, project: input.project, title: reportTitleOf(input.title), origin: reportOriginOf(input.origin),
+      ...key, entityType: "REPORT_TASK", companyId: input.companyId, taskId: input.taskId, project: input.project, title: reportTitleOf(input.title), origin: reportOriginOf(input.origin, input.ticket?.system),
       startedAt: input.receivedAt, state: "open", prsOpened: 0, prsMerged: 0, prLinks: [], version: 1,
     };
     return [{ kind: "put", item: row, condition: { op: "notExists", path: ["pk"] } }];

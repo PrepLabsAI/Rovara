@@ -43,6 +43,24 @@ async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<T
 }
 
 describe("the tool list (FR-027, FR-028, SC-010)", () => {
+  it("emits only numeric task money fields and does not invent a range or limit raise", async () => {
+    const mcp = await connect({ getTask: async () => view("SUCCEEDED", {
+      runEstimate: { lowUsd: null, highUsd: "12", runLimitUsd: 10 } as unknown as DeveloperTaskView["runEstimate"],
+      planRunLimit: { currentUsd: null, proposedUsd: 15, raises: true } as unknown as DeveloperTaskView["planRunLimit"],
+    }) });
+    try {
+      await mcp.listTools();
+      const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(result.isError, text(result)).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ run_estimate: { run_limit_usd: 10 }, run_limit_change: { proposed_usd: 15, raises: true } });
+      const structured = result.structuredContent as { run_estimate?: unknown; run_limit_change?: unknown } | undefined;
+      expect(structured?.run_estimate).toEqual({ run_limit_usd: 10 });
+      expect(structured?.run_limit_change).toEqual({ proposed_usd: 15, raises: true });
+      expect(text(result)).not.toMatch(/\$(?:undefined|null|NaN)/);
+    } finally {
+      await mcp.close();
+    }
+  });
   it("lists exactly the module's developer tools, each with an output schema", async () => {
     const { tools } = await (await connect({})).listTools();
     expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));

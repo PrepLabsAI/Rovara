@@ -1,3 +1,4 @@
+import { readTaskMoney } from "../../core/cost/task-money.js";
 // Lane L9-wire: the owner's HTTP routes on `rovara up`: the ones the CLI, the MCP tools and the editor call with the session token. Authentication happens before this (the identity
 // adapter vouches for the principal); nothing here reads who is acting from a body.
 //
@@ -5,6 +6,7 @@
 // (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
 import type { ObjectStorage } from "@agentx/contracts";
 import { AgentXError, DEVELOPER_API_VERSION, agentXError, type Principal } from "@agentx/contracts";
+import type { TaskActionsOptions } from "../../core/task-flow/owner-round.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { loadOwnedTask, taskViewOf } from "../../core/task-flow/reads.js";
@@ -46,6 +48,8 @@ export interface OwnerRoutesDeps {
   diagnosis?: Pick<LocalDiagnosis, "core">;
   /** The owner's moves on a task already running (send back, review findings, continue). Absent: the flow's own, with no money cap held. */
   taskActions?: TaskActions;
+  /** The same configured cap the local model proxy and owner rounds enforce. Absent: no cap. */
+  roundCap?: TaskActionsOptions["roundCap"];
 }
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -86,7 +90,9 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
   const taskActions = deps.taskActions ?? createTaskActions(flow.deps);
   const viewOf = async (caller: TaskCaller, taskId: string): Promise<Record<string, unknown>> => {
     const task = await loadOwnedTask(flow.deps, caller, taskId);
-    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest));
+    const cap = await deps.roundCap?.(task).catch(() => undefined);
+    const maximum = cap === undefined ? undefined : Math.round(cap.limitUsd * 1_000_000);
+    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), await readTaskMoney({ store: flow.deps.store, companyId, task, revealPayer: true, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) }), true);
   };
   const opens: number[] = [];
   let opening = false;

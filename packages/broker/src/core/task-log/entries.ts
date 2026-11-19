@@ -56,14 +56,13 @@ export function pullRequestEntryOf(milestone: Pick<CodeMilestone, "at" | "pullRe
   return TaskLogEntrySchema.parse({ key: `pr:${sha(requests.map((request) => `${request.repository}#${String(request.number)}`).join(","), 12)}`, at: iso(milestone.at), kind: "pr", urls });
 }
 
-/** The plan summary of the plan waiting for review: the card's lines (redacted and bounded again here), its risk tier and the estimate range. One per plan revision. */
+/** The plan summary of the plan waiting for review: the card's lines (redacted and bounded again here), its risk tier, without private cost figures. One per plan revision. */
 export function planSummaryEntryOf(input: { revision: number; at: string; needed: string; lines: readonly string[]; risk: string; estimate?: string | undefined }): TaskLogEntry | undefined {
   const needed = cleanLogText(input.needed, TASK_LOG_PLAN_NEEDED_MAX);
   const lines = input.lines.map((line) => cleanLogText(line, TASK_LOG_PLAN_LINE_MAX)).filter((line) => line !== "").slice(0, TASK_LOG_PLAN_LINES_MAX);
   if (needed === "" || lines.length === 0) return undefined;
   const risk = input.risk === "low" || input.risk === "medium" ? input.risk : "high";
-  const estimate = input.estimate === undefined ? "" : cleanLogText(input.estimate, 80);
-  return TaskLogEntrySchema.parse({ key: `plan:r${String(input.revision)}`, at: iso(input.at), kind: "plan_summary", revision: input.revision, needed, lines, risk, ...(estimate === "" ? {} : { estimate }) });
+  return TaskLogEntrySchema.parse({ key: `plan:r${String(input.revision)}`, at: iso(input.at), kind: "plan_summary", revision: input.revision, needed, lines, risk });
 }
 
 /** The questions Understand asked a person in one round. */

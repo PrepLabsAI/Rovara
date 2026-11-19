@@ -1,4 +1,5 @@
 import "./broker-environment-init.js"; import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { grantKeyFor } from "./company-layout.js";
 import type { SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
@@ -19,13 +20,15 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, ownCompanyAuthorityRows, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
-import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
+import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
+import { grantsPkFor, namedCompany } from "./company-layout.js";
+import { slackChannelBindingPkFor } from "./slack-company-layout.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -335,6 +338,10 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 /** Authority-only reads/fences do not silently consume retry time from the shared SDK client. */
 const taskAuthorityDocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({ ...awsClientConfiguration, maxAttempts: 1 }));
 const kms = new KMSClient(awsClientConfiguration);
+/** The project's own per-task limit as the dispatcher reads it (the company rules service, through this function's own signer): the one reader its Admission and automatic fixing's cap (L4-TA6) share. Built per call; unusable settings refuse. */
+function dispatcherProjectTaskCapOf(): ReturnType<typeof dispatcherProjectTaskCap> {
+  return dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms);
+}
 const sfn = new SFNClient(awsClientConfiguration);
 export const taskPersonProofLambdaClient = new LambdaClient({ ...awsClientConfiguration, maxAttempts: 1 });
 
@@ -342,13 +349,15 @@ export function taskPersonProofInvokeCommand(functionName: string, payload: Uint
   return new InvokeCommand({ FunctionName: functionName, Payload: payload, InvocationType: "RequestResponse" });
 }
 
-function taskPersonRuntimePorts(input: {
+/** The task-person runtime's bounded State reads. `client`: the dispatcher's own DynamoDB client; tests pass a fake (R2-F1 review round 4). */
+export function taskPersonRuntimePorts(input: {
   admission: ReturnType<typeof createTaskAuthorityAdmission>;
   stateTableName: string;
   signInTableName: string | undefined;
   proofArn: string;
   slackTeamId: string;
-}): TaskPersonRuntimePorts {
+}, client: Pick<DynamoDBDocumentClient, "send"> = taskAuthorityDocumentClient): TaskPersonRuntimePorts {
+  const taskAuthorityDocumentClient = client;
   const projection = (attributes: readonly string[]) => ({
     ProjectionExpression: attributes.map((_, index) => `#p${index}`).join(", "),
     ExpressionAttributeNames: Object.fromEntries(attributes.map((attribute, index) => [`#p${index}`, attribute])),
@@ -410,19 +419,41 @@ function taskPersonRuntimePorts(input: {
       return (response as unknown as { Item?: TaskPersonDeveloperRecordProjection }).Item;
     },
     projectAuthorityReader: {
-      async latestRevision(project, admission, abortSignal) {
+      async latestRevision(project, admission, abortSignal, companyId) {
+        // DEC 254zzz80: a named company's project, read from its own partition in the core's order (company-layout.ts: catalog pointer, else the newest non-candidate;
+        // a row naming another company is absent). The first read uses the admitted signal; each later read is admitted before it is issued.
+        const named = namedCompany(companyId);
+        if (named !== undefined) return taskPersonNamedLatestRevision(taskAuthorityDocumentClient, input.stateTableName, named, project, admission, abortSignal);
         const response = await taskAuthorityDocumentClient.send(new QueryCommand(taskPersonLatestRevisionQuery(input.stateTableName, project)), { abortSignal });
         admission.assertOpen();
         return taskPersonRevisionFromResponse(response);
       },
-      async memberships(developerId, admission, abortSignal) {
+      async memberships(developerId, admission, abortSignal, companyId) {
+        // R2-F1 review round 3: a NAMED company's grants are its own partition's (lane 2, `grantsPkFor`); a row there naming another company is dropped.
+        const named = namedCompany(companyId);
+        if (named !== undefined) {
+          const own = await queryPages<{ pk: string; sk: string; projectName: string; role?: string; companyId?: unknown; orgId?: unknown }>({
+            pk: grantsPkFor(named, developerId), prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role", "companyId", "orgId"], abortSignal,
+          });
+          admission.assertOpen();
+          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
+        }
         const result = await queryPages<{ pk: string; sk: string; projectName: string; role?: string }>({
           pk: `MEMBER#${developerId}`, prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role"], abortSignal,
         });
         admission.assertOpen();
         return result;
       },
-      async bindings(teamId, admission, abortSignal) {
+      async bindings(teamId, admission, abortSignal, companyId) {
+        // R2-F1 review round 3: a NAMED company's channel bindings are its own partition's (lane 3, `slackChannelBindingPkFor`); a row naming another company is dropped.
+        const named = namedCompany(companyId);
+        if (named !== undefined) {
+          const own = await queryPages<SlackChannelBinding & { pk: string; sk: string; companyId?: unknown; orgId?: unknown }>({
+            pk: slackChannelBindingPkFor(named, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt", "companyId", "orgId"], abortSignal,
+          });
+          admission.assertOpen();
+          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
+        }
         const result = await queryPages<SlackChannelBinding & { pk: string; sk: string }>({
           pk: channelBindingPartition(SLACK_CHANNEL, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
         });
@@ -518,8 +549,9 @@ export function createProjectSetupDispatchGuard(input: { documentClient: DynamoD
   if (!project || project.registeredBy !== row.ownerKey || project.definition?.revision !== row.projectRevision
     || project.setupApproval?.decision !== "approve" || project.setupApproval.proposalSha256 !== row.proposalSha256
     || project.setupApproval.proposalRef !== row.proposalRef) return "PARKED";
+  // DEC 254zzz98 (one rule; delta review M1): `projectItem` is the LEGACY revision (`PROJECT#<name>`), so the owner's grant is the legacy row beside it, as registration writes it.
   const membership = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
-    Key: { pk: `MEMBER#${row.ownerKey}`, sk: `PROJECT#${row.projectName}` }, ConsistentRead: true }))).Item as { role?: unknown } | undefined;
+    Key: grantKeyFor(undefined, row.ownerKey, row.projectName), ConsistentRead: true }))).Item as { role?: unknown } | undefined;
   if (membership?.role !== "administrator") return "PARKED";
   const approved = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
     Key: { pk: `PROJECT_SETUP#${row.projectName}`, sk: `PROPOSAL#${row.proposalSha256}` }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
@@ -765,11 +797,16 @@ export const handler = withCoreDispatch(workflowHandler, {
           });
         },
         // A dispatch decides nothing for a person, so the identity point names nobody here, and the approvers point (lane L2a) gets no proof key: it refuses every proof.
-        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env), projectTaskCap: dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms) /* L2-5 (b), CORE-DISPATCH-HOOK-SIGNER-20261117: the project's limit through the company rules service, as the broker resolves it (this function's own signer over the policy hook key); unusable: refused */ }), ...gatewayModelKeysModules(process.env)],
+        extraModules: [...hostedSecurityModules({ env: process.env, identity: { membershipOf: async () => undefined, displayNameOf: async () => undefined }, runStopWired: runStopWiredFrom(process.env), projectTaskCap: dispatcherProjectTaskCapOf() /* L2-5 (b), CORE-DISPATCH-HOOK-SIGNER-20261117: the project's limit through the company rules service, as the broker resolves it (this function's own signer over the policy hook key); unusable: refused */ }), ...gatewayModelKeysModules(process.env)],
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
           const read = readHostedAdmissionSettings(process.env);
           return createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, now: () => new Date() });
+        },
+        // L4-TA6: automatic fixing's per-task dollar cap is the task's live cap, read the way the dispatcher's own Admission reads it (the install's task cap lowered to the project's own limit, through the same reader as above); unreadable asks.
+        taskCapUsd: (registry, companyId) => {
+          const read = readHostedAdmissionSettings(process.env);
+          return hostedTaskCapUsd({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, projectTaskCap: dispatcherProjectTaskCapOf() });
         },
         log: (entry) => { process.stderr.write(`${JSON.stringify({ component: "dispatcher", ...entry })}\n`); }, // one JSON line on stderr, as logDispatchFailure's fallback (fixed fields only)
       }).host;

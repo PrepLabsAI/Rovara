@@ -213,3 +213,11 @@ describe("the owner's route", () => {
     expect(await secondRound(no.h)).toHaveLength(0);
   });
 });
+
+it("a co-owner's cap refusal carries no other person's amounts", async () => {
+ const { h } = await seedPlain();
+ const coOwner = { ...h.guest, principal: { ...h.guest.principal, companyId: COMPANY } };
+ h.deps.access.canAct = async () => true;
+ h.deps.access.ownerActing = async () => ({ actorId: OWNER_KEY, authority: { role: "TASK_OWNER" } } as never);
+ await expect(createTaskActions(h.deps, { roundCap: async () => ({ limitUsd: 17.43, spentUsd: 18.61 }) }).continue(coOwner, TASK_ID, ask())).rejects.toMatchObject({ code: "BUDGET_EXCEEDED", message: expect.not.stringMatching(/17\.43|18\.61|\$/u) as string });
+});

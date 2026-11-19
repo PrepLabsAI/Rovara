@@ -2,6 +2,7 @@
 // sealer (the encryption context is its additional data) and a fake Linear behind the fetch seam. Two companies throughout.
 import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { fakeLinear, LINEAR_APP, LINEAR_CLIENT_ID, LINEAR_CLIENT_SECRET, LINEAR_REDIRECT, LINEAR_WEBHOOK_SECRET, testSealer, WORKSPACE_A, WORKSPACE_B, WORKSPACE_C, type FakeWorkspace } from "../support/fake-linear-oauth.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
@@ -9,12 +10,13 @@ import {
   LinearConnections, linearConnectionKey, linearStateKey, linearTeamKey, linearWorkspaceKey, LINEAR_NEEDS_RECONNECT, LINEAR_NOT_CONNECTED, REFRESH_LEASE_MS, REFRESH_MARGIN_MS, type LinearAppSettings,
 } from "../../packages/broker/src/aws/linear-connections.js";
 import {
-  routeLinearConnect, CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, DISCONNECT_STEP_UP, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND,
+  routeLinearConnect, CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND,
 } from "../../packages/broker/src/aws/linear-connect-routes.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_WINDOW_MS, WEBHOOK_REFUSED, type LinearProjectEvent } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearCompanyApiAccess } from "../../packages/broker/src/aws/linear-wiring.js";
 import { LINEAR_SCOPES } from "../../packages/broker/src/aws/linear-oauth-client.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { companyProjectRow } from "../support/company-layout-projects.js";
 
 const PERSON_B = "e".repeat(64);
 const PERSON_C = "c".repeat(64);
@@ -39,9 +41,9 @@ function world() {
     h.db.set({ ...membershipKey(personId), entityType: "COMPANY_MEMBERSHIP", personId, companyId, role, joinedAt: TIME });
     h.db.set({ pk: `SESSION#${sid}`, sk: "META", developerId: personId, amr: "slack", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 86_400 * 60 });
     h.db.set({ pk: `DEVELOPER#${personId}`, sk: "META", displayName: personId === PERSON ? "Ada Admin" : "Bea Admin" });
-    h.claims.sub = personId; h.claims.sid = sid; delete h.claims.step_up_at; delete h.claims.step_up_amr; delete h.claims.azp;
+    h.claims.sub = personId; h.claims.sid = sid; delete h.claims.azp;
   };
-  // The web app's sign-in client: only its tokens carry a step-up (developer-routes.ts authenticateCallerWithStepUp), as Cloud's calls do.
+  // The web app's sign-in client, as Cloud's calls use it.
   h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false,
     installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   const asWeb = (personId: string, companyId: string, role: "owner" | "admin" | "member") => {
@@ -55,7 +57,6 @@ function world() {
     const answer = await h.read(path, { method, headers: { authorization: `Bearer ${part({ alg: "none" })}.${part(h.claims)}.sig` } });
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Answer, raw: answer.body };
   };
-  const stepUp = (ageSeconds = 30) => { h.claims.step_up_at = Math.floor((now - ageSeconds * 1000) / 1000); h.claims.step_up_amr = "passkey"; };
   h.deps.developer.verifyAccessToken = async (authorization) => claimsFor.get(authorization ?? "") ?? h.claims;
   const call = async (method: string, path: string, body?: unknown, who?: { sub: string; sid: string }) => {
     const authorization = who === undefined ? undefined : `Bearer ${who.sub}.${who.sid}`;
@@ -73,10 +74,12 @@ function world() {
   };
   const projectOf = (name: string, companyId: string, grants: Array<{ personId: string; role: "administrator" | "developer" }> = []) => {
     h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId });
-    for (const grant of grants) h.db.set({ pk: `MEMBER#${grant.personId}`, sk: `PROJECT#${name}`, projectName: name, role: grant.role, companyId });
+    h.db.set(companyProjectRow(companyId, name, 1)); // DEC 254zzz80: a named company's project readers read its own partition
+    // DEC 254zzz80: a named company's grants live in its own partition.
+    for (const grant of grants) h.db.set({ pk: `ORG#${companyId}#MEMBER#${grant.personId}`, sk: `PROJECT#${name}`, projectName: name, role: grant.role, companyId });
   };
   const stored = () => JSON.stringify([...h.db.items.values()]);
-  return { ...h, linear, sealer, logs, connections, as, asWeb, web, stepUp, call, start, complete, connect, projectOf, stored, setApp: (value: LinearAppSettings | undefined) => { app = value; },
+  return { ...h, linear, sealer, logs, connections, as, asWeb, web, call, start, complete, connect, projectOf, stored, setApp: (value: LinearAppSettings | undefined) => { app = value; },
     tick: (ms: number) => { now += ms; }, now: () => now };
 }
 
@@ -386,22 +389,24 @@ describe("team pick", () => {
 });
 
 describe("disconnect", () => {
-  it("needs a live owner, then a fresh step-up; then revokes both tokens, unbinds, clears every pick and names the projects", async () => {
+  it("needs a live owner on the Rovara website (no step-up, DEC 254zzz73; website only, DEC 254zzz99); then revokes both tokens, unbinds, clears every pick and names the projects", async () => {
     const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
     w.projectOf("alpha", A); w.projectOf("gamma", A);
     await w.call("PUT", `${BASE}/projects/alpha`, { teamId: "team-a-eng" });
     await w.call("PUT", `${BASE}/projects/gamma`, { teamId: "team-a-ops" });
-    w.asWeb(PERSON, A, "admin"); w.stepUp();
+    w.asWeb(PERSON, A, "admin");
     expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "FORBIDDEN", message: DISCONNECT_OWNER_ONLY } });
-    w.asWeb(PERSON, A, "owner");
-    expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "REAUTH_REQUIRED", message: DISCONNECT_STEP_UP } });
-    // The CLI's token never carries a step-up.
-    w.as(PERSON, A, "owner"); w.stepUp();
-    expect(refused(await w.call("DELETE", BASE))).toEqual({ status: 403, error: { code: "REAUTH_REQUIRED", message: DISCONNECT_STEP_UP } });
-    w.asWeb(PERSON, A, "owner"); w.stepUp(11 * 60);
-    expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "REAUTH_REQUIRED", message: DISCONNECT_STEP_UP } });
+    w.asWeb(PERSON, A, "member");
+    expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "FORBIDDEN", message: DISCONNECT_OWNER_ONLY } });
     expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeDefined();
-    w.stepUp();
+    // Owner DEC 254zzz99: the owner's CLI (or AI-tool) token is refused with the website words, and nothing changes.
+    w.as(PERSON, A, "owner");
+    expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 403, error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } });
+    expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeDefined();
+    expect(w.linear.grants[0]!.revoked).not.toBe(true);
+    w.asWeb(PERSON, A, "owner");
+    expect(w.claims).not.toHaveProperty("step_up_at");
+   
     const grant = w.linear.grants[0]!;
     const answer = await w.web("DELETE", BASE);
     expect(answer.body).toMatchObject({ status: "disconnected", workspaceName: "Acme Linear", projects: ["alpha", "gamma"] });
@@ -421,7 +426,7 @@ describe("disconnect", () => {
   /** A connected company with one pick, ready for an owner to disconnect; returns the tokens Rovara holds. */
   async function connectedOwner() {
     const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
-    w.asWeb(PERSON, A, "owner"); w.stepUp();
+    w.asWeb(PERSON, A, "owner");
     return w;
   }
   const revokeLogs = (w: ReturnType<typeof world>) => w.logs.filter((e) => e.event === "linear.revoke_failed");
@@ -459,7 +464,7 @@ describe("disconnect", () => {
   it("disconnects a company with more picks than the routing read's cap, clearing all of them", async () => {
     const w = world(); w.as(PERSON, A, "owner"); await w.connect(WORKSPACE_A);
     for (let i = 0; i < 502; i++) w.db.set({ ...linearTeamKey(A, `p${String(i)}`), entityType: "LINEAR_PROJECT_TEAM", companyId: A, project: `p${String(i)}`, teamId: "team-a-eng", teamKey: "ENG", teamName: "Engineering", setBy: PERSON, setAt: TIME });
-    w.asWeb(PERSON, A, "owner"); w.stepUp();
+    w.asWeb(PERSON, A, "owner");
     const answer = await w.web("DELETE", BASE);
     expect(answer.status).toBe(200);
     expect((answer.body.projects as string[]).length).toBe(502);
@@ -467,7 +472,7 @@ describe("disconnect", () => {
   });
   it("an owner of another company cannot disconnect A's connection (it is always the caller's own)", async () => {
     const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
-    w.asWeb(PERSON_B, B, "owner"); w.stepUp();
+    w.asWeb(PERSON_B, B, "owner");
     expect(refused(await w.web("DELETE", BASE))).toEqual({ status: 409, error: { code: "LINEAR_NOT_CONNECTED", message: LINEAR_NOT_CONNECTED } });
     expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeDefined();
   });

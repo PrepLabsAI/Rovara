@@ -1,9 +1,9 @@
 // Core task web routes (Cloud #188's Code gaps): the routes the web app needs for a task the core engine owns, each with the old task routes' access rules.
 //   - DEC 254zzz39 (6): `POST /v1/app/tasks/{id}/review-findings`, the task owner's Accept findings on the web page, the one route that accepts a SECURITY finding on a core task: only the web app's own client, only
-//     after a fresh step-up checked against the company's window, only for the task's owner; anyone else is refused and nothing is written.
+//     for the task's owner or a People co-owner (DEC 254zzz73: no step-up); anyone else is refused and nothing is written.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -12,6 +12,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { HOSTED_MERGE_WORDS } from "../../packages/broker/src/core-host/hosted-merge-routes.js";
 import { blockedReview, code, plain, report, TOKEN, tokenId } from "../support/task-actions-world.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -25,7 +26,6 @@ const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session
 const get = (path: string) => ({ method: "GET", path, headers: {}, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
 const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
-const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
 
 /** The company's owner rule as a deployment wires it: only the person the task runs for acts on it (and so reads its money) as its owner here. */
 const isOwner = (principal: { personId: string; provider: string }, task: { developerId: string }) => principal.personId === task.developerId || developerIdOf(principal) === task.developerId;
@@ -77,10 +77,10 @@ const acceptSecurity = (expectedRevision: number) => ({ requestId: randomUUID(),
 const PAGE = (taskId: string) => `/v1/app/tasks/${taskId}/review-findings`;
 
 describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web page", () => {
-  it("accepts it for the task owner on the web app's client with a fresh step-up, as the page; the same request through the API-token route is refused", async () => {
+  it("accepts it for the task owner on the web app's client with no step-up, as the page; the same request through the API-token route is refused", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
-    const page: DeployedCaller = { ...own, webApp: true, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const page: DeployedCaller = { ...own, webApp: true };
     // The old workflow route is an API token's: it never accepts a security finding, whoever calls it.
     const token = await routes.route(post(`/v1/dev/tasks/${taskId}/workflow/review-findings`, acceptSecurity(revision)), page);
     expect(token?.statusCode).toBe(403);
@@ -94,12 +94,12 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(stored.workflow.revision).toBeGreaterThan(revision);
   });
 
-  it("refuses a caller that is not the web app's client, with nothing read or written, whatever step-up it carries", async () => {
+  it("refuses a caller that is not the web app's client, with nothing read or written", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
     const before = JSON.stringify(await world.store.get(taskKey(taskId)));
     const read = vi.spyOn(world.store, "get");
-    for (const caller of [{ ...own, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }] as DeployedCaller[]) {
+    for (const caller of [{ ...own }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never }] as DeployedCaller[]) {
       const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), caller);
       expect(answer?.statusCode).toBe(403);
       expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: SECURITY_ACCEPT_ON_THE_PAGE });
@@ -110,59 +110,46 @@ describe("DEC 254zzz39 (6): the task owner accepts a SECURITY finding on the web
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 
-  it("needs a FRESH step-up with Code's own factor, within the company's window: none, an old one, a Slack round trip, a future one or one past a shorter company window is refused, with nothing written", async () => {
+  it("needs no step-up (DEC 254zzz73): a caller carrying no sign-in time at all is the page for the task's owner", async () => {
     const { world, routes, own, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
-    const before = JSON.stringify(await world.store.get(taskKey(taskId)));
-    for (const stepUp of [undefined, { at: minutesAgo(world, 11), method: "passkey" }, { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "passkey" }]) {
-      const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...own, webApp: true, ...(stepUp === undefined ? {} : { stepUp }) });
-      expect(answer?.statusCode, JSON.stringify(stepUp)).toBe(403);
-      expect(errorOf(answer), JSON.stringify(stepUp)).toEqual({ code: "REAUTH_REQUIRED", message: SECURITY_ACCEPT_ON_THE_PAGE });
-    }
-    expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
-    // The company's own (shorter) window: two minutes old is too old for a one-minute window; a window that cannot be read refuses.
-    for (const [window, refusal] of [[async () => 60, "REAUTH_REQUIRED"], [async () => { throw new Error("rules down"); }, "RUNTIME_UNAVAILABLE"]] as const) {
-      const shorter = await started({ wiring: { stepUpWindowSeconds: window } });
-      const shorterRevision = await blockOnSecurity(shorter.world, shorter.taskId);
-      const answer = await shorter.routes.route(post(PAGE(shorter.taskId), acceptSecurity(shorterRevision)), { ...shorter.own, webApp: true, stepUp: { at: minutesAgo(shorter.world, 2), method: "passkey" } });
-      expect(errorOf(answer).code).toBe(refusal);
-      expect(JSON.stringify(await shorter.world.store.get(taskKey(shorter.taskId)))).toContain(`"revision":${shorterRevision},`);
-    }
+    const answer = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { principal: own.principal, client: own.client, webApp: true });
+    expect(answer?.statusCode, answer?.body).toBe(200);
   });
 
   it("refuses a company member who is not the task's owner, another company's caller and a script token as no such task; nothing is written", async () => {
     const { world, routes, remember, taskId } = await started();
     const revision = await blockOnSecurity(world, taskId);
     const before = JSON.stringify(await world.store.get(taskKey(taskId)));
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const page = { webApp: true as const };
     // A member (even a company admin) of the same company who is not the task's owner.
     for (const role of ["member", "admin"] as const) {
-      const colleague = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY, role, `person-${role}-000000000002`), ...fresh });
+      const colleague = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY, role, `person-${role}-000000000002`), ...page });
       expect(colleague?.statusCode, role).toBe(404);
       expect(errorOf(colleague).code).toBe("TASK_NOT_FOUND");
     }
     // Another company's owner: exactly the answer for an id with no task.
-    const theirs = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(OTHER), ...fresh });
-    const missing = await routes.route(post(PAGE(randomUUID()), acceptSecurity(revision)), { ...remember(OTHER), ...fresh });
+    const theirs = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(OTHER), ...page });
+    const missing = await routes.route(post(PAGE(randomUUID()), acceptSecurity(revision)), { ...remember(OTHER), ...page });
     expect(theirs?.statusCode).toBe(404);
     expect(errorOf(theirs)).toEqual(errorOf(missing));
     expect(theirs!.body).not.toContain(FAKE_COMPANY);
     // A script token never reaches it.
-    const token = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY), ...fresh, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+    const token = await routes.route(post(PAGE(taskId), acceptSecurity(revision)), { ...remember(FAKE_COMPANY), ...page, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
     expect(token?.statusCode).toBe(404);
     expect(JSON.stringify(await world.store.get(taskKey(taskId)))).toBe(before);
   });
 
   it("is served only with the owner moves' wiring and the company's owner rule, for POST only", async () => {
     const unwired = await started({ wiring: { taskActions: undefined } });
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(unwired.world, 1), method: "passkey" } };
-    const answer = await unwired.routes.route(post(PAGE(unwired.taskId), acceptSecurity(1)), { ...unwired.own, ...fresh });
+    const page = { webApp: true as const };
+    const answer = await unwired.routes.route(post(PAGE(unwired.taskId), acceptSecurity(1)), { ...unwired.own, ...page });
     expect(answer?.statusCode).toBe(404);
     expect(errorOf(answer).message).toBe(NOT_ON_THE_CORE_YET);
     const laptopRule = await started({ access: createOwnerTaskAccess() });
-    expect(errorOf(await laptopRule.routes.route(post(PAGE(laptopRule.taskId), acceptSecurity(1)), { ...laptopRule.own, webApp: true, stepUp: { at: minutesAgo(laptopRule.world, 1), method: "passkey" } })).message).toBe(NOT_ON_THE_CORE_YET);
+    expect(errorOf(await laptopRule.routes.route(post(PAGE(laptopRule.taskId), acceptSecurity(1)), { ...laptopRule.own, webApp: true })).message).toBe(NOT_ON_THE_CORE_YET);
     const wired = await started();
-    expect(await wired.routes.route(get(PAGE(wired.taskId)), { ...wired.own, ...fresh })).toBeUndefined();
+    expect(await wired.routes.route(get(PAGE(wired.taskId)), { ...wired.own, ...page })).toBeUndefined();
   });
 });
 
@@ -170,8 +157,8 @@ describe("DEC 254zzz39 (6): a body the move would refuse tells someone who may n
   it("another company's caller and a non-owner get no such task for any body (the task is read before the body)", async () => {
     const { world, routes, remember, taskId } = await started();
     await blockOnSecurity(world, taskId);
-    const fresh = { webApp: true as const, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-    for (const caller of [{ ...remember(OTHER), ...fresh }, { ...remember(FAKE_COMPANY, "member", "person-member-000000000003"), ...fresh }]) {
+    const page = { webApp: true as const };
+    for (const caller of [{ ...remember(OTHER), ...page }, { ...remember(FAKE_COMPANY, "member", "person-member-000000000003"), ...page }]) {
       for (const raw of ["not json", "[1]", "null"]) expect((await routes.route({ ...post(PAGE(taskId)), body: raw }, caller))?.statusCode, raw).toBe(404);
     }
   });
@@ -181,8 +168,11 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
   it("answers the task's owner with the owner round's own cap and spend, and nobody else; a cap that cannot be read gives nothing", async () => {
     const roundCap = vi.fn(async () => ({ limitUsd: 12, spentUsd: 3.5 }));
     const { routes, own, remember, taskId } = await started({ wiring: { taskActions: { roundCap } } });
-    expect(await routes.taskMoney(own, taskId)).toEqual({ costUsd: 3.5, runLimitUsd: 12 });
-    expect(roundCap).toHaveBeenCalledTimes(1);
+    const read = await routes.taskMoney(own, taskId);
+    expect(read).toMatchObject({ costUsd: 3.5, runLimitUsd: 12, money: { version: 1, taskId, state: "unavailable", stop: { taskMaximumMicros: { state: "available", value: 12_000_000 } } } });
+    const detail = (JSON.parse((await routes.route(get(`/v1/dev/tasks/${taskId}`), own))!.body) as { task: { money?: unknown } }).task;
+    expect(detail.money).toEqual(read?.money);
+    expect(roundCap).toHaveBeenCalledTimes(2);
     roundCap.mockClear();
     // A member of the same company who is not the owner, another company's caller, a script token, a malformed or missing id: nothing, and the cap is never read.
     for (const caller of [remember(FAKE_COMPANY, "admin", "person-admin-000000000004"), remember(OTHER), { ...own, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } }]) expect(await routes.taskMoney(caller, taskId)).toBeUndefined();
@@ -191,9 +181,11 @@ describe("Cloud #188 item 5: the task list's money read for a core task", () => 
     expect(roundCap).not.toHaveBeenCalled();
     // An unknown spend: the limit alone; a throwing or unwired cap: nothing.
     const unknownSpend = await started({ wiring: { taskActions: { roundCap: async () => ({ limitUsd: 4, spentUsd: undefined }) } } });
-    expect(await unknownSpend.routes.taskMoney(unknownSpend.own, unknownSpend.taskId)).toEqual({ runLimitUsd: 4 });
+    expect(await unknownSpend.routes.taskMoney(unknownSpend.own, unknownSpend.taskId)).toMatchObject({ runLimitUsd: 4, money: { state: "unavailable" } });
     const failing = await started({ wiring: { taskActions: { roundCap: async () => { throw new Error("ledger down"); } } } });
     expect(await failing.routes.taskMoney(failing.own, failing.taskId)).toBeUndefined();
+    const noCap = (JSON.parse((await failing.routes.route(get(`/v1/dev/tasks/${failing.taskId}`), failing.own))!.body) as { task: { money: unknown } }).task;
+    expect(noCap.money).toMatchObject({ stop: { taskMaximumMicros: { state: "unavailable" } } });
     const unwired = await started({ wiring: { taskActions: undefined } });
     expect(await unwired.routes.taskMoney(unwired.own, unwired.taskId)).toBeUndefined();
   });
@@ -301,5 +293,59 @@ describe("DEC 254zzz44 (a): only the core rule's 'no such task' falls back to th
     const { routes, remember, taskId } = await started({ access, wiring: { taskRules: { route: vi.fn(), readsAsReader } } });
     await expect(routes.route(get(`/v1/dev/tasks/${taskId}`), remember(FAKE_COMPANY, "member", "person-reader-00000000006"))).rejects.toThrow("people store down");
     expect(readsAsReader).not.toHaveBeenCalled();
+  });
+});
+
+describe("DEC 254zzz94: the Merge button through the dev routes", () => {
+  const MERGE = (taskId: string) => `/v1/app/tasks/${taskId}/merge`;
+  const mergeWiring = () => {
+    // The merge core's seams: a spy that throws (the install cannot build them), so a request that reaches past WHERE and WHO says "not set up" and one refused earlier never asks.
+    const repository = vi.fn(() => { throw new Error("no seams in this test"); });
+    return { repository, wiring: { merge: { projectGrantRole: async () => undefined, merge: repository, afterMerge: async () => undefined } } };
+  };
+
+  it("a script token never reaches it (it reads like a missing route), and nothing is read for it", async () => {
+    const { repository, wiring } = mergeWiring();
+    const { routes, own, taskId } = await started({ wiring });
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
+      const answer = await routes.route(request, { ...own, webApp: true, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
+      expect(answer?.statusCode).toBe(404);
+      expect(errorOf(answer).message).toBe("route not found");
+    }
+    expect(repository).not.toHaveBeenCalled();
+  });
+
+  it("a press from the CLI's token is refused with the website words; the web app's own client reaches the merge rules", async () => {
+    const { repository, wiring } = mergeWiring();
+    const { routes, own, taskId } = await started({ wiring });
+    for (const caller of [{ ...own }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never }] as DeployedCaller[]) {
+      const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), caller);
+      expect(answer?.statusCode).toBe(403);
+      expect(errorOf(answer).message).toBe(ON_THE_WEBSITE_MESSAGE);
+    }
+    expect(repository).not.toHaveBeenCalled();
+    // The owner on the website reaches the merge core (here: seams the install cannot build, so "not set up"), for the press and the read alike.
+    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
+    expect(errorOf(page)).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(errorOf(await routes.route(get(MERGE(taskId)), own))).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
+    expect(repository).toHaveBeenCalledTimes(2);
+  });
+
+  it("another company's member reads 'no such task' for this company's task", async () => {
+    const { wiring } = mergeWiring();
+    const { routes, remember, taskId } = await started({ wiring });
+    const other = remember(OTHER, "owner");
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
+      const answer = await routes.route(request, { ...other, webApp: true });
+      expect(answer?.statusCode).toBe(404);
+      expect(errorOf(answer).code).toBe("TASK_NOT_FOUND");
+    }
+  });
+
+  it("an install that does not wire it says merging from Rovara is not set up", async () => {
+    const { routes, own, taskId } = await started();
+    const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
+    expect(answer?.statusCode).toBe(404);
+    expect(errorOf(answer).message).toBe(HOSTED_MERGE_WORDS.notSetUp);
   });
 });

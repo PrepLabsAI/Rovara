@@ -39,7 +39,7 @@ it("only the member helper constructs member payloads and derives company/actor 
       " | ImportDeclaration: import { membershipKey } from "./company-check.js";",
       " | ImportDeclaration: import { CompanyMember, MemberListInput, MemberPersonId, MemberReply, memberCursorPerson, type CompanyMemberReply } from "../developer/company-member-contract.js";",
       " | VariableDeclaration: Request = z.discriminatedUnion("kind", [
-        z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: MemberPersonId }).strict(),
+        z.object({ kind: z.literal("company-member-revoke"), companyId: OrgIdSchema, personId: MemberPersonId, expectedRole: OrgRoleSchema.optional(), successorId: MemberPersonId.optional() }).strict(),
         z.object({ kind: z.literal("company-member-role-set"), companyId: OrgIdSchema, personId: MemberPersonId, role: OrgRoleSchema }).strict(),
         MemberListInput.extend({ kind: z.literal("company-member-list") }).strict(),
     ])",

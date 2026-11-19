@@ -33,3 +33,9 @@ export function storedWords(text: string, max: number): string {
   const points = Array.from(clean);
   return points.length <= max ? clean : points.slice(0, max).join("").trim();
 }
+
+/**
+ * A number in square brackets inside words the model wrote (`items[0]`, `[12]`) must never read as a source marker: the answer's own markers (`[1]`, `[2]`) are added by Code after the check, and the web page refuses a
+ * whole answer whose text names a source it does not have. The brackets become round ones, the number stays (B8, lead 4 journey audit).
+ */
+export const neutralizeSourceMarkers = (text: string): string => text.replace(/\[\s*(\d+)\s*\]/gu, "($1)");

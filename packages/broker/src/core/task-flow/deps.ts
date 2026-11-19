@@ -1,3 +1,4 @@
+import type { PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
@@ -62,11 +63,6 @@ export interface TaskCaller {
    * the body says. It is never an approval proof: nothing that decides anything reads it as one, and no route a token may reach decides anything.
    */
   scriptToken?: { tokenId: string; name: string; permissions: readonly ScriptTokenPermission[]; projects: readonly string[] } | undefined;
-  /**
-   * The person's last step-up (a fresh sign-in with a factor Code owns) as the VERIFIED access token states it (`step_up_at`, `step_up_amr`), set only by the host's sign-in, never from a header, a query or a body.
-   * `at` is an ISO time. Only an act that needs a fresh sign-in reads it (accepting a security finding, `security-accept.ts`), and its age is checked there against the company's window.
-   */
-  stepUp?: { at: string; method: string } | undefined;
   /**
    * DEC 236h: set only by the host's sign-in, from the verified client's registration, when the request comes from the Rovara web app's own sign-in client (the one the operator marked; never an administrator's
    * registration, and never another full-access client such as an AI tool's). Only the act that is the web page's alone (accepting a security finding, `security-accept.ts`) reads it.
@@ -165,8 +161,8 @@ export interface StartExtrasInput {
   ticket?: { system: string; id: string; url: string; parent?: { kind: "project" | "parent_issue" | "epic"; id: string; title: string; url?: string | undefined } } | undefined;
   /** Where the task started (the surface that asked for it). */
   origin?: WorkOrigin | undefined;
-  /** What the task is for when it is not ordinary work (a setup run); absent for ordinary work. */
-  purpose?: "setup_agent" | undefined;
+  /** What the task is for when it is not ordinary feature work; absent for ordinary work. */
+  purpose?: "setup_agent" | "wiki_build" | undefined;
 }
 
 /** Reads what a worker saved (a plan, a document) by its object key. At most `maxBytes` are read; undefined when it is not there. Lane L9a's object-storage port fills it. */
@@ -223,6 +219,8 @@ export interface DesignReviewSteps {
 }
 
 export interface TaskFlowDeps {
+  /** Advisory snapshot captured by the host; never supplied as browser authority. */
+  captureStartComparison?: (input: { project: string; inputText: string }) => Promise<PreviewV2>;
   /** Code's one company (`IMPLICIT_COMPANY_ID`); every port call carries it. */
   companyId: OrgId;
   store: DocumentStore;
@@ -320,6 +318,13 @@ export interface TaskFlowDeps {
    */
   autofix?: { enabled?: boolean; capUsd?: number; roundEstimateUsd?: number };
   taskSpendUsd?: (taskId: string) => Promise<number | undefined>;
+  /**
+   * L4-TA6: the cap this task is held to RIGHT NOW, in dollars: the very value the install's own money checks enforce (hosted: `taskCapOf`, the install's task cap lowered to the project's own per-task limit, the figure
+   * Admission, the per-run stop and the owner's round read; laptop: `taskLimitUsd`, the planning allowance plus the plan's run limit, the figure the round cap reads). Automatic fixing holds its rounds to
+   * this (`min(this, autofix.capUsd)`), never to a larger default, so it cannot keep sending work back until Admission stops the round with a spending-limit refusal. Throws, answers undefined or a number that is not a
+   * finite non-negative one: the cap is unknown, and the owner is asked (the same as an unknown spend). Absent: this install holds no per-task limit (a laptop with `ROVARA_RUN_LIMIT=0`), and `autofix.capUsd` (default 15) is the only cap.
+   */
+  taskCapUsd?: (task: TaskRecord) => Promise<number | undefined>;
   /**
    * Decision 70(c): how far Rovara may act on its own for this task NOW (the stricter of the task's frozen recipe and the company's limit), read again where a merged base's checks would be re-run by themselves and
    * before the reviews that follow. `suggest` asks the owner instead; `unreadable` and `noCompany` say why a `suggest` is not the owner's setting, so the ask is true. Absent: `suggest` (nothing is re-run by

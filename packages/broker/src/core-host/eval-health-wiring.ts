@@ -2,7 +2,9 @@
 // the `eval-reservation` adapter bound there, so an install with none spends nothing), the live members reader, the monthly cap source, the audit sink, the code host (main's heads) and the task flow (the worker's preparation).
 //   - `healthRuns` (the card's button and the route) is true only where a run can really happen: the install's model gateway is configured (a run is metered by it) AND a reservation adapter is bound AND a monthly cap source exists;
 //   - the callback layer (`eval-plan` for the run's own preparation, `eval-health-result`) gets the same deps; its `mainHeads` and `launch` are never used there and answer nothing.
-import type { AdapterRegistry, AuditSink, DocumentStore, OrgId } from "@agentx/contracts";
+import { evalStandInsOn, type AdapterRegistry, type AuditSink, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { createEvalStandInDescriptorSource } from "../core/setup-agent/eval-stand-in-descriptor.js";
+import { fixtureObjectPortOf } from "../core/test-env/fixture-store-aws.js";
 import type { SessionMembers } from "../core/sessions/access.js";
 import { launchEvalHealthRun } from "../core/setup-agent/eval-health-launch.js";
 import { startEvalHealthRun, type EvalHealthRunDeps, type EvalHealthStart } from "../core/setup-agent/eval-health-run.js";
@@ -21,6 +23,7 @@ export interface EvalHealthWiringInput {
   flow?: TaskFlowDeps | undefined;
   /** Whether the install's model gateway is configured. */
   modelGatewayConfigured: boolean;
+  environment?: Readonly<Record<string, string | undefined>>;
 }
 
 /** Whether a health run can really happen on this install for this company: the card shows its button only then. */
@@ -33,7 +36,10 @@ export function evalHealthRunDeps(input: EvalHealthWiringInput): EvalHealthRunDe
   const store: DocumentStore = input.registry.require("storage");
   const audit: AuditSink = input.registry.require("audit-sink");
   const monthlyCap = boundEvalMonthlyCap(input.registry);
+  const env = input.environment ?? {};
+  const standIns = evalStandInsOn(env) ? createEvalStandInDescriptorSource({ store, companyId: input.companyId, objects: fixtureObjectPortOf(input.registry.require("object-storage")) }, env) : undefined;
   return {
+    ...(standIns === undefined ? {} : { standIns }),
     store, companyId: input.companyId, now: input.now, members: input.members, registry: input.registry, ...(monthlyCap === undefined ? {} : { monthlyCap }),
     async mainHeads(project) {
       const flow = input.flow;

@@ -201,8 +201,8 @@ export async function scanTreeForSecrets(root: string, options: SecretScanOption
       }
       const parts = relative.split("/");
       if (info.isDirectory()) {
-        // .git/objects is compressed: nothing in it can be read as text. Everything else of .git is scanned.
-        if (parts.at(-2) === ".git" && (entry.name === "objects" || entry.name === "lfs")) continue;
+        // Git object/LFS bytes count toward the seed cap too. Descend to
+        // measure them, but do not interpret their compressed content below.
         stack.push(relative);
         continue;
       }
@@ -214,14 +214,15 @@ export async function scanTreeForSecrets(root: string, options: SecretScanOption
       if ((info.mode & 0o6000) !== 0) return { ok: false, reason: "unscannable", detail: "unsafe_mode" };
       files += 1;
       if (files > maxFiles) return { ok: false, reason: "unscannable", detail: "too_many_files" };
+      // Count ALL staged bytes, including Git objects and files refused by name.
+      bytes += info.size;
+      if (bytes > maxBytes) return { ok: false, reason: "unscannable", detail: "too_many_bytes" };
+      if (parts.some((part, index) => part === ".git" && (parts[index + 1] === "objects" || parts[index + 1] === "lfs"))) continue;
       const dependency = isDependencyPath(parts.slice(0, -1));
       const byName = fileNameFinding(parts, dependency);
       if (byName !== undefined) { report(byName, relative); continue; }
 
       const want = Math.min(info.size, MAX_SCANNED_BYTES_PER_FILE);
-      // With exact values to find, the whole file is read (in chunks), so the whole file counts.
-      bytes += forbidden.length > 0 ? info.size : want;
-      if (bytes > maxBytes) return { ok: false, reason: "unscannable", detail: "too_many_bytes" };
       if (want === 0) continue;
       let content: Buffer;
       try {

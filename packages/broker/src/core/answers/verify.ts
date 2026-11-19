@@ -7,7 +7,7 @@
 //  - a sentence that fails any of it is removed. A check that could not finish (a read failed, a limit was reached) never counts as a pass: its sentences are removed.
 import { ANSWER_LIMITS, type AnswerCitation } from "@agentx/contracts";
 import { checkClaims, hasCodeToken, type CitationFileReader, type CitationRef, type ClaimToCheck } from "../citations/citation-check.js";
-import { plainLine } from "./frame.js";
+import { neutralizeSourceMarkers, plainLine } from "./frame.js";
 import type { FinalAnswer } from "./protocol.js";
 import { holdsPrivateKey, redactedLines, secretShapedPath } from "./secret-files.js";
 
@@ -116,7 +116,7 @@ export async function checkAnswer(input: { final: FinalAnswer; heads: ReadonlyMa
       }
       own.push(at);
     }
-    kept.push({ text: claim.sentence, sources: [...new Set(own)] });
+    kept.push({ text: neutralizeSourceMarkers(claim.sentence), sources: [...new Set(own)] });
   });
   return { kept, sources, written: sentences.length, dropped, droppedPlaces, complete: checked.complete };
 }

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vitest";
-import { resolvePolicy, companyScoped, AgentXError, IMPLICIT_COMPANY_ID, POLICY_FIELDS, POLICY_FIELD_SURFACES, orgProjectCatalogKey, orgSettingsKey, policyFieldPageOnly, projectRevisionKey } from "@agentx/contracts";
+import { resolvePolicy, companyScoped, AgentXError, ON_THE_WEBSITE_MESSAGE, POLICY_FIELDS, POLICY_FIELD_SURFACES, policyFieldPageOnly, IMPLICIT_COMPANY_ID, orgProjectCatalogKey, orgSettingsKey, projectRevisionKey } from "@agentx/contracts";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { createProjectSettingsPolicySource } from "../../packages/broker/src/aws/project-settings.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -11,31 +11,39 @@ const now = 1_800_000_000_000;
 const person = "d".repeat(64);
 const path = "/v1/dev/projects/web/settings";
 const install = makeKey("install"); const hookKey = makeKey("hook");
+/** DEC 254zzz80: where a person's grants live for this company. */
+const grantPk = (companyId: string) => companyId === IMPLICIT_COMPANY_ID ? `MEMBER#${person}` : `ORG#${companyId}#MEMBER#${person}`;
 /** The switch-over layout (staging 2026-11-17): the company's own catalog pointer and selected revision, with NO companyId (the partition key names the company). */
 function partitionProject(db: FakeDynamoDb, companyId: string, name = "web", revision = 1, extra: Record<string, unknown> = {}) {
   db.set({ ...projectRevisionKey(companyId, name, revision), entityType: "PROJECT", definition: { name, revision } });
   db.set({ ...orgProjectCatalogKey(companyId, name), entityType: "PROJECT_CATALOG", name, latestRevision: revision, ...extra });
 }
-function world() {
+function world(options: { webApp?: boolean } = {}) {
   const db = new FakeDynamoDb();
+  // Owner DEC 254zzz91: by default the caller is the Rovara website's own client (the operator-marked full-access web app); `webApp: false` is the Rovara CLI's own token.
+  const web = options.webApp !== false;
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const webBearer = `Bearer ${part({ alg: "none" })}.${part({ azp: "web-app" })}.sig`;
   let company: string | undefined = COMPANY;
-  // The verified access token's step-up claims (set by the sign-in server, never by a request). Fresh by default so the M4a slice 1 cases keep their meaning.
-  let stepUp: { step_up_at?: unknown; step_up_amr?: unknown } = { step_up_at: now / 1000 - 60, step_up_amr: "email_code" };
+  // Extra claims on the verified access token (DEC 254zzz73: a leftover step-up claim is ignored). None by default.
+  let extraClaims: Record<string, unknown> = {};
   const companies = { companyOf: vi.fn(async () => company) };
   const deps: DeveloperRouteDependencies = { documentClient: db, tableName: "state", companies, now: () => now,
     developer: { issuer: ISSUER, env: "test", methods: { slack: true, oidc: false }, signInTableName: "signin", channelMembers: async () => ({ ok: false, error: "slack_unavailable" }),
-      verifyAccessToken: async () => ({ iss: ISSUER, aud: "agentx-developer", sub: person, amr: "slack", env: "test", sid: "session", iat: now / 1000, exp: now / 1000 + 3600, companyId: COMPANY, ...stepUp }) } };
-  db.set({ pk: "SESSION#session", sk: "META", sessionId: "session", developerId: person, amr: "slack", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600 });
+      verifyAccessToken: async () => ({ iss: ISSUER, aud: "agentx-developer", sub: person, amr: "slack", env: "test", sid: "session", iat: now / 1000, exp: now / 1000 + 3600, companyId: COMPANY, ...(web ? { azp: "web-app" } : {}), ...extraClaims }) } };
+  db.set({ pk: "SESSION#session", sk: "META", sessionId: "session", developerId: person, amr: "slack", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600, ...(web ? { clientId: "web-app" } : {}) });
+  if (web) db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), updatedBy: "admin" });
   db.set({ pk: `DEVELOPER#${person}`, sk: "META", displayName: "Test", revoked: false });
   // A project in BOTH layouts: the legacy shared row (read only by the implicit company's unmarked path) and the company partition rows, without companyId as the switch-over left them.
   const project = (cid: string) => {
     db.set({ pk: "PROJECT#web", sk: "REV#000000000001", companyId: cid, entityType: "PROJECT", definition: { name: "web", revision: 1 } });
     partitionProject(db, cid);
   };
-  const role = (value = "administrator", cid = COMPANY) => db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: cid, projectName: "web", role: value });
+  // DEC 254zzz80: a named company's grant lives in its own partition (the implicit company's in the legacy row); `stamp` names a company on the row itself (drift when it differs).
+  const role = (value = "administrator", cid = COMPANY, stamp = cid) => db.set({ pk: grantPk(cid), sk: "PROJECT#web", companyId: stamp, projectName: "web", role: value });
   project(COMPANY); role();
   const send = vi.spyOn(db, "send");
-  const call = (method = "GET", body?: unknown, query = "", headers: Record<string, string> = {}) => routeDeveloperRequest(deps, { method, path, headers: { authorization: "Bearer fixture", "x-company-id": COMPANY, ...headers }, requestId: "test", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path + query, ISSUER)).catch((error: unknown) => {
+  const call = (method = "GET", body?: unknown, query = "", headers: Record<string, string> = {}) => routeDeveloperRequest(deps, { method, path, headers: { authorization: web ? webBearer : "Bearer fixture", "x-company-id": COMPANY, ...headers }, requestId: "test", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, new URL(path + query, ISSUER)).catch((error: unknown) => {
     if (error instanceof AgentXError) throw Object.assign(new Error(error.message.slice(error.code.length + 2)), { code: error.code, statusCode: error.statusCode });
     throw error;
   });
@@ -45,7 +53,7 @@ function world() {
     return service;
   };
   return { db, deps, send, call, role, project, hook, companies, setCompany: (value: string | undefined) => { company = value; },
-    setStepUp: (value: { step_up_at?: unknown; step_up_amr?: unknown }) => { stepUp = value; } };
+    setExtraClaims: (value: Record<string, unknown>) => { extraClaims = value; } };
 }
 it("absent row and absent hook preserve today's resolution byte for byte", async () => {
   const w = world();
@@ -87,7 +95,8 @@ it("missing or unreadable live membership fails closed without settings access",
 it.each(["developer", "unknown"])("PUT requires this company's project administrator (%s)", async (role) => {
   const w = world(); w.role(role);
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
-  w.role("administrator", B);
+  // A row in the company's own partition that names another company is not its grant.
+  w.role("administrator", COMPANY, B);
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
 });
 it("concurrent writes with the same revision have one winner and one audit", async () => {
@@ -157,13 +166,13 @@ it("failed project and administrator reads never echo their cause", async () => 
 
 // ---- L2-5 (a): the page reads the company's own partition, like the S3 compliance list (#843). ----
 const STAGING = "/v1/dev/projects/web/settings";
-/** Only the switch-over layout: no shared rows at all, no companyId on any project row, and the broker's grant row without a company (as registration writes it). */
+/** Only the switch-over layout: no shared rows at all, no companyId on any project row, and the grant row in the company's own partition without a company field (DEC 254zzz80). */
 function stagingWorld(company = COMPANY) {
   const w = world();
-  for (const row of w.db.find((r) => r.pk === "PROJECT#web" || r.pk === `MEMBER#${person}` || String(r.pk).includes("PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#"))) w.db.delete(String(row.pk), String(row.sk));
+  for (const row of w.db.find((r) => r.pk === "PROJECT#web" || String(r.pk).endsWith(`MEMBER#${person}`) || String(r.pk).includes("PROJECT_CATALOG") || String(r.pk).includes("#PROJECT#"))) w.db.delete(String(row.pk), String(row.sk));
   w.setCompany(company);
   partitionProject(w.db, company);
-  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator" });
+  w.db.set({ pk: grantPk(company), sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator" });
   return w;
 }
 const drop = (db: FakeDynamoDb, key: { pk: string; sk: string }) => db.delete(key.pk, key.sk);
@@ -233,12 +242,14 @@ it("an approved setup's selected revision (it keeps candidate: true) is the proj
 
 it("PUT on a partition project: the grant row may leave the company out, but one naming another company, another project or a lesser role is refused", async () => {
   const w = stagingWorld();
-  const grant = (fields: Record<string, unknown>) => w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", ...fields });
+  const grant = (fields: Record<string, unknown>) => w.db.set({ pk: grantPk(COMPANY), sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", ...fields });
   for (const fields of [{ companyId: B }, { orgId: B }, { companyId: "not-an-org" }, { projectName: "api" }, { role: "developer" }, { role: "owner" }]) {
     grant(fields);
     await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: "project administrator required" });
   }
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
+  // A legacy grant row is never a named company's grant (DEC 254zzz80: no dual read).
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", entityType: "MEMBERSHIP", ownerKey: person, projectName: "web", role: "administrator", companyId: COMPANY });
   await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
   expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS")).toEqual([]);
   grant({ companyId: COMPANY });
@@ -259,7 +270,7 @@ it("the implicit company keeps today's shared path until it is marked, then read
   w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", projectName: "other", orgId: B, role: "administrator" });
   expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2 });
   // A grant naming a named company is refused on the legacy path (projectGrant's stored-company rule).
-  w.role("administrator", COMPANY);
+  w.db.set({ pk: `MEMBER#${person}`, sk: "PROJECT#web", companyId: COMPANY, projectName: "web", role: "administrator" });
   await expect(w.call("PUT", { expectedRevision: 2, preset: "lightweight" })).rejects.toMatchObject({ code: "FORBIDDEN" });
   // Marked: only the partition counts, so a shared-only project is not found.
   w.db.set({ ...orgSettingsKey(I, "PROJECT_CATALOG_INDEX"), verifiedAt: new Date(now).toISOString(), count: 1, runId: "run-1" });
@@ -310,167 +321,79 @@ it("uses the hosted JWKS path for the developer API's hook settings and refuses 
   await expect(w.call()).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
 });
 
-// ---- M4a slice 2: a cost or approval setting is changed on the page, right after a fresh step-up (DEC 236j; the brief's page-only rule) ----
-const PAGE_ONLY_WORDS = "Cost and approval settings are changed on the project's settings page, right after you confirm it's you on the sign-in page: a tool that only holds an API token cannot change them. Confirm it's you, then try again within a few minutes.";
+// ---- M4a slice 2 as changed by DEC 254zzz73: a cost or approval setting needs no step-up; who may change it is the role rule, and the company is the caller's own ----
 const CHANGES: Record<string, unknown> = {
   preset_level: "careful", real_check: "rovara_real_run", ci_fix_rounds: 2, round_time_minutes: 45, model_budget_usd: 7, machine_budget_minutes: 90,
-  extra_review: true, mutation_spot_check: "on", prompt_side_by_side: "on",
+  extra_review: true, mutation_spot_check: "on", prompt_side_by_side: "on", after_merge_revert: "report_only",
 };
-const noStepUp = () => ({ step_up_at: undefined, step_up_amr: undefined });
 const writes = (w: ReturnType<typeof world>) => w.db.find((row) => row.entityType === "PROJECT_SETTINGS");
 
-it("classifies every settings field, and a field nobody classified is page-only", () => {
+it.each(Object.entries(CHANGES))("DEC 254zzz73: the project's administrator changes %s with no step-up claim", async (field, value) => {
+  const w = world();
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { [field]: value } })).toMatchObject({ revision: 1, overrides: { [field]: value } });
+});
+it("DEC 254zzz73: a preset change needs no step-up claim", async () => {
+  const w = world();
+  await w.call("PUT", { expectedRevision: 0, preset: "balanced" });
+  expect(await w.call("PUT", { expectedRevision: 1, preset: "careful" })).toMatchObject({ revision: 2, preset: "careful" });
+});
+it("DEC 254zzz73: a leftover step-up claim of any form is ignored, and nothing in a header, the query or the body changes who may write", async () => {
+  const w = world(); w.setExtraClaims({ step_up_at: String(now / 1000 + 3600), step_up_amr: "slack" });
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).toMatchObject({ revision: 1 });
+  w.role("developer");
+  await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }, `?step_up_at=${now / 1000}&step_up_amr=passkey`, { "x-step-up-at": new Date(now).toISOString() })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 }, stepUp: { at: new Date(now).toISOString(), method: "passkey" } })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  expect(await w.call()).toMatchObject({ revision: 1, overrides: { model_budget_usd: 3 } });
+});
+// Owner DEC 254zzz91: a cost or approval field (and the preset) changes only from the Rovara website's own client; the Rovara CLI's token (or an AI tool holding it) is refused, nothing written.
+const PAGE_ONLY = Object.entries(CHANGES).filter(([field]) => field !== "after_merge_revert");
+it("owner DEC 254zzz91: classifies every settings field, and a field nobody classified is website-only", () => {
   expect(Object.keys(POLICY_FIELD_SURFACES).sort()).toEqual(POLICY_FIELDS.map((field) => field.id).sort());
   expect(policyFieldPageOnly("brand_new_field")).toBe(true);
   expect(policyFieldPageOnly("__proto__")).toBe(true);
   expect(policyFieldPageOnly("constructor")).toBe(true);
   expect(POLICY_FIELDS.filter((field) => !policyFieldPageOnly(field.id)).map((field) => field.id)).toEqual(["after_merge_revert"]);
 });
-it.each(Object.entries(CHANGES))("changing %s without a step-up is refused with fixed words and writes nothing", async (field, value) => {
-  const w = world(); w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { [field]: value } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", statusCode: 403, message: PAGE_ONLY_WORDS });
-  expect(writes(w)).toEqual([]);
-  expect(w.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([]);
-  w.setStepUp({ step_up_at: now / 1000 - 60, step_up_amr: "email_code" });
-  expect(await w.call("PUT", { expectedRevision: 0, overrides: { [field]: value } })).toMatchObject({ revision: 1, overrides: { [field]: value } });
-});
-it("after_merge_revert only offers a revert a person presses, so it needs no step-up", async () => {
-  const w = world(); w.setStepUp(noStepUp());
-  expect(await w.call("PUT", { expectedRevision: 0, overrides: { after_merge_revert: "report_only" } })).toMatchObject({ revision: 1 });
-});
-it("choosing a preset that changes a cost field needs a step-up; choosing the same preset again does not", async () => {
-  const w = world();
-  await w.call("PUT", { expectedRevision: 0, preset: "balanced" });
-  w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 1, preset: "careful" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(await w.call("PUT", { expectedRevision: 1, preset: "balanced" })).toMatchObject({ revision: 2, preset: "balanced" });
-  expect(await w.call()).toMatchObject({ revision: 2 });
-});
-it("clearing an override needs a step-up even when a company minimum hides the effect", async () => {
-  const w = world(); w.hook({ extra_review: true });
-  await w.call("PUT", { expectedRevision: 0, overrides: { extra_review: true } });
-  w.setStepUp(noStepUp());
-  // The effective value is true either way (the company minimum), but the stored choice would show again when the minimum is lifted.
-  await expect(w.call("PUT", { expectedRevision: 1, overrides: {} })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(await w.call()).toMatchObject({ revision: 1, overrides: { extra_review: true } });
-});
-it("dropping an override that equals the preset still changes the page's 'changed here' choice, so it needs a step-up", async () => {
-  const w = world();
-  await w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { extra_review: true } });
-  w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 1, overrides: {} })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(await w.call()).toMatchObject({ revision: 1, overrides: { extra_review: true } });
-});
-it("a repeat of what is stored changes nothing, so it needs no step-up", async () => {
-  const w = world();
-  await w.call("PUT", { expectedRevision: 0, overrides: { extra_review: true } });
-  w.setStepUp(noStepUp());
-  expect(await w.call("PUT", { expectedRevision: 1, overrides: { extra_review: true } })).toMatchObject({ revision: 2 });
-});
-it("reading settings never needs a step-up", async () => {
-  const w = world(); w.setStepUp(noStepUp());
-  expect(await w.call()).toMatchObject({ revision: 0 });
-});
-it.each([
-  ["a step-up older than the window", { step_up_at: now / 1000 - 601, step_up_amr: "email_code" }],
-  ["a step-up from the future", { step_up_at: now / 1000 + 3600, step_up_amr: "email_code" }],
-  ["a method that is not Code's own", { step_up_at: now / 1000 - 60, step_up_amr: "slack" }],
-  ["a time written as text", { step_up_at: String(now / 1000 - 60), step_up_amr: "email_code" }],
-  ["a time without a method", { step_up_at: now / 1000 - 60 }],
-  ["a method without a time", { step_up_amr: "passkey" }],
-])("%s is no step-up", async (_name, claims) => {
-  const w = world(); w.setStepUp(claims);
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+it.each(PAGE_ONLY)("owner DEC 254zzz91: the project's administrator's CLI token cannot change %s (the website words, nothing written)", async (field, value) => {
+  const w = world({ webApp: false });
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { [field]: value } })).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403, message: ON_THE_WEBSITE_MESSAGE });
   expect(writes(w)).toEqual([]);
 });
-it.each(["email_code", "passkey", "company_reauth"])("a fresh %s step-up passes, and the age is read from the token on every request", async (method) => {
-  const w = world(); w.setStepUp({ step_up_at: now / 1000 - 599, step_up_amr: method });
-  expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).toMatchObject({ revision: 1 });
-  w.setStepUp({ step_up_at: now / 1000 - 601, step_up_amr: method });
-  await expect(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
-});
-it("a step-up in a header, the query or the body is never believed", async () => {
-  const w = world(); w.setStepUp(noStepUp());
-  const claimed = { "x-step-up-at": new Date(now - 1000).toISOString(), "x-step-up-method": "passkey", "x-amzn-step-up": "1" };
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } }, `?step_up_at=${now / 1000}&step_up_amr=passkey`, claimed)).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 }, stepUp: { at: new Date(now).toISOString(), method: "passkey" } })).rejects.toThrow(/^invalid settings request$/);
+it("owner DEC 254zzz91: the CLI token cannot change the preset, but may change a report-only field (after_merge_revert) and read", async () => {
+  const w = world({ webApp: false });
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
   expect(writes(w)).toEqual([]);
-});
-async function unavailableWithoutCanary(call: Promise<unknown>): Promise<void> {
-  const error = await call.then(() => undefined, (caught: unknown) => caught as Error & { code?: string });
-  expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-  expect(error?.message).not.toContain("private-canary");
-}
-it("the company's step-up window may only shorten the default, and an unreadable window refuses", async () => {
-  const w = world(); w.setStepUp({ step_up_at: now / 1000 - 120, step_up_amr: "email_code" });
-  const window = vi.fn<(company: string) => Promise<unknown>>(async () => 60);
-  w.deps.developer.stepUpWindowSeconds = window;
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(window).toHaveBeenCalledWith(COMPANY);
-  window.mockResolvedValue(3600);
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).resolves.toMatchObject({ revision: 1 });
-  for (const answer of ["private-canary", -1, 86_401, 1.5, undefined]) {
-    window.mockResolvedValue(answer);
-    await unavailableWithoutCanary(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }));
-  }
-  window.mockRejectedValue(new Error("private-canary"));
-  await unavailableWithoutCanary(w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 4 } }));
+  expect(await w.call("PUT", { expectedRevision: 0, overrides: { after_merge_revert: "report_only" } })).toMatchObject({ revision: 1, overrides: { after_merge_revert: "report_only" } });
   expect(await w.call()).toMatchObject({ revision: 1 });
 });
-it("a change that needs no step-up never asks the company's window", async () => {
-  const w = world(); w.setStepUp(noStepUp());
-  const window = vi.fn<(company: string) => Promise<unknown>>(async () => { throw new Error("must not be asked"); });
-  w.deps.developer.stepUpWindowSeconds = window;
-  expect(await w.call("PUT", { expectedRevision: 0, overrides: { after_merge_revert: "off" } })).toMatchObject({ revision: 1 });
-  expect(window).not.toHaveBeenCalled();
-});
-it("a person who may not write, or who is in another company, learns nothing from the step-up check", async () => {
-  const w = world(); w.setStepUp(noStepUp());
+it("owner DEC 254zzz91: on the website's own client the role and company rules still refuse first", async () => {
+  const w = world();
   w.role("developer");
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  w.role("administrator"); w.setCompany(B);
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.not.toMatchObject({ message: ON_THE_WEBSITE_MESSAGE });
+  expect(writes(w)).toEqual([]);
+});
+it("without a step-up, a person who may not write, or who is in another company, still changes nothing and learns nothing", async () => {
+  const w = world();
+  w.role("developer");
+  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
+  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "FORBIDDEN", message: "project administrator required" });
   w.role("administrator");
   w.setCompany(B); w.send.mockClear();
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "NOT_FOUND", message: "project not found" });
   expect(w.send.mock.calls.some(([c]) => JSON.stringify(c.input).includes("PROJECT_SETTINGS"))).toBe(false);
   w.setCompany(undefined);
   await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  expect(writes(w)).toEqual([]);
 });
-it("a fresh step-up in company B never lets B change company A's settings", async () => {
+it("an administrator in company B never changes company A's settings", async () => {
   const w = world();
   await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } });
   w.setCompany(B); w.project(B); w.role("administrator", B);
   expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 9 } })).toMatchObject({ revision: 1, overrides: { model_budget_usd: 9 } });
   w.setCompany(COMPANY); w.project(COMPANY); w.role();
   expect(await w.call()).toMatchObject({ overrides: { model_budget_usd: 3 } });
-});
-it("a registered full-access client's token carries its own step-up claims the same way", async () => {
-  const w = world();
-  const claims = (extra: Record<string, unknown>) => ({ iss: ISSUER, aud: "web-app", azp: "web-app", sub: person, amr: "slack", env: "test", sid: "client-session", iat: now / 1000, exp: now / 1000 + 3600, ...extra });
-  w.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.test/callback"], loopback: false, secretHash: "f".repeat(64), fullAccess: true, installLevel: true, createdAt: new Date(now - 60_000).toISOString(), updatedAt: new Date(now - 60_000).toISOString(), updatedBy: "admin" });
-  w.db.set({ pk: "SESSION#client-session", sk: "META", sessionId: "client-session", developerId: person, amr: "slack", clientId: "web-app", startedAt: new Date(now).toISOString(), endsAt: now / 1000 + 3600 });
-  w.deps.developer.methods = { slack: true, oidc: false };
-  const token = (extra: Record<string, unknown>) => { w.deps.developer.verifyAccessToken = async () => claims(extra); return w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } }, "", { authorization: `Bearer ${["h", Buffer.from(JSON.stringify({ azp: "web-app" })).toString("base64url"), "s"].join(".")}` }); };
-  await expect(token({})).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  await expect(token({ step_up_at: now / 1000 - 700, step_up_amr: "passkey" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED" });
-  expect(await token({ step_up_at: now / 1000 - 30, step_up_amr: "passkey" })).toMatchObject({ revision: 1 });
-});
-it("a preset change is refused without a step-up even when an override pins preset_level over it", async () => {
-  const w = world();
-  await w.call("PUT", { expectedRevision: 0, preset: "careful", overrides: { preset_level: "balanced" } });
-  w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 1, preset: "lightweight" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(await w.call()).toMatchObject({ revision: 1, preset: "careful" });
-});
-it("a zero company window refuses every step-up", async () => {
-  const w = world(); w.deps.developer.stepUpWindowSeconds = async () => 0;
-  await expect(w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(writes(w)).toEqual([]);
-});
-it("an api_ok change next to unchanged page-only overrides needs no step-up", async () => {
-  const w = world();
-  await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 3, extra_review: true } });
-  w.setStepUp(noStepUp());
-  expect(await w.call("PUT", { expectedRevision: 1, overrides: { model_budget_usd: 3, extra_review: true, after_merge_revert: "off" } })).toMatchObject({ revision: 2 });
 });
 
 // ---- M4a slice 4 (DEC 249a.3): a preset under a company bound is clamped silently; only an explicit override that breaks a bound is refused ----
@@ -548,11 +471,6 @@ it("a preset change a pinned preset_level override hides is named in the audit e
   // Dropping the pin shows the preset in the values themselves, so no extra names.
   expect(events[2]).not.toHaveProperty("presetBefore");
 });
-it("a clamped preset still needs the fresh step-up first", async () => {
-  const w = world(); w.hook({ ci_fix_rounds: 2 }); w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 0, preset: "careful" })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
-  expect(writes(w)).toEqual([]);
-});
 it("the audit row for a clamped preset records what applies and the person's choice the bound hides", async () => {
   const w = world(); w.hook({ real_check: "their_ci_fix" });
   await w.call("PUT", { expectedRevision: 0, preset: "lightweight" });
@@ -576,25 +494,24 @@ it("a change of preset that a company preset_level minimum fully hides still lea
 const BUDGET_ONLY = "Company owners and admins can change only this project's per-task spending limit here. Other project settings need one of the project's admins.";
 function companyAdminWorld(role: string, extra: Record<string, unknown> = {}) {
   const w = stagingWorld();
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
   w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role, joinedAt: new Date(now).toISOString(), ...extra });
   return w;
 }
 
-it.each(["owner", "admin"])("a company %s who is not a project admin changes the per-task limit, with a fresh step-up, and the audit names the basis", async (role) => {
+it.each(["owner", "admin"])("a company %s who is not a project admin changes the per-task limit (no step-up, DEC 254zzz73), and the audit names the basis", async (role) => {
   const w = companyAdminWorld(role);
   expect(await w.call("PUT", { expectedRevision: 0, overrides: { model_budget_usd: 4 } })).toMatchObject({ revision: 1, overrides: { model_budget_usd: 4 } });
   expect(w.db.find((row) => row.entityType === "COMPANY_LOG")).toEqual([expect.objectContaining({ personId: person, basis: `company-${role}`, changes: [expect.objectContaining({ field: "model_budget_usd", after: 4 })] })]);
   // Clearing it is a budget change too.
   expect(await w.call("PUT", { expectedRevision: 1, overrides: {} })).toMatchObject({ revision: 2, overrides: {} });
-  w.setStepUp(noStepUp());
-  await expect(w.call("PUT", { expectedRevision: 2, overrides: { model_budget_usd: 9 } })).rejects.toMatchObject({ code: "REAUTH_REQUIRED", message: PAGE_ONLY_WORDS });
+  expect(await w.call("PUT", { expectedRevision: 2, overrides: { model_budget_usd: 9 } })).toMatchObject({ revision: 3 });
 });
 
 it("a company admin may not change any other setting, not even beside the limit; the stored others may be sent back unchanged", async () => {
   const w = stagingWorld();
   await w.call("PUT", { expectedRevision: 0, preset: "balanced", overrides: { extra_review: true } });
-  w.db.delete(`MEMBER#${person}`, "PROJECT#web");
+  w.db.delete(grantPk(COMPANY), "PROJECT#web");
   w.db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY, role: "admin", joinedAt: new Date(now).toISOString() });
   for (const body of [{ expectedRevision: 1, preset: "careful" }, { expectedRevision: 1, overrides: { extra_review: false, model_budget_usd: 2 } }, { expectedRevision: 1, overrides: { model_budget_usd: 2 } },
     { expectedRevision: 1, overrides: { extra_review: true, ci_fix_rounds: 1, model_budget_usd: 2 } }]) {

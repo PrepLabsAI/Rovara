@@ -46,7 +46,9 @@ async function setup(options: { off?: boolean; teamOff?: boolean; teamCompany?: 
       const companyId = members.get(personId);
       return { Item: companyId === undefined ? undefined : { ...Key, entityType: "COMPANY_MEMBERSHIP", personId, companyId, role: "member", joinedAt: "2026-11-01T00:00:00.000Z" } };
     }
-    if (String(Key?.pk).startsWith("MEMBER#")) return { Item: projectAllowed ? { ...Key, projectName: "payments", role: "developer" } : undefined };
+    // DEC 254zzz80: a person's grant sits in their own company's partition (`ORG#<company>#MEMBER#<person>`), as a named company keeps its grants.
+    const grant = /^ORG#(org_[0-9a-z]{20})#MEMBER#(.+)$/u.exec(String(Key?.pk));
+    if (grant !== null) return { Item: projectAllowed && members.get(grant[2]!) === grant[1] ? { ...Key, projectName: "payments", role: "developer" } : undefined };
     return { Item: await world.store.get(Key as { pk: string; sk: string }) };
   } };
   const root = createBrokerCoreRoot({

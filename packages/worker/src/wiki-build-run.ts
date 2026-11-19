@@ -11,7 +11,7 @@
 //     with its reason when the gateway's upkeep limit refused a nightly refresh's call (read from the gateway's fixed sentence; the broker only takes it from an unattended run).
 import { lstat, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { AgentXError, BUDGET_EXHAUSTED_FAILURE_MESSAGE, WIKI_BUILD_TOOLS, agentXError, upkeepPauseReasonOfText, type UpkeepPauseReason, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
+import { AgentXError, isBudgetExhaustedMessage, WIKI_BUILD_TOOLS, agentXError, upkeepPauseReasonOfText, type UpkeepPauseReason, type WikiBuildPins, type WikiBuildLimits } from "@agentx/contracts";
 import { ModelBudgetExhaustedError, budgetExhaustedFromMarker } from "@agentx/model-runtime";
 import { assistantOutcome, failedTurn } from "./session-events.js";
 import { SETUP_NEXT_TURN_MARGIN_TOKENS, type ModelPrice } from "./setup-agent-price.js";
@@ -229,7 +229,7 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
         const failure = failedTurn(outcome);
         const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
         if (paused !== undefined) { stopped = "upkeep_paused"; pause = paused; void session?.abort().catch(() => undefined); }
-        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || failure?.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE) stopped = "budget_used";
+        else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || isBudgetExhaustedMessage(failure?.message)) stopped = "budget_used";
         else if (failure instanceof AgentXError && failure.code === "MODEL_NOT_ALLOWED") stopped = "needs_ai_key";
       }
       if (type === "tool_execution_end") toolRuns += 1;
@@ -244,7 +244,7 @@ async function writePage(input: WikiRunInput, job: PageJob, baseCents: number, p
       const paused = upkeepPauseReasonOfText(error instanceof Error ? error.message : undefined);
       if (paused !== undefined) { stopped ??= "upkeep_paused"; pause ??= paused; }
       else if (error instanceof AgentXError && error.code === "MODEL_NOT_ALLOWED") stopped ??= "needs_ai_key";
-      else if (error instanceof ModelBudgetExhaustedError || (error instanceof Error && error.message === BUDGET_EXHAUSTED_FAILURE_MESSAGE)) stopped ??= "budget_used";
+      else if (error instanceof ModelBudgetExhaustedError || (error instanceof Error && isBudgetExhaustedMessage(error.message))) stopped ??= "budget_used";
     };
     try { await session.prompt(task); } catch (error) { refused(error); }
     // One more try when the answer is not readable as the page (not when the run was stopped).

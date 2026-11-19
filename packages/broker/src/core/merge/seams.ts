@@ -28,6 +28,9 @@ export interface MergeTask {
   /** Who started the task and who created it, when they are not the owner. */
   startedBy?: { developerId?: string | undefined } | undefined;
   creatorId?: string | undefined;
+  /** The second review's opinion and the owner's acknowledgements (the merge card's wait, `secondReviewMergeWait`), as the task record holds them. Absent: no second review. */
+  secondOpinion?: unknown;
+  secondReviewAcknowledged?: readonly string[] | undefined;
   /** The task's frozen agent: its recipe's digest, which an automatic decision is bound to. */
   agent?: { agentId?: string | undefined; version?: number | "draft" | undefined; digest?: string | undefined } | undefined;
 }

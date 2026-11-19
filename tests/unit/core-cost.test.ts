@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_RUN_ESTIMATE_USD, MAX_RUN_LIMIT_USD, runCostKey, type MeterEntry, type Metering, type OrgId, type PriceTable } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";
-import { costLine, costUsdOf, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
+import { costLine, costUsdOf, createCostLedger, type LearningMeterEntry } from "../../packages/broker/src/core/cost/ledger.js";
 import { estimatePathOf, estimateRun, planRunLimit, recordRunCost, runCostInputOf } from "../../packages/broker/src/core/cost/estimate.js";
 import { remainingUsd, taskLimitUsd } from "../../packages/broker/src/core/cost/limits.js";
 
@@ -210,4 +210,44 @@ describe("the limit a task's model calls are held to", () => {
     expect(remainingUsd(2.1, 0.3)).toBe(1.8);
     expect(remainingUsd(8, undefined)).toBe(0);
   });
+});
+
+import { chargeReceipt } from "./charge-receipt-fixture.js";
+import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+it("atomically replaces charge revisions on the original day across months and detects conflicting replay", async () => {
+  const store = new MemoryDocumentStore();
+  const ledger = createCostLedger({ store, metering: createPriceTableMetering(table), now: () => new Date("2026-02-02T00:00:00.000Z") });
+  const apply = Reflect.get(ledger, "applyChargeReceipt") as (r: unknown) => Promise<unknown>;
+  expect(apply).toBeTypeOf("function");
+  const first = chargeReceipt({ companyId: ORG, taskId: TASK });
+  expect(await apply(first)).toMatchObject({ result: "applied", deltaMicros: 80 });
+  expect(await apply(first)).toMatchObject({ result: "duplicate", deltaMicros: 0 });
+  const final = chargeReceipt({ ...first, revision: 2, replacesRevision: 1, status: "final", reason: "reported_cost", amountMicros: { state: "available", value: 30 }, providerCostMicros: { state: "available", value: 30 }, recordedAt: "2026-02-02T00:00:00.000Z" });
+  expect(await apply(final)).toMatchObject({ result: "applied", deltaMicros: -50 });
+  expect(await apply(first)).toMatchObject({ result: "older" });
+  await expect(apply({ ...final, amountMicros: { state: "available", value: 31 } })).rejects.toThrow();
+  const up = { ...final, revision: 3, replacesRevision: 2, amountMicros: { state: "available", value: 90 }, providerCostMicros: { state: "available", value: 90 } };
+  expect(await apply(up)).toMatchObject({ result: "applied", deltaMicros: 60 });
+  expect(await ledger.taskCost(ORG, TASK)).toMatchObject({ micros: 90, entries: 1, unpricedEntries: 0 });
+  expect(await ledger.companyDayCost(ORG, "2026-01-31")).toMatchObject({ usdMicros: 90, entries: 1 });
+  expect(await ledger.companyDayCost(ORG, "2026-02-02")).toMatchObject({ usdMicros: 0, entries: 0 });
+  const total = await store.get({ pk: costPartition(ORG, TASK), sk: "TOTAL" });
+  expect(total).toMatchObject({ finalMicros: 90, estimatedMicros: 0, awaitingUsageMicros: 0 });
+  expect((await store.query({ pk: costPartition(ORG, TASK), sk: { op: "beginsWith", prefix: "ADJUST#" } })).items).toHaveLength(3);
+  expect(await store.get(companyDayKey(ORG, "2026-01-31"))).toMatchObject({ loadMicros: 90 });
+});
+
+
+it("drops malformed learning metadata while keeping estimated and awaiting-usage money accounting", async () => {
+  const store = new MemoryDocumentStore();
+  const ledger = createCostLedger({ store, metering: createPriceTableMetering(table), now: () => new Date("2026-11-09T10:00:00.000Z") });
+  const invalid = { runUsage: { callId: "broken" }, runUsageCalls: [{ callId: "broken" }] };
+  const priced = { ...entry("learning-bad"), ...invalid } as unknown as LearningMeterEntry;
+  expect(await ledger.recordUsage(priced, { status: "estimated" })).toMatchObject({ counted: true, cost: { micros: 4_500_000 } });
+  const pending = { ...entry("learning-missing", { usage: usage("unknown", 0, 0) }), ...invalid } as unknown as LearningMeterEntry;
+  expect(await ledger.recordUsage(pending, { status: "awaiting_usage", missingCalls: 2 })).toMatchObject({ counted: true, cost: null });
+  expect(await ledger.taskCost(ORG, TASK)).toMatchObject({ micros: 4_500_000, entries: 3, unpricedEntries: 2, provisionalCalls: 3 });
+  expect(await ledger.companyDayCost(ORG, "2026-11-09")).toMatchObject({ usdMicros: 4_500_000, entries: 3, uncountedEntries: 2 });
+  const rows = await store.query({ pk: costPartition(ORG, TASK), sk: { op: "beginsWith", prefix: "ENTRY#" } });
+  for (const row of rows.items) { expect(row["runUsage"]).toBeUndefined(); expect(row["runUsageCalls"]).toBeUndefined(); }
 });

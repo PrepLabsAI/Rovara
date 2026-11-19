@@ -1,3 +1,4 @@
+import { taskOwnerView } from "../developer/task-owner-view.js";
 // Switch-on lane L11: the decision cards, the session levels and how we work on the deployed core's developer routes (`core-host/dev-routes.ts`, `CoreDevWiring`), from the company's OWN records.
 //
 //   - Session levels (`deployedSessionMembers`): the person's company role is their LIVE membership (R4's `COMPANY_MEMBER#` row: owner, admin or member), and their role on a project is the broker's own
@@ -5,7 +6,7 @@
 //     layer names (its developer id) in the same company; anything else, and a re-check that has no principal, finds no one (fail closed: a session then reads as missing).
 //   - Decision cards (`deployedDecisionCards`): the cards of the documents a task waits on (the requirements, the design or the coding plan) for the task's OWNERS, while they are still a member with the
 //     project grant: the task's own person, and (web task channel C6, decision D5) the co-owners its People list names, each under the live People rule the core's owner moves use (`TaskAccess.ownerActing`:
-//     live membership, the live proof of the person, the project grant). Commenters and viewers never decide. A host without that rule (Code's laptop) keeps the task's own person. Acting on a card needs the fresh step-up the route already checked (lane ID part 2c); the performer re-checks the person's live authority (member, the task's own person, the grant)
+//     live membership, the live proof of the person, the project grant). Commenters and viewers never decide. A host without that rule (Code's laptop) keeps the task's own person. Acting on a card needs the signed-in person the route authenticated (DEC 254zzz73: no step-up); the performer re-checks the person's live authority (member, the task's own person, the grant)
 //     and only then asks the approval gate, with a proof the deployment's approvers point issues and verifies (lane L2a: `DecisionProofIssuer`). The gate's Approvers seam (the policy hook's stricter-only
 //     wrapper in front of it) and the workflow decision decide; nothing here approves anything. The gate records the approver as the task owner who decided (the task's own person, or the co-owner, with the People
 //     revision fenced into the decision's transaction); there is no project approver path on the core yet.
@@ -45,7 +46,7 @@ import { loadWorkflowDocument } from "../developer/plan-document-reader.js";
 import { taskOwnerKey } from "../developer/task-records.js";
 import type { CoreRuntime } from "./core-runtime.js";
 import type { CoreDevWiring, DeployedDecisionCaller } from "./dev-routes.js";
-import { STEP_UP_APPROVAL_METHOD, issueStepUpApproval, type HostedChatApproval, type StepUpApprovalInput } from "./hosted-approvers.js";
+import { APPROVAL_PROOF_METHOD, issueApprovalProof, type HostedChatApproval, type ApprovalProofInput } from "./hosted-approvers.js";
 import type { ChatThreads } from "./chat-threads.js";
 
 /** The company's own records of its people, as the broker keeps them. A read that fails throws (the caller refuses); `undefined` is "none". */
@@ -70,7 +71,7 @@ export async function liveMemberRole(people: DeployedPeople, companyId: OrgId, p
 
 /**
  * HW5b: the chat the approvers point lets a person approve a low or medium risk plan in, from the deployment's chat seam (`ChatThreads`) and the company's own records of its people. ONE chat that can name a person
- * (`personOf`), else none (the install takes the step-up alone). Everything is read at each use: the workspace's company, the account's link or sign-in, the person's live membership in THAT company and their project grant.
+ * (`personOf`), else none (the install takes the page's proof alone). Everything is read at each use: the workspace's company, the account's link or sign-in, the person's live membership in THAT company and their project grant.
  */
 export function hostedChatApproval(threads: Pick<ChatThreads, "channels" | "companyOf" | "personOf"> | undefined, people: DeployedPeople, key: Buffer | undefined): HostedChatApproval | undefined {
   const personOf = threads?.personOf;
@@ -132,25 +133,25 @@ export function deployedSessionMembers(companyId: OrgId, people: DeployedPeople)
 // ---- decision cards
 
 /**
- * The deployment's approvers point's own proof for one act on a card (lane L2a). The performer asks for it only after the route checked a FRESH step-up and the performer re-checked the person's live
+ * The deployment's approvers point's own proof for one act on a card (lane L2a). The performer asks for it only after the route authenticated the signed-in person and the performer re-checked the person's live
  * authority; the token is handed to the approval gate, which hands it to the same point's `verify` (never stored or logged). A throw refuses the act (nothing is decided).
  */
 export interface DecisionProofIssuer {
-  /** The approval method the point accepts for a fresh step-up (one of its `ApprovalRequirement.methods`). */
+  /** The approval method the point accepts for this proof (one of its `ApprovalRequirement.methods`). */
   readonly method: string;
   issue: (act: DecisionAct) => Credential | Promise<Credential>;
 }
 
 /**
- * What one act on a card is, as the route and the performer checked it (lane L2a's `StepUpApprovalInput`): the company, the person the sign-in vouched for, the step-up the route checked, the
+ * What one act on a card is, as the route and the performer checked it (lane L2a's `ApprovalProofInput`): the company, the person the sign-in vouched for, the
  * decision's request id and kind (the `ApprovalRequest.kind` the gate will ask about: the waiting document's type), the task, the revision and digest the card was drawn at, the answer, and
  * the card at that document version. Nothing here comes from the request body but the request id the card route validated.
  */
-export type DecisionAct = StepUpApprovalInput;
+export type DecisionAct = ApprovalProofInput;
 
-/** The deployed issuer: lane L2a's signed, card-bound, one-time step-up proof (`issueStepUpApproval`), under the install's proof key. */
-export function stepUpDecisionProofs(key: Buffer, nowMs: () => number): DecisionProofIssuer {
-  return { method: STEP_UP_APPROVAL_METHOD, issue: (act) => issueStepUpApproval(key, act, nowMs()) };
+/** The deployed issuer: lane L2a's signed, card-bound, one-time proof (`issueApprovalProof`), under the install's proof key. */
+export function approvalDecisionProofs(key: Buffer, nowMs: () => number): DecisionProofIssuer {
+  return { method: APPROVAL_PROOF_METHOD, issue: (act) => issueApprovalProof(key, act, nowMs()) };
 }
 
 /** The `ApprovalRequest.kind` the workflow decision asks about for each document card (the subject's `currentDocumentType`), never the gate's subject kind. */
@@ -283,6 +284,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     if (artifact.format === "structured" && loaded?.format !== "structured") return undefined;
     const facts = planFactsOf(loaded, workflow);
     const base = {
+      revealMoney: viewer.admin || taskOwnerView(task)?.developerId === viewer.principal.personId,
       subjectId: task.taskId, taskId: task.taskId, project: task.project, title: task.title, createdAt: artifact.createdAt, contentVersion: artifact.sha256,
       binding: { revision: workflow.revision, artifactDigest: artifact.sha256 }, openPath: taskOpenPath(task),
     };
@@ -365,8 +367,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   /** One act: the person's live authority again, then the point's proof, then the gate (through the workflow decision). Anything that does not hold is refused; nothing is decided. */
   const act = (outcome: DecisionOutcome, run: NonNullable<KindHandler<ProvingCaller>["reject"]>) => async (caller: DeployedDecisionCaller, input: PerformInput & { reason?: string }): Promise<PerformOutcome> => {
     const personId = personOfCaller(companyId, caller);
-    const stepUp = caller.stepUp;
-    if (personId === undefined || stepUp === undefined || typeof stepUp.at !== "string" || typeof stepUp.method !== "string") return { kind: "refused", reason: "forbidden" };
+    if (personId === undefined) return { kind: "refused", reason: "forbidden" };
     const task = await ownTask(caller.principal, input.item.taskId);
     if (task === undefined) return { kind: "refused", reason: "forbidden" };
     const binding = input.item.binding;
@@ -376,7 +377,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     let credential: Credential;
     try {
       credential = await proofs.issue({
-        companyId, personId, stepUp: { at: stepUp.at, method: stepUp.method }, requestId: input.requestId, kind, taskId: task.taskId,
+        companyId, personId, requestId: input.requestId, kind, taskId: task.taskId,
         revision: binding.revision, artifactDigest: binding.artifactDigest, outcome,
         // The card at the document version the gate is given (`workflowDocumentHandler`): the same card the gate names to the point.
         card: { cardId: input.card.id, contentVersion: binding.artifactDigest },

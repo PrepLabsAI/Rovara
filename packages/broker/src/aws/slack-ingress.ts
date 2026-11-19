@@ -1,4 +1,5 @@
-import { slackCompanyPerson, slackCompanyProject, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
+import { slackBindingCompany, slackBindingInCompany, slackCompanyPerson, slackCompanyToken, slackLinkNotice, slackRequestWorkspace, type SlackCompanyDependencies } from "./slack-person.js";
+import { namedCompanySlackBinding } from "./slack-company-layout.js";
 import { slackCompanyDependenciesFromEnvironment } from "./slack-company-wiring.js";
 import { splitBySlackIngressTeam } from "./slack-company-split.js";
 import { slackWorkspaceToken } from "./slack-workspace-tokens.js";
@@ -249,6 +250,8 @@ const PATH_WITHOUT_REQUEST_NOTICE = "Add your request after it, for example `qui
  * Said when a Slack task would start, or a path be chosen, but this ingress cannot read task threads: a task
  * started here could not be driven from its thread, so none is started.
  */
+/** DEC 254zzz80 (R2-F1): a NAMED company's typed @mention in a channel no project is connected to. Fixed words: no project, channel or company name. */
+export const SLACK_CHANNEL_NOT_BOUND_NOTICE = "This channel isn't connected to a Rovara project yet, so I can't work on requests here. A project admin can connect it in Rovara.";
 export const SLACK_TASK_THREADS_OFF_NOTICE = "AgentX can't run tasks from Slack threads here yet. Ask an AgentX admin to turn on Slack task threads.";
 
 /** NOT_OWNER: a Slack-started task's own thread, where only the task's owner may stop it. */
@@ -404,7 +407,7 @@ export function createSlackAdapterFront(deps: {
     if (deps.workspaces !== undefined) {
       try {
         const binding = await deps.getBinding?.(mention.thread.teamId, mention.thread.channelId);
-        if (binding === undefined || !await slackCompanyProject(deps, mention.thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
+        if (binding === undefined || !await slackBindingInCompany(deps, mention.thread.teamId, binding)) return ignore(log, "channel_not_bound");
         await deps.workspaces.requireCompany(mention.thread.teamId);
         const token = await slackWorkspaceToken(deps.workspaces, mention.thread.teamId);
         const person = await slackCompanyPerson(deps, mention.thread.teamId, mention.userId);
@@ -487,14 +490,31 @@ export function createSlackMentionRouter(dependencies: SlackRouterDependencies):
   async function companyRoute(mention: SlackMention): Promise<HttpResponse> {
     const { thread } = mention;
     const binding = await dependencies.getBinding(thread.teamId, thread.channelId);
-    if (binding === undefined || !await slackCompanyProject(dependencies, thread.teamId, binding.projectName)) return ignore(log, "channel_not_bound");
+    if (binding === undefined) return notBound(mention);
+    if (!await slackBindingInCompany(dependencies, thread.teamId, binding)) return ignore(log, "channel_not_bound");
     return route(mention, binding);
+  }
+  /**
+   * DEC 254zzz80 (R2-F1): a channel with no binding. For a NAMED company's workspace, a person's typed @mention is answered once in its thread (the event is claimed first, so
+   * Slack's retry is not answered twice), through the verified request's own workspace token: it is never silent there. Every other case (a plain message, an app-posted
+   * mention, the built-in company, no company layer, or a company that cannot be read) is ignored exactly as before.
+   */
+  async function notBound(mention: SlackMention, fields: Record<string, string> = {}): Promise<HttpResponse> {
+    let company: string | undefined;
+    if (mention.kind === "mention" && !mention.appPosted) {
+      try { company = await slackBindingCompany(dependencies, mention.thread.teamId); } catch { company = undefined; }
+    }
+    if (company === undefined) return ignore(log, "channel_not_bound", fields);
+    if (!await dependencies.claimEvent(mention.eventId, Math.floor(now() / 1_000) + EVENT_RETENTION_SECONDS)) return ignore(log, "duplicate_event", { eventId: mention.eventId });
+    log("event.channel_not_bound_answered", { eventId: mention.eventId });
+    await post(dependencies, log, mention.thread, SLACK_CHANNEL_NOT_BOUND_NOTICE, "channel_not_bound.notice_failed");
+    return respond(200, { ok: true });
   }
   async function route(incoming: SlackMention, checkedBinding?: SlackChannelBinding): Promise<HttpResponse> {
     let mention = incoming;
     const { thread } = mention;
     const binding = checkedBinding ?? await dependencies.getBinding(thread.teamId, thread.channelId);
-    if (!binding) return ignore(log, "channel_not_bound", { channelId: thread.channelId });
+    if (!binding) return notBound(mention, { channelId: thread.channelId });
     // Gap 2: a plain message is read only in a Slack-started task's own open thread. Every other channel
     // message is left alone before it is claimed, checked or stored.
     let shared: SharedThreadLookup | undefined;
@@ -1344,6 +1364,10 @@ export function awsSlackRouterDependencies(transport: SlackRouterTransport, comp
       },
     },
     async getBinding(teamId, channelId) {
+      // DEC 254zzz80 (R2-F1): a NAMED company's channel bindings live only in its own partition (ORG#<company>#SLACK_BINDING#<team>); the company is the verified request's
+      // or the team's operator binding (slackBindingCompany), never a request field. The built-in company and no company layer read the legacy key below, as before.
+      const named = await slackBindingCompany(company, teamId);
+      if (named !== undefined) return namedCompanySlackBinding(documentClient, stateTableName, named, teamId, channelId);
       // Spec 062 FR-010: the neutral binding key and reader; a Slack binding's key and row are unchanged.
       const ref = { channel: SLACK_CHANNEL, tenant: teamId, space: channelId };
       const response = await documentClient.send(new GetCommand({ TableName: stateTableName, Key: channelBindingKey(ref) }));
@@ -1670,7 +1694,8 @@ export function createAwsSlackHandlerFromEnvironment(env: NodeJS.ProcessEnv = pr
   });
   if (wiring === undefined) return make({});
   // Defence in depth, as in the broker's legacy view: another team's channel binding is "not bound" in today's handler while company mode is on.
-  const legacy = make({ slackInstallTeamOnly: wiring.legacyTeamId });
+  // DEC 254zzz80 (R2-F1): the install team's company (its operator binding) picks where its channel bindings are read: a NAMED company's own partition, else the legacy keys.
+  const legacy = make({ slackInstallTeamOnly: wiring.legacyTeamId, installTeamCompany: (team) => wiring.workspaces.requireCompany(team) });
   const company = make({ workspaces: wiring.workspaces, ...(wiring.companies === undefined ? {} : { companies: wiring.companies }), onWorkspaceRemoved: (team) => wiring.forget(team) });
   return splitBySlackIngressTeam(legacy, company, wiring.legacyTeamId);
 }

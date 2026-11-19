@@ -365,6 +365,32 @@ describe("scheduled jobs", () => {
     expect(result).toEqual({ job: "merge-tracking", companies: [{ companyId: FAKE_COMPANY, outcome: "ran", report: { swept: 0 } }] });
   });
 
+  it("L4-JA56 B5: under `on`, a company a lessons or system-runs flag names is listed with no in-use mark; `on`/off flags and a company the engine does not cover add nothing", async () => {
+    const jobCompanies = async (env: NodeJS.ProcessEnv, named: string[], job = "dispatch-sweep"): Promise<string[]> => {
+      const world = createFakeWorld();
+      const app = createCoreHostApp({
+        env, modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
+        alsoNamedBy: named.map((value) => parseCoreSwitch(value).value),
+        runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined, services: ALL_SERVICES, ciReporting: HONEST_CI }),
+      });
+      const result = await app.handleScheduledJob({ source: "agentx.core-job", job }) as { companies?: Array<{ companyId: string }> };
+      return (result.companies ?? []).map((entry) => entry.companyId).sort();
+    };
+    const pilot = "org_pilotaaaaaaaaaaaaaaa";
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on" }, [`on:${pilot}`])).toEqual([FAKE_COMPANY, pilot].sort());
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on" }, ["on", "off", `on:${OTHER}:${pilot}`])).toEqual([FAKE_COMPANY, OTHER, pilot].sort());
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on" }, ["on", "off"])).toEqual([FAKE_COMPANY]);
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on" }, [])).toEqual([FAKE_COMPANY]);
+    // The engine's own list is not widened: a flag naming a company the engine does not cover adds it nowhere, and the engine-covered company is listed once.
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: `on:${FAKE_COMPANY}` }, [`on:${FAKE_COMPANY}:${pilot}`])).toEqual([FAKE_COMPANY]);
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "off" }, [`on:${pilot}`])).toEqual([]);
+    // Area narrowing: the flow area is on only for the install's company, so a company the flags name is not run for flow jobs, but is for the merge area (which follows the combined switch).
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ENGINE_FLOW: `on:${FAKE_COMPANY}` }, [`on:${pilot}`])).toEqual([FAKE_COMPANY]);
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "on", ROVARA_CORE_ENGINE_FLOW: `on:${FAKE_COMPANY}` }, [`on:${pilot}`], "merge-tracking")).toEqual([FAKE_COMPANY, pilot].sort());
+    // Drain starts nothing new: a named company is not added.
+    expect(await jobCompanies({ ROVARA_CORE_ENGINE: "drain" }, [`on:${pilot}`])).toEqual([]);
+  });
+
   it("caps a run's budget by the function's time left, less the exit margin", async () => {
     const world = createFakeWorld();
     const budgets: number[] = [];

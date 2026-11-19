@@ -20,7 +20,6 @@ async function world(enabled = true, company: string = A, mode: "developer" | "l
   await bindings.backfill(async () => []);
   await bindings.claim(A, 77, "account-77", "operator");
   await bindings.claim(B, 88, "private-canary", "operator");
-  h.deps.developer.clientRoutes = true;
   h.claims.azp = "web-app"; h.claims.amr = "oidc"; h.claims.scope = "projects:create";
   h.db.set({ ...h.db.get("SESSION#session", "META")!, clientId: "web-app", amr: "oidc", administrator: true, endsAt: 4_000_000_000 });
   h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, provider: "oidc" });
@@ -70,13 +69,16 @@ it("requires operator binding before repository defaults/token work and stores t
   const h = await world();
   const response = await h.call("/v1/dev/client/projects", { repository: "example/demo" });
   expect(response.statusCode).toBe(200);
-  expect(h.db.get("PROJECT#demo", "REV#000000000001")?.companyId).toBe(A);
+  // DEC 254zzz80: a named company's project is written in its own partition.
+  expect(h.db.get(`ORG#${A}#PROJECT#demo`, "REV#000000000001")?.companyId).toBe(A);
+  expect(h.db.get("PROJECT#demo", "REV#000000000001")).toBeUndefined();
   const foreign = await world(true, B);
   const refused = await foreign.call("/v1/dev/client/projects", { repository: "example/demo" });
   expect(refused.statusCode).toBe(400);
   expect((JSON.parse(refused.body) as { error: unknown }).error).toEqual({ code: "CONFIG_INVALID", message: "the GitHub App cannot access example/demo; install it on example with access to that repository" });
   expect(foreign.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
   expect(foreign.db.get("PROJECT#demo", "REV#000000000001")).toBeUndefined();
+  expect(foreign.db.find((item) => String(item.pk).includes("#PROJECT#demo"))).toEqual([]);
   expect(foreign.db.get("GITHUB_INSTALLATION#77", "BINDING")?.companyId).toBe(A);
   foreign.extra.githubPullRequests.installationIdFor.mockResolvedValue(99);
   expect(await foreign.call("/v1/dev/client/projects", { repository: "example/demo" })).toEqual(refused);
@@ -86,11 +88,13 @@ it("requires operator binding before repository defaults/token work and stores t
 it("client creation refuses occupied names across foreign or malformed stored companies", async () => {
   const h = await world();
   await registerClient(h, { bind: false });
-  expect(h.db.get("PROJECT#demo", "REV#000000000001")?.companyId).toBe(A);
+  const own = `ORG#${A}#PROJECT#demo`;
+  expect(h.db.get(own, "REV#000000000001")?.companyId).toBe(A);
   for (const companyId of [B, null, "private-canary"]) {
-    h.db.set({ ...h.db.get("PROJECT#demo", "REV#000000000001")!, companyId });
+    h.db.set({ ...h.db.get(own, "REV#000000000001")!, companyId });
     await expect(registerClient(h, { bind: false })).rejects.toThrow(/a project named demo already exists/);
     await expect(registerClient(h, { bind: false, revision: 2 })).rejects.toThrow(/a project named demo already exists/);
+    expect(h.db.get(own, "REV#000000000002")).toBeUndefined();
     expect(h.db.get("PROJECT#demo", "REV#000000000002")).toBeUndefined();
   }
 });
@@ -98,6 +102,7 @@ it("registration refuses a foreign installation before writing any project", asy
   const h = await world(true, B);
   await expect(registerClient(h, { bind: false })).rejects.toThrow(/the GitHub App cannot access example\/demo/);
   expect(h.db.get("PROJECT#demo", "REV#000000000001")).toBeUndefined();
+  expect(h.db.find((item) => String(item.pk).includes("#PROJECT#demo"))).toEqual([]);
 });
 it("backfill validates a whole page before writes and refuses HTTP invocations", async () => {
   const h = await world(); h.db.delete("GITHUB_INSTALLATION_BINDING", "BACKFILL");
@@ -170,7 +175,7 @@ it("revalidates bindings on duplicate registration and the company of a concurre
 it("client creation refuses an occupied name even when the latest revision belongs to the caller", async () => {
   const h = await world();
   await registerClient(h, { bind: false });
-  const first = h.db.get("PROJECT#demo", "REV#000000000001")!;
+  const first = h.db.get(`ORG#${A}#PROJECT#demo`, "REV#000000000001")!;
   h.db.set({ ...first, companyId: B });
   h.db.set({ ...first, sk: "REV#000000000002", companyId: A, definition: { ...(first.definition as object), revision: 2 } });
   await expect(registerClient(h, { bind: false })).rejects.toThrow(/a project named demo already exists/);
@@ -280,4 +285,38 @@ it("operator claim refuses a mismatched or unreadable GitHub installation before
     expect(h.db.get("GITHUB_INSTALLATION#99", "BINDING")).toBeUndefined();
     expect(h.db.get("GITHUB_INSTALLATION#98", "BINDING")).toBeUndefined();
   }
+});
+
+// DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 3): without the company GitHub bindings the App's installations cannot be filtered to a company. With a company layer, both repository reads refuse in fixed
+// words (never the whole unfiltered list, never another company's account); with no company layer (one company, a Rovara administrator) they are as before.
+it("refuses the repository list and picker when a company layer has no GitHub bindings to filter by, before any installation is read", async () => {
+  // The company layer on, the Rovara administrator in the install's own (implicit) company: the one caller who reaches the list there.
+  const h = await world(false, IMPLICIT_COMPANY_ID);
+  // Both places a host gives the company layer: the deployed broker sets it on the sign-in configuration only (developer.companies); a test host may set it on the dependencies.
+  const onDependencies = createBroker({ extra: { ...h.extra, companies: { companyOf: h.companyOf } } });
+  const onSignIn = createBroker({ extra: { ...h.extra, linking: { ...h.deps.developer, companies: { companyOf: h.companyOf } } } });
+  for (const [path, created] of [["/v1/dev/client/repositories", onDependencies], ["/v1/dev/client/repositories/available", onDependencies], ["/v1/dev/client/repositories", onSignIn], ["/v1/dev/client/repositories/available", onSignIn]] as const) {
+    const refused = await h.call(path, undefined, created.handler);
+    expect(refused.statusCode, path).not.toBe(200);
+    expect(refused.body, path).toContain('"code":"GITHUB_NOT_CONNECTED"');
+    expect(refused.body, path).not.toContain("account-88");
+    expect(refused.body, path).not.toContain("private-canary");
+  }
+  expect(h.clientProjects.repositories).not.toHaveBeenCalled();
+  // No company layer: the Rovara administrator's list is as before.
+  const unchanged = await h.call();
+  expect(unchanged.statusCode).toBe(200);
+  expect((JSON.parse(unchanged.body) as { installations: unknown[] }).installations).toHaveLength(3);
+});
+
+// DEC 254zzz81 (CLIENT-ROUTES-BEFORE-ON 2): a sign-in client's project create registers with the registration preflight ON, as every other registration does (it had `preflight: false`).
+it("registers every client-created project with the registration preflight on", () => {
+  const source = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
+  const start = source.indexOf("function clientProjectRouteDependencies(");
+  const end = source.indexOf("\nfunction ", start + 1);
+  const body = source.slice(start, end);
+  expect(start).toBeGreaterThan(0);
+  expect(body.match(/registerProject\(/gu)).toHaveLength(2);
+  expect(body.match(/preflight: true/gu)).toHaveLength(2);
+  expect(body).not.toContain("preflight: false");
 });

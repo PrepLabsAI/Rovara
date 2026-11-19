@@ -3,7 +3,7 @@
 // or from the tool's default (cited as `detector:java`); JaCoCo coverage is proposed only when the build writes the XML report. Only the top-level build files are read, so a plugin applied only inside a module is not
 // seen. A multi-module build gets root-level commands and a module list but no single report path (each module writes its own). Maven and Gradle together at the top is a question, not a guess.
 // No per-test selection is proposed: both tools take one pattern per flag, which the `{tests}` template (one place, separate arguments) cannot express safely, and Rovara never rewrites the customer's command.
-import { awsClientCandidate, candidate, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
+import { awsClientCandidate, candidate, gcpClientFamily, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
 import { type DependencyCandidate, type Detection, type DetectedSource, type Detector, type DetectorContext, blocksBetween, findLine, lineOf } from "./types.js";
 
 const TIMEOUT = { test: 1_800, integration: 3_600, lint: 600, setup: 900 } as const;
@@ -335,6 +335,9 @@ const AWS_SDK_SUFFIX = /-(?:enhanced|transfer-manager|crt)$/u;
 
 function javaArtifactFamily(key: string): string | undefined {
   for (const [pattern, family] of JAVA_ARTIFACTS) if (pattern.test(key)) return family;
+  // The GCP pack: `com.google.cloud:google-cloud-pubsub`, `...-storage`, `...-spanner`, ...
+  const google = /^com\.google\.cloud:google-cloud-([a-z0-9-]+)$/u.exec(key)?.[1];
+  if (google !== undefined && gcpClientFamily(google) !== undefined) return gcpClientFamily(google);
   const v2 = /^software\.amazon\.awssdk:([a-z0-9-]+)$/u.exec(key)?.[1];
   const v1 = /^com\.amazonaws:aws-java-sdk-([a-z0-9-]+)$/u.exec(key)?.[1];
   const raw = (v2 ?? v1)?.replace(AWS_SDK_SUFFIX, "");
@@ -374,6 +377,14 @@ export const JAVA_DRIVERS: readonly DriverRule[] = [
   { family: "kafka", uses: /^[ \t]*import\s{1,40}org\.apache\.kafka\./mu, call: /\.put\s{0,120}\(\s{0,120}["']bootstrap\.servers["']|BOOTSTRAP_SERVERS_CONFIG\s{0,40},/u },
   { family: "rabbitmq", uses: /^[ \t]*import\s{1,40}com\.rabbitmq\./mu, call: /\.setHost\s{0,120}\(|\.setUri\s{0,120}\(/u },
   { family: "elasticsearch", uses: /^[ \t]*import\s{1,40}(?:org\.elasticsearch|co\.elastic)\./mu, call: /RestClient\.builder\s{0,120}\(|new\s{1,40}HttpHost\s{0,120}\(/u },
+  // The GCP pack (L4-E8). A builder given a string endpoint (`setEndpoint("...")`, `setHost(...)`) is flagged.
+  { family: "pubsub", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.pubsub\./mu, call: /\.setEndpoint\s{0,120}\(|\.setChannelProvider\s{0,120}\(/u },
+  { family: "firestore", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.firestore\./mu, call: /\.setEmulatorHost\s{0,120}\(|\.setHost\s{0,120}\(/u },
+  { family: "datastore", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.datastore\./mu, call: /\.setHost\s{0,120}\(/u },
+  { family: "bigtable", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.bigtable\./mu, call: /\.setEndpoint\s{0,120}\(|\.setEmulatorHost\s{0,120}\(/u },
+  { family: "spanner", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.spanner\./mu, call: /\.setEmulatorHost\s{0,120}\(|\.setHost\s{0,120}\(/u },
+  { family: "gcs", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.storage\./mu, call: /\.setHost\s{0,120}\(/u },
+  { family: "bigquery", uses: /^[ \t]*import\s{1,40}com\.google\.cloud\.bigquery\./mu, call: /\.setHost\s{0,120}\(/u },
 ];
 
 /** AWS SDK clients (v2 `S3Client.builder()`, v1 imports) and drivers a Java or Kotlin file uses (test services D5). An `endpointOverride` / endpoint configuration written as a string is flagged. */

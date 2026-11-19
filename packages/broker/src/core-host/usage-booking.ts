@@ -1,3 +1,5 @@
+import { RunUsageCallSchema } from "@agentx/contracts";
+import type { LearningMeterEntry } from "../core/cost/ledger.js";
 // Usage booking on a deployed install (switch-on lane L8): every model usage a core task's worker reports is booked into the task's cost ledger, as the laptop's model proxy books each call
 // (`meter` in local/app/app.ts). A worker reports one `usage` event per model session (a run, a reviewer, a part of a plan) through the callback layer (services/callbacks.ts `bookUsage`),
 // and the batch is acknowledged only once its usage is booked: a booking that fails fails the batch, the worker sends it again, and the ledger counts each usage once.
@@ -7,11 +9,11 @@
 // numbers, a cost that is not a number) is booked as a usage with NO dollar figure, so the task's and
 // the company's day figures say they are a floor and the admission refuses new spending for the rest of the day (`spend_unknown`).
 //
-// `bookUsageReport` is the one entry for any reporter: the worker's events here, and the Cloud gateway's usage report when it lands (it names the task and its own entry id).
+// Usage events carry worker assertions only. Receipts require a separate authenticated gateway entry; none is wired in this release.
 import { createHash } from "node:crypto";
-import { type DocumentStore, type MeterEntry, type Metering, type ModelUsage } from "@agentx/contracts";
+import type { DocumentStore, MeterEntry, Metering, ModelUsage } from "@agentx/contracts";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
-import { costPartition } from "../core/cost/ledger.js";
+import { costPartition, type UsageAccounting } from "../core/cost/ledger.js";
 import { createHostedLedger } from "./hosted-modules.js";
 
 /** The worker's event type that carries a model session's usage (`TaskUsageTelemetry`). */
@@ -44,13 +46,14 @@ export interface UsageReport {
 }
 
 /** The usage a payload reports, or undefined when it does not read as one (see the file comment). */
-export function readUsagePayload(payload: unknown, options: { checkpointsBooked?: boolean } = {}): { usage: ModelUsage; reportedMicros?: number } | undefined {
+export function readUsagePayload(payload: unknown, options: { checkpointsBooked?: boolean } = {}): { usage: ModelUsage; reportedMicros?: number; estimated?: true } | undefined {
   if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
   const record = payload as Record<string, unknown>;
   const tokens = record["tokens"] as Record<string, unknown> | null | undefined;
   if (!text(record["provider"], 128) || !text(record["modelId"], 256) || tokens === null || typeof tokens !== "object" || Array.isArray(tokens)) return undefined;
   const { input, output, cacheRead, cacheWrite } = tokens;
   if (!natural(input) || !natural(output) || !natural(cacheRead) || !natural(cacheWrite)) return undefined;
+  if (record["usageMissingCalls"] !== undefined && !natural(record["usageMissingCalls"])) return undefined;
   const cost = record["costUsd"];
   if (cost !== undefined && cost !== null && (typeof cost !== "number" || !Number.isFinite(cost) || cost < 0)) return undefined;
   const reportedMicros = typeof cost === "number" && cost > 0 ? Math.ceil(cost * 1_000_000) : undefined;
@@ -58,8 +61,8 @@ export function readUsagePayload(payload: unknown, options: { checkpointsBooked?
   // billed. It is not taken as unreadable, which would stop the whole company for the day. The one exception is a session's `final` report when checkpoints of its run were BOOKED
   // (`checkpointsBooked`, read from the ledger, never the worker's word; per-run dollar stop): the run's spend is what they booked, never less. Without one, the floor stands:
   // the checkpoints told what it spent, and a zero end says only that nothing is left.
-  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && !(record["final"] === true && options.checkpointsBooked === true)) {
-    return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS };
+  if (input + output + cacheRead + cacheWrite === 0 && reportedMicros === undefined && !(typeof record["usageMissingCalls"] === "number" && record["usageMissingCalls"] > 0) && !(record["final"] === true && options.checkpointsBooked === true)) {
+    return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, reportedMicros: EMPTY_REPORT_CHARGE_MICROS, estimated: true };
   }
   if (reportedMicros !== undefined && !Number.isSafeInteger(reportedMicros)) return undefined;
   return { usage: { provider: record["provider"], modelId: record["modelId"], tokens: { input, output, cacheRead, cacheWrite } }, ...(reportedMicros === undefined ? {} : { reportedMicros }) };
@@ -87,17 +90,35 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
   const ledger = createHostedLedger({ store: deps.store, metering: bookingMeter(deps.metering), ...(deps.now === undefined ? {} : { now: deps.now }) });
 
   async function bookUsageReport(report: UsageReport): Promise<boolean> {
+    // Never apply receipts from a worker, even when their schema and scope look valid. In particular
+    // they cannot finalize charges or apply signed revisions. Keep booking the aggregate tokens.
     const read = readUsagePayload(report.payload, { checkpointsBooked: report.checkpointsBooked === true });
-    const entry: MeterEntry = {
+    const payloadCalls = (report.payload as { calls?: unknown } | null)?.calls;
+    const parsedCalls = Array.isArray(payloadCalls) && payloadCalls.length <= 2000 ? payloadCalls.map((call: unknown) => RunUsageCallSchema.safeParse(call)) : undefined;
+    const runUsageCalls = parsedCalls?.every((call) => call.success) ? parsedCalls.map((call) => call.data) : undefined;
+    const entry: LearningMeterEntry = {
+      ...(runUsageCalls === undefined ? {} : { runUsageCalls }),
       companyId: report.companyId, entryId: report.entryId, at: report.at, taskId: report.taskId,
       usage: read?.usage ?? { provider: UNREADABLE_USAGE_PROVIDER, modelId: "unreadable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
       ...(read?.reportedMicros === undefined ? {} : { reportedCost: { micros: read.reportedMicros, currency: "USD" } }),
     };
-    let last: unknown;
-    for (let attempt = 0; attempt < BOOKING_ATTEMPTS; attempt += 1) {
-      try { return (await ledger.recordUsage(entry)).counted; } catch (error) { last = error; }
+    const missing = read === undefined ? 0 : (report.payload as { usageMissingCalls?: number }).usageMissingCalls ?? 0;
+    const record = async (value: MeterEntry, accounting?: UsageAccounting): Promise<boolean> => {
+      let last: unknown;
+      for (let attempt = 0; attempt < BOOKING_ATTEMPTS; attempt += 1) {
+        try { return (await ledger.recordUsage(value, accounting)).counted; } catch (error) { last = error; }
+      }
+      throw last instanceof Error ? last : new Error("the usage could not be booked");
+    };
+    // Missing calls have no recoverable R here. Count them without inventing dollars, independently
+    // of the priced token total in the same event. Stable ids make a partial/retried batch safe.
+    const hasAggregate = missing === 0 || read === undefined || read.reportedMicros !== undefined || Object.values(read.usage.tokens).some(n => n > 0);
+    let counted = hasAggregate && await record(entry, read?.estimated ? { status: "estimated" } : undefined);
+    if (missing > 0) {
+      const pending = await record({ ...entry, entryId: `${entry.entryId}:missing`, usage: { provider: UNREADABLE_USAGE_PROVIDER, modelId: "missing-usage", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } }, { status: "awaiting_usage", missingCalls: missing });
+      counted = pending || counted;
     }
-    throw last instanceof Error ? last : new Error("the usage could not be booked");
+    return counted;
   }
 
   return {

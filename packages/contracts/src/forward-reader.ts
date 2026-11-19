@@ -1,3 +1,4 @@
+import { WorkflowDesignReviewSchema } from "./design-review.js";
 // Forward-compatible readers, shared by the chain session views (chain-session.ts) and the agent session views (session-views.ts).
 import { z } from "zod";
 
@@ -33,7 +34,25 @@ export function forwardReader<S extends z.ZodType>(schema: S): z.ZodType<Forward
   return readerOf(schema) as z.ZodType<ForwardReader<z.output<S>>>;
 }
 
+// A design review's read projection may omit money at every depth. Keep that
+// omission through the outer task/session reader; the Design tab validates the
+// rest of the review exactly before rendering it. Stored schemas are unchanged.
+function designReviewReader(schema: z.ZodType): z.ZodType {
+  const def = defOf(schema);
+  switch (def.type) {
+    case "object": return z.looseObject(Object.fromEntries(Object.entries((schema as z.ZodObject).shape).map(([key, field]) => {
+      const read = designReviewReader(field as z.ZodType);
+      return [key, /Usd(?:PerTask)?$/u.test(key) ? read.optional() : read];
+    })));
+    case "array": return z.array(designReviewReader(def.element as z.ZodType));
+    case "optional": return designReviewReader(def.innerType as z.ZodType).optional();
+    case "union": return z.union((def.options as z.ZodType[]).map(designReviewReader));
+    default: return readerOf(schema);
+  }
+}
+
 export function readerOf(schema: z.ZodType): z.ZodType {
+  if (schema === WorkflowDesignReviewSchema) return designReviewReader(schema);
   const def = defOf(schema);
   switch (def.type) {
     case "object": {

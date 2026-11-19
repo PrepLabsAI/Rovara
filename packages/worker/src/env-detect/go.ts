@@ -4,7 +4,7 @@
 // Reports: `go test` writes no file by itself, and Rovara never wraps the customer's command in a shell, so a JUnit report is proposed only when the module already depends on gotestsum (go.mod names it),
 // run with `go run` at the version go.mod pins. Coverage is a Go cover profile written by the proposed `-coverprofile` flag; the reader for it is in verification/changed-coverage.ts.
 // No per-test selection is proposed: `go test` takes packages, the selection template (`{tests}`) is filled with test ids that are files, and a file argument makes `go test` build only those files, not the package.
-import { awsClientCandidate, candidate, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
+import { awsClientCandidate, candidate, gcpClientFamily, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
 import { type DependencyCandidate, type Detection, type DetectedSource, type Detector, type DetectorContext, type RepositoryReader, findLine } from "./types.js";
 import type { GoModuleRoot } from "../verification/changed-coverage.js";
 
@@ -225,6 +225,9 @@ const AWS_GO_SERVICE = /^github\.com\/aws\/aws-sdk-go(?:-v2)?\/service\/([a-z0-9
 
 function goModuleFamily(module: string): string | undefined {
   for (const [pattern, family] of GO_MODULES) if (pattern.test(module)) return family;
+  // The GCP pack: `cloud.google.com/go/pubsub` (and `/v2`), `.../storage`, `.../spanner`, ...
+  const google = /^cloud\.google\.com\/go\/([a-z0-9]+)(?:\/v\d+)?$/u.exec(module)?.[1];
+  if (google !== undefined && gcpClientFamily(google) !== undefined) return gcpClientFamily(google);
   const raw = AWS_GO_SERVICE.exec(module)?.[1];
   const id = raw === undefined ? undefined : normalizeAwsService(raw, "go");
   return id === undefined || isOwnedElsewhere(`aws:${id}`) ? undefined : `aws:${id}`;
@@ -258,6 +261,14 @@ export const GO_DRIVERS: readonly DriverRule[] = [
   { family: "elasticsearch", uses: GO_IMPORT("github\\.com/elastic/go-elasticsearch(?:/v\\d+)?|github\\.com/olivere/elastic(?:/v\\d+)?"), call: /\belasticsearch\.NewClient\s{0,120}\(|\belastic\.NewClient\s{0,120}\(/u },
   { family: "opensearch", uses: GO_IMPORT("github\\.com/opensearch-project/opensearch-go(?:/v\\d+)?"), call: /\bopensearch\.NewClient\s{0,120}\(/u },
   { family: "memcached", uses: GO_IMPORT("github\\.com/bradfitz/gomemcache/memcache"), call: /\bmemcache\.New\s{0,120}\(/u },
+  // The GCP pack (L4-E8). A client built with option.WithEndpoint("...") is flagged.
+  { family: "pubsub", uses: GO_IMPORT("cloud\\.google\\.com/go/pubsub(?:/v\\d+)?"), call: /\bpubsub\.NewClient\s{0,120}\(/u },
+  { family: "firestore", uses: GO_IMPORT("cloud\\.google\\.com/go/firestore"), call: /\bfirestore\.NewClient\s{0,120}\(/u },
+  { family: "datastore", uses: GO_IMPORT("cloud\\.google\\.com/go/datastore"), call: /\bdatastore\.NewClient\s{0,120}\(/u },
+  { family: "bigtable", uses: GO_IMPORT("cloud\\.google\\.com/go/bigtable"), call: /\bbigtable\.New(?:Admin)?Client\s{0,120}\(/u },
+  { family: "spanner", uses: GO_IMPORT("cloud\\.google\\.com/go/spanner"), call: /\bspanner\.NewClient\s{0,120}\(/u },
+  { family: "gcs", uses: GO_IMPORT("cloud\\.google\\.com/go/storage"), call: /\bstorage\.NewClient\s{0,120}\(/u },
+  { family: "bigquery", uses: GO_IMPORT("cloud\\.google\\.com/go/bigquery"), call: /\bbigquery\.NewClient\s{0,120}\(/u },
 ];
 
 /** AWS SDK clients (a service package imported) and drivers a Go file uses (test services D5). A `BaseEndpoint` / `Endpoint` written as a string is flagged for every AWS service the file imports. */

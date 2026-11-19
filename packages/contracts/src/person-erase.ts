@@ -1,5 +1,5 @@
 // Person erase (row 13.1): the Code API a company admin calls to erase one person in their company (`POST /v1/app/people/<personId>/erase`). The engine erase and its receipt are Code's
-// (broker core/people/erase.ts); the caller's company comes from membership, never from this body, and the press needs a fresh step-up with a factor Code owns.
+// (broker core/people/erase.ts); the caller's company comes from membership, never from this body; the press needs a live owner or admin of that company (DEC 254zzz73: no step-up).
 import { z } from "zod";
 
 /** The body: only the request id that makes the call repeatable (the same id, or any repeat, records nothing new). Nothing else is accepted. */

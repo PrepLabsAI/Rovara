@@ -264,7 +264,7 @@ describe("graduating over the API", () => {
     const { api: target } = api(w);
     await w.lessons.get(A)!.runtime.evidence.note({ workspaceId: A, project: "payments", lessonId: "les_proc0003", kind: "against", weight: 1, at: w.world.clock.now, id: "mark-1" });
     expect(await call(target, "a-maint", "POST", `${P}/lessons/les_proc0003/skill`, {})).toMatchObject({ ok: false, code: "FORBIDDEN", message: "That lesson has not proved itself yet, so it cannot become a skill." });
-    expect(await call(target, "a-maint", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+    expect(await call(target, "a-maint", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", canDecide: true, skills: [] } });
   });
 
   it("the whole path over the API: the card, the draft, two people approve, and the lesson is retired with became -> skill; the card is gone", async () => {
@@ -281,7 +281,7 @@ describe("graduating over the API", () => {
     expect(await store.get({ workspaceId: A, project: "payments" }, "les_proc0001")).toMatchObject({ status: "retired", became: { kind: "skill", ref: "add-a-queue-handler" } });
     expect((await call(target, "a-maint", "GET", `${GP}/graduation`) as { body: { card?: unknown } }).body.card).toBeUndefined();
     // Company B has nothing of it.
-    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", skills: [] } });
+    expect(await call(target, "b-admin", "GET", `${P}/skills`)).toEqual({ ok: true, body: { project: "payments", canDecide: true, skills: [] } });
   });
 
   it("the page reads the shared signals, but a decision reads them fresh: a mark made after the card was shown stops the graduation, and an old one does not count", async () => {

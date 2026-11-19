@@ -74,8 +74,14 @@ access stack from it with their credentials; you deploy the rest with the operat
 
    It changes nothing in AWS. It makes two read-only calls (your account id, and whether `<env>`
    is already installed), so it needs credentials for the target account. `--operator-principal`
-   is who may assume the operator role; without it, any principal in the account that IAM allows
-   may. To use OpenRouter, Anthropic or OpenAI, create the key's secret yourself and pass
+   is who may assume the operator role: ONE IAM role or user, never a whole account (`:root` is
+   refused). Without it, any principal in this account that its own IAM policy allows may. A role
+   or user of ANOTHER account is allowed only with `--operator-external-id <id>`: the operator role
+   then trusts it only when it presents that id (`sts:ExternalId`), so knowing the account id or the
+   role's name opens nothing. An id is 2 to 1224 characters of letters, digits and `+ = , . @ : / _ -`.
+   If you deployed an access stack before these rules with a `:root` principal, an `upgrade` stops
+   and says so: set `OperatorPrincipalArn` on the access stack (and `OperatorExternalId` for another
+   account's principal), then run it again. To use OpenRouter, Anthropic or OpenAI, create the key's secret yourself and pass
    `--openrouter-secret-arn`, `--anthropic-secret-arn` or `--openai-secret-arn <arn>`.
 
 2. **What the bundle holds.** No secret. It has:

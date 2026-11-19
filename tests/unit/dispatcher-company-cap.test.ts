@@ -176,7 +176,10 @@ describe("fails closed: a signer or rules service that cannot be used refuses th
 describe("the dispatcher is wired to this reader", () => {
   it("hands dispatcherProjectTaskCap (the process environment, the State table, its KMS client) to the deployed security modules, never a reader without the rules service", () => {
     const source = readFileSync(new URL("../../packages/broker/src/aws/dispatcher.ts", import.meta.url), "utf8");
-    expect(source).toContain('projectTaskCap: dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms)');
+    // L4-TA6 (#1087): one function builds the reader for Admission and for automatic fixing's cap; both wirings call it.
+    expect(source).toContain('return dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms);');
+    expect(source.match(/projectTaskCap: dispatcherProjectTaskCapOf\(\)/gu)?.length).toBe(2);
+    expect(source.match(/dispatcherProjectTaskCap\(/gu)?.length).toBe(1);
     expect(source).not.toMatch(/projectTaskCapReader\(/u);
     expect(source).toMatch(/^const kms = new KMSClient\(awsClientConfiguration\);$/mu);
   });

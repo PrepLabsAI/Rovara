@@ -52,46 +52,36 @@ beforeAll(() => {
   legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
 }, 300_000);
 
-describe("(a) step-up email through SES", () => {
-  it("declares StepUpEmailSender (the legacy deployment too since #1129), empty by default, one address or empty", () => {
-    const parameter = named.Parameters.StepUpEmailSender!;
-    expect(parameter).toMatchObject({ Type: "String", Default: "", MaxLength: 254 });
-    const pattern = new RegExp(parameter.AllowedPattern as string, "u");
-    for (const ok of ["", "codes@example.com", "step-up.codes@mail.example.co"]) expect(pattern.test(ok), ok).toBe(true);
-    for (const bad of ["Codes <codes@example.com>", "codes@example", "a b@example.com", "codes@@example.com", "*@example.com"]) expect(pattern.test(bad), bad).toBe(false);
-    // #1129: the legacy deployment (production) declares the same parameter, empty (no email factor).
-    expect(legacy.Parameters.StepUpEmailSender).toEqual(parameter);
+describe("(a) no step-up email (DEC 254zzz73)", () => {
+  it("declares no StepUpEmailSender parameter and gives the sign-in function no STEP_UP_EMAIL_FROM, in either template", () => {
+    expect(named.Parameters.StepUpEmailSender).toBeUndefined();
+    expect(legacy.Parameters.StepUpEmailSender).toBeUndefined();
+    expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toBeUndefined();
+    expect(JSON.stringify(named)).not.toContain("StepUpEmailSender");
+    expect(JSON.stringify(named)).not.toContain("STEP_UP_EMAIL_FROM");
+    expect(JSON.stringify(legacy)).not.toContain("STEP_UP_EMAIL_FROM");
   });
 
-  it("lets the sign-in function send only as that identity, with the From address pinned, and nobody else send", () => {
-    const sends = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")));
-    expect(sends).toEqual([{
-      Action: "ses:SendEmail", Effect: "Allow",
-      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "StepUpEmailSender" }]] },
-      Condition: { StringEquals: { "ses:FromAddress": { Ref: "StepUpEmailSender" } } },
-    }]);
-    expect(envOf(named, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toEqual({ Ref: "StepUpEmailSender" });
+  it("lets the sign-in function send no email: the only SES right in the stack is the attention email sender's own", () => {
+    expect(statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")))).toEqual([]);
     // No other role in the stack may send email, except the attention email's own sender (DEC 254zx, #907): one ses:SendEmail on its own CoreAttentionEmailSender identity, From
     // pinned, in its own policy that exists only while CoreAttentionEmail is on (core-engine-infrastructure.test.ts pins the rest of it).
     const sesByPolicy = ofType(named, "AWS::IAM::Policy").flatMap(([id, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
       .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))).map((statement) => ({ id, statement })));
-    expect(sesByPolicy).toHaveLength(2);
-    const attention = sesByPolicy.filter(({ id }) => id.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy"));
-    expect(attention.map(({ statement }) => statement)).toEqual([{
+    expect(sesByPolicy).toHaveLength(1);
+    expect(sesByPolicy[0]!.id.startsWith("CoreEngineJobsAttentionEmailSenderServiceRoleDefaultPolicy")).toBe(true);
+    expect(sesByPolicy.map(({ statement }) => statement)).toEqual([{
       Action: "ses:SendEmail", Effect: "Allow",
       Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "CoreAttentionEmailSender" }]] },
       Condition: { StringEquals: { "ses:FromAddress": { Ref: "CoreAttentionEmailSender" } } },
       Sid: "AttentionEmailSend",
     }]);
-    // #1129: the legacy deployment has exactly the sign-in function's statement, and no other role may send.
-    expect(statementsOfRole(legacy, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:")))).toEqual(sends);
-    expect(ofType(legacy, "AWS::IAM::Policy").flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement
-      .filter((statement) => actionsOf(statement).some((action) => action.startsWith("ses:"))))).toHaveLength(1);
-    expect(envOf(legacy, "DeveloperSignInFunction").STEP_UP_EMAIL_FROM).toEqual({ Ref: "StepUpEmailSender" });
+    expect(JSON.stringify(legacy)).not.toContain("ses:");
   });
 });
 
 describe("(a) the default boundary's SES statement", () => {
+  // Kept for the attention email sender; the Sid keeps its old name so the deployed boundary does not change (DEC 254zzz73).
   it("allows only ses:SendEmail, only on this account's email identities in this region", () => {
     const scope = { env: "staging", partition: "aws", region: "us-west-2", account: "111122223333", cloudFormationRoleName: "agentx-staging-cloudformation" };
     const statements = defaultBoundaryStatements(scope);
@@ -101,12 +91,14 @@ describe("(a) the default boundary's SES statement", () => {
   });
 });
 
-describe("(b) passkeys", () => {
-  it("turns passkeys on (the legacy deployment too since #1129), and the function's Query and DeleteItem reach only PASSKEYS# and the sign-in clients' partition", () => {
-    expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBe("enabled");
-    expect(envOf(legacy, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBe("enabled");
+describe("(b) no passkeys (DEC 254zzz73)", () => {
+  it("turns no passkeys on, and the function's Query and DeleteItem reach only the sign-in clients' partition and the company grants, never PASSKEYS#", () => {
+    expect(envOf(named, "DeveloperSignInFunction").DEVELOPER_PASSKEYS).toBeUndefined();
+    expect(JSON.stringify(named)).not.toContain("DEVELOPER_PASSKEYS");
+    expect(JSON.stringify(legacy)).not.toContain("DEVELOPER_PASSKEYS");
+    expect(JSON.stringify(named)).not.toContain("PASSKEYS#");
     const all = statementsOfRole(named, "DeveloperSignInFunctionServiceRole").filter((statement) => actionsOf(statement).some((action) => action === "dynamodb:Query" || action === "dynamodb:DeleteItem"));
-    // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here); the passkey ones are unchanged.
+    // Batch 16+17 (#1014, owner DEC 254zzz33): the sign-in role's company grants add three key-limited Query/DeleteItem statements of their own (pinned exactly here).
     const companyGrant = (statement: (typeof all)[number]) => /SIGNIN_LINKS#|#MEMBERS"|COMPANY_INVITE_CODES|#PREAPPROVAL"|#COMPANY"|COMPANY_MEMBER#/u.test(JSON.stringify(statement.Condition));
     expect(all.filter(companyGrant).map((statement) => [actionsOf(statement), statement.Condition])).toEqual([
       [["dynamodb:Query"], { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#MEMBERS", "ORG#org_????????????????????#PREAPPROVAL", "COMPANY_INVITE_CODES", "SIGNIN_LINKS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }],
@@ -116,7 +108,6 @@ describe("(b) passkeys", () => {
     const scoped = all.filter((statement) => !companyGrant(statement));
     expect(scoped.map((statement) => statement.Condition)).toEqual([
       { "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": ["SIGNIN_CLIENTS"] }, Null: { "dynamodb:LeadingKeys": "false" } },
-      { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
     ]);
     for (const statement of scoped) expect(actionsOf(statement).sort()).toEqual(["dynamodb:DeleteItem", "dynamodb:Query"]);
     expect(JSON.stringify(statementsOfRole(named, "DeveloperSignInFunctionServiceRole"))).not.toContain("dynamodb:Scan");
@@ -254,7 +245,15 @@ describe("(i) the core dispatch queues", () => {
     });
     const [queueId, queue] = queues.find(([id]) => withoutHash(id) === "CoreEngineJobsQueue")!;
     expect(queue.Properties.QueueName).toBe("agentx-staging-core-dispatch");
-    const policies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobs"));
+    // L4-SQS: the lessons reflection queue and its dead letters are CoreEngineJobs queues too (pinned in tests/contract/core-lessons-reflect-queue.test.ts); this test is the core dispatch pair's.
+    const reflectPolicies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobsLessonsReflect"));
+    expect(reflectPolicies).toHaveLength(2);
+    for (const [, policy] of reflectPolicies) {
+      const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+      expect(statements.filter((statement) => statement.Effect === "Deny")).toHaveLength(1);
+      expect(statements.filter((statement) => statement.Sid === "BrokerUsesCoreDispatchQueue")).toHaveLength(0);
+    }
+    const policies = ofType(named, "AWS::SQS::QueuePolicy").filter(([, policy]) => JSON.stringify(policy.Properties.Queues).includes("CoreEngineJobs") && !JSON.stringify(policy.Properties.Queues).includes("LessonsReflect"));
     expect(policies).toHaveLength(2);
     for (const [, policy] of policies) {
       const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;

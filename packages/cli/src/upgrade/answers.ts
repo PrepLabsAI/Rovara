@@ -4,7 +4,7 @@
 // principal). Operator-set parameters are carried by deployEnvironment (Task 1), not here, and the
 // callback signing key comes from Secrets Manager.
 import { writeFile } from "node:fs/promises";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, operatorTrustProblem } from "@agentx/contracts";
 import { workerImageProblem } from "../deploy/parameters.js";
 import { UpgradeDeployAnswersSchema } from "../deploy/commands.js";
 import type { DeployAnswers } from "../deploy/deploy-environment.js";
@@ -43,15 +43,24 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
   // principal": the upgrade would otherwise deploy it again without one. An empty value is the
   // install's own choice (the parameter's default).
   let operatorPrincipalArn: string | undefined;
+  let operatorExternalId: string | undefined;
   if (settings.stacks.access !== undefined) {
     const access = await input.stacks.describe(settings.stacks.access);
     if (access === undefined) throw agentXError("CONFIG_INVALID", `stack ${settings.stacks.access} does not exist; agentx doctor says what else is missing`);
     operatorPrincipalArn = access.parameters.OperatorPrincipalArn;
+    // Absent on a stack from before the parameter existed: no id. Carried through, so an upgrade never drops the id a cross-account principal presents.
+    operatorExternalId = access.parameters.OperatorExternalId;
   }
   const images = input.images === undefined || (input.images.worker === undefined && input.images.slack === undefined) ? undefined : {
     ...(input.images.worker === undefined ? {} : { worker: input.images.worker }),
     ...(input.images.slack === undefined ? {} : { slack: input.images.slack }),
   };
+  // L4-HARD (migration): an access stack deployed before the operator-trust rules may hold a whole-account (`:root`) principal, or one of another account with no external id.
+  // The upgrade stops here, before any stack is touched, and says what to change; it never rewrites the access stack itself (the operator role may not).
+  const trustProblem = operatorTrustProblem({ principal: operatorPrincipalArn, externalId: operatorExternalId === "" ? undefined : operatorExternalId, account: settings.account });
+  if (trustProblem !== undefined) {
+    throw agentXError("CONFIG_INVALID", `${settings.stacks.access ?? "the access stack"}: ${trustProblem}. Ask whoever owns the access stack to set its OperatorPrincipalArn (and OperatorExternalId for a principal of another account), then run the upgrade again`);
+  }
   // L4-IAM: refused before any stack is touched (stackParameters repeats the check as a backstop).
   const workerProblem = images?.worker === undefined ? undefined : workerImageProblem(images.worker, { env: settings.env, account: settings.account, region: settings.region });
   if (workerProblem !== undefined) throw agentXError("CONFIG_INVALID", `--worker-image: ${workerProblem}`);
@@ -64,6 +73,7 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     github: { appId, privateKeySecretArn, ...(credentialRef === undefined || credentialRef === "" ? {} : { credentialRef }) },
     ...(settings.access?.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: settings.access.permissionsBoundaryArn }),
     ...(operatorPrincipalArn === undefined || operatorPrincipalArn === "" ? {} : { operatorPrincipalArn }),
+    ...(operatorExternalId === undefined || operatorExternalId === "" || operatorPrincipalArn === undefined || operatorPrincipalArn === "" ? {} : { operatorExternalId }),
     ...(images === undefined ? {} : { images }),
   };
 }
@@ -93,6 +103,7 @@ export async function writeAnswersFromDeployed(input: {
     github: { ...(appId === undefined || appId === "" ? {} : { appId }), ...github },
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
     ...(answers.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: answers.operatorPrincipalArn }),
+    ...(answers.operatorExternalId === undefined ? {} : { operatorExternalId: answers.operatorExternalId }),
     ...(answers.images === undefined ? {} : { images: answers.images }),
   };
   const checked = UpgradeDeployAnswersSchema.safeParse(file);

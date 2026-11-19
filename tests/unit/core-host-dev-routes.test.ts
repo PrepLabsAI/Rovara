@@ -2,7 +2,7 @@
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { SYSTEM_RUNS_CONSENT_WORDS, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import { ON_THE_WEBSITE_MESSAGE, WorkflowSnapshotSchema, agentXError, orgProjectCatalogKey, projectRevisionKey, type AuditSink, type JsonValue, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { blockedReview, plain } from "../support/task-actions-world.js";
@@ -11,7 +11,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
-import { INVOLVED_UNAVAILABLE, COMPANY_RULES_NO_ANSWER, DECIDE_ON_A_PAGE, MAKE_SCRIPT_TOKEN_ON_A_PAGE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
+import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 
@@ -37,7 +37,9 @@ async function registerProject(world: FakeWorld, companyId: string): Promise<voi
 
 const get = (path: string, headers: Record<string, string> = {}) => ({ method: "GET", path, headers, body: "" });
 const post = (path: string, body: unknown = {}) => ({ method: "POST", path, headers: {}, body: JSON.stringify(body) });
-const callerOf = (companyId: string): DeployedCaller => ({ principal: localOwnerPrincipal({ companyId: companyId }), client: "cli" });
+// Owner DEC 254zzz91: the Rovara website's own client by default (making a script token and allowing automatic runs are its acts alone); `cliOf` is the CLI's or an AI tool's token.
+const callerOf = (companyId: string): DeployedCaller => ({ principal: localOwnerPrincipal({ companyId: companyId }), client: "web", webApp: true });
+const cliOf = (caller: DeployedCaller): DeployedCaller => { const { webApp: _web, ...rest } = caller; void _web; return { ...rest, client: "cli" }; };
 const WIRED: CoreDevWiring = { origin: () => "https://api.example", scriptTokens: { enabled: () => true } };
 
 async function world2(env: NodeJS.ProcessEnv = { ROVARA_CORE_ENGINE: "on" }) {
@@ -73,7 +75,7 @@ describe("the core's handlers on the deployed API", () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
-    for (const path of ["/v1/dev/tasks", "/v1/dev/projects", "/v1/dev/projects/payments/lessons/replay", "/v1/local/pages/open", "/v1/local/playbook/payments", "/v1/admin/projects", "/healthz"]) expect(await routes.route(get(path), caller), path).toBeUndefined();
+    for (const path of ["/v1/dev/tasks", "/v1/dev/projects", "/v1/dev/projects/payments/lessons/replay", "/v1/dev/projects/payments/lessons/weekly", "/v1/local/pages/open", "/v1/local/playbook/payments", "/v1/admin/projects", "/healthz"]) expect(await routes.route(get(path), caller), path).toBeUndefined();
     expect(companyOf).not.toHaveBeenCalled();
   });
 
@@ -133,14 +135,14 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(get("/v1/app/script-tokens"), caller))?.statusCode).toBe(404);
   });
 
-  it("lists and revokes script tokens, and refuses to make one for every caller (the recently-signed-in page rule has no credential on this API yet)", async () => {
+  it("lists and revokes script tokens; making one asks for no step-up and needs the project reader wired (DEC 254zzz73)", async () => {
     const { app, companyOf, remember } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => WIRED });
     const caller = remember(FAKE_COMPANY);
     expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), caller))!.body)).toEqual({ tokens: [], canCreate: true });
     const made = await routes.route(post("/v1/app/script-tokens", { name: "ci", projects: ["payments"], permissions: ["read"], expiresInDays: 30 }), caller);
-    expect(made?.statusCode).toBe(403);
-    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+    expect(made?.statusCode).toBe(404);
+    expect((JSON.parse(made!.body) as { error: { message: string } }).error.message).toBe(NOT_ON_THE_CORE_YET);
     expect((await routes.route(post("/v1/app/script-tokens/sct_nothing/revoke"), caller))?.statusCode).toBe(404);
     // Switched off by its own setting: not there.
     const disabled = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, scriptTokens: { enabled: () => false } }) });
@@ -170,7 +172,7 @@ describe("the core's handlers on the deployed API", () => {
     expect((await routes.route(post("/v1/app/script-tokens/%E0/revoke"), owner))?.statusCode).toBe(404);
   });
 
-  it("reads the decision cards but refuses every act on them (no recently-signed-in proof on this API yet)", async () => {
+  it("reads the decision cards and hands every act to them with no step-up in front (DEC 254zzz73)", async () => {
     const { app, companyOf, remember } = await world2();
     const list = vi.fn(async () => []);
     const performer = { approve: vi.fn(), reject: vi.fn() };
@@ -179,8 +181,9 @@ describe("the core's handlers on the deployed API", () => {
     const caller = remember(FAKE_COMPANY);
     for (const action of ["approve", "reject", "request-changes", "evidence-opened"]) {
       const answer = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/${action}`, { digest: "x" }), caller);
-      expect(answer?.statusCode, action).toBe(403);
-      expect((JSON.parse(answer!.body) as { error: { message: string } }).error.message).toBe(DECIDE_ON_A_PAGE);
+      // No step-up refusal in front: the cards' own rules answer (no such card waits for this person), and nothing is decided.
+      expect(answer?.statusCode, action).toBe(404);
+      expect((JSON.parse(answer!.body) as { error: { code: string } }).error.code, action).not.toBe("REAUTH_REQUIRED");
     }
     expect(performer.approve).not.toHaveBeenCalled();
     expect(performer.reject).not.toHaveBeenCalled();
@@ -298,10 +301,9 @@ describe("the project wiki's corrections on the deployed API", () => {
   });
 });
 
-// Lane ID part 2: a fresh step-up (a factor Code owns, checked on the route against the company's window) opens the two acts this API refused.
-describe("a fresh step-up opens making a script token and acting on a decision card", () => {
+// DEC 254zzz73: no step-up. Making a script token needs a live owner or admin of the company; acting on a decision card needs the performer's live rule.
+describe("making a script token and acting on a decision card need no step-up", () => {
   const BODY = { requestId: "", name: "ci", projects: ["payments"], permissions: ["read"] };
-  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
   const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
 
   async function setup(extra: Partial<CoreDevWiring> = {}) {
@@ -313,21 +315,19 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     return { ...w, routes: routesFor({}), routesFor, list, performer };
   }
 
-  it("refuses a live member before reading the body or asking for step-up, despite owner claims", async () => {
-    const window = vi.fn(async () => 600);
-    const { routes, remember } = await setup({ stepUpWindowSeconds: window });
+  it("refuses a live member before reading the body, despite owner claims", async () => {
+    const { routes, remember } = await setup();
     const member = remember(FAKE_COMPANY, "member");
     expect(member.principal.roles).toContain("owner");
     const request = { ...post("/v1/app/script-tokens"), headers: { "x-org-role": "owner" }, get body(): string { throw new Error("body must not be read"); } };
     const answer = await routes.route(request, member);
     expect(answer?.statusCode).toBe(403);
     expect(errorOf(answer)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
-    expect(window).not.toHaveBeenCalled();
   });
 
   it("reads creation authority live on every request and never takes an owner claim over a demotion", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "owner"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY, "owner");
     for (const role of ["owner", "admin"] as const) {
       remember(FAKE_COMPANY, role);
       expect((await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
@@ -342,16 +342,16 @@ describe("a fresh step-up opens making a script token and acting on a decision c
   it("refuses creation when an admin membership belongs to a different company", async () => {
     const { world, app } = await world2();
     const routes = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "admin" }), wiring: () => WIRED });
-    const caller = { ...callerOf(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const caller = callerOf(FAKE_COMPANY);
     const answer = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
     expect(answer?.statusCode).toBe(401);
     expect(errorOf(answer)).toEqual({ code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN });
     expect(world.created).toEqual([]);
   });
 
-  it("makes a script token for a caller whose step-up is inside the window, and lists it after", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 2), method: "email_code" } };
+  it("makes a script token for a signed-in owner with no step-up, and lists it after", async () => {
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
     expect(made?.statusCode).toBe(201);
     const created = JSON.parse(made!.body) as { token: { tokenId: string }; secret: string };
@@ -360,21 +360,36 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     expect(listed.tokens.map((token) => token.tokenId)).toEqual([created.token.tokenId]);
   });
 
-  it("writes the step-up's method as the token's amr and its time as the token's sign-in time (ID-STEPUP-FOLLOWUPS d)", async () => {
-    const { world, app, routes, remember } = await setup();
-    for (const method of ["email_code", "passkey", "company_reauth"] as const) {
-      const at = minutesAgo(world, 3);
-      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${method}` }), { ...remember(FAKE_COMPANY), stepUp: { at, method } });
+  it("owner DEC 254zzz91: an owner's CLI or AI-tool token (not the Rovara website's own client) makes no script token: 403 with the website words, and nothing is listed after", async () => {
+    const { routes, remember } = await setup();
+    const web = remember(FAKE_COMPANY);
+    const refused = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), cliOf(web));
+    expect(refused?.statusCode).toBe(403);
+    expect(JSON.parse(refused!.body)).toEqual({ error: { code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE } });
+    expect((JSON.parse((await routes.route(get("/v1/app/script-tokens"), web))!.body) as { tokens: unknown[] }).tokens).toEqual([]);
+    // Listing and revoking stay open to the CLI's token.
+    expect((await routes.route(get("/v1/app/script-tokens"), cliOf(web)))?.statusCode).toBe(200);
+    // A member on the website's own client is refused for the role, not for the client.
+    const member = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY, "member", "person-member-web"));
+    expect(member?.statusCode).toBe(403);
+    expect((JSON.parse(member!.body) as { error: { message: string } }).error.message).not.toBe(ON_THE_WEBSITE_MESSAGE);
+  });
+
+  it("writes the caller's verified sign-in method as the token's amr, and no sign-in time", async () => {
+    const { app, routes, remember } = await setup();
+    for (const amr of ["slack", "github"] as const) {
+      const made = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: `ci-${amr}` }), { ...remember(FAKE_COMPANY), amr });
       expect(made?.statusCode).toBe(201);
       const tokenId = (JSON.parse(made!.body) as { token: { tokenId: string } }).token.tokenId;
       const record = await readScriptToken({ store: (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store }, FAKE_COMPANY, tokenId);
-      expect(record).toMatchObject({ amr: method, authTime: at });
+      expect(record).toMatchObject({ amr });
+      expect(record).not.toHaveProperty("authTime");
     }
   });
 
   it("passes the install's session cap through: a token lives no longer than a session would, and an unreadable cap makes nothing", async () => {
-    const { world, app, routesFor, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { app, routesFor, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const store = (await app.runtimeFor(FAKE_COMPANY)).flow.deps.store;
     const capped = await routesFor({ sessionCapSeconds: 3_600 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), days: 30 }), caller);
     expect(capped?.statusCode).toBe(201);
@@ -389,66 +404,25 @@ describe("a fresh step-up opens making a script token and acting on a decision c
       expect(refused?.statusCode, String(cap)).toBe(503);
       expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: SESSION_CAP_UNREADABLE });
     }
-    // The step-up comes first: a stale one is refused for that, whatever the cap.
-    const stale = await routesFor({ sessionCapSeconds: 0 }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci-stale" }), { ...caller, stepUp: { at: minutesAgo(world, 11), method: "passkey" } });
-    expect(errorOf(stale)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
     const listed = JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body) as { tokens: Array<{ name: string }> };
     expect(listed.tokens.map((token) => token.name).sort()).toEqual(["ci", "ci-open"]);
   });
 
-  it("refuses a step-up older than the window, in the future, or unreadable, whatever the body or a header claims", async () => {
-    const { world, routes, remember, list } = await setup();
-    const base = remember(FAKE_COMPANY);
-    const stale = [
-      { at: minutesAgo(world, 11), method: "email_code" }, { at: minutesAgo(world, -5), method: "passkey" }, { at: "yesterday", method: "email_code" },
-      { at: minutesAgo(world, 1), method: "" }, { at: 12345 as never, method: "email_code" }, null as never,
-      // A federated round trip is not a factor Code owns, and a looser time form is not read.
-      { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, 1), method: "oidc" }, { at: "2026-11-15", method: "email_code" }, { at: new Date(world.clock.now - 60_000).toUTCString(), method: "email_code" },
-    ];
-    for (const stepUp of stale) {
-      const caller: DeployedCaller = { ...base, stepUp };
-      const body = { ...BODY, requestId: randomUUID(), stepUp: { at: new Date(world.clock.now).toISOString(), method: "email_code" } };
-      const request = { ...post("/v1/app/script-tokens", body), headers: { "x-step-up-at": new Date(world.clock.now).toISOString() } };
-      const made = await routes.route(request, caller);
-      expect(made?.statusCode, JSON.stringify(stepUp)).toBe(403);
-      expect(errorOf(made)).toEqual({ code: "REAUTH_REQUIRED", message: MAKE_SCRIPT_TOKEN_ON_A_PAGE });
-      const acted = await routes.route(post(`/v1/app/decisions/plan/${randomUUID()}/approve`, body), caller);
-      expect(errorOf(acted)).toEqual({ code: "REAUTH_REQUIRED", message: DECIDE_ON_A_PAGE });
-    }
-    expect(list).not.toHaveBeenCalled();
-    expect(JSON.parse((await routes.route(get("/v1/app/script-tokens"), base))!.body)).toEqual({ tokens: [], canCreate: true });
+  it("a step-up a body or a header names is ignored: an owner's token is made, a member's is refused, whatever they send", async () => {
+    const { world, routes, remember } = await setup();
+    const body = { ...BODY, requestId: randomUUID(), stepUp: { at: new Date(world.clock.now).toISOString(), method: "email_code" } };
+    const request = (b: unknown) => ({ ...post("/v1/app/script-tokens", b), headers: { "x-step-up-at": new Date(world.clock.now).toISOString() } });
+    // `stepUp` is not a body field the token schema reads: a strict body refuses it, so the plain body is the owner's.
+    expect((await routes.route(request(body), remember(FAKE_COMPANY)))?.statusCode).toBeGreaterThanOrEqual(400);
+    expect((await routes.route(request({ ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY)))?.statusCode).toBe(201);
+    const member = await routes.route(request({ ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY, "member", "person-member-0001"));
+    expect(errorOf(member)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
   });
 
-  it("takes the company's shorter window from the hook, never a longer one, and refuses when the hook gives no readable answer", async () => {
-    const { world, routesFor, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 5), method: "email_code" } };
-    const routesWith = async (answer: () => Promise<unknown>) => routesFor({ stepUpWindowSeconds: answer });
-    // A 2-minute company window refuses a 5-minute-old step-up; a 30-minute answer is capped at the 10-minute default.
-    expect(errorOf(await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller)).code).toBe("REAUTH_REQUIRED");
-    // A zero window refuses even a step-up made this very moment.
-    expect(errorOf(await (await routesWith(async () => 0)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 0.75), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    const old: DeployedCaller = { ...caller, stepUp: { at: minutesAgo(world, 11), method: "email_code" } };
-    expect(errorOf(await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), old)).code).toBe("REAUTH_REQUIRED");
-    expect((await (await routesWith(async () => 1800)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller))?.statusCode).toBe(201);
-    // Positive short windows: a 30 s window takes a 20 s-old step-up, a 120 s window a 60 s-old one; and the future-skew allowance never exceeds the window.
-    expect((await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, 20 / 60), method: "email_code" } }))?.statusCode).toBe(201);
-    expect((await (await routesWith(async () => 120)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), name: "ci2" }), { ...caller, stepUp: { at: minutesAgo(world, 1), method: "passkey" } }))?.statusCode).toBe(201);
-    expect(errorOf(await (await routesWith(async () => 30)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), { ...caller, stepUp: { at: minutesAgo(world, -1), method: "email_code" } })).code).toBe("REAUTH_REQUIRED");
-    // No step-up: refused without asking the hook.
-    const asked = vi.fn(async () => 600);
-    expect(errorOf(await (await routesWith(asked)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), remember(FAKE_COMPANY))).code).toBe("REAUTH_REQUIRED");
-    expect(asked).not.toHaveBeenCalled();
-    for (const answer of [async () => { throw new Error("hook down"); }, async () => "600", async () => -1, async () => 1.5, async () => undefined, async () => 90_000]) {
-      const refused = await (await routesWith(answer)).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
-      expect(refused?.statusCode).toBe(503);
-      expect(errorOf(refused)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: COMPANY_RULES_NO_ANSWER });
-    }
-  });
 
   it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
-    const { world, routes, remember } = await setup();
-    const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
     const hidden = await routes.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID(), projects: ["secret"] }), caller);
     expect(hidden?.statusCode).toBe(404);
     expect(errorOf(hidden).message).toBe("project not found");
@@ -458,23 +432,17 @@ describe("a fresh step-up opens making a script token and acting on a decision c
     expect(errorOf(unwired).message).toBe(NOT_ON_THE_CORE_YET);
   });
 
-  it("lets an act on a card reach the cards with the step-up as the person's sign-in time (and a read carries none)", async () => {
-    const { world, routes, remember, list } = await setup();
-    const at = minutesAgo(world, 3);
-    const base = remember(FAKE_COMPANY);
-    const caller: DeployedCaller = { ...base, principal: { ...base.principal, authTime: minutesAgo(world, 0) }, stepUp: { at, method: "email_code" } };
+  it("lets an act on a card reach the cards with no step-up and no sign-in time on the principal (DEC 254zzz73)", async () => {
+    const { routes, remember, list } = await setup();
+    const caller = remember(FAKE_COMPANY);
     const acted = await routes.route(post(`/v1/app/decisions/approve_plan/${randomUUID()}/reject`, { requestId: randomUUID(), reason: "not_now" }), caller);
-    // Past the step-up gate: the card is simply not waiting for them (the sources list is empty).
+    // The card is simply not waiting for them (the sources list is empty): nothing in front of the cards refused the act.
     expect(acted?.statusCode).toBe(404);
     expect(list).toHaveBeenCalledTimes(1);
     const seen = list.mock.calls[0]![0] as { principal: { authTime?: string; methods?: string[] }; stepUp?: unknown };
-    expect(seen.principal.authTime).toBe(at);
-    expect(seen.principal.methods).toEqual(["email_code"]);
-    expect(seen.stepUp).toEqual({ at, method: "email_code" });
-    await routes.route(get("/v1/app/decisions"), caller);
-    const read = list.mock.calls[1]![0] as { principal: { authTime?: string }; stepUp?: unknown };
-    expect(read.principal.authTime).toBeUndefined();
-    expect(read.stepUp).toBeUndefined();
+    expect(seen.principal.authTime).toBeUndefined();
+    expect(seen.principal.methods).toBeUndefined();
+    expect(seen).not.toHaveProperty("stepUp");
     // A malformed body is a fixed refusal, never an echo.
     const bad = await routes.route({ ...post(`/v1/app/decisions/plan/${randomUUID()}/approve`), body: "{not json <script>" }, caller);
     expect(errorOf(bad)).toEqual({ code: "CONFIG_INVALID", message: "the request body is not JSON" });
@@ -757,12 +725,11 @@ describe("the tasks I was added to on the deployed API (web task channel C5)", (
   });
 });
 
-// L4-P3 (owner 2026-11-17): allowing the company's automatic runs needs the SAME fresh step-up as making a script token (the real check, against the company's window), through both the setup PUT and the company's
-// own route; withdrawing needs only the live owner or admin role. Mutants are listed in the PR body with the test that kills each.
-describe("the company's automatic runs: a fresh step-up to allow, none to withdraw", () => {
+// L4-P3 (owner 2026-11-17), DEC 254zzz73: allowing and withdrawing the company's automatic runs need only the live owner or admin role (no step-up), through both the setup PUT and the company's
+// own route. Mutants are listed in the PR body with the test that kills each.
+describe("the company's automatic runs: the live owner or admin role to allow and to withdraw, no step-up", () => {
   const SYSTEM_RUNS = "/v1/app/company/system-runs";
   const UPKEEP = "/v1/app/projects/payments/upkeep";
-  const minutesAgo = (world: FakeWorld, minutes: number) => new Date(world.clock.now - minutes * 60_000).toISOString();
   const errorOf = (answer: { body: string } | undefined) => (JSON.parse(answer!.body) as { error: { code: string; message: string } }).error;
   const put = (path: string, body: unknown) => ({ method: "PUT", path, headers: {}, body: JSON.stringify(body) });
   const allow = (): { requestId: string; allowed: boolean } => ({ requestId: randomUUID(), allowed: true });
@@ -776,43 +743,38 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
     return { ...w, routes, consentOf };
   }
 
-  // MUTANT E1: dev-routes does not hand the real step-up check to the company route or to the setup route.
-  it("a stale step-up, a missing one, a federated factor and a future time are all refused on BOTH routes; nothing is written", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const base = remember(FAKE_COMPANY);
-    const refused = [undefined, { at: minutesAgo(world, 11), method: "passkey" }, { at: minutesAgo(world, 1), method: "slack" }, { at: minutesAgo(world, -5), method: "email_code" }, { at: "yesterday", method: "email_code" }, { at: minutesAgo(world, 1), method: "" }];
-    for (const stepUp of refused) {
-      const caller: DeployedCaller = { ...base, ...(stepUp === undefined ? {} : { stepUp }) };
-      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
-        const answer = await routes.route(request, caller);
-        expect(answer?.statusCode, `${request.path} ${JSON.stringify(stepUp)}`).toBe(403);
-        expect(errorOf(answer), request.path).toEqual({ code: "REAUTH_REQUIRED", message: SYSTEM_RUNS_CONSENT_WORDS.needsSignIn });
-      }
+
+  it("owner DEC 254zzz91: an owner's CLI or AI-tool token cannot ALLOW on either route (403, the website words, nothing written) but can WITHDRAW", async () => {
+    const a = await setup();
+    const owner = a.remember(FAKE_COMPANY);
+    for (const [path, body] of [[SYSTEM_RUNS, allow()], [UPKEEP, setupAllow()]] as const) {
+      const refused = await a.routes.route(put(path, body), cliOf(owner));
+      expect(refused?.statusCode, path).toBe(403);
+      expect(errorOf(refused)).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+      expect(await a.consentOf(FAKE_COMPANY)).toBe(false);
     }
-    expect(await consentOf(FAKE_COMPANY)).toBe(false);
+    expect((await a.routes.route(put(SYSTEM_RUNS, allow()), owner))?.statusCode).toBe(200);
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
+    expect((await a.routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), cliOf(owner)))?.statusCode).toBe(200);
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(false);
   });
 
-  it("a step-up inside the window (a passkey or an emailed code) allows it, through both routes", async () => {
-    for (const method of ["passkey", "email_code"]) {
-      const a = await setup();
-      const callerA: DeployedCaller = { ...a.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(a.world, 2), method } };
-      const answer = await a.routes.route(put(SYSTEM_RUNS, allow()), callerA);
-      expect(answer?.statusCode, method).toBe(200);
-      expect(JSON.parse(answer!.body)).toEqual({ available: true, allowed: true, systemRunsOn: true });
-      expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
-      const b = await setup();
-      const callerB: DeployedCaller = { ...b.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(b.world, 2), method } };
-      const setupAnswer = await b.routes.route(put(UPKEEP, setupAllow()), callerB);
-      expect(setupAnswer?.statusCode, method).toBe(200);
-      expect(JSON.parse(setupAnswer!.body)).toMatchObject({ enabled: true, systemRunsOn: true });
-      expect(await b.consentOf(FAKE_COMPANY)).toBe(true);
-    }
+  it("a signed-in owner with no step-up allows it, through both routes", async () => {
+    const a = await setup();
+    const answer = await a.routes.route(put(SYSTEM_RUNS, allow()), a.remember(FAKE_COMPANY));
+    expect(answer?.statusCode).toBe(200);
+    expect(JSON.parse(answer!.body)).toEqual({ available: true, allowed: true, systemRunsOn: true });
+    expect(await a.consentOf(FAKE_COMPANY)).toBe(true);
+    const b = await setup();
+    const setupAnswer = await b.routes.route(put(UPKEEP, setupAllow()), b.remember(FAKE_COMPANY));
+    expect(setupAnswer?.statusCode).toBe(200);
+    expect(JSON.parse(setupAnswer!.body)).toMatchObject({ enabled: true, systemRunsOn: true });
+    expect(await b.consentOf(FAKE_COMPANY)).toBe(true);
   });
 
-  // MUTANT E2: the withdrawal asks for the step-up (here: a caller with none is refused).
-  it("withdrawing needs no step-up on either route: an owner with none withdraws; the consent is gone and the gate says off at once", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const fresh: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+  it("an owner withdraws on either route; the consent is gone and the gate says off at once", async () => {
+    const { routes, remember, consentOf } = await setup();
+    const fresh: DeployedCaller = remember(FAKE_COMPANY);
     expect((await routes.route(put(SYSTEM_RUNS, allow()), fresh))?.statusCode).toBe(200);
     expect(await consentOf(FAKE_COMPANY)).toBe(true);
     const bare = remember(FAKE_COMPANY);
@@ -830,16 +792,16 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
 
   // MUTANT E3: the role is not membership's (a maintainer or member reaches the company route).
   it("the role is membership's: a member (and a project maintainer, who is a member of the company) is refused for reading, allowing and withdrawing; an admin is not", async () => {
-    const { world, routes, remember, consentOf } = await setup();
+    const { routes, remember, consentOf } = await setup();
     // "pm" is the person the setup wiring knows as a project administrator: a maintainer of the project, a plain member of the company.
     for (const personId of ["person-member", "pm"]) {
-      const caller: DeployedCaller = { ...remember(FAKE_COMPANY, "member", personId), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+      const caller: DeployedCaller = remember(FAKE_COMPANY, "member", personId);
       for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false })]) {
         const answer = await routes.route(request, caller);
         expect(answer?.statusCode, `${personId} ${request.method}`).toBe(403);
         expect(errorOf(answer).code).toBe("FORBIDDEN");
       }
-      // The setup route: the maintainer may switch the project, but neither allow nor withdraw the company's consent (even with a fresh step-up).
+      // The setup route: the maintainer may switch the project, but neither allow nor withdraw the company's consent.
       for (const body of [setupAllow(), { requestId: randomUUID(), on: false, allowSystemRuns: false }]) {
         const answer = await routes.route(put(UPKEEP, body), caller);
         expect(answer?.statusCode, personId).toBe(403);
@@ -847,15 +809,15 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
       }
     }
     expect(await consentOf(FAKE_COMPANY)).toBe(false);
-    const admin: DeployedCaller = { ...remember(FAKE_COMPANY, "admin", "person-admin"), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const admin: DeployedCaller = remember(FAKE_COMPANY, "admin", "person-admin");
     expect((await routes.route(put(SYSTEM_RUNS, allow()), admin))?.statusCode).toBe(200);
     expect((await routes.route(get(SYSTEM_RUNS), admin))?.statusCode).toBe(200);
   });
 
   // MUTANT E4: the script-token refusal does not cover the new path.
   it("a script token reaches neither route's company control: refused before anything is read", async () => {
-    const { world, routes, remember } = await setup();
-    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" }, stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember } = await setup();
+    const token: DeployedCaller = { ...remember(FAKE_COMPANY), scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } };
     for (const request of [get(SYSTEM_RUNS), put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) {
       const answer = await routes.route(request, token);
       expect(answer?.statusCode, request.path).toBe(403);
@@ -863,18 +825,10 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
     }
   });
 
-  it("takes the company's shorter step-up window and refuses when the company rules give no answer (both routes)", async () => {
-    for (const [window, code] of [[async () => 0, "REAUTH_REQUIRED"], [async () => { throw new Error("down"); }, "RUNTIME_UNAVAILABLE"], [async () => "ten", "RUNTIME_UNAVAILABLE"]] as const) {
-      const { world, routes, remember, consentOf } = await setup({ stepUpWindowSeconds: window });
-      const caller: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-      for (const request of [put(SYSTEM_RUNS, allow()), put(UPKEEP, setupAllow())]) expect(errorOf(await routes.route(request, caller)).code, request.path).toBe(code);
-      expect(await consentOf(FAKE_COMPANY)).toBe(false);
-    }
-  });
 
   it("the ceiling off: allowing is 'unavailable'; withdrawing still works. Unwired: 'not on the core yet'", async () => {
     const off = await setup({}, false);
-    const caller: DeployedCaller = { ...off.remember(FAKE_COMPANY), stepUp: { at: minutesAgo(off.world, 1), method: "passkey" } };
+    const caller: DeployedCaller = off.remember(FAKE_COMPANY);
     expect(errorOf(await off.routes.route(put(SYSTEM_RUNS, allow()), caller)).code).toBe("NOT_AVAILABLE_HERE");
     expect((await off.routes.route(put(SYSTEM_RUNS, { requestId: randomUUID(), allowed: false }), caller))?.statusCode).toBe(200);
     const w = await world2();
@@ -885,9 +839,9 @@ describe("the company's automatic runs: a fresh step-up to allow, none to withdr
   });
 
   it("two companies: one's owner allows and withdraws only their own company's setting", async () => {
-    const { world, routes, remember, consentOf } = await setup();
-    const a: DeployedCaller = { ...remember(FAKE_COMPANY), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
-    const b: DeployedCaller = { ...remember(OTHER), stepUp: { at: minutesAgo(world, 1), method: "passkey" } };
+    const { routes, remember, consentOf } = await setup();
+    const a: DeployedCaller = remember(FAKE_COMPANY);
+    const b: DeployedCaller = remember(OTHER);
     expect((await routes.route(put(SYSTEM_RUNS, allow()), a))?.statusCode).toBe(200);
     expect(await consentOf(FAKE_COMPANY)).toBe(true);
     expect(await consentOf(OTHER)).toBe(false);
@@ -948,4 +902,206 @@ describe("the eval check card on the deployed API (L4-EVCI2)", () => {
     expect(answerOf(await routes.route(get(CARD), remember(OTHER))).confirmed).toBeNull();
     expect(await (await app.runtimeFor(OTHER)).flow.deps.store.get({ pk: `ORG#${OTHER}#CIEVAL#payments`, sk: "CHECK" })).toBeUndefined();
   });
+});
+
+
+describe("read-only start-estimates", () => {
+ it("registers only the approved read scope on the dev boundary", async () => {
+  const { devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  expect(devRouteOf("POST", "/v1/dev/projects/payments/start-estimates")?.requires).toBe("tasks:read");
+  for (const method of ["GET", "PUT", "DELETE"]) expect(devRouteOf(method, "/v1/dev/projects/payments/start-estimates")).toBeUndefined();
+ });
+ it("serves the negotiated comparison with live company/project checks and never creates a hold or task", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const caller = remember(FAKE_COMPANY);
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false }) });
+  const writes = vi.spyOn(world.store, "transact");
+  const put = vi.spyOn(world.store, "put");
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), caller);
+  expect(result?.statusCode).toBe(200);
+  expect(JSON.parse(result!.body)).toMatchObject({ quoteVersion: 2, orgId: FAKE_COMPANY, options: [{ path: "QUICK" }, { path: "FULL" }] });
+  expect(writes).not.toHaveBeenCalled();expect(put).not.toHaveBeenCalled();
+  const denied = remember(OTHER, "member");
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), denied))?.statusCode).toBe(404);
+  expect((await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2, companyId: OTHER }), caller))?.statusCode).toBe(400);
+ });
+});
+
+
+it("redacts every company figure in the member JSON while owners and admins keep the numeric quote", async () => {
+ const { app, companyOf, remember } = await world2();
+ const av = <T>(value: T) => ({ state: "available" as const, value });
+ const un = { state: "unavailable" as const, reason: "not_measured" as const };
+ const companyNumbers = [9100011, 8100013, 7100017, 5100023, 4100029];
+ const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5100023, limits: [
+  { scope: "engine_day" as const, maximumMicros: av(9100011), availableMicros: av(8100013), heldMicros: av(7100017), resetAt: un },
+  { scope: "engine_task" as const, maximumMicros: av(6100019), availableMicros: av(5100023), heldMicros: av(4100029), resetAt: un },
+ ] };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => true, startEstimates: async () => context }) });
+ const read = async (role: CompanyMembership["role"]) => {
+  const result = await routes.route(post("/v1/dev/projects/payments/start-estimates", { quoteVersion: 2 }), remember(FAKE_COMPANY, role));
+  expect(result?.statusCode).toBe(200);
+  return JSON.parse(result!.body) as unknown;
+ };
+ // Walk the entire serialized response: leaks in a hold, binding or future nested field must also fail.
+ const numbers = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(numbers) : [];
+ const member = await read("member");
+ const options = (member as { options: Array<{ firstBindingLimit: unknown }> }).options;
+ for (const q of options) expect(numbers(q.firstBindingLimit)).toEqual([]);
+ expect(member).toMatchObject({ options: [{ firstBindingLimit: { value: { bindingScope: "engine_task" } } }, { firstBindingLimit: { value: { bindingScope: "engine_task" } } }] });
+ expect(numbers(member).filter(n => companyNumbers.includes(n))).toEqual([]);
+ expect(options.map(q => Object.keys(q).sort())).toEqual([0, 1].map(() => ["path", "scope", "range", "taskMaximumMicros", "limitCoverage", "firstBindingLimit", "notices"].sort()));
+ expect(member).toMatchObject({ options: [{ range: av({ lowMicros: 1_000_000, highMicros: 3_000_000 }), taskMaximumMicros: av(6100019) }, { range: av({ lowMicros: 4_000_000, highMicros: 10_000_000 }), taskMaximumMicros: av(6100019) }] });
+ expect(numbers(member)).toEqual([2, 1_000_000, 3_000_000, 6100019, 4_000_000, 10_000_000, 6100019]);
+ for (const role of ["owner", "admin"] as const) {
+  const quote = await read(role);
+  expect(numbers(quote)).toEqual(expect.arrayContaining(companyNumbers));
+ }
+});
+
+describe("start-estimates history and refresh boundary", () => {
+ it("labels five historical runs, preserves unknown optional increments, refreshes changed options and discloses blocking held room", async () => {
+  const { world, app, companyOf, remember } = await world2();
+  const { recordRunCost } = await import("../../packages/broker/src/core/cost/estimate.js");
+  const { parsePreviewV2 } = await import("../../packages/contracts/src/start-estimates.js");
+  for (let i = 0; i < 5; i++) {
+   const taskId = `history-${i}`;
+   await world.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: "META", companyId: FAKE_COMPANY } });
+   await recordRunCost({ store: world.store }, { orgId: FAKE_COMPANY, project: "payments", taskId, path: "QUICK", endedAt: "2026-11-17T00:00:00.000Z", costUsd: 0.5 + i / 2 });
+  }
+  const av = <T>(value: T) => ({ state: "available" as const, value });
+  const un = { state: "unavailable" as const, reason: "not_measured" as const };
+  const context = { policyRevision: "p1", stages: {}, initialHoldCeilingMicros: 5_000_000, limits: [{ scope: "engine_day" as const, maximumMicros: av(5_000_000), availableMicros: av(1_000_000), heldMicros: av(4_000_000), resetAt: un }] };
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, canReadProject: async () => false, startEstimates: async () => context }) });
+  const caller = remember(FAKE_COMPANY);
+  const read = async (body: unknown) => parsePreviewV2(JSON.parse((await routes.route(post("/v1/dev/projects/payments/start-estimates", body), caller))!.body))!;
+  const q = await read({ quoteVersion: 2 });
+  // This caller reads the full (non-restricted) quote: narrow before reading its admin-only fields.
+  const [quickQuote, fullQuote] = q.options;
+  if (!("basis" in quickQuote) || !("planningAllowanceMicros" in fullQuote)) throw new Error("expected the full (unrestricted) quote");
+  expect(quickQuote.basis).toMatchObject({ kind: "history", modelPriced: false, samples: 5 });
+  expect(q.options[0].range).toEqual(av({ lowMicros: 1_500_000, highMicros: 2_000_000 }));
+  expect(q.options[1].range).toEqual(av({ lowMicros: 4_000_000, highMicros: 10_000_000 }));
+  expect(fullQuote.planningAllowanceMicros).toEqual(av(6_000_000));
+  expect(fullQuote.initialHoldMicros).toEqual(av(5_000_000));
+  expect(q.options[0].firstBindingLimit).toMatchObject({ state: "available", value: { scope: "engine_day", appliesAt: "start", blocked: true, reason: "held" } });
+  const refreshed = await read({ quoteVersion: 2, options: { eval: true } });
+  expect(refreshed.inputsDigest).not.toBe(q.inputsDigest);
+  expect(refreshed.quoteId).not.toBe(q.quoteId);
+  expect(refreshed.options[0].range).toEqual(un);
+  if (!("stages" in refreshed.options[0])) throw new Error("admin comparison must retain stage details");
+  expect(refreshed.options[0].stages.find(s => s.stage === "legacy_aggregate")?.range).toEqual(q.options[0].range);
+  expect(refreshed.options[0].limitCoverage).toBe("partial");
+ });
+});
+
+// Internal worker routes are inventoried in the scope table, with no person scope.
+it("inventories exactly four worker-only saved image callbacks without exposing app or developer aliases", async () => {
+  const { APP_ROUTES, DEV_ROUTES, SAVED_ENV_WORKER_ROUTES, savedEnvWorkerRouteOf, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  expect(SAVED_ENV_WORKER_ROUTES.map(row => [row.method, row.path, row.requires])).toEqual(["push-login", "result", "fallback", "login"].map(action => ["POST", `/v1/internal/workspaces/{workspace}/operations/{operation}/saved-env-${action}`, "worker"]));
+  for (const row of SAVED_ENV_WORKER_ROUTES) {
+    const path = row.path.replace("{workspace}", "w").replace("{operation}", "o");
+    expect(savedEnvWorkerRouteOf("POST", path)).toEqual(row);
+    expect(savedEnvWorkerRouteOf("GET", path)).toBeUndefined();
+    expect(appRouteOf("POST", path)).toBeUndefined();
+    expect(devRouteOf("POST", path)).toBeUndefined();
+  }
+  expect([...APP_ROUTES, ...DEV_ROUTES].some(row => row.path.includes("/v1/internal/"))).toBe(false);
+});
+
+
+it("shows task money only to its stored owner or a live company admin, never a reader, co-owner or second company", async () => {
+ const { world, app, companyOf, remember } = await world2();
+ const owner = remember(FAKE_COMPANY, "member", "task-owner");
+ const reader = remember(FAKE_COMPANY, "member", "reader");
+ const coOwner = remember(FAKE_COMPANY, "member", "co-owner");
+ const admin = remember(FAKE_COMPANY, "admin", "admin");
+ const foreign = remember(OTHER, "member", "task-owner");
+ const runtime = await app.runtimeFor(FAKE_COMPANY);
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Owned task", workflow: true, workflowPath: "FULL" });
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default" as const, samples: 0 };
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, spentUsd: 1.23, spentRuns: 1, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
+ runtime.flow.deps.access.canRead = async () => true;
+ runtime.flow.deps.access.canAct = async principal => principal.personId !== "reader";
+ // Use the ledger's real partition and an engine aggregate, just as worker accounting does.
+ const { costPartition } = await import("../../packages/broker/src/core/cost/ledger.js");
+ const costPk = costPartition(FAKE_COMPANY, task.taskId);
+ await world.store.put({ item: { pk: costPk, sk: "ENTRY#one", companyId: FAKE_COMPANY, taskId: task.taskId, currency: "USD", micros: 1_230_000 } });
+ const cap = vi.fn(async () => ({ limitUsd: 12, spentUsd: 1.23 }));
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, taskActions: { roundCap: cap } }) });
+ const read = async (caller: DeployedCaller) => routes.route(get(`/v1/dev/tasks/${task.taskId}`), caller);
+ for (const caller of [owner, admin]) {
+  const answer = await read(caller);
+  expect(answer?.statusCode).toBe(200);
+  expect(JSON.parse(answer!.body)).toMatchObject({ task: { owner: { developerId: "task-owner" }, runEstimate, money: { spentMicros: { value: 1_230_000 }, estimatedMicros: { value: 1_230_000 }, stop: { taskMaximumMicros: { value: 12_000_000 } } } } });
+ }
+ for (const caller of [reader, coOwner]) {
+  cap.mockClear();
+  const query = vi.spyOn(world.store, "query");
+  const answer = await read(caller);
+  expect(answer?.statusCode).toBe(200);
+  const body = JSON.parse(answer!.body) as { task: { money?: unknown } };
+  expect(body.task.money).toBeUndefined();
+  const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+  for (const figure of [4.37, 10.19, 12.71, 1.23, 1_230_000, 12_000_000, ...REVIEW_MONEY]) expect(walk(body)).not.toContain(figure);
+  expect(body.task).not.toHaveProperty("runEstimate");
+  expect(body.task).not.toHaveProperty("spent");
+  expect(query.mock.calls.filter(([input]) => input.pk === costPk)).toEqual([]);
+  expect(cap).not.toHaveBeenCalled();
+  query.mockRestore();
+  expect(await routes.taskMoney(caller, task.taskId)).toBeUndefined();
+ }
+ expect((await read(foreign))?.statusCode).toBe(404);
+ expect(await routes.taskMoney(foreign, task.taskId)).toBeUndefined();
+});
+
+const REVIEW_MONEY = [2.83, 17.43, 3.91, 0.87, 5.67, 9.73, 18.61, 1.81];
+function fullMoneyReview() {
+ const reviewer = { role: "critic", promptId: "design-review-critic", promptVersion: 1, promptDigest: "a".repeat(64), model: { provider: "anthropic", modelId: "claude-opus-5-5" }, sourceId: "src", sessionId: "review-1", modelKeyId: "key", packetDigest: "b".repeat(64), packet: [], filesRead: [], verified: true, inputProof: "digest_only", tokensIn: 100, tokensOut: 20, costUsd: 0.87, startedAt: "2026-11-19T00:00:00.000Z", endedAt: "2026-11-19T00:00:01.000Z" };
+ return { decidedBy: "auto", reasons: [], status: "done", tier: "light", spentUsd: 2.83, capUsd: 17.43, estimateUsd: 3.91,
+  rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [reviewer], findings: [], resolutions: [] }],
+  approvals: [{ kind: "spend", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", approvedUsd: 5.67 }, { kind: "raise_cap", by: { actorId: "owner" }, at: "2026-11-19T00:00:00.000Z", fromUsd: 9.73, capUsd: 18.61 }],
+  earlierReviews: [{ sentBackBy: { actorId: "owner" }, sentBackAt: "2026-11-19T00:00:00.000Z", spentUsd: 1.81, rounds: [{ round: 1, designDigest: "c".repeat(64), reviewers: [{ role: reviewer.role, model: reviewer.model, sessionId: reviewer.sessionId, modelKeyId: reviewer.modelKeyId, packetDigest: reviewer.packetDigest, verified: true, tokensIn: 100, tokensOut: 20, costUsd: 0.87 }], findings: [] }] }] };
+}
+
+it("hosted session read and list keep FULL task figures private even when a reader or co-owner owns the session", async () => {
+ const { world, app, companyOf, remember } = await world2();
+ const owner = remember(FAKE_COMPANY, "member", "stored-owner");
+ const reader = remember(FAKE_COMPANY, "member", "reader");
+ const coOwner = remember(FAKE_COMPANY, "member", "co-owner");
+ const admin = remember(FAKE_COMPANY, "admin", "admin");
+ const foreign = remember(OTHER, "admin", "foreign");
+ const runtime = await app.runtimeFor(FAKE_COMPANY);
+ const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Full task", workflow: true, workflowPath: "FULL" });
+ const { agentSessionKey, mySessionsKey } = await import("@agentx/contracts");
+ const { taskSessionHeader, taskSessionId } = await import("../../packages/broker/src/core/sessions/create.js");
+ const sessionId = taskSessionId(task.taskId);
+ const { record: session } = taskSessionHeader({ orgId: FAKE_COMPANY, sessionId, taskId: task.taskId, project: task.project, title: task.title, owner: owner.principal, agent: { agentId: "agt_aaaaaaaaaaaaaaaaaaaa", name: "Planner", version: 1 }, origin: "app", payer: { kind: "project", project: "payments" }, now: task.createdAt });
+ expect(session).toBeDefined();
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default", samples: 0 };
+ const stored = await world.store.get(taskKey(task.taskId));
+ await world.store.put({ item: { ...stored, runEstimate, workflow: { ...stored?.["workflow"] as Record<string, unknown>, designReview: fullMoneyReview() } } as never });
+ await world.store.put({ item: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, people: [{ developerId: developerIdOf(coOwner.principal), role: "owner" }, { developerId: developerIdOf(reader.principal), role: "viewer" }] } });
+ const members = { companyRole: async (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal === undefined ? undefined : (await companyOf({ principal: person.principal }))?.role, projectGrant: (person: { principal?: DeployedCaller["principal"] | undefined }) => person.principal?.personId === "reader" ? "viewer" as const : "contributor" as const };
+ const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members }) });
+ const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+ for (const caller of [owner, admin, reader, coOwner]) {
+  // Deliberately differ session owner from stored task owner. A session owner is not a financial owner.
+  const changed = { ...session, owner: { developerId: developerIdOf(caller.principal), name: caller.principal.displayName }, summary: { ...session.summary, costUsd: 1.23, runLimitUsd: 12.71, stopAtUsd: 12.71 } };
+  // A stored copy, as the table would hold it (no undefined fields).
+  await world.store.put({ item: JSON.parse(JSON.stringify({ ...changed, ...agentSessionKey(FAKE_COMPANY, sessionId, "META") })) as Parameters<typeof world.store.put>[0]["item"] });
+  await world.store.put({ item: { ...mySessionsKey(FAKE_COMPANY, developerIdOf(caller.principal), changed.createdAt, changed.sessionId), sessionId: changed.sessionId } });
+  for (const path of [`/v1/app/sessions/${sessionId}`, "/v1/app/sessions"]) {
+   const answer = await routes.route(get(path), caller);
+   expect(answer?.statusCode).toBe(200);
+   const body: unknown = JSON.parse(answer!.body);
+   const { SessionResponseReaderSchema, SessionListReaderSchema } = await import("@agentx/contracts");
+   const parsed = path.endsWith(sessionId) ? SessionResponseReaderSchema.safeParse(body) : SessionListReaderSchema.safeParse(body);
+   expect(parsed.success, parsed.success ? undefined : JSON.stringify(parsed.error.issues)).toBe(true);
+   if (caller === owner || caller === admin) { expect(walk(body)).toContain(1.23); if (path.endsWith(sessionId)) expect(walk(body)).toContain(2.83); }
+   else { for (const figure of [1.23, 12.71, 4.37, 10.19, ...REVIEW_MONEY]) expect(walk(body), path).not.toContain(figure); }
+  }
+ }
+ expect((await routes.route(get(`/v1/app/sessions/${sessionId}`), foreign))?.statusCode).toBe(404);
 });

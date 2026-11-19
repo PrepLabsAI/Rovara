@@ -67,7 +67,8 @@ describe("what an entry is made of", () => {
 
   it("keeps a plan's summary to the card's bounds and drops one that says nothing", () => {
     const entry = planSummaryEntryOf({ revision: 2, at: AT, needed: "Add a cap", lines: ["one", "two", "three", "four", "five", "six"], risk: "medium", estimate: "$4 to $10" })!;
-    expect(entry).toMatchObject({ kind: "plan_summary", key: "plan:r2", revision: 2, risk: "medium", estimate: "$4 to $10" });
+    expect(entry).toMatchObject({ kind: "plan_summary", key: "plan:r2", revision: 2, risk: "medium" });
+    expect(entry).not.toHaveProperty("estimate");
     expect((entry as { lines: string[] }).lines).toHaveLength(5);
     expect(planSummaryEntryOf({ revision: 2, at: AT, needed: " ", lines: ["a"], risk: "low" })).toBeUndefined();
     expect(planSummaryEntryOf({ revision: 2, at: AT, needed: "x", lines: [], risk: "low" })).toBeUndefined();

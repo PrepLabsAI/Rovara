@@ -7,12 +7,18 @@ import {
 } from "@agentx/contracts";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { createTaskWeb } from "../../packages/broker/src/aws/task-web.js";
-import { AutoFixAskSchema } from "../../packages/broker/src/developer/autofix-messages.js";
+import { AutoFixAskSchema, autoFixAskReasonSentence } from "../../packages/broker/src/developer/autofix-messages.js";
 import { autofixConfigFromEnvironment, postponeAutofixRow, recordAutofixGiveUpAsk } from "../../packages/broker/src/aws/workflow-autofix-runner.js";
 import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { getTaskDocumentView, publicWorkflowDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
+
+it.each([undefined, 15, 17.43])("keeps the automatic-fix cap out of reader-visible messages (%s)", (capUsd) => {
+  const message = autoFixAskReasonSentence("spend-cap", capUsd);
+  expect(message).toContain("automatic-fix limit");
+  expect(message).not.toMatch(/\$|\d/);
+});
 
 type Harness = Awaited<ReturnType<typeof broker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -209,7 +215,7 @@ describe("automatic fixing of blocked checks and reviews (AUTOFIX)", () => {
     onlyOwnerPlanApprovalAndAutomatic(harness, ctx.taskId);
   });
 
-  it("asks, naming the cap, when the WHOLE task's spend plus one more round would pass it", async () => {
+  it("asks without an amount when the WHOLE task's spend plus one more round would pass it", async () => {
     const harness = await broker();
     const ctx = await startCoding(harness);
     // 14 dollars were spent in the first coding run (not in the last round): 14 + 3 > 15.
@@ -218,7 +224,7 @@ describe("automatic fixing of blocked checks and reviews (AUTOFIX)", () => {
     expect(automatic(harness, ctx.taskId)).toHaveLength(0);
     const ask = AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk);
     expect(ask).toMatchObject({ reason: "spend-cap", capUsd: 15 });
-    expect(workflowMessage({ taskId: ctx.taskId, workflow: workflowOf(harness, ctx.taskId), autoFix: { ask } })!.text).toContain("over the $15 per-task cap");
+    expect(workflowMessage({ taskId: ctx.taskId, workflow: workflowOf(harness, ctx.taskId), autoFix: { ask } })!.text).toContain("The automatic-fix limit was reached.");
   });
 
   it("adds up EVERY usage record of a review run (one per reviewer), so the cap holds against both reviewers' cost", async () => {
@@ -255,18 +261,20 @@ describe("automatic fixing of blocked checks and reviews (AUTOFIX)", () => {
     expect(AutoFixAskSchema.parse(taskOf(harness, ctx.taskId).autofixAsk)).toMatchObject({ reason: "spend-cap", capUsd: 15 });
   });
 
-  it("shows the ask on the task page, in the blocked step's place, with what Rovara tried and the cap", async () => {
+  it("shows the ask on the task page, in the blocked step's place, with what Rovara tried and the limit reached", async () => {
     const harness = await broker();
     const ctx = await startCoding(harness);
     await blockOnFindings(harness, ctx, 1, 0.1, 7);
     const view = await getTaskDocumentView({ documentClient: harness.db, tableName: "state", actions: harness.actions, log: () => undefined,
       checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() },
     { developerId: MAYA.developerId } as never, ctx.taskId);
-    expect(view.autofix?.lines.join("\n")).toContain("Why I'm asking you: Another automatic round would go over the $15 per-task cap on automatic fixing.");
+    expect(view.autofix?.lines.join("\n")).toContain("Why I'm asking you: The automatic-fix limit was reached.");
     const web = createTaskWeb({ authenticateSession: async () => ({ developerId: MAYA.developerId } as never), getTaskDocumentView: async () => view });
     const answer = await web({ method: "GET", path: `/review/${ctx.taskId}/task`, headers: { cookie: "__Host-agentx_review_session=11111111-1111-4111-8111-111111111111" }, body: "" } as never, new URL(`https://agentx.example.test/review/${ctx.taskId}/task`));
     expect(answer.body).toContain('id="autofix"');
-    expect(answer.body).toContain("$15 per-task cap");
+    expect(answer.body).toContain("The automatic-fix limit was reached.");
+    expect(answer.body).not.toContain("$15");
+    expect(view.autofix?.lines.join("\n")).not.toContain("$15");
     // A task Rovara never touched has no such section.
     const quiet = await broker({ ...ON, enabled: false });
     const other = await startCoding(quiet);

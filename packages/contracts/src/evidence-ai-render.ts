@@ -15,7 +15,7 @@ function summary(ai: { eval: Pick<EvidenceAi["eval"], "label" | "privateSet" | "
   const e = ai.eval; const c = e.counts;
   const firstLine = e.label === "Worse on eval" ? e.privateSet ? "Worse on eval on private questions" : c!.broke > 0 ? `Worse on eval: ${noun(c!.broke)} broke` : "Worse on eval: aggregate pass rate dropped" : undefined;
   const words = e.privateSet ? `${e.label} on private questions` : e.label === "Improved on eval" ? "Improved on eval on questions the agent could read" : e.label;
-  const evalLine = ai.promptWithoutEval ? PROMPT_WITHOUT_EVAL_NOTICE : e.label === "Not run" ? `Eval: Not run: ${(e.runFailure === undefined ? EVAL_NOT_RUN_SENTENCES[e.notRunReason!].replace(/^not run: /iu, "") : evalRunFailureSentence(e.runFailure, { named }))}.${e.notRunReason === "no_eval_configured" ? "" : " Retry from the Rovara task page"}` : `Eval: ${words}`;
+  const evalLine = ai.promptWithoutEval ? PROMPT_WITHOUT_EVAL_NOTICE : e.label === "Not run" ? `Eval: Not run: ${(e.runFailure === undefined ? EVAL_NOT_RUN_SENTENCES[e.notRunReason!].replace(/^not run: /iu, "") : evalRunFailureSentence(e.runFailure, { named }))}.${e.notRunReason === "no_eval_configured" || e.runFailure?.code === "blocked_connection" ? "" : " Retry from the Rovara task page"}` : `Eval: ${words}`;
   const real = ai.realModelRun;
   return { ...(firstLine === undefined ? {} : { firstLine }), lines: [
     "AI checks", evalLine,

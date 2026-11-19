@@ -45,7 +45,8 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     if (view.cannotStart !== undefined) return `<p class="notice">${esc(view.cannotStart)}</p>`;
     const requestId = randomUUID();
     return `<form method="post" action="${action("start")}" class="row">${hidden("requestId", requestId)}${token("start", { requestId })}${button(view.status === "none" ? "Set this project up" : "Run the setup again", "primary")}</form>`
-      + `<p class="muted">A run is limited to ${esc(view.limits.commands)} commands, ${esc(view.limits.wallClockMin)} minutes and about $${esc((view.limits.budgetCents / 100).toFixed(2))} of model use.</p>`;
+      + `<p class="muted">A run is limited to ${esc(view.limits.commands)} commands, ${esc(view.limits.wallClockMin)} minutes and about $${esc((view.limits.budgetCents / 100).toFixed(2))} of model use.</p>`
+      + (view.standInWriter === undefined ? "" : `<p class="muted">${esc(view.standInWriter)}</p>`);
   };
 
   const itemRow = (item: SetupItemView): string => {
@@ -104,6 +105,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     // The eval panel's own two rules (the page style is shared by every page, so they stay here), under the page's style nonce.
     return `<style nonce="${esc(context.nonce)}">.eval-scroll{overflow-x:auto;max-width:100%}.eval-wrap{white-space:pre-wrap;overflow-wrap:anywhere}</style><div class="panel"><h2>Eval</h2><p class="${EVAL_STATE_CLASS[found.state]}">${esc(EVAL_STATE_WORDS[found.state])}</p>${found.cannotConfirm === undefined ? "" : `<p class="notice">${esc(found.cannotConfirm)}</p>`}`
       + `<div class="eval-scroll"><table><thead><tr><th>Eval</th><th>Questions</th><th>Command</th><th>Model and judge</th><th></th></tr></thead><tbody>${found.suites.map(suite).join("")}</tbody></table></div>`
+      + (view.evalReaches === undefined ? "" : `<p class="notice">${esc(view.evalReaches.words)}</p>`)
       + `<p class="muted">The setup run drafted this from the repository. Confirming it makes Rovara read each question file and the scoring file at the setup commit and pin them; nothing runs until its spend estimate is approved.</p></div>`;
   };
 

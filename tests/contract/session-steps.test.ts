@@ -11,7 +11,7 @@ import { hostedWorkersRunTestServices } from "../../packages/broker/src/aws/host
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices"> = {}) {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}, more: Pick<SessionStepsDependencies, "testServices" | "savedEnvBuilderImage"> = {}) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -225,4 +225,21 @@ describe("session steps", () => {
     await expect(handler({ action: "markReady", workspaceId, generation: 1, extra: true })).rejects.toThrow();
     expect(ping).not.toHaveBeenCalled();
   });
+});
+
+
+it("passes the saved builder pin from the provisioner configuration through to worker.env", async () => {
+  const image = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-production/saved-env-builder@sha256:${"c8252268760e1baba80780d63d738ef9f260fb7c7c0973c78494cb9ddd99eda1"}`;
+  const { handler } = setup(undefined, {}, { savedEnvBuilderImage: image });
+  const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
+  const rendered = gunzipSync(Buffer.from(result.userData, "base64")).toString("utf8");
+  expect(rendered).toContain(`export AGENTX_SAVED_ENV_BUILDER_IMAGE='${image}'`);
+  expect(rendered).toContain('printf \'AGENTX_SAVED_ENV_BUILDER_IMAGE=%s\\n\'');
+});
+
+it("treats an empty builder configuration as absent without failing worker launch", async () => {
+  const launch = { action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false };
+  const absent = await setup().handler(launch);
+  const empty = await setup(undefined, {}, { savedEnvBuilderImage: "" }).handler(launch);
+  expect(empty).toEqual(absent);
 });

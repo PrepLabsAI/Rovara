@@ -19,10 +19,12 @@ import { randomBytes } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  agentXError, AgentXNameSchema, channelBindingAttributes, channelBindingKey, channelBindingPartition, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackChannelIdSchema,
+  agentXError, AgentXNameSchema, channelBindingAttributes, companyLog, OrgIdSchema, SLACK_CHANNEL, SlackChannelIdSchema,
 } from "@agentx/contracts";
 import { projectGrant } from "./admin-actions.js";
-import { Membership, membershipKey, recordInCompany } from "./company-check.js";
+import { Membership, membershipKey, ownPartitionRow, recordInCompany } from "./company-check.js";
+import { latestRevisionRowFor, namedCompany } from "./company-layout.js";
+import { slackChannelBindingKeyFor, slackChannelBindingPkFor } from "./slack-company-layout.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { companyInstallKey } from "./slack-company-install.js";
@@ -111,6 +113,8 @@ export async function companyTeam(ctx: SlackChannelContext, companyId: string): 
 /** Whether `project` is a registered project of `companyId` (its latest revision's company; an unstamped one is the implicit company's). */
 export async function projectInCompany(ctx: SlackChannelContext, companyId: string, project: string): Promise<boolean> {
   if (!AgentXNameSchema.safeParse(project).success) return false;
+  // DEC 254zzz80 (R2-F1): a NAMED company's project is its own partition's (the core's order; a row naming another company is absent). The built-in company: as before.
+  if (namedCompany(companyId) !== undefined) return await latestRevisionRowFor(ctx.documentClient, ctx.tableName, companyId, project) !== undefined;
   const response = await ctx.documentClient.send(new QueryCommand({ TableName: ctx.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
     ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true })) as { Items?: unknown[] };
   const row = response.Items?.[0];
@@ -126,8 +130,9 @@ export async function mayLinkProject(ctx: SlackChannelContext, linker: ChannelLi
 
 interface TeamLink { channelId: string; projectName: string }
 /** Every link row of one team (bounded); more than the bound, or an unreadable row, throws. */
-async function teamLinks(ctx: SlackChannelContext, teamId: string): Promise<TeamLink[]> {
-  const pk = channelBindingPartition(SLACK_CHANNEL, teamId);
+async function teamLinks(ctx: SlackChannelContext, companyId: string, teamId: string): Promise<TeamLink[]> {
+  // DEC 254zzz80 (R2-F1): a NAMED company's links live only in its own partition (ORG#<company>#SLACK_BINDING#<team>); the built-in company's are the legacy rows.
+  const pk = slackChannelBindingPkFor(companyId, teamId);
   const links: TeamLink[] = [];
   let cursor: Record<string, unknown> | undefined;
   let pages = 0;
@@ -148,9 +153,11 @@ async function teamLinks(ctx: SlackChannelContext, teamId: string): Promise<Team
 }
 
 /** One channel's link row, or undefined. An unreadable row throws (as reading a binding does today). */
-async function channelLink(ctx: SlackChannelContext, teamId: string, channelId: string): Promise<string | undefined> {
-  const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }), ConsistentRead: true })) as { Item?: Record<string, unknown> };
+async function channelLink(ctx: SlackChannelContext, companyId: string, teamId: string, channelId: string): Promise<string | undefined> {
+  const key = slackChannelBindingKeyFor(companyId, teamId, channelId);
+  const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
   if (response.Item === undefined) return undefined;
+  if (response.Item.pk !== key.pk || response.Item.sk !== key.sk || !ownPartitionRow(response.Item, companyId)) throw new Error("link");
   const project = AgentXNameSchema.safeParse(response.Item.projectName);
   if (!project.success || response.Item.teamId !== teamId || response.Item.channelId !== channelId) throw new Error("link");
   return project.data;
@@ -158,7 +165,7 @@ async function channelLink(ctx: SlackChannelContext, teamId: string, channelId: 
 
 /** The project a channel of the company's workspace is linked to, when that project is this company's; undefined when unlinked (or linked outside the company). */
 export async function linkedProjectOf(ctx: SlackChannelContext, companyId: string, teamId: string, channelId: string): Promise<string | undefined> {
-  const project = await channelLink(ctx, teamId, channelId);
+  const project = await channelLink(ctx, companyId, teamId, channelId);
   return project !== undefined && await projectInCompany(ctx, companyId, project) ? project : undefined;
 }
 
@@ -229,8 +236,8 @@ export async function linkChannel(ctx: SlackChannelContext, linker: ChannelLinke
   const teamId = await prepare(ctx, linker, project, expectedTeam);
   let existing: string | undefined; let others: TeamLink[];
   try {
-    existing = await channelLink(ctx, teamId, channelId);
-    others = (await teamLinks(ctx, teamId)).filter((link) => link.projectName === project && link.channelId !== channelId);
+    existing = await channelLink(ctx, linker.companyId, teamId, channelId);
+    others = (await teamLinks(ctx, linker.companyId, teamId)).filter((link) => link.projectName === project && link.channelId !== channelId);
   } catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
   if (existing !== undefined && existing !== project) throw agentXError("SLACK_CHANNEL_TAKEN", CHANNEL_TAKEN);
   if (others.length > REPLACED_MAX) throw agentXError("CONFIG_INVALID", CHANNEL_TOO_MANY);
@@ -239,21 +246,21 @@ export async function linkChannel(ctx: SlackChannelContext, linker: ChannelLinke
   const channel = { id: checked.id, name: checked.name, isPrivate: checked.isPrivate };
   if (existing === project && others.length === 0) return { status: "linked", teamId, channel, alreadyLinked: true, replaced: [] };
   const at = new Date(ctx.now()).toISOString();
-  const row = { ...channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }),
+  const row = { ...slackChannelBindingKeyFor(linker.companyId, teamId, channelId),
     ...channelBindingAttributes({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId, projectName: project, updatedAt: at }), updatedBy: linker.personId };
   const replaced = others.map((link) => link.channelId).sort();
   try {
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
       teamStillOurs(ctx, teamId, linker.companyId),
       { Put: { TableName: ctx.tableName, Item: row, ConditionExpression: "attribute_not_exists(pk) OR projectName = :project", ExpressionAttributeValues: { ":project": project } } },
-      ...replaced.map((old) => ({ Delete: { TableName: ctx.tableName, Key: channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: old }),
+      ...replaced.map((old) => ({ Delete: { TableName: ctx.tableName, Key: slackChannelBindingKeyFor(linker.companyId, teamId, old),
         ConditionExpression: "projectName = :project", ExpressionAttributeValues: { ":project": project } } })),
       auditPut(ctx, { companyId: linker.companyId, teamId, channelId, projectName: project, action: "link", actor: linker.personId, via, at, replaced }),
     ] }));
   } catch (error) {
     if (isAgentXError(error)) throw error;
     // Lost a race (another project took the channel, or the workspace was disconnected meanwhile): the stored rows decide; nothing was written.
-    const now = await channelLink(ctx, teamId, channelId).catch(() => undefined);
+    const now = await channelLink(ctx, linker.companyId, teamId, channelId).catch(() => undefined);
     if (now !== undefined && now !== project) throw agentXError("SLACK_CHANNEL_TAKEN", CHANNEL_TAKEN);
     throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE);
   }
@@ -268,7 +275,7 @@ async function unlinkRows(ctx: SlackChannelContext, linker: ChannelLinker, teamI
     await ctx.documentClient.send(new TransactWriteCommand({ TransactItems: [
       teamStillOurs(ctx, teamId, linker.companyId),
       ...channels.flatMap((channelId) => [
-        { Delete: { TableName: ctx.tableName, Key: channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }),
+        { Delete: { TableName: ctx.tableName, Key: slackChannelBindingKeyFor(linker.companyId, teamId, channelId),
           ConditionExpression: "projectName = :project", ExpressionAttributeValues: { ":project": project } } },
         auditPut(ctx, { companyId: linker.companyId, teamId, channelId, projectName: project, action: "unlink", actor: linker.personId, via, at }),
       ]),
@@ -281,7 +288,7 @@ async function unlinkRows(ctx: SlackChannelContext, linker: ChannelLinker, teamI
 export async function unlinkProject(ctx: SlackChannelContext, linker: ChannelLinker, project: string, via: "web" | "slack"): Promise<{ status: "unlinked"; teamId: string; channels: string[] }> {
   const teamId = await prepare(ctx, linker, project);
   let channels: string[];
-  try { channels = (await teamLinks(ctx, teamId)).filter((link) => link.projectName === project).map((link) => link.channelId).sort(); }
+  try { channels = (await teamLinks(ctx, linker.companyId, teamId)).filter((link) => link.projectName === project).map((link) => link.channelId).sort(); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
   if (channels.length === 0) throw agentXError("NOT_FOUND", CHANNEL_NOT_LINKED);
   if (channels.length > REPLACED_MAX) throw agentXError("CONFIG_INVALID", CHANNEL_TOO_MANY);
@@ -293,7 +300,7 @@ export async function unlinkProject(ctx: SlackChannelContext, linker: ChannelLin
 export async function unlinkChannel(ctx: SlackChannelContext, linker: ChannelLinker, project: string, channelId: string, via: "web" | "slack", expectedTeam?: string): Promise<"unlinked" | "changed"> {
   const teamId = await prepare(ctx, linker, project, expectedTeam);
   let now: string | undefined;
-  try { now = await channelLink(ctx, teamId, channelId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
+  try { now = await channelLink(ctx, linker.companyId, teamId, channelId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CHANNEL_UNAVAILABLE); }
   if (now !== project) return "changed";
   await unlinkRows(ctx, linker, teamId, project, [channelId], via);
   return "unlinked";
@@ -326,7 +333,7 @@ async function listChannels(ctx: SlackChannelContext, linker: ChannelLinker, url
   const teamId = await prepare(ctx, linker, project);
   let page: { channels: SlackChannelView[]; nextCursor?: string }; let links: TeamLink[];
   try {
-    links = await teamLinks(ctx, teamId);
+    links = await teamLinks(ctx, linker.companyId, teamId);
     page = await ctx.wiring.slack.channels(linker.companyId, teamId, cursor?.data);
   } catch (error) {
     if (error instanceof SlackNoToken) throw agentXError("SLACK_NOT_CONNECTED", CHANNEL_NO_TOKEN);
@@ -354,7 +361,7 @@ async function readProjectChannel(ctx: SlackChannelContext, linker: ChannelLinke
     if (!await projectInCompany(ctx, linker.companyId, project)) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
     const teamId = await companyTeam(ctx, linker.companyId);
     if (teamId === undefined) return { workspace: null, channels: [] };
-    const channels = (await teamLinks(ctx, teamId)).filter((link) => link.projectName === project).map((link) => ({ channelId: link.channelId })).sort((a, b) => a.channelId.localeCompare(b.channelId));
+    const channels = (await teamLinks(ctx, linker.companyId, teamId)).filter((link) => link.projectName === project).map((link) => ({ channelId: link.channelId })).sort((a, b) => a.channelId.localeCompare(b.channelId));
     return { workspace: { teamId }, channels };
   } catch (error) {
     if (isAgentXError(error)) throw error;

@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_NAMES, formatFinding, runGuard } from "../../scripts/port-guard.js";
+import { DEFAULT_NAMES, formatFinding, lineFindings, runGuard } from "../../scripts/port-guard.js";
 
 // The port-guard job in CI runs the guard over everything code/next holds beyond mainline (origin/mainline..HEAD, docs/porting.md). New rules once
 // turned that job red on legitimate public code and old public history, because no test ran the guard over the real range. This one does: what the
@@ -17,6 +18,10 @@ const haveRange =
   Number(git("rev-list", "--count", "origin/mainline..HEAD") || "0") > 0;
 
 describe("the guard over the real CI range", () => {
+  it("keeps the task-money schema metadata public", () => {
+    const schema = readFileSync(new URL("../../contracts/shared/task-money.v1.json", import.meta.url), "utf8");
+    expect(lineFindings(schema, DEFAULT_NAMES)).toEqual([]);
+  });
   it.skipIf(!haveRange)(
     "finds nothing in origin/mainline..HEAD (the secret scan is the port-guard job's)",
     () => {

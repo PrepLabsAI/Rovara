@@ -19,13 +19,13 @@ const A: OrgId = "org_aaaaaaaaaaaaaaaaaaaa", B: OrgId = "org_bbbbbbbbbbbbbbbbbbb
 const TASK = "33333333-3333-4333-8333-333333333333";
 const TASK_B = "66666666-6666-4666-8666-666666666666";
 
-async function world() {
+async function world(extraEnv: Record<string, string> = {}) {
   const w = createFakeWorld();
   w.clock.now = Date.now();
   adapters.modules = w.modules.filter((module) => ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "secrets"].includes(module.point));
   const logs: Array<Record<string, unknown>> = [];
   const root = createBrokerCoreRoot({
-    env: { ROVARA_CORE_ENGINE: `on:${A}:${B}`, ROVARA_CORE_ALLOWED_COMPANIES: `${A}:${B}`, ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6" },
+    env: { ROVARA_CORE_ENGINE: `on:${A}:${B}`, ROVARA_CORE_ALLOWED_COMPANIES: `${A}:${B}`, ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVARA_CORE_AGENT_MODEL: "claude-sonnet-4-6", ...extraEnv },
     taskTokens: () => ({ signer: taskKeySigner(signerOf(makeKey("t".repeat(16)))), issuer: "https://api.example/v1/auth" }),
     documentClient: { async send() { return { Item: undefined }; } }, stateTableName: "state", signInTableName: "signin", callbackSigningKey: "k".repeat(32), repositoryGrantKey: Buffer.alloc(32, 1),
     repositoryCredential: async () => ({ token: "fake" }), codeModules: () => ({}) as never,
@@ -82,6 +82,39 @@ describe("the broker's core root gives each company's flow a taskSpendUsd over i
   });
 });
 
+// L4-TA6: automatic fixing is held to the task's LIVE cap (the value Admission and the run stop enforce), set on every company's flow from the install's settings.
+describe("the broker's core root gives each company's flow a taskCapUsd that is the task cap Admission enforces (L4-TA6)", () => {
+  const taskOf = async (w: Awaited<ReturnType<typeof world>>, companyId: OrgId, taskId: string, project = "demo") => {
+    await w.w.store.put({ item: { ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, companyId, workspaceId: `ws-${taskId}`, project } });
+    return { companyId, taskId, project };
+  };
+
+  it("sets it on every company's flow, a different function for each, and it reads the install's task cap ($1 here, never the $15 autofix default)", async () => {
+    const w = await world({ ROVARA_CORE_TASK_CAP_USD: "1" });
+    const [a, b] = [(await w.root.app.runtimeFor(A)).flow.deps, (await w.root.app.runtimeFor(B)).flow.deps];
+    expect(typeof a.taskCapUsd).toBe("function");
+    expect(typeof b.taskCapUsd).toBe("function");
+    expect(a.taskCapUsd).not.toBe(b.taskCapUsd);
+    expect(await a.taskCapUsd!(await taskOf(w, A, TASK) as never)).toBe(1);
+    expect(await b.taskCapUsd!(await taskOf(w, B, TASK_B) as never)).toBe(1);
+  });
+
+  it("follows the install's setting (the default $5, $3 when set): the same value Admission's own task cap reads", async () => {
+    const dflt = await world();
+    expect(await (await dflt.root.app.runtimeFor(A)).flow.deps.taskCapUsd!(await taskOf(dflt, A, TASK) as never)).toBe(5);
+    const three = await world({ ROVARA_CORE_TASK_CAP_USD: "3" });
+    expect(await (await three.root.app.runtimeFor(A)).flow.deps.taskCapUsd!(await taskOf(three, A, TASK) as never)).toBe(3);
+  });
+
+  it("a task of another company is no task of this company's reader: it throws (the flow asks), whichever way round", async () => {
+    const w = await world({ ROVARA_CORE_TASK_CAP_USD: "1" });
+    const [a, b] = [(await w.root.app.runtimeFor(A)).flow.deps, (await w.root.app.runtimeFor(B)).flow.deps];
+    const taskA = await taskOf(w, A, TASK), taskB = await taskOf(w, B, TASK_B);
+    await expect(a.taskCapUsd!(taskB as never)).rejects.toThrow();
+    await expect(b.taskCapUsd!(taskA as never)).rejects.toThrow();
+  });
+});
+
 describe("the laptop's own taskSpendUsd is unchanged", () => {
   it("still reads the laptop ledger and treats an unpriced figure as nothing spent; the hosted reader is not used there", () => {
     const app = readFileSync(new URL("../../packages/broker/src/local/app/app.ts", import.meta.url), "utf8");
@@ -90,5 +123,8 @@ describe("the laptop's own taskSpendUsd is unchanged", () => {
     expect(app).not.toContain("createCompanyTaskSpend");
     const autofix = readFileSync(new URL("../../packages/broker/src/core/build-step/autofix.ts", import.meta.url), "utf8");
     expect(autofix).toContain("deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0");
+    // L4-TA6: and its live cap is the run limit (`taskLimitUsd`, the round cap's own figure), set only while the run limit is held.
+    expect(app).toContain("...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),");
+    expect(autofix).toContain("const capUsd = await autofixCapUsd(deps, task, config.capUsd);");
   });
 });

@@ -162,7 +162,7 @@ const DigestItemSchema = z.object({
   links: z.array(z.string().url().max(300)).max(10),
 }).strict();
 /** One row of the weekly list (lessons phase 1): why it is there in plain words, never a score; a suggestion carries its band, a need-a-look card its cause. */
-const WeeklyRowSchema = z.object({
+export const WeeklyRowSchema = z.object({
   id: z.string().min(1).max(64), title: z.string().max(80), type: LessonTypeSchema,
   band: z.enum(["direct_correction", "measured", "weak_twice"]).optional(),
   cause: z.enum(["conflict", "retire_proposed", "revert_overlap", "area_gone", "area_rewritten", "asked_to_keep", "sent_back"]).optional(),
@@ -170,6 +170,12 @@ const WeeklyRowSchema = z.object({
   /** "Since this lesson: the correction came back `back` times in `matched` matching tasks." */
   repeat: z.object({ matched: z.number().int().min(0), back: z.number().int().min(0) }).strict().optional(),
 }).strict();
+/** The small weekly route answer shown to people who decide lessons. */
+export const LessonWeeklySchema = z.object({
+  project: z.string().min(1),
+  weekly: z.object({ needLook: z.array(WeeklyRowSchema).max(3), picks: z.array(WeeklyRowSchema).max(5) }).strict(),
+}).strict();
+export type LessonWeekly = z.infer<typeof LessonWeeklySchema>;
 export const LessonsDigestSchema = z.object({
   since: z.number(),
   /** The most important lessons first: measured outcomes, then recurrence, then severity. */

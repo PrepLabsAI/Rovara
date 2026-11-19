@@ -5,10 +5,13 @@
 //   - the tail kept for the evidence is REDACTED: every secret this run knows (the run's model token and the placeholder keys, raw and in their common encodings), then the shared `redactText`
 //     (key shapes, bearer tokens, credentials in URLs and assignments), then URL credentials and secret-named query parameters, then opaque long tokens. A secret that survives all of that is
 //     checked for once more and the tail is DROPPED whole rather than shown;
+//   - TH1: a run that stopped because it tried to reach something other than the model helper (a refused port, a failed name lookup) is named by `blocked_connection` plus up to 3 FIXED-shape items: a database by its PORT,
+//     an outside service by its HOST NAME. Hosts and ports are read from a closed list of error shapes (never from a URL, so a path, a query string and a credential are never even looked at), pass the strict host
+//     shape, and are dropped when they carry a secret this run knows. Addresses, `localhost` and the model route's own names are never named;
 //   - nothing here runs, reads a file or throws: any fault is a diagnostic with an empty tail.
 import {
-  EVAL_RUN_FAILURE_NAME, EVAL_RUN_TAIL_MAX_CHARS, redactText,
-  type EvalRunDiagnostic, type EvalRunFailureCode,
+  EVAL_BLOCKED_HOST, EVAL_BLOCKED_REACH_MAX_ITEMS, EVAL_RUN_FAILURE_NAME, EVAL_RUN_TAIL_MAX_CHARS, redactText,
+  type EvalBlockedReach, type EvalRunDiagnostic, type EvalRunFailureCode,
 } from "@agentx/contracts";
 
 /** The most raw characters looked at: the end of what the command printed. */
@@ -109,6 +112,161 @@ function match(text: string, secrets: readonly string[]): Match | undefined {
   return undefined;
 }
 
+/** Ports of the common databases and caches: a connection to one is "a database", named by its port only. */
+const DATABASE_PORTS: ReadonlySet<number> = new Set([5432, 5433, 5439, 3306, 3307, 6379, 27017, 1433, 1521, 9042, 11211]);
+/** The model route's own names that are always there: the helper and the metadata name. The sandbox adds EVERY model host it pinned to the helper (`ModelRoute`, from its own block plan). */
+const MODEL_ROUTE_BASE: readonly string[] = ["rovara-models", "metadata.google.internal"];
+/** The model route of a run: the hosts pinned to the model helper and the suffixes (Azure) that are model hosts. A failed connection to one is the model route, never "blocked" (a client that ignored the redirect has its own wording). */
+export interface ModelRoute { readonly hosts: readonly string[]; readonly suffixes: readonly string[] }
+const GOOGLE_AI_SUFFIX = "-aiplatform.googleapis.com";
+export function isModelRoute(host: string, route: ModelRoute | undefined): boolean {
+  if (MODEL_ROUTE_BASE.includes(host) || host.endsWith(GOOGLE_AI_SUFFIX) || host === "generativelanguage.googleapis.com" || host === "aiplatform.googleapis.com") return true;
+  if (route === undefined) return false;
+  return route.hosts.some(h => h.toLowerCase() === host) || route.suffixes.some(suffix => { const bare = suffix.toLowerCase().replace(/^\./u, ""); return host === bare || host.endsWith(`.${bare}`); });
+}
+/** Names that are this machine, not an outside service: never named (a database on one still counts as a database). */
+const LOCAL_HOSTS: ReadonlySet<string> = new Set(["localhost", "ip6-localhost", "host.docker.internal"]);
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/u;
+
+interface Reach { readonly host: string | undefined; readonly port: number | undefined; readonly database: boolean }
+const HOST = "([A-Za-z0-9][A-Za-z0-9._-]{0,252})";
+const PORT = "(\\d{1,5})";
+/**
+ * The closed list of error shapes that carry a host and/or a port of a connection that failed. Each regex captures ONLY a host and/or a port (never a URL, a path or a query), so nothing else of the line is ever read.
+ * `db` marks the shapes only a database driver prints (so a name with no port is still "a database").
+ */
+const REACH_PATTERNS: ReadonlyArray<{ readonly pattern: RegExp; readonly host?: number; readonly port?: number; readonly db?: boolean }> = [
+  // Node: getaddrinfo ENOTFOUND api.example.com / EAI_AGAIN db
+  { pattern: new RegExp(`getaddrinfo (?:ENOTFOUND|EAI_AGAIN|EAI_NODATA|EAI_FAIL) ${HOST}`, "gu"), host: 1 },
+  // Node: connect ECONNREFUSED 127.0.0.1:5432 / ::1:5432 / ETIMEDOUT / EHOSTUNREACH / ENETUNREACH
+  { pattern: new RegExp(`(?:ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH) \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}\\b`, "gu"), host: 1, port: 2 },
+  // Node error object: syscall: 'connect', address: '127.0.0.1', port: 5432
+  { pattern: new RegExp(`syscall: 'connect',\\s*address: '([^'\\s]{1,253})',\\s*port: ${PORT}`, "gu"), host: 1, port: 2 },
+  // Node error object of a failed lookup: code: 'ENOTFOUND', ... hostname: 'api.example.com'
+  { pattern: new RegExp(`ENOTFOUND'?,?[^\\n]{0,200}\\n?[^\\n]{0,80}hostname: '${HOST}'`, "gu"), host: 1 },
+  // undici: (attempted address: api.example.com:443, timeout: 10000ms)
+  { pattern: new RegExp(`attempted address: \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}`, "gu"), host: 1, port: 2 },
+  // Python pymongo and friends: db:27017: [Errno -2] Name or service not known / [Errno 111] Connection refused
+  { pattern: new RegExp(`${HOST}:${PORT}: \\[Errno -?\\d+\\] (?:Connection refused|Name or service not known|Temporary failure in name resolution|Network is unreachable|No route to host|Connection timed out)`, "gu"), host: 1, port: 2 },
+  // Python requests / urllib3: HTTPSConnectionPool(host='api.example.com', port=443): Max retries exceeded ... (the URL after it is never captured)
+  { pattern: new RegExp(`HTTPS?ConnectionPool\\(host='${HOST}', port=${PORT}\\)[^\\n]{0,600}?(?:Failed to resolve|NameResolutionError|Name or service not known|Temporary failure in name resolution|Connection refused|Network is unreachable|No route to host|Failed to establish a new connection)`, "gu"), host: 1, port: 2 },
+  // urllib3: Failed to resolve 'api.example.com'
+  { pattern: new RegExp(`Failed to resolve '${HOST}'`, "gu"), host: 1 },
+  // aiohttp: Cannot connect to host api.example.com:443 ssl:default
+  { pattern: new RegExp(`Cannot connect to host ${HOST}:${PORT}`, "gu"), host: 1, port: 2 },
+  // asyncpg and asyncio: Connect call failed ('127.0.0.1', 5432)
+  { pattern: new RegExp(`Connect call failed \\('([^'\\s]{1,253})', ${PORT}`, "gu"), host: 1, port: 2 },
+  // psycopg: could not translate host name "db" to address
+  { pattern: /could not translate host name "([A-Za-z0-9][A-Za-z0-9._-]{0,252})" to address/gu, host: 1, db: true },
+  // psycopg 3 and libpq 14+: connection to server at "db" (172.18.0.2), port 5432 failed
+  { pattern: new RegExp(`connection to server at "${HOST}"(?: \\([^)\\n]{0,60}\\))?, port ${PORT} failed`, "gu"), host: 1, port: 2, db: true },
+  // older libpq: Is the server running on host "db" (172.18.0.2) and accepting TCP/IP connections on port 5432?
+  { pattern: new RegExp(`server running on host "${HOST}"[^\\n]{0,80}\\n?[^\\n]{0,40}connections on port ${PORT}`, "gu"), host: 1, port: 2, db: true },
+  // MySQL: Can't connect to MySQL server on 'db' (111) / on 'db:3306'
+  { pattern: /Can't connect to MySQL server on '([A-Za-z0-9][A-Za-z0-9._-]{0,252})(?::(\d{1,5}))?'/gu, host: 1, port: 2, db: true },
+  // redis-py: Error 111 connecting to redis:6379. Connection refused. / Error -2 connecting to ...
+  { pattern: new RegExp(`Error (?:-?\\d+ )?(?:while )?connecting to ${HOST}:${PORT}\\b`, "gu"), host: 1, port: 2 },
+  // Go: dial tcp 10.0.0.1:5432: connect: connection refused / i/o timeout
+  { pattern: new RegExp(`dial tcp \\[?([0-9A-Fa-f:.]{2,45}|[A-Za-z0-9][A-Za-z0-9._-]{0,252})\\]?:${PORT}: `, "gu"), host: 1, port: 2 },
+  // Go: dial tcp: lookup db on 127.0.0.11:53: no such host
+  { pattern: new RegExp(`lookup ${HOST}(?: on [0-9A-Fa-f:.\\[\\]]{2,45})?: (?:no such host|server misbehaving|i/o timeout|connection refused)`, "gu"), host: 1 },
+];
+
+const bareHost = (raw: string): string => raw.trim().replace(/^\[|\]$/gu, "").replace(/\.$/u, "");
+const normalHost = (raw: string): string => bareHost(raw).toLowerCase();
+
+/** One outside host name, lower-cased, or undefined when it is an address, this machine, not the strict host shape, or carries a secret this run knows. */
+export function cleanHost(raw: string | undefined, secrets: readonly string[]): string | undefined {
+  if (raw === undefined) return undefined;
+  const written = bareHost(raw);
+  const host = written.toLowerCase();
+  if (host === "" || host.includes(":") || IPV4.test(host) || LOCAL_HOSTS.has(host) || host.endsWith(".localhost")) return undefined;
+  // Redaction is judged on the name as the output wrote it AND lower-cased (a key shape is case-sensitive).
+  if (!EVAL_BLOCKED_HOST.test(host) || host.includes("..") || redactText(written) !== written || redactText(host) !== host) return undefined;
+  // An opaque long label (a token) is not a host name.
+  if (host.split(".").some(label => label.length >= 32)) return undefined;
+  if (secrets.some(secret => secret.length >= MIN_SECRET_CHARS && secretForms(secret).some(form => host.includes(form.toLowerCase())))) return undefined;
+  return host;
+}
+
+/** Every reach shape the output names, in the order the output names them (at most 200). */
+function reachesOf(text: string): Reach[] {
+  const found: Array<{ at: number; reach: Reach }> = [];
+  for (const { pattern, host, port, db } of REACH_PATTERNS) {
+    pattern.lastIndex = 0;
+    for (const m of text.matchAll(pattern)) {
+      const p = port === undefined || m[port] === undefined ? undefined : Number(m[port]);
+      found.push({ at: m.index ?? 0, reach: { host: host === undefined ? undefined : m[host], port: p !== undefined && Number.isInteger(p) && p >= 1 && p <= 65_535 ? p : undefined, database: db === true } });
+      if (found.length >= 200) break;
+    }
+  }
+  found.sort((a, b) => a.at - b.at);
+  return found.map(({ reach }) => reach);
+}
+
+/** What one reach is, after the model route and the strict host shape: a database (named by its port alone) or an outside service (a host name, with the port when one was seen). Undefined when it is nothing nameable. */
+function classifyReach(reach: Reach, secrets: readonly string[], route: ModelRoute | undefined): { kind: "database"; port: number | undefined } | { kind: "service"; host: string; port: number | undefined } | undefined {
+  const raw = reach.host === undefined ? "" : normalHost(reach.host);
+  if (isModelRoute(raw, route)) return undefined;
+  const host = cleanHost(reach.host, secrets);
+  // A database is named by its port alone (its host is the project's own private name); anything else needs a host name that passed the shape.
+  if (reach.database || (reach.port !== undefined && DATABASE_PORTS.has(reach.port))) return { kind: "database", port: reach.port };
+  return host === undefined ? undefined : { kind: "service", host, port: reach.port };
+}
+
+/**
+ * L4-E12: EVERY distinct thing the eval tried to reach (no cap of 3), for the dry run's dependency list: databases by port, outside hosts by name with the port when the error named one. The same closed shapes, the same
+ * model-route exclusion and the same host allow-list as `findBlockedReach`. Never throws.
+ */
+export function findAllReaches(text: string, secrets: readonly string[] = [], route?: ModelRoute): { databases: Array<{ port: number | undefined }>; databaseHosts: string[]; hosts: Array<{ name: string; port: number | undefined }> } {
+  const databases: Array<{ port: number | undefined }> = [];
+  // The databases' own host names (private to the project): kept ONLY to tell a database's name from an outside service when the name server also recorded it. They never leave the worker.
+  const databaseHosts = new Set<string>();
+  const hosts: Array<{ name: string; port: number | undefined }> = [];
+  try {
+    for (const reach of reachesOf(text)) {
+      const item = classifyReach(reach, secrets, route);
+      if (item === undefined) continue;
+      if (item.kind === "database") {
+        if (reach.host !== undefined) databaseHosts.add(normalHost(reach.host));
+        if (!databases.some(d => d.port === item.port)) databases.push({ port: item.port });
+      } else {
+        const known = hosts.find(h => h.name === item.host);
+        if (known === undefined) hosts.push({ name: item.host, port: item.port });
+        else if (known.port === undefined && item.port !== undefined) known.port = item.port;
+      }
+    }
+  } catch { /* an unreadable text names nothing */ }
+  // A database seen with no port is the same one as a database seen with a port (a driver names the host in one line and the port in another).
+  const withPort = databases.some(d => d.port !== undefined);
+  return { databases: databases.filter(d => !(withPort && d.port === undefined)), databaseHosts: [...databaseHosts], hosts };
+}
+
+/** What the eval tried to reach, from the command's own output: up to 3 items (databases by port, outside services by host name), in the order the output names them. Undefined when nothing nameable was found. */
+export function findBlockedReach(text: string, secrets: readonly string[] = [], route?: ModelRoute): EvalBlockedReach | undefined {
+  try {
+    const items: Array<EvalBlockedReach["items"][number]> = [];
+    const seen = new Set<string>();
+    for (const reach of reachesOf(text)) {
+      const classified = classifyReach(reach, secrets, route);
+      if (classified === undefined) continue;
+      const item: EvalBlockedReach["items"][number] = classified.kind === "database" ? { kind: "database", ...(classified.port === undefined ? {} : { port: classified.port }) } : { kind: "service", host: classified.host };
+      const key = item.kind === "database" ? `d:${String(item.port ?? "")}` : `s:${item.host}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+    // A database seen with no port is the same one as a database seen with a port (a driver names the host in one line and the port in another).
+    const withPort = items.some(item => item.kind === "database" && item.port !== undefined);
+    const distinct = items.filter(item => !(withPort && item.kind === "database" && item.port === undefined));
+    const more = distinct.length > EVAL_BLOCKED_REACH_MAX_ITEMS;
+    const kept = distinct.slice(0, EVAL_BLOCKED_REACH_MAX_ITEMS);
+    return kept.length === 0 ? undefined : { items: kept, ...(more ? { more: true } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
 export interface EvalFailureInput {
   readonly phase: "install" | "run";
   /** The container's exit code, or undefined when it could not be read. */
@@ -118,6 +276,8 @@ export interface EvalFailureInput {
   readonly output: unknown;
   /** Values that must never show: the run's model token, the placeholder keys. */
   readonly secrets?: readonly string[] | undefined;
+  /** TH1: the hosts the sandbox pinned to the model helper (never named as a blocked connection). */
+  readonly modelRoute?: ModelRoute | undefined;
 }
 
 /** The diagnostic for a failed install step or a failed eval run. Never throws; an unreadable input still gives a fixed code with an empty tail. */
@@ -136,6 +296,9 @@ export function diagnoseEvalFailure(input: EvalFailureInput): EvalRunDiagnostic 
   // An install step that failed is the cause; what it printed (a missing build tool, a refused registry) is in the tail, not reduced to a package name.
   if (input.phase === "install") return { code: "install_failed", phase: "install", ...exit, tail };
   if (found !== undefined) return { code: found.code, phase: "run", ...(found.name === undefined ? {} : { name: found.name }), ...exit, tail };
+  // TH1: the eval tried to reach something other than the model helper. Read from the cleaned text, before redaction (like the names above); only fixed-shape hosts and ports are kept.
+  const blocked = typeof input.output === "string" ? findBlockedReach(tidy(input.output), secrets, input.modelRoute) : undefined;
+  if (blocked !== undefined) return { code: "blocked_connection", phase: "run", blocked, ...exit, tail };
   return { code: "exited", phase: "run", ...exit, tail };
 }
 

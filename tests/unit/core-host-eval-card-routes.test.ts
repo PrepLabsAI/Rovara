@@ -1,5 +1,5 @@
 // L4-EVC (DEC 254zzz20 D5, D8): the hosted eval card routes on the deployed API (setup-run-routes.ts): GET eval (the card, dollars only), POST eval-approve (the confirm AND the spend approval in one
-// act: a fresh step-up, the live owner/admin/maintainer rule, the dollars the person saw), POST eval-decide (a waiting item), POST eval-health (the opt-in). Through the real hosted approvers point, the
+// act: the live owner/admin/maintainer rule (DEC 254zzz73: no step-up), the dollars the person saw), POST eval-decide (a waiting item), POST eval-health (the opt-in). Through the real hosted approvers point, the
 // real decision gate and the real eval spend subject over the company's own store.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
@@ -9,17 +9,18 @@ import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/c
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, EVAL_APPROVAL_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../../packages/broker/src/core-host/setup-approval.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { evalSpendKey, readEvalSpendRecord } from "../../packages/broker/src/core/setup-agent/eval-spend.js";
 import { deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { evalHealthState, readEvalHealthRequest } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { readEvalDiscovery } from "../../packages/broker/src/core/setup-agent/eval-discovery.js";
+import { recordEvalDependencyList } from "../../packages/broker/src/core/setup-agent/eval-dependency-list.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { CAP, company, filesOf, gitReader, project as PROJECT, reportOf } from "../support/eval-card-world.js";
 
 const OTHER = "org_corehost00000000000b";
-const KEY = stepUpApprovalKeyOf("callback-signing-key-for-tests-0123456789abcdef");
+const KEY = approvalProofKeyOf("callback-signing-key-for-tests-0123456789abcdef");
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const definition = (name: string): ProjectDefinition => ({
@@ -41,17 +42,16 @@ const post = (path: string, body: unknown = {}) => ({ method: "POST", path, head
 const RUN = `/v1/app/projects/${PROJECT}/setup-agent`;
 interface Person { companyId: OrgId; role: OrgRole; grants: Record<string, "developer" | "administrator"> }
 
-async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown>; providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined> } = {}) {
+async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; healthRun?: (project: string) => Promise<unknown>; providerConnected?: (scope: { company: string; project: string }) => Promise<boolean | undefined>; testServicesOff?: () => boolean } = {}) {
   const world = createFakeWorld();
   await register(world, FAKE_COMPANY, PROJECT); await register(world, OTHER, PROJECT);
   const app = appOver(world);
   const people = new Map<string, Person>();
   const membershipOf = async (personId: string) => { const found = people.get(personId); return found === undefined ? undefined : { companyId: found.companyId, role: found.role }; };
   const projectGrantRole = async (personId: string, name: string) => people.get(personId)?.grants[name];
-  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}, stepUpAgoMs: number | null = 60_000): DeployedCaller => {
+  const person = (personId: string, companyId: OrgId, role: OrgRole, grants: Person["grants"] = {}): DeployedCaller => {
     people.set(personId, { companyId, role, grants });
-    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud",
-      ...(stepUpAgoMs === null ? {} : { stepUp: { at: new Date(world.clock.now - stepUpAgoMs).toISOString(), method: "passkey" } }) };
+    return { principal: { companyId, personId, displayName: personId, roles: [role], provider: HOSTED_IDENTITY_PROVIDER }, client: "cloud" };
   };
   const standing = async (personId: string, companyId: string, name: string): Promise<SetupRunStanding> => {
     const found = people.get(personId);
@@ -69,7 +69,7 @@ async function hosted(options: { evalWiring?: boolean; healthRuns?: boolean; hea
   const wiringFor = (companyId: OrgId): HostedSetupRunWiring => ({
     standing, modelAccessConfigured: () => true,
     approval: createHostedSetupApproval({ flow: { store: world.store, companyId, now: () => new Date(world.clock.now) }, store: world.store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now: () => new Date(world.clock.now) }),
-    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), ...(options.providerConnected === undefined ? {} : { providerConnected: options.providerConnected }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
+    ...(options.evalWiring === false ? {} : { eval: { healthRuns: options.healthRuns !== false, ...(options.healthRun === undefined ? {} : { healthRun: options.healthRun }), ...(options.providerConnected === undefined ? {} : { providerConnected: options.providerConnected }), ...(options.testServicesOff === undefined ? {} : { testServicesOff: options.testServicesOff }), monthlyCap: async () => reader.cap, readFile: (...args: Parameters<NonNullable<ReturnType<typeof gitReader>>>) => reader.read!(...args) } }),
   });
   const wirings = new Map<string, HostedSetupRunWiring>([[FAKE_COMPANY, wiringFor(FAKE_COMPANY)], [OTHER, wiringFor(OTHER)]]);
   const routes = createCoreDevRoutes({
@@ -154,16 +154,14 @@ describe("POST eval-approve: one approval", () => {
     expect(audit.find((e) => e.action === "eval.approve_requested")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: `p-${role}` }, subject: { type: "project", id: PROJECT } });
     expect(audit.find((e) => e.action === "decision.approved")).toMatchObject({ companyId: FAKE_COMPANY, actor: { id: `p-${role}` }, subject: { type: "eval_spend", id: PROJECT } });
   });
-  it("needs a fresh step-up: without one the person is told to confirm it's them, and nothing is confirmed or approved", async () => {
+  it("needs no step-up (DEC 254zzz73), and an admin of another company approves nothing here: our record and report stay as they were", async () => {
     const { world, person, call, reported } = await hosted();
     await reported(FAKE_COMPANY);
-    const stale = person("p-admin", FAKE_COMPANY, "admin", {}, 3_600_000);
-    const refused = await call(post(`${RUN}/eval-approve`, await approveBody(call, stale)), stale);
-    expect(refused.body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    const body = await approveBody(call, person("p-admin", FAKE_COMPANY, "admin"));
+    const stranger = person("o-admin", OTHER, "admin");
+    expect((await call(post(`${RUN}/eval-approve`, body), stranger)).status).toBeGreaterThanOrEqual(400);
     expect(await world.store.get(evalSpendKey(FAKE_COMPANY, PROJECT))).toBeUndefined();
     expect((await readEvalDiscovery({ store: world.store, companyId: FAKE_COMPANY }, PROJECT))?.state).toBe("reported");
-    const none = person("p-none-stepup", FAKE_COMPANY, "admin", {}, null);
-    expect((await call(post(`${RUN}/eval-approve`, await approveBody(call, none)), none)).body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
   });
   it("refuses a project user and a member with no grant, writing nothing", async () => {
     const { world, person, call, reported } = await hosted();
@@ -213,7 +211,7 @@ describe("POST eval-decide: a waiting item", () => {
     await h.reported(FAKE_COMPANY);
     return { ...h, admin: h.person("p-admin", FAKE_COMPANY, "admin") };
   }
-  it("approves or rejects the waiting item by the offer the card showed, with a fresh step-up and the live rule; a stale digest is refused", async () => {
+  it("approves or rejects the waiting item by the offer the card showed, with no step-up and the live rule; a stale digest is refused", async () => {
     const h = await waiting();
     // Seed a waiting item through the broker's own confirm (no approve).
     const { confirmEvalDiscovery } = await import("../../packages/broker/src/core/setup-agent/eval-discovery.js");
@@ -233,8 +231,9 @@ describe("POST eval-decide: a waiting item", () => {
     expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
     const dev = h.person("p-dev", FAKE_COMPANY, "member", { [PROJECT]: "developer" });
     expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), dev)).status).toBe(403);
-    const lapsed = h.person("p-lapsed", FAKE_COMPANY, "admin", {}, 3_600_000);
-    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), lapsed)).body).toMatchObject({ error: { code: "REAUTH_REQUIRED" } });
+    const stranger = h.person("o-admin", OTHER, "admin");
+    expect((await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), stranger)).status).toBeGreaterThanOrEqual(400);
+    expect((await recordOf(h.world, FAKE_COMPANY))?.state).toBe("waiting");
     const done = await h.call(post(`${RUN}/eval-decide`, { requestId: offer.requestId, outcome: "approve", seen: { revision: offer.revision, artifactDigest: offer.artifactDigest } }), h.admin);
     expect(done.status, done.raw).toBe(200);
     expect(done.body).toEqual({ project: PROJECT, decision: "approved" });
@@ -325,5 +324,39 @@ describe("POST eval-health starts the run (L4-EVH)", () => {
     const off = await approvedWorld({ healthRuns: false, healthRun: async (name) => { started.push(name); } });
     expect((await off.call(post(`${RUN}/eval-health`, { requestId: randomUUID(), seenCostMicros: off.seen }), off.admin)).status).toBe(404);
     expect(started).toEqual([]);
+  });
+});
+
+describe("GET eval: what the free dry run found (L4-E12)", () => {
+  const LIST = { version: 1 as const, modelCalls: 0 as const, ended: "failed" as const, databases: [{ port: 5432, engine: "postgres" as const }], hosts: [{ name: "api.vendor.example.test", port: 443 }], envVars: ["STRIPE_API_KEY"] };
+  const record = (world: FakeWorld, companyId: OrgId) => recordEvalDependencyList({ store: world.store, now: () => world.clock.now }, { orgId: companyId, project: PROJECT, taskId: randomUUID() }, LIST);
+
+  it("carries the list in the TH1 words on the card, with the off reason only where the deployment says test services are off", async () => {
+    const off = await hosted({ testServicesOff: () => true });
+    await off.reported(FAKE_COMPANY);
+    await record(off.world, FAKE_COMPANY);
+    const admin = off.person("p-admin", FAKE_COMPANY, "admin");
+    const card = (await off.call(get(`${RUN}/eval`), admin)).body as { reaches?: { words: string; blocked?: { items: unknown[] } } };
+    expect(card.reaches?.words).toBe("A free dry run of your eval on main found it reaches a database (port 5432) and an outside service (api.vendor.example.test) and needs the variable STRIPE_API_KEY. Test services are off on this install, so your evals get no database or stand-in here yet.");
+    expect(card.reaches?.blocked?.items).toEqual([{ kind: "database", port: 5432 }, { kind: "service", host: "api.vendor.example.test" }]);
+    const on = await hosted({ testServicesOff: () => false });
+    await on.reported(FAKE_COMPANY);
+    await record(on.world, FAKE_COMPANY);
+    const answer = (await on.call(get(`${RUN}/eval`), on.person("p-admin", FAKE_COMPANY, "admin"))).body as { reaches?: { words: string } };
+    expect(answer.reaches?.words).not.toContain("Test services");
+    // a deployment that wires no switch reads as on
+    const none = await hosted();
+    await none.reported(FAKE_COMPANY);
+    await record(none.world, FAKE_COMPANY);
+    expect(((await none.call(get(`${RUN}/eval`), none.person("p-admin", FAKE_COMPANY, "admin"))).body as { reaches?: { words: string } }).reaches?.words).not.toContain("Test services");
+  });
+
+  it("shows nothing to another company, and nothing where no dry run ran (two companies)", async () => {
+    const { world, person, call, reported } = await hosted({ testServicesOff: () => true });
+    await reported(FAKE_COMPANY);
+    expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body["reaches"]).toBeUndefined();
+    await record(world, FAKE_COMPANY);
+    expect((await call(get(`${RUN}/eval`), person("o-admin", OTHER, "admin"))).body["reaches"]).toBeUndefined();
+    expect((await call(get(`${RUN}/eval`), person("p-admin", FAKE_COMPANY, "admin"))).body["reaches"]).toBeDefined();
   });
 });

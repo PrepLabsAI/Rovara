@@ -80,6 +80,21 @@ describe("project access (E7, E8, FR-013.1)", () => {
     expect(db.get(`MEMBER#${MAYA.developerId}`, "PROJECT#payments")).toBeUndefined();
   });
 
+  it("DEC 254zzz98 (review M2): an administrator whose live company is a named company grants and revokes the legacy project's legacy grant, never one in their company", async () => {
+    const h = await harness();
+    const named = `org_${"m".repeat(20)}`;
+    const deps = { ...h.deps, actions: { ...h.deps.actions, companies: { companyOf: async () => named } } } as PlanDependencies;
+    const developerId = developerIdForSlackUser("U0NEW00002");
+    h.db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "slack", displayName: "Ola Ruiz", slackUserId: "U0NEW00002" });
+    await (await planChange(deps, h.identity, { kind: "grant_project_access", project: "payments", developer: "U0NEW00002" })).apply(h.identity);
+    // The grant is where the project's (legacy) revision is, so it is read with it; nothing is written under the administrator's company.
+    expect(h.db.get(`MEMBER#${developerId}`, "PROJECT#payments")).toMatchObject({ role: "developer", projectName: "payments" });
+    expect(h.db.find((item) => String(item.pk).startsWith(`ORG#${named}#`))).toEqual([]);
+    // And the revoke finds that legacy grant and removes it.
+    await (await planChange(deps, h.identity, { kind: "revoke_project_access", project: "payments", developer: developerId })).apply(h.identity);
+    expect(h.db.get(`MEMBER#${developerId}`, "PROJECT#payments")).toBeUndefined();
+  });
+
   it("names a signed-in developer, and revokes only a grant, saying channel access may remain", async () => {
     const { deps, identity, db } = await harness();
     db.set({ pk: `MEMBER#${MAYA.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: MAYA.developerId, projectName: "payments", role: "developer" });

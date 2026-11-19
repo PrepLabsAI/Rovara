@@ -350,7 +350,7 @@ export class GithubInstallationBindings {
   }
 
   /**
-   * Guided onboarding PR 3: a company owner unbinds the company's installation (the route checked the role, the step-up and that no project uses it). One conditional
+   * Guided onboarding PR 3: a company owner unbinds the company's installation (the route checked the role and that no project uses it). One conditional
    * transaction on exactly the binding that was read: the binding and the company's list row go, an audit row naming the person stays (with the claim audits, history is kept),
    * and the backfill marker must exist (before it, an unbound installation would read as the implicit company's). Another company's, or none: not_found, nothing written.
    */

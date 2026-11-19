@@ -65,6 +65,14 @@ export async function host(options: { repositories?: readonly string[] } = {}) {
   await world.store.transact(createTaskSessionItems({ orgId: ORG, sessionId: SESSION, taskId: TASK_ID, project: "web", agent: { agentId: "rovara-code", name: "Rovara Code", version: 1 }, title: "Add retry", owner: OWNER, origin: "app", payer: { kind: "member", developerId: OWNER_ID } as never, now: at }));
   await world.store.put({ item: { ...recoveryRowKey(TASK_ID), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: TASK_ID, nextAttemptAt: 0 } });
   const registry = createAdapterRegistry();
+  const evidenceObjects = new Map<string, Uint8Array>();
+  registry.register("object-storage", "test", {
+    async put(key: string, bytes: Uint8Array) { evidenceObjects.set(key, new Uint8Array(bytes)); },
+    async get(key: string, maxBytes: number) { const value = evidenceObjects.get(key); return value === undefined || value.byteLength > maxBytes ? undefined : new Uint8Array(value); },
+    async stat(key: string) { const value = evidenceObjects.get(key); return value === undefined ? undefined : { size: value.byteLength, contentType: "application/octet-stream", metadata: {} }; },
+    async delete(key: string) { evidenceObjects.delete(key); },
+    async deletePrefix(prefix: string) { for (const key of evidenceObjects.keys()) if (key.startsWith(prefix)) evidenceObjects.delete(key); return true; },
+  } as never);
   const codeHosts = new Map<string, CodeHost>();
   for (const name of repositories) codeHosts.set(`https://github.com/acme/${name}`, (await world.host.repository("web", 1, name, ORG))!.codeHost);
   registry.register("code-host", "github", codeHosts.size === 1 ? [...codeHosts.values()][0]! : routedHost(codeHosts));

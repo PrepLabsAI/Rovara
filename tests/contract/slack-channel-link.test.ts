@@ -19,6 +19,11 @@ import { createSlackInteractivityHandler } from "../../packages/broker/src/aws/s
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
 
 const C = "org_cccccccccccccccccccc";
+const projectDefinition = (name: string) => ({
+  name, revision: 1, orchestratorInstructions: "x",
+  setup: [{ executable: "npm", args: ["ci"], cwd: "repo/r", timeoutSeconds: 900 }], readiness: [{ executable: "npm", args: ["test"], cwd: "repo/r", timeoutSeconds: 900 }],
+  repositories: [{ name: "r", url: "https://github.com/acme/r", defaultBranch: "main", path: "repo/r", credentialRef: "github-agentx-sdlc" }],
+});
 const ACME = "T0ACME"; const BETA = "T0BETA";
 const tokenOf = (name: string) => ["xoxb", "200", name].join("-");
 const SIGNING = ["sign", "ing", "secret", "for", "tests", "only"].join("-");
@@ -109,6 +114,8 @@ function world(options: { installTeam?: string; tokens?: boolean } = {}) {
   // Projects (names are install-wide; each belongs to one company): A has web and api, B has beta-app.
   const project = (name: string, company: string) => {
     h.db.set({ pk: `PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: { name, revision: 1 }, companyId: company });
+    // DEC 254zzz80 (R2-F1): a NAMED company's project lives in its own partition (the staging layout); that is the one its channel links are checked against.
+    h.db.set({ pk: `ORG#${company}#PROJECT#${name}`, sk: "REV#000000000001", entityType: "PROJECT", definition: projectDefinition(name), companyId: company });
     h.db.set({ pk: `ORG#${company}#PROJECT_CATALOG`, sk: `PROJECT#${name}`, entityType: "PROJECT_CATALOG", name, latestRevision: 1, companyId: company });
   };
   project("web", A); project("api", A); project("beta-app", B); project("cee-app", C);
@@ -129,7 +136,7 @@ function world(options: { installTeam?: string; tokens?: boolean } = {}) {
   const ownerB = person(BETA, "U0BEA", B, "owner");
   const memberA = person(ACME, "U0MEM", A, "member");
   const apiAdminA = person(ACME, "U0API", A, "member");
-  h.db.set({ pk: `MEMBER#${apiAdminA.personId}`, sk: "PROJECT#api", projectName: "api", role: "administrator", companyId: A });
+  h.db.set({ pk: `ORG#${A}#MEMBER#${apiAdminA.personId}`, sk: "PROJECT#api", projectName: "api", role: "administrator" });
   const adminC = person("T0CEE", "U0CEE", C, "admin");
   const jwtOf = (claims: Record<string, unknown>) => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
   const call = async (who: { personId: string }, method: string, path: string, body?: unknown) => {
@@ -137,7 +144,8 @@ function world(options: { installTeam?: string; tokens?: boolean } = {}) {
     return { status: answer.statusCode, body: JSON.parse(answer.body) as Answer, raw: answer.body };
   };
   const link = (who: { personId: string }, project: string, channelId: string) => call(who, "PUT", `/v1/dev/company/slack/projects/${project}/channel`, { channelId });
-  const linkRow = (team: string, channel: string) => h.db.get(`SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
+  // DEC 254zzz80 (R2-F1): a NAMED company's channel links live in its own partition (Acme is A's workspace, Beta is B's).
+  const linkRow = (team: string, channel: string) => h.db.get(`ORG#${team === BETA ? B : A}#SLACK_BINDING#${team}`, `CHANNEL#${channel}`);
   const audits = (company: string) => h.db.find((item) => item.pk === `ORG#${company}#SLACK_CHANNEL_AUDIT`);
   const context = (): SlackRovaraContext => ({ documentClient: h.db, tableName: "State", signInTableName: "SignIn", now: () => now, wiring, installTeamId: installTeam });
   // The Slack side: the real interactivity handler (signature) -> the real front -> (asynchronous half) the real broker half -> the response URL.
@@ -182,11 +190,28 @@ describe("web: link a project's channel", () => {
     expect(answer.body).toMatchObject({ status: "linked", workspace: { teamId: ACME }, channel: { id: "C0GENERAL", name: "general", isPrivate: false }, alreadyLinked: false, replaced: [] });
     expect(w.slack.calls).toEqual(["conversations.info acme C0GENERAL", "conversations.join acme"]);
     // Golden: the row the CLI's `agentx admin slack bind` writes (broker.ts putSlackBinding), with the person as updatedBy.
-    expect(w.linkRow(ACME, "C0GENERAL")).toEqual({ pk: `SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "web", updatedAt: TIME, updatedBy: w.adminA.personId });
+    expect(w.linkRow(ACME, "C0GENERAL")).toEqual({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "web", updatedAt: TIME, updatedBy: w.adminA.personId });
     expect(w.audits(A)).toEqual([expect.objectContaining({ entityType: "SLACK_CHANNEL_AUDIT", action: "link", actor: w.adminA.personId, via: "web", projectName: "web", channelId: "C0GENERAL", teamId: ACME, companyId: A })]);
     expect(w.audits(B)).toEqual([]);
     expect(w.logs).toEqual([expect.objectContaining({ event: "slack.channel_linked", companyId: A, channelId: "C0GENERAL", actor: w.adminA.personId })]);
     expect(JSON.stringify(w.logs) + answer.raw).not.toContain("xoxb");
+  });
+
+  it("DEC 254zzz80: a NAMED company's project is its own partition's: a project only in the legacy layout (even stamped with A) is not A's", async () => {
+    const w = world();
+    w.db.delete(`ORG#${A}#PROJECT#web`, "REV#000000000001");
+    const answer = await w.link(w.adminA, "web", "C0GENERAL");
+    expect(answer.status).toBe(404);
+    expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
+    expect(w.slack.calls).toEqual([]);
+  });
+
+  it("DEC 254zzz80: a link row in A's partition that names another company is unreadable, never A's link", async () => {
+    const w = world();
+    w.db.set({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "web", updatedAt: TIME, companyId: B });
+    const answer = await w.link(w.adminA, "web", "C0GENERAL");
+    expect(answer.status).not.toBe(200);
+    expect(answer.body.error.code).toBe("RUNTIME_UNAVAILABLE");
   });
 
   it("two companies: A's admin can't link a channel of B's workspace, and the body can't name a workspace", async () => {
@@ -195,7 +220,7 @@ describe("web: link a project's channel", () => {
     // A's own token is asked (never B's), and Slack doesn't show it the channel: nothing is linked, and the answer names nothing of B.
     expect(answer.body).toMatchObject({ status: "invite_needed", workspace: { teamId: ACME }, channel: { id: "C0BETA" }, message: CHANNEL_INVITE });
     expect(w.slack.calls).toEqual(["conversations.info acme C0BETA"]);
-    expect(w.db.find((item) => String(item.pk).startsWith("SLACK_BINDING#"))).toEqual([]);
+    expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
     expect(answer.raw).not.toContain("beta-general");
     const named = await w.call(w.adminA, "PUT", "/v1/dev/company/slack/projects/web/channel", { channelId: "C0BETA", teamId: BETA });
     expect(named.status).toBe(400);
@@ -204,7 +229,7 @@ describe("web: link a project's channel", () => {
     const missing = await w.link(w.ownerB, "nope", "C0BETA");
     expect(foreign.status).toBe(404);
     expect(foreign.body.error).toEqual(missing.body.error);
-    expect(w.db.find((item) => String(item.pk).startsWith("SLACK_BINDING#"))).toEqual([]);
+    expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
     // B links its own channel, through its own token only.
     expect((await w.link(w.ownerB, "beta-app", "C0BETA")).body).toMatchObject({ status: "linked", workspace: { teamId: BETA } });
     expect(w.slack.calls.filter((line) => line.includes(" beta"))).toEqual(["conversations.info beta C0BETA"]);
@@ -220,13 +245,19 @@ describe("web: link a project's channel", () => {
 
   it("a project admin's grant must be in the caller's company", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: B });
+    // DEC 254zzz80: a row in A's own partition that names company B, one in B's partition, and a legacy row: none is A's grant.
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: B });
+    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
+    w.db.delete(`ORG#${A}#MEMBER#${w.memberA.personId}`, "PROJECT#web");
+    w.db.set({ pk: `ORG#${B}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator" });
+    expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
+    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "administrator", companyId: A });
     expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
   });
 
   it("a project grant that is not administrator does not let a member link", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "developer", companyId: A });
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.memberA.personId}`, sk: "PROJECT#web", projectName: "web", role: "developer" });
     expect((await w.link(w.memberA, "web", "C0GENERAL")).status).toBe(403);
     expect(w.slack.calls).toEqual([]);
   });
@@ -279,7 +310,7 @@ describe("web: link a project's channel", () => {
     const w = world();
     const send = w.db.send.bind(w.db);
     w.db.send = (async (command: { constructor: { name: string } }) => {
-      if (command.constructor.name === "TransactWriteCommand") w.db.set({ pk: `SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0BOTIN", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0BOTIN", projectName: "api", updatedAt: TIME });
+      if (command.constructor.name === "TransactWriteCommand") w.db.set({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0BOTIN", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0BOTIN", projectName: "api", updatedAt: TIME });
       return send(command as never);
     });
     expect(await w.link(w.adminA, "web", "C0BOTIN")).toMatchObject({ status: 409, body: { error: { code: "SLACK_CHANNEL_TAKEN" } } });
@@ -383,7 +414,7 @@ describe("web: read, unlink and the picker", () => {
 
   it("names a linked project only when it is this company's", async () => {
     const w = world();
-    w.db.set({ pk: `SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "beta-app", updatedAt: TIME });
+    w.db.set({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0GENERAL", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0GENERAL", projectName: "beta-app", updatedAt: TIME });
     const answer = await w.call(w.adminA, "GET", "/v1/dev/company/slack/channels?project=web");
     expect(answer.body.channels[0]).toEqual({ id: "C0GENERAL", name: "general", isPrivate: false, linked: true });
     expect(answer.raw).not.toContain("beta-app");
@@ -492,7 +523,7 @@ describe("/rovara in Slack", () => {
 
   it("the menu never offers a project of another company, even with a stray grant stamped with this company", async () => {
     const w = world();
-    w.db.set({ pk: `MEMBER#${w.apiAdminA.personId}`, sk: "PROJECT#beta-app", projectName: "beta-app", role: "administrator", companyId: A });
+    w.db.set({ pk: `ORG#${A}#MEMBER#${w.apiAdminA.personId}`, sk: "PROJECT#beta-app", projectName: "beta-app", role: "administrator" });
     const menu = await w.slash(w.apiAdminA, "link");
     expect(JSON.stringify(menu)).toContain("*api*");
     expect(JSON.stringify(menu)).not.toContain("beta-app");
@@ -521,7 +552,7 @@ describe("/rovara in Slack", () => {
     expect(done).toMatchObject({ response_type: "ephemeral", replace_original: true, text: "Linked <#C0GENERAL> to *web*. Mention @Rovara here to start work." });
     expect(w.linkRow(ACME, "C0GENERAL")).toMatchObject({ projectName: "web", updatedBy: w.adminA.personId });
     expect(w.audits(A)).toEqual([expect.objectContaining({ action: "link", via: "slack", actor: w.adminA.personId })]);
-    w.db.delete(`SLACK_BINDING#${ACME}`, "CHANNEL#C0GENERAL");
+    w.db.delete(`ORG#${A}#SLACK_BINDING#${ACME}`, "CHANNEL#C0GENERAL");
     expect((await w.press(w.adminA, ROVARA_LINK_ACTION, button!.value))!.text).toBe(ROVARA_EXPIRED);
     expect(w.linkRow(ACME, "C0GENERAL")).toBeUndefined();
     expect(w.audits(A)).toHaveLength(1);
@@ -582,12 +613,12 @@ describe("/rovara in Slack", () => {
     const legacy = w.person("T0LEGACY", "U0LEG", A, "admin");
     const value = w.buttons(await w.slash(legacy, "link web"))[0]!.value;
     expect((await w.press(legacy, ROVARA_LINK_ACTION, value))!.text).toBe(CHANNEL_NOT_CONNECTED);
-    expect(w.db.find((item) => String(item.pk).startsWith("SLACK_BINDING#"))).toEqual([]);
+    expect(w.db.find((item) => String(item.pk).includes("SLACK_BINDING#"))).toEqual([]);
   });
 
   it("a legacy link naming another company's project reads as unlinked", async () => {
     const w = world();
-    w.db.set({ pk: `SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0BOTIN", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0BOTIN", projectName: "beta-app", updatedAt: TIME });
+    w.db.set({ pk: `ORG#${A}#SLACK_BINDING#${ACME}`, sk: "CHANNEL#C0BOTIN", entityType: "SLACK_BINDING", teamId: ACME, channelId: "C0BOTIN", projectName: "beta-app", updatedAt: TIME });
     const status = await w.slash(w.adminA, "status", "C0BOTIN");
     expect(status.text).toBe("<#C0BOTIN> isn't linked to a Rovara project.");
   });

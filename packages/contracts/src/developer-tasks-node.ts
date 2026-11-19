@@ -1,3 +1,4 @@
+import { TaskMoneyV1Schema } from "./task-money-schema.js";
 import { sharedNoticeKey, type SlackThread, slackThreadSubject } from "./slack.js";
 import { z } from "zod";
 import type { DeveloperTaskShareSchema, ChannelTurnSchema, DeveloperTaskStatusSchema, DeveloperTaskFailureCategorySchema, DeveloperTaskFailureStageSchema, DeveloperTaskFailureSchema, DeveloperTaskRunViewSchema} from "./developer-tasks.js";
@@ -141,8 +142,31 @@ export const ENDED_TASK_STATUSES: ReadonlySet<DeveloperTaskStatus> = new Set(["S
 
 export type DeveloperTaskFailureCategory = z.infer<typeof DeveloperTaskFailureCategorySchema>;
 
-/** Task 16: what a task says when its AI budget ran out, for every scope (organisation, member, task); the broker reads the category from it. */
+/**
+ * Task 16: what a task says when its AI budget ran out and the limit is not named (an agent's, a chain's or a testing allowance, or a refusal that does not say which); the broker reads the category from it.
+ * A refusal that names its limit ends with that limit's own words (`budgetExhaustedWords`), and `isBudgetExhaustedMessage` reads both as the same stop.
+ */
 export const BUDGET_EXHAUSTED_FAILURE_MESSAGE = "Stopped: the AI budget for this task ran out. Raise the budget and choose Continue to resume.";
+
+/**
+ * Lead 4 TA12: which limit a stopped run reached. The first four are the gateway's refusals (Key= task, Project= project month, Team= company month, User= the person's month); `company_day` is the install's
+ * own day limit. Fixed words only, so a customer can tell which limit and what to do, never a figure of ours.
+ */
+export const BUDGET_LIMIT_KINDS = ["task", "project", "org", "member", "company_day"] as const;
+export type BudgetLimitKind = typeof BUDGET_LIMIT_KINDS[number];
+const BUDGET_LIMIT_WORDS: Readonly<Record<BudgetLimitKind, string>> = {
+  task: "Stopped: this task reached its own spending limit. A project admin, or a company owner or admin, can raise it on Spending limits; then choose Continue to resume.",
+  project: "Stopped: this project reached its monthly AI spending limit. A company owner or admin can raise it on Spending limits; then choose Continue to resume.",
+  org: "Stopped: your company reached its monthly AI spending limit. A company owner or admin can raise it on Spending limits; then choose Continue to resume.",
+  member: "Stopped: your monthly AI spending limit was reached. A company owner or admin can raise it on Spending limits; then choose Continue to resume.",
+  company_day: "Stopped: your company reached today's AI spending limit. It starts again tomorrow (UTC); until then, ask whoever runs the install to raise it. Then choose Continue to resume.",
+};
+const BUDGET_LIMIT_WORD_SET: ReadonlySet<string> = new Set([BUDGET_EXHAUSTED_FAILURE_MESSAGE, ...Object.values(BUDGET_LIMIT_WORDS)]);
+const isBudgetLimitKind = (value: unknown): value is BudgetLimitKind => typeof value === "string" && (BUDGET_LIMIT_KINDS as readonly string[]).includes(value);
+/** The words a run stopped at `limit` ends with; any other scope (an agent's, a chain's, a testing allowance) or none: the generic words. */
+export const budgetExhaustedWords = (limit: string | undefined): string => (isBudgetLimitKind(limit) ? BUDGET_LIMIT_WORDS[limit] : BUDGET_EXHAUSTED_FAILURE_MESSAGE);
+/** Whether `text` is one of the words a spent AI budget ends a run with (the generic ones or a limit's own). */
+export const isBudgetExhaustedMessage = (text: unknown): boolean => typeof text === "string" && BUDGET_LIMIT_WORD_SET.has(text);
 
 export type DeveloperTaskFailureStage = z.infer<typeof DeveloperTaskFailureStageSchema>;
 
@@ -338,6 +362,7 @@ export function understandRoundOf(workflow: { stage: string; intent?: WorkflowIn
 }
 
 export const DeveloperTaskListDetailSchema = z.object({
+  money: TaskMoneyV1Schema.optional(),
   workflow: z.object({ stage: z.string().min(1).max(40), state: z.string().min(1).max(40), revision: z.number().int().nonnegative(), path: z.string().min(1).max(40), blockReason: z.string().max(1000).optional() }).strict().optional(),
   pullRequests: z.array(z.object({ repository: z.string().min(1).max(200), number: z.number().int().positive(), url: z.string().url().max(2048), state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]) }).strict()).max(32).optional(),
   costUsd: z.number().nonnegative().optional(),

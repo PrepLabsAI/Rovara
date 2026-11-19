@@ -9,6 +9,7 @@ import { randomBytes } from "node:crypto";
 import { AGENTX_NAME_PATTERN, AgentXError, errorStatus, OrgIdSchema, orgProjectCatalogKey, orgProjectNameClaimKey } from "@agentx/contracts";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { unavailable } from "./client-project-create.js";
+import { namedCompany, namedCompanyLatestRevisionRow } from "./company-layout.js";
 
 /** The six random characters after a company project's name, and the most of the name kept in front of them (63-character ids). */
 export const PROJECT_ID_SUFFIX_LENGTH = 6;
@@ -72,7 +73,9 @@ export async function companyProjectIdByName(store: Store, tableName: string, co
   const claim = await read(orgProjectNameClaimKey(company, name));
   if (claim !== undefined) {
     if (claim.entityType !== PROJECT_NAME_CLAIM || claim.companyId !== company || claim.name !== name || typeof claim.projectId !== "string" || !AGENTX_NAME_PATTERN.test(claim.projectId)) return undefined;
-    // The project itself must still be the company's (its latest revision), whatever the claim says.
+    // The project itself must still be the company's (its latest revision), whatever the claim says. DEC 254zzz80: a named company's is in its own partition (company-layout.ts).
+    const named = namedCompany(company);
+    if (named !== undefined) return await namedCompanyLatestRevisionRow(store, tableName, named, claim.projectId) !== undefined ? claim.projectId : undefined;
     const latest = ((await store.send(new QueryCommand({ TableName: tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
       ExpressionAttributeValues: { ":pk": `PROJECT#${claim.projectId}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true }))) as { Items?: Array<Record<string, unknown>> }).Items?.[0];
     return latest !== undefined && latest.companyId === company ? claim.projectId : undefined;
@@ -90,7 +93,7 @@ export const PROJECT_ID_ATTEMPTS = 3;
  * The naming rules one create uses. `projectExists` is the global id check (`PROJECT#<id>`), asked only of today's names and of a fresh random id;
  * `companyTaken` reads only the naming company's own rows.
  */
-export function companyProjectNaming(projectExists: (id: string) => Promise<boolean>, companyTaken: (companyId: string, name: string) => Promise<boolean>) {
+export function companyProjectNaming(projectExists: (id: string, owner?: string) => Promise<boolean>, companyTaken: (companyId: string, name: string) => Promise<boolean>) {
   return {
     /** The company whose names apply, or undefined for today's global names. Per-company naming without a company is refused (fail closed). */
     owner(naming: ClientProjectNaming | undefined, companyId: string | undefined): string | undefined {
@@ -105,7 +108,7 @@ export function companyProjectNaming(projectExists: (id: string) => Promise<bool
       if (owner === undefined) return name;
       for (let attempt = 0; attempt < PROJECT_ID_ATTEMPTS; attempt++) {
         const id = companyProjectId(name);
-        if (!await projectExists(id)) return id;
+        if (!await projectExists(id, owner)) return id;
       }
       throw unavailable();
     },

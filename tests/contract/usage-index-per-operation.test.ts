@@ -63,7 +63,10 @@ function fakePi(conversationId: string, costs: { next: Array<number | null> }) {
           entries.push(cost);
           incurred.usd = Math.round((incurred.usd + cost) * 1e9) / 1e9;
         }
-        listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: role === "main" ? SPEC_ANSWER : '{"findings":[]}' }] } });
+        // A null call replays the prior/local answer; its message retains usage,
+        // while the session stats above correctly add no new spend. Real calls
+        // carry their own usage instead of pretending the provider omitted it.
+        listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: cost ?? 0 } }, content: [{ type: "text", text: role === "main" ? SPEC_ANSWER : '{"findings":[]}' }] } });
       },
       async abort() {},
       getModel: () => ({ provider: "test", modelId: "first-v1" }),

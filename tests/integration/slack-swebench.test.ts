@@ -73,11 +73,12 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
     const h = harness();
     await processSlackRequest(message("<@UAGENTX> eval swebench verified django__django-11099"), h.dependencies, { finalAttempt: false });
     expect(h.startSwebenchRun).toHaveBeenCalledWith({ requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown, dataset: "verified", instanceId: "django__django-11099" });
-    expect(h.posts[0]).toContain("Started a SWE-bench run of `django__django-11099` from SWE-bench Verified on `amazon-bedrock/balanced-v1`, with a cost ceiling of $10.00.");
+    expect(h.posts[0]).toContain("Started a SWE-bench run of `django__django-11099` from SWE-bench Verified on `amazon-bedrock/balanced-v1`.");
     expect(h.posts[0]).toContain("say `stop` to cancel it");
     expect(h.getSwebenchRun).toHaveBeenCalledTimes(2);
     expect(h.sleep).toHaveBeenCalledWith(30_000);
     expect(h.posts[1]).toBe(resultMessage(graded));
+    for (const post of h.posts) expect(post).not.toMatch(/\$|\bUSD\b|1\.84|10\.00/);
     expect(h.ensureWorkspace).not.toHaveBeenCalled();
     expect(h.runTurn).not.toHaveBeenCalled();
   });
@@ -156,22 +157,31 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
 });
 
 describe("the result message (spec 043 SC-003)", () => {
-  it("states resolution, tests, why the agent stopped, time, cost and artifacts", () => {
+  it.each(["$17.43", "17.43 USD", "USD 17.43", "17.43 dollars"])("keeps a runner's failure reason without forwarding %s", (amount) => {
+    const failed = resultMessage(run({ status: "FAILED", error: `the reservation of ${amount} exceeds the cap` }));
+    const stopped = resultMessage(run({ status: "SUCCEEDED", result: { ...graded.result!, stopReason: "model_error", stopDetail: `the reservation of ${amount} exceeds the cap` } }));
+    for (const post of [failed, stopped]) {
+      expect(post).toContain("exceeds the cap");
+      expect(post).not.toMatch(/\$|\bUSD\b|17\.43/);
+    }
+  });
+  it("states resolution, tests, why the agent stopped, time, tokens and artifacts without money", () => {
     expect(resultMessage(graded).split("\n")).toEqual([
       "*Resolved* `django__django-11099` (SWE-bench Verified).",
       "• Tests: FAIL_TO_PASS 3/3, PASS_TO_PASS 19/19",
       "• Agent: finished after 7m 05s",
-      "• Cost: $1.84 for 1,680,000 tokens on `amazon-bedrock/balanced-v1`",
+      "• Usage: 1,680,000 tokens on `amazon-bedrock/balanced-v1`",
       "• Patch, transcript and harness logs: `evals/3f0c2a4e-8a51-4b8e-9d57-0e5f4f5b1c11/` in the artifact bucket",
     ]);
   });
 
   it("explains a capped run with no patch, a failure and a cancellation", () => {
     const capped = run({ status: "SUCCEEDED", result: { ...graded.result!, resolved: false, stopReason: "cost_ceiling", stopDetail: "the run reached its cost ceiling of 10.00 USD", patchBytes: 0, failToPass: undefined, passToPass: undefined } });
+    expect(resultMessage(capped)).not.toMatch(/\$|\bUSD\b|10\.00|1\.84/);
     const lines = resultMessage(capped).split("\n");
     expect(lines[0]).toBe("*Not resolved:* `django__django-11099` (SWE-bench Verified).");
     expect(lines[1]).toBe("• Tests: not run, because the agent changed nothing");
-    expect(lines[2]).toBe("• Agent: stopped at the cost ceiling after 7m 05s (the run reached its cost ceiling of 10.00 USD)");
+    expect(lines[2]).toBe("• Agent: stopped at the cost ceiling after 7m 05s");
     expect(resultMessage(run({ status: "FAILED", error: "could not pull <image>" }))).toBe("The SWE-bench run of `django__django-11099` failed: could not pull &lt;image&gt;");
     expect(resultMessage(run({ status: "CANCELLED" }))).toBe("The SWE-bench run of `django__django-11099` was cancelled and its instance terminated.");
   });
@@ -184,7 +194,7 @@ describe("SEC-bench wording around the result (spec 045 FR-010)", () => {
     const h = harness([run({ ...secbench, status: "FAILED", error: "x" })], async () => ({ outcome: "STARTED", run: run(secbench) }));
     await processSlackRequest(message("<@UAGENTX> eval secbench patch njs.cve-2022-32414"), h.dependencies, { finalAttempt: false });
     expect(h.startSwebenchRun).toHaveBeenCalledWith(expect.objectContaining(secbench));
-    expect(h.posts[0]).toContain("Started a SEC-bench run of `njs.cve-2022-32414` from SEC-bench patch task on `amazon-bedrock/balanced-v1`, with a cost ceiling of $10.00.");
+    expect(h.posts[0]).toContain("Started a SEC-bench run of `njs.cve-2022-32414` from SEC-bench patch task on `amazon-bedrock/balanced-v1`.");
   });
 
   it("names SEC-bench when the run failed", () => {

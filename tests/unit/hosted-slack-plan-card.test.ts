@@ -10,7 +10,7 @@ import {
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { coreAdapter } from "../../packages/broker/src/core-host/registry.js";
 import { HOSTED_IDENTITY_PROVIDER, createHostedIdentity } from "../../packages/broker/src/core-host/hosted-modules.js";
-import { createHostedApprovers, stepUpApprovalKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { hostedDecisionService, type DeployedPeople } from "../../packages/broker/src/core-host/deployed-decisions.js";
 import { hostedThreadHandler, hostedThreadNotification } from "../../packages/broker/src/core-host/thread-notification.js";
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
@@ -83,7 +83,7 @@ async function world(options: { teams?: Record<string, { company: OrgId; token?:
   const people: DeployedPeople = { membershipOf: async (personId) => memberships.get(personId), projectGrantRole: async () => "developer" };
   const identity = createHostedIdentity({ membershipOf: people.membershipOf, displayNameOf: async (personId) => personId });
   fake.modules.push(coreAdapter({ point: "identity", name: HOSTED_IDENTITY_PROVIDER, owner: "fake", create: () => identity }));
-  fake.modules.push(coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => createHostedApprovers({ store: fake.store, identity, key: stepUpApprovalKeyOf("k".repeat(32)), now: () => new Date(fake.clock.now) }) }));
+  fake.modules.push(coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => createHostedApprovers({ store: fake.store, identity, key: approvalProofKeyOf("k".repeat(32)), now: () => new Date(fake.clock.now) }) }));
   for (const companyId of [ORG, OTHER]) {
     await fake.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await fake.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });

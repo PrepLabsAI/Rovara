@@ -118,6 +118,31 @@ describe("the knowledge routes at the developer router", () => {
     expect(answer).toHaveBeenCalledTimes(1);
   });
 
+  it("the two knowledge-switch PUTs are made only from the website's own client (owner DEC 254zzz99): the CLI's full-access token gets the fixed words, the web app succeeds, and the GETs are the same for both", async () => {
+    const w = world();
+    await w.setup();
+    const { MemoryDocumentStore } = await import("../../packages/broker/src/ports/memory-document-store.js");
+    const { createKnowledgeSwitchApi, ON_THE_WEBSITE } = await import("../../packages/broker/src/core-host/knowledge-switch-api.js");
+    const events: unknown[] = [];
+    const api = createKnowledgeSwitchApi({
+      store: new MemoryDocumentStore(), audit: { stage: () => [], record: async (event) => { events.push(event); } }, now: () => 1_800_000_000_000,
+      companyOf: async () => ({ companyId: "org_aaaaaaaaaaaaaaaaaaaa", role: "owner" as const }), projectExists: async () => true, projectRole: async () => undefined,
+    });
+    const deps = { ...w.routes, knowledgeSwitch: api } as DeveloperRouteDependencies;
+    const cli = await w.signIn("owner", { cli: true });
+    const web = await w.signIn("owner");
+    for (const [path, body] of [["/v1/dev/company/lessons/local-tools", { stays: true }], [`${P}/lessons/local-tools`, { enabled: false }]] as const) {
+      expect(await callOn(deps, "PUT", path, `Bearer ${cli.access!}`, body), path).toEqual({ status: 403, body: { error: { code: "FORBIDDEN", message: ON_THE_WEBSITE } } });
+      expect(await callOn(deps, "GET", path, `Bearer ${cli.access!}`), path).toMatchObject({ status: 200 });
+    }
+    expect(events).toEqual([]);
+    expect(await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${web.access!}`, { stays: true })).toEqual({ status: 200, body: { stays: true } });
+    expect(await callOn(deps, "PUT", `${P}/lessons/local-tools`, `Bearer ${web.access!}`, { enabled: false })).toMatchObject({ status: 200, body: { enabled: false } });
+    expect(events).toHaveLength(2);
+    // A script token is not a sign-in at all here (the unit test covers a full-access caller with webApp false or missing).
+    expect((await callOn(deps, "PUT", "/v1/dev/company/lessons/local-tools", `Bearer ${TOKEN}`, { stays: false })).status).toBe(401);
+  });
+
   it("the route table's rows are additive: exactly these three rows are the knowledge rows, and each existing row keeps its method, path and scope", () => {
     const keyOf = (route: { method: string; path: string; requires: string }) => `${route.method} ${route.path} ${route.requires}`;
     const all = DEV_ROUTES.map(keyOf);
@@ -125,9 +150,16 @@ describe("the knowledge routes at the developer router", () => {
     const added = all.filter((row) => row.includes("/knowledge/areas") || row.includes("/knowledge/propose") || row === "POST /v1/dev/projects/{project}/lessons full");
     expect(added).toEqual(["POST /v1/dev/projects/{project}/lessons full", "POST /v1/dev/projects/{project}/knowledge/areas full", "POST /v1/dev/projects/{project}/knowledge/propose full"]);
     // The digest of every other row (the order is the table's own).
-    const others = all.filter((row) => !added.includes(row));
-    expect(others).toHaveLength(DEV_ROUTES.length - 3);
+    const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
+    expect(all.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
+    const withPreview = all.filter((row) => !added.includes(row));
+    const others = withPreview.filter((row) => row !== preview);
+    expect(others).toHaveLength(DEV_ROUTES.length - 4);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
+    // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
+    const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));
+    expect(switchRows).toEqual(["GET /v1/dev/company/lessons/local-tools full", "PUT /v1/dev/company/lessons/local-tools full", "GET /v1/dev/projects/{project}/lessons/local-tools full", "PUT /v1/dev/projects/{project}/lessons/local-tools full"]);
+    expect(createHash("sha256").update(others.filter((row) => !switchRows.includes(row)).join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST_BEFORE_JA7);
   });
 });
 
@@ -137,4 +169,14 @@ describe("the knowledge routes at the developer router", () => {
 // Batch 18 (rule D): with batch 16+17's table and the batch's new /v1/dev rows (#1017 GET lessons/tuning; #1029 POST lessons/{lessonId}/keep; #1034's five Rovara skills rows (GET skills, POST lessons/{lessonId}/skill,
 // PUT skills/{skill}, POST skills/{skill}/approve and /retire); #1020's POST knowledge/propose; #1036's GET and PUT me/lessons-slack; #1051's GET lessons/replay). All added, none changed, the order of every earlier row kept:
 // removing exactly those 11 rows gives back the batch 16+17 pin bb57d437e545367e483433b83f4d5de6048d8aab93a43882bc21316f82e73599 (the knowledge rows are left out of both).
-const OTHER_ROWS_DIGEST = "94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0";
+// Batch b20 (rule D): #1075 adds GET/PUT /v1/dev/company/learning-model (full) and #1086 removes GET /v1/dev/me/sign-in-factors (full). Taking out exactly those two rows and putting the
+// removed one back after DELETE /v1/dev/company/members/{personId}/sign-ins/{method} gives the previous pin 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0.
+// L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
+// removing exactly those 4 rows gives back the pin below.
+const OTHER_ROWS_DIGEST_BEFORE_JA7 = "3e93a0c13585f735aa5bc8b18f3b5225dfc770ba135fed28e56cb4e5964fea57";
+// Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives def66b83.
+// Batch b20 (rule D): plus #1108's 2 hand-over rows; removing exactly those gives 5d5d7ca6 (the pin before #1108).
+const OTHER_ROWS_DIGEST = "775a500554b18c68847dac9013d6c88dfe51f52860fb162d76ade0265dc64a3d";
+// (#1108) DEC 254zzz101 (rule D): #1100 stacks on #1086, whose own table (step-up removed) gives ff498627c2c192b3cb3ea56aa4fb04369cb6b6f2957598952f4b96d7ea4c128a here (the earlier pin was
+// 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0); #1100 adds two rows (GET company/members/handovers, POST company/members/{personId}/handover), none changed: removing
+// exactly those 2 rows gives back ff498627....

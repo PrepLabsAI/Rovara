@@ -32,7 +32,6 @@ export const AutoFixAskSchema = z.object({
 }).strict();
 export type AutoFixAsk = z.infer<typeof AutoFixAskSchema>;
 
-const usd = (value: number): string => `$${Number.isInteger(value) ? String(value) : value.toFixed(2)}`;
 const times = (count: number): string => (count === 1 ? "once" : count === 2 ? "twice" : `${count} times`);
 
 /** What each failure code means, in the card's words. Group codes use the owner's RUN-2 sentences; the rest are fixed here. */
@@ -102,7 +101,7 @@ export function autoFixCodeSentence(code: AutoFixCode): string {
 }
 
 /** Why Rovara asked, in a sentence that names the limit, the cap or the budget it hit. */
-export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: number, failedOnOriginal = true): string {
+export function autoFixAskReasonSentence(reason: AutoFixAskReason, _capUsd?: number, failedOnOriginal = true): string {
   switch (reason) {
     case "needs-a-person": return "Only a person can fix this; new code or a retry would not.";
     case "original-code-also-fails": return failedOnOriginal ? "The same checks also fail on the original code, so new code may not fix it." : "The original code could not be checked, so I can't tell whether new code would fix it.";
@@ -116,10 +115,10 @@ export function autoFixAskReasonSentence(reason: AutoFixAskReason, capUsd?: numb
     case "send-back-limit": return "I already sent this back to coding twice for this plan, which is my limit.";
     case "retry-limit": return "I already retried this once for this code, which is my limit.";
     case "total-limit": return "I reached my limit of 6 automatic actions on this task.";
-    case "spend-cap": return capUsd === undefined ? "Another automatic round would go over the per-task spending cap." : `Another automatic round would go over the ${usd(capUsd)} per-task cap on automatic fixing.`;
+    case "spend-cap": return "The automatic-fix limit was reached.";
     case "day-budget": return "The project's daily AI budget has no room for another automatic round today.";
     case "history-full": return "This task's decision history is full.";
-    case "inputs-missing": return "I could not read what this task has spent so far, so I did not act.";
+    case "inputs-missing": return "I could not read what this task has spent so far, or its spending limit, so I did not act.";
   }
 }
 

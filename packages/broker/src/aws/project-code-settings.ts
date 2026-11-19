@@ -10,16 +10,15 @@
 // Rules:
 //   - The record is company-scoped in its key (`CODE_SETTINGS#<company>#<project>`), so two companies with the same project name never share settings; it also names its company,
 //     and a record naming another company is refused, never applied.
-//   - LOOSENING a rule needs a fresh step-up with a factor Code owns: turning self-approval on, or taking a required code reviewer off. Tightening and the merge method do not.
+//   - DEC 254zzz73: no step-up. Any change needs the project's administrator or a company administrator (`mayChange`, read live by the developer API); LOOSENING a rule
+//     (self-approval on, a required reviewer off) also needs the Rovara website's own client (DEC 254zzz91).
 //   - A stale revision is refused with Code's fixed words; the body is validated at runtime (strict); refusals never echo what was sent.
 import { GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  CODE_SETTINGS_STALE_MESSAGE, CodeSettingsBodySchema, CodeSettingsSchema, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID, agentXError, type CodeSettings, type OrgId,
+  CODE_SETTINGS_STALE_MESSAGE, ON_THE_WEBSITE_MESSAGE, CodeSettingsBodySchema, CodeSettingsSchema, DEFAULT_CODE_SETTINGS, IMPLICIT_COMPANY_ID, agentXError, type CodeSettings, type OrgId,
 } from "@agentx/contracts";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
-import { requireFreshStepUp, type CallerStepUp } from "./step-up-check.js";
 
-export const LOOSEN_ON_A_PAGE = "Loosening a merge rule is done right after you confirm it's you on the sign-in page. Confirm it's you, then try again within a few minutes.";
 export const NOT_A_PROJECT_ADMIN = "only the project's administrators or a company administrator can change its merge rules";
 export const CODE_SETTINGS_BODY = "send a requestId, the revision you read, and only allowSelfApproval, mergeMethod or codeReviewers";
 export const CODE_SETTINGS_UNREADABLE = "the project's merge rules could not be read";
@@ -66,7 +65,7 @@ export function loosens(current: CodeSettings, next: Omit<CodeSettings, "revisio
 
 /** A checked change. `mayChange` is the caller's right (project administrator or company administrator), decided by the developer API before any body is read. */
 export async function putCodeSettings(store: Store & { now: () => number; log(entry: Record<string, unknown>): void }, input: {
-  companyId: string | undefined; project: string; personId: string; clientId: string; mayChange: boolean; stepUp: CallerStepUp | undefined; body: unknown;
+  companyId: string | undefined; project: string; personId: string; clientId: string; mayChange: boolean; webApp?: boolean; body: unknown;
 }): Promise<{ settings: CodeSettings }> {
   if (!input.mayChange) throw agentXError("FORBIDDEN", NOT_A_PROJECT_ADMIN);
   const body = CodeSettingsBodySchema.safeParse(input.body);
@@ -79,7 +78,8 @@ export async function putCodeSettings(store: Store & { now: () => number; log(en
     mergeMethod: body.data.mergeMethod ?? current.mergeMethod,
     codeReviewers: body.data.codeReviewers ?? current.codeReviewers,
   };
-  if (loosens(current, next)) requireFreshStepUp(input.stepUp, store.now(), LOOSEN_ON_A_PAGE);
+  // Owner DEC 254zzz91: LOOSENING a rule is made only from the Rovara website's own client (never the CLI's or an AI tool's token); tightening and the merge method are not.
+  if (loosens(current, next) && input.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
   const settings: CodeSettings = { ...next, revision: current.revision + 1 };
   try {
     await store.documentClient.send(new PutCommand({

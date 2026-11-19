@@ -1,3 +1,8 @@
+import { taskOwnerView } from "../developer/task-owner-view.js";
+import { parsePreviewRequestV2, restrictPreviewV2 } from "@agentx/contracts";
+import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
+import { readTaskMoney } from "../core/cost/task-money.js";
+import type { TaskMoneyV1 } from "@agentx/contracts";
 // Engine host (lane E2): the core's own handlers, mountable on the deployed developer API behind the switch (`ROVARA_CORE_ENGINE`, default off).
 //
 // The controller decided that, once the host is deployed, these answers come from the core itself, not from adapters on the old broker:
@@ -7,8 +12,7 @@
 //   - a task's START (`POST /v1/dev/tasks`), only for a member whose company the switch sends NEW tasks to the core (`engineForNewTask`). Anyone else, and a person with no member company,
 //     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
-//     evidence-opened) needs a FRESH STEP-UP (lane ID part 2): the person proved it was them with a factor Code owns (an emailed code, a passkey, or a company sign-in's own
-//     re-authentication), no longer ago than the company's window. A Slack, Google or GitHub round trip never counts, and a tool holding an ordinary API token has no step-up;
+//     evidence-opened) needs the signed-in person's live authority, checked by the performer (DEC 254zzz73: there is no step-up);
 //   - the owner's moves on a task already running (DECISIONS 198): `POST /v1/dev/tasks/<id>/workflow/send-back`, `.../workflow/review-findings` and `.../continue`, with the
 //     old workflow routes' request and answer (`{ task }`), so Cloud's Send back and Accept findings work for a task of either engine. Served only when the deployment wires the money
 //     cap per round (`taskActions.roundCap`) AND the company's owner rule (`TaskAccess.ownerActing` on the runtime's access): without that seam the flow would use Code's laptop rule
@@ -18,19 +22,16 @@
 //   - the project's test environment (`GET /v1/app/projects/<p>/test-environment`, DEC 254z-amend3): read only, the laptop's own state answer (`testEnvironmentView`, as local/app/test-environment.ts serves it)
 //     from the company's records, with whether test services are on and, when the host cannot run them, why ("Test services not available here: ..."), and the catalog they would use. Same rule as how we work:
 //     for a person the company lets read that project, or a live company owner or admin for a project of their company (L4-B3c); proposing and approving are not on the core here (no hosted approval path for a test environment yet);
-//   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): a fresh step-up, the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
+//   - approving that environment (`POST /v1/app/projects/<p>/test-environment/approve`, L4-B3b): the person's right to read the project, then the risk-based approver rule (a company owner or admin, or
 //     the project's maintainer for low and medium risk; high risk a company owner or admin only), read live again inside the decision, with the approvers point's own proof; served only where the deployment wires it;
 //   - the project's saved environment image (`GET /v1/app/projects/<p>/environment-image`, L4-MF1): read only, the Environment panel's own view (`savedEnvPanel`, fixed words, counts and times) from the company's
 //     saved-environment row for that project, for a person the company lets read that project (any project role; `canReset` is always false here). Saved environments are off on a hosted install until the
 //     install switch is on: then it answers a plain 404 "Saved environments are off for this install", never made-up data. Reset and the setting are not on the core here;
 //   - the setup run (`/v1/app/projects/<p>/setup-agent...`, guided onboarding L2-3): start, re-run, stop, the journal, confirm and discard, for a live company owner or admin or the
-//     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with a fresh step-up and the risk-based approver rule; the rules are setup-run-routes.ts's;
+//     project's administrator (a project user reads it), and deciding a setup candidate (L4-D) with the risk-based approver rule; the rules are setup-run-routes.ts's;
 //   - a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, audit gap 11b): the laptop's GET and PUT, any project role reads, a live company owner or admin or the project's administrator changes (ticket-updates-routes.ts);
-//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and a fresh step-up as above (controller decision, option A of R2-SCRIPT-TOKEN-CREDENTIAL: the laptop's
-//     "a page signed in to a few minutes ago" rule, with Code's own factor as the proof). A token's own requests are not accepted here either (the broker's sign-in decides that).
-//   - The step-up's time comes only from the caller the broker's sign-in vouched for (`DeployedCaller.stepUp`, read from the verified access token), never from a header, a query or a
-//     body. The age is checked HERE, on every such request, against the company's window (`stepUpWindowSeconds`, the policy hook's answer, which may only shorten the default), so a
-//     token whose step-up is older than the window is refused whatever the calling service says.
+//   - script tokens (`/v1/app/script-tokens...`): list and revoke; MAKING one needs a live company owner/admin role and the Rovara website's own client (DEC 254zzz73: no step-up; DEC 254zzz91: website only). A token's own requests are not accepted
+//     here either (the broker's sign-in decides that).
 //
 // Rules:
 //   - Off (the default) is byte-identical: `route` answers `undefined` for every request without reading anything, and the old broker answers as before.
@@ -40,7 +41,7 @@
 //   - A company the switch does not send to the core, and that holds no core task, is the old broker's (`undefined`).
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { APPROVAL_SIGN_IN_SKEW_SECONDS, AgentXError, FRESH_SIGN_IN_SECONDS, OrgRoleSchema, SavedEnvPanelSchema, agentXError, checkApprovalSignIn, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
@@ -55,7 +56,7 @@ import type { SessionMembers } from "../core/sessions/access.js";
 import { answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import { developerIdOf } from "../core/sessions/create.js";
 import type { PlaybookService } from "../core/playbook/service.js";
-import { createScriptToken, listScriptTokens, readScriptToken, scriptTokenStatus, revokeScriptToken, scriptTokensEnabled, STEP_UP_METHODS, type ScriptTokenCaller, type ScriptTokenSignIn } from "../core/script-tokens/index.js";
+import { createScriptToken, listScriptTokens, readScriptToken, scriptTokenStatus, revokeScriptToken, scriptTokensEnabled, type ScriptTokenCaller } from "../core/script-tokens/index.js";
 import { SCRIPT_TOKEN_CREATE_ADMIN_ONLY } from "../core/script-tokens/store.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { createSessionRoutes } from "../local/app/session-routes.js"; import { INBOX_PATH, createInboxRoutes, inboxAnswer, inboxOwns } from "./inbox-routes.js";
@@ -90,6 +91,7 @@ import { isUpkeepPath, routeHostedUpkeep, type HostedUpkeepWiring } from "./upke
 import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "./eval-check-routes.js";
 import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directory-routes.js";
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
+import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
 /** The paths this module owns. Anything else is the old broker's. */
@@ -101,7 +103,7 @@ const TASK_EVIDENCE = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/evidence$/u;
 const TASK_ACTION = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/(workflow\/send-back|workflow\/review-findings|continue)$/u;
 /**
  * DEC 254zzz39 (6): the task owner's "Accept findings" on Rovara's web page (`{ requestId, expectedRevision, candidateDigest, resolutions }` in, as the workflow route; `{ task }` out). The one route that accepts a
- * SECURITY finding on a core task: only the web app's own sign-in client (`webApp`), only after a fresh step-up checked against the company's window, only for the task's owner; the move is then made as the page's (`via: "page"`).
+ * SECURITY finding on a core task: only the web app's own sign-in client (`webApp`), only for the task's owner (or a People co-owner); the move is then made as the page's (`via: "page"`).
  */
 const TASK_PAGE_FINDINGS = /^\/v1\/app\/tasks\/([0-9a-f-]{36})\/review-findings$/u;
 /** A person's Stop on a core task, on the old cancel route's path (`{ requestId }` in, `{ task }` out), so Cloud's Stop and the AI tools' cancel stop a task of either engine. */
@@ -113,6 +115,7 @@ const DECISIONS = /^\/v1\/app\/decisions(?:\/|$)/u;
 const TASK_ANSWERS = /^\/v1\/dev\/tasks\/([0-9a-f-]{36})\/answers$/u;
 const PLAYBOOK = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/(?:how-we-work|playbook)$/u;
 const SCRIPT_TOKENS = /^\/v1\/app\/script-tokens(?:\/([^/]+)\/revoke)?$/u;
+const START_ESTIMATES = /^\/v1\/dev\/projects\/([a-z][a-z0-9-]{0,62})\/start-estimates$/u;
 const SAVED_ENV_IMAGE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/environment-image$/u;
 const TEST_ENVIRONMENT = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9._-]{0,99})\/test-environment$/u;
 /** L4-B3b: approving the proposal that waits (a POST). */
@@ -126,10 +129,7 @@ const ApproveTestEnvironmentBodySchema = z.object({
 
 export const SAVED_ENV_OFF = "Saved environments are off for this install";
 export const NOT_ON_THE_CORE_YET = "That is not on the core engine on this install yet.";
-export const MAKE_SCRIPT_TOKEN_ON_A_PAGE = "A script token is made right after you confirm it's you on the sign-in page: it is a long-lived credential, so a tool that holds an API token cannot make one. Confirm it's you, then try again within a few minutes.";
 export const SIGN_IN_AGAIN = "Sign in again.";
-export const DECIDE_ON_A_PAGE = "A decision is made right after you confirm it's you on the sign-in page: a tool that holds an API token cannot approve or reject. Confirm it's you, then try again within a few minutes.";
-export const COMPANY_RULES_NO_ANSWER = "The company rules service did not answer, so nothing was done. Try again in a moment.";
 export const NOT_FOR_SCRIPT_TOKENS = "A script token cannot do that.";
 export const SESSION_CAP_UNREADABLE = "This install's session limit could not be read, so no token was made. Try again later, or ask whoever runs the install.";
 const PROJECT_NOT_FOUND = "project not found";
@@ -141,11 +141,8 @@ export interface DeployedCaller {
   client?: string | undefined;
   /** Set by the broker's sign-in when the request carries a script token (never from a body). Such a caller reaches task reads and explicitly scoped wiki reads here. */
   scriptToken?: { tokenId: string } | undefined;
-  /**
-   * Lane ID part 2: the person's last step-up as the VERIFIED access token states it (`stepUpOf` over its `step_up_at` and `step_up_amr`), set by the broker's sign-in and never from a
-   * header, a query or a body. `at` is an ISO time. Absent: no step-up in this session. The age is checked on the route, never trusted from it.
-   */
-  stepUp?: { at: string; method: string } | undefined;
+  /** How the person signed in (the verified token's `amr`), set by the broker's sign-in and never from a header, a query or a body. Kept on a script token's record. Absent: not known. */
+  amr?: DeveloperSignInMethod | undefined;
   /**
    * Set only by the broker's sign-in, from the verified client's registration, for the Rovara web app's own sign-in client (DEC 236h; never the CLI's token, a tool's or another client's). Everything else that reads the wiki
    * is a tool outside Rovara and is held to the company's "Knowledge stays in Rovara" switch (`wiki-routes.ts`). DEC 254zzz39 (6): the client must be registered with full access AND marked `webApp`
@@ -154,11 +151,9 @@ export interface DeployedCaller {
   webApp?: true | undefined;
 }
 
-/** A decision card's caller on the deployed API: who acts and, for the deployment's performer, the person with the step-up time as `Principal.authTime`. */
+/** A decision card's caller on the deployed API: who acts, as the broker's sign-in vouched for them. */
 export interface DeployedDecisionCaller extends DecisionCaller {
   principal: Principal;
-  /** Present on an act (approve, reject, request changes, evidence-opened): the fresh step-up the route checked. Absent on a read. */
-  stepUp?: { at: string; method: string };
 }
 
 /** What membership says about the caller: the company and the live role in it (never a token claim). */
@@ -169,15 +164,11 @@ export interface CompanyMembership {
 
 /** What the deployment wires for one company. Each part is optional; a missing one answers `NOT_ON_THE_CORE_YET`. */
 export interface CoreDevWiring {
+  startEstimates?: (project: string) => Promise<PreviewContext>;
   /** The session levels from the company's own records (lanes ID and T). Without it the session routes are not served (the laptop's default is the sole owner). */
   members?: SessionMembers;
-  /** The decision cards' sources and performer (each checks the caller's live authority). An act reaches the performer only after the route checked a fresh step-up. */
+  /** The decision cards' sources and performer (each checks the caller's live authority). */
   decisions?: DecisionRouteDependencies<DeployedDecisionCaller>;
-  /**
-   * The company's step-up window in seconds, through the policy hook. It may only shorten FRESH_SIGN_IN_SECONDS (ten minutes, the sign-in server's DEVELOPER_STEP_UP_WINDOW_SECONDS). Absent: that default. A throw, or an answer that is not a whole
-   * number from 0 to 86400, is no answer: the act is refused (`COMPANY_RULES_NO_ANSWER`), never let through on the default.
-   */
-  stepUpWindowSeconds?: () => Promise<unknown>;
   /**
    * The owner's moves on a task already running (send back, review findings, continue; DECISIONS 198). `roundCap` is the money cap each round is held to (the task's limit and what it has
    * spent; a throw, or an unreadable spend, refuses the round). It is required so the deployment says what it holds; `async () => undefined` holds none. Served only when the runtime's
@@ -194,7 +185,7 @@ export interface CoreDevWiring {
    */
   testEnvironment?: { env: NodeJS.ProcessEnv; serviceCatalog?: ServiceCatalogSource | undefined; catalogName: "owner-starter-list" };
   /**
-   * L4-B3b (DEC 254zm item 4): approving the project's test environment (`POST /v1/app/projects/<p>/test-environment/approve`): a fresh step-up, the risk-based approver rule read live, the approvers
+   * L4-B3b (DEC 254zm item 4): approving the project's test environment (`POST /v1/app/projects/<p>/test-environment/approve`): the risk-based approver rule read live, the approvers
    * point's own proof, the approval gate (test-environment-approval.ts). Absent: that path says "not on the core yet". Served only with `canReadProject`.
    */
   testEnvironmentApproval?: HostedTestEnvironmentDecider;
@@ -206,7 +197,7 @@ export interface CoreDevWiring {
   /** Script tokens' list and revoke (the token store is the core's; the audit sink is the registry's). */
   scriptTokens?: { enabled?: () => boolean };
   /**
-   * ID-STEPUP-FOLLOWUPS (d): the install's session cap in seconds, where it caps every session: a script token made here lives no longer than a session would. Absent: no cap (the days
+   * The install's session cap in seconds, where it caps every session: a script token made here lives no longer than a session would. Absent: no cap (the days
    * asked for). Anything but a positive whole number makes no token (fixed words), never one without the cap.
    */
   sessionCapSeconds?: number;
@@ -248,6 +239,8 @@ export interface CoreDevWiring {
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
   /** L4-EVCI2: the setup card's eval check from the customer's CI (`/v1/app/projects/<p>/ci-eval-check`, eval-check-routes.ts). Absent: that path says "not on the core yet". */
   evalCheck?: HostedEvalCheckWiring;
+  /** DEC 254zzz94: the Merge button on a finished task (`/v1/app/tasks/<id>/merge`, hosted-merge-routes.ts). Absent: those paths say merging from Rovara is not set up. */
+  merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
   ticketUpdates?: HostedTicketUpdatesWiring;
 }
@@ -292,10 +285,12 @@ function tokenIdOf(raw: string): string {
 function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
+  if (START_ESTIMATES.test(path)) return method === "POST";
   if (TASK_ANSWERS.test(path)) return method === "POST";
   if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
   if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
   if (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path)) return method === "POST";
+  if (isHostedMergePath(path, method)) return true;
   if (coreTaskRuleOf(path, method) !== undefined) return true;
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
@@ -320,35 +315,6 @@ function bodyOf(request: BrokerRequest): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** The factors Code owns (the sign-in server's DEVELOPER_STEP_UP_METHODS). A Slack, Google or GitHub round trip is none of them, whatever a wiring maps into the caller. */
-const STEP_UP_FACTORS: ReadonlySet<unknown> = new Set<unknown>(STEP_UP_METHODS);
-/** The one time form the broker's sign-in writes (`toISOString`); a looser string that Date.parse would still read is refused. */
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
-
-/**
- * Lane ID part 2: the caller's step-up, if it is fresh enough for this company now; otherwise the refusal. The window is the company's (through the hook) and may only be shorter than
- * the default; a missing, unreadable, too-old or future step-up time is refused (`checkApprovalSignIn`'s window rule, with its clock-skew allowance).
- */
-async function freshStepUp(caller: DeployedCaller, wiring: CoreDevWiring, nowMs: number, refusal: string): Promise<{ at: string; method: ScriptTokenSignIn["amr"] }> {
-  // The step-up is read first: a caller without one is refused without asking the company rules service.
-  const stepUp = caller.stepUp;
-  if (stepUp === undefined || stepUp === null || typeof stepUp !== "object" || typeof stepUp.at !== "string" || !ISO_INSTANT.test(stepUp.at) || !STEP_UP_FACTORS.has(stepUp.method)) throw agentXError("REAUTH_REQUIRED", refusal);
-  let seconds = FRESH_SIGN_IN_SECONDS;
-  if (wiring.stepUpWindowSeconds !== undefined) {
-    let answer: unknown;
-    try { answer = await wiring.stepUpWindowSeconds(); } catch { answer = undefined; }
-    if (typeof answer !== "number" || !Number.isInteger(answer) || answer < 0 || answer > 86_400) throw agentXError("RUNTIME_UNAVAILABLE", COMPANY_RULES_NO_ANSWER);
-    seconds = Math.min(seconds, answer);
-  }
-  // A zero window refuses every step-up; checkApprovalSignIn's window needs at least a minute, so it is decided here.
-  if (seconds === 0) throw agentXError("REAUTH_REQUIRED", refusal);
-  const verdict = checkApprovalSignIn({ mode: "window", seconds: Math.max(seconds, 60) }, { authTime: stepUp.at }, nowMs, { companySignIn: false });
-  if (!verdict.ok) throw agentXError("REAUTH_REQUIRED", refusal);
-  // Below a minute, checkApprovalSignIn's floor would be looser than the company asked: the exact age is checked too, and the clock-skew allowance never exceeds the window.
-  const age = nowMs - Date.parse(stepUp.at);
-  if (age > seconds * 1000 || -age > Math.min(APPROVAL_SIGN_IN_SKEW_SECONDS, seconds) * 1000) throw agentXError("REAUTH_REQUIRED", refusal);
-  return { at: stepUp.at, method: stepUp.method as ScriptTokenSignIn["amr"] };
-}
 
 /** DEC 254zzz44 (a): the task, when the caller is a reader its owner shared it with (the old rule, through the deployment's wiring) and it is a task of the caller's own company; otherwise undefined. */
 async function sharedReaderTask(target: Mounted, companyId: string, caller: DeployedCaller, taskId: string): Promise<TaskRecord | undefined> {
@@ -413,6 +379,19 @@ interface Mounted {
   actions?: TaskActions;
 }
 
+/** Figures belong to the stored task owner or a live company admin. A co-owner's
+ * right to act does not disclose another person's money. Scope budgets stay private. */
+function maySeeTaskMoney(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): boolean {
+  return caller.scriptToken === undefined && caller.principal.companyId === target.runtime.companyId && membership.companyId === target.runtime.companyId && task.companyId === target.runtime.companyId
+    && (membership.role === "owner" || membership.role === "admin" || membership.role === "member" && taskOwnerView(task)?.developerId === caller.principal.personId);
+}
+async function moneyOf(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership, knownCap?: { limitUsd: number }): Promise<TaskMoneyV1 | undefined> {
+  if (!maySeeTaskMoney(target, task, caller, membership)) return undefined;
+  const cap = knownCap ?? await target.wiring.taskActions?.roundCap?.(task).catch(() => undefined);
+  const maximum = cap === undefined ? undefined : Math.round(cap.limitUsd * 1_000_000);
+  return readTaskMoney({ store: target.runtime.flow.deps.store, companyId: target.runtime.companyId, task, hosted: true, revealPayer: true, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) });
+}
+
 export interface CoreDevRoutes {
   route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>;
   /**
@@ -425,7 +404,7 @@ export interface CoreDevRoutes {
    * live membership's, the task must be one this caller may act on (the owner moves' rule), and the money is the owner round's own read (`taskActions.roundCap`). `undefined` for anything else (switch off, no member
    * company, another company's task, not theirs, no money wiring, a read that fails): the row then carries no money, never a guess.
    */
-  taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  taskMoney(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>;
   /**
    * Understand's round on the task list (`GET /v1/dev/tasks?detail=1`, `round`), in process: whether the core's own task read (`GET /v1/dev/tasks/{id}`: the owner, a co-owner, or a reader of its People list) would show this
    * caller the task. The company is the caller's live membership's; the task must be one of that company's. `false` for anything else (switch off, no member company, another company's task, a script token, a malformed or
@@ -489,10 +468,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (roundCap === undefined) return undefined;
         const taskCaller: TaskCaller = { principal: caller.principal, ...(caller.client === undefined ? {} : { client: caller.client }) };
         const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
+        if (!maySeeTaskMoney(target, record, caller, membership)) return undefined;
         const cap = await roundCap(record);
         if (cap === undefined || typeof cap.limitUsd !== "number" || !Number.isFinite(cap.limitUsd) || cap.limitUsd < 0) return undefined;
         const spent = cap.spentUsd;
-        return { runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
+        const money = await moneyOf(target, record, caller, membership, cap);
+        return { ...(money === undefined ? {} : { money }), runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
       } catch {
         return undefined;
       }
@@ -540,7 +521,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
       let target: Mounted;
       try {
@@ -565,7 +546,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // same request id answers the first task. The answer is the developer task view, as the old start's.
           const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
         }
         const task = TASK_READ.exec(path);
         if (task !== null) {
@@ -581,7 +562,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
               return shared;
             })
             : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
         }
         const evidence = TASK_EVIDENCE.exec(path);
         if (evidence !== null) {
@@ -599,7 +580,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
           // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
           const stopped = await stopTaskOnRequest(target.runtime.flow.deps, { ...taskCaller, companyRole: membership.role }, cancel[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs) });
+          return json(200, { task: await developerTaskView(stopped.task, await taskViewOf(target.runtime.flow.deps, stopped.task), target.blobs, undefined, await moneyOf(target, stopped.task, caller, membership), maySeeTaskMoney(target, stopped.task, caller, membership)) });
         }
         const action = TASK_ACTION.exec(path);
         if (action !== null) {
@@ -615,7 +596,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           else if (action[2] === "workflow/review-findings") await target.actions.resolveFindings(taskCaller, taskId, body, "api-token");
           else await target.actions.continue(taskCaller, taskId, body);
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
         }
         const rule = coreTaskRuleOf(path, request.method);
         if (rule !== undefined) {
@@ -633,18 +614,24 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (pageFindings !== null) {
           // The web page's own act: anyone else (the CLI's token, an AI tool's, another full-access client) is refused before anything is read, whatever they sent.
           if (caller.webApp !== true) throw agentXError("FORBIDDEN", SECURITY_ACCEPT_ON_THE_PAGE);
-          // A fresh step-up (Code's own factors), its age checked against the company's window, before anything is read.
-          const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), SECURITY_ACCEPT_ON_THE_PAGE);
           // Served only with the owner moves' own wiring (the money cap and the company's owner rule); otherwise fixed words, the same for every task id.
           if (target.actions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           const taskId = pageFindings[1]!;
           // The task's owner (or a People co-owner) only: anyone else, another company's task, or none, reads "no such task" whatever they sent.
           await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
           const body = jsonBodyOf(request);
-          // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`, a fresh step-up); a refusal writes nothing.
-          await target.actions.resolveFindings({ ...taskCaller, webApp: true, stepUp }, taskId, body, "page");
+          // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`); a refusal writes nothing.
+          await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs) });
+          return json(200, { task: await developerTaskView(record, await taskViewOf(target.runtime.flow.deps, record), target.blobs, undefined, await moneyOf(target, record, caller, membership), maySeeTaskMoney(target, record, caller, membership)) });
+        }
+        if (isHostedMergePath(path, request.method)) {
+          // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
+          const audit = target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit);
+          return await routeHostedMerge({
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, role: membership.role, flow: target.runtime.flow.deps, wiring: target.wiring.merge, audit,
+            now: () => nowOf(target), webApp: caller.webApp === true, ...(options.log === undefined ? {} : { log: options.log }),
+          });
         }
         const answers = TASK_ANSWERS.exec(path);
         if (answers !== null) {
@@ -653,21 +640,18 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Only the task's owner (People owners count; a company admin who is not one does not). Anyone who may not read the task gets the missing task's answer whatever they sent; a
           // reader who is not its owner gets fixed words. One request id is one answer, and the round asked is checked.
           const answered = await answerTaskOnRequest(target.runtime.flow.deps, taskCaller, answers[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await developerTaskView(answered.task, await taskViewOf(target.runtime.flow.deps, answered.task), target.blobs) });
+          return json(200, { task: await developerTaskView(answered.task, await taskViewOf(target.runtime.flow.deps, answered.task), target.blobs, undefined, await moneyOf(target, answered.task, caller, membership), maySeeTaskMoney(target, answered.task, caller, membership)) });
         }
         if (DECISIONS.test(path)) {
           if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // Reading the cards needs no step-up; approve, reject, request changes and evidence-opened need a fresh one, checked here before anything else is read.
-          const stepUp = request.method === "GET" ? undefined : await freshStepUp(caller, target.wiring, nowOf(target), DECIDE_ON_A_PAGE);
           const body = request.method === "GET" ? {} : bodyOf(request);
           const url = new URL(request.path, "http://core");
-          // The step-up time is the person's fresh sign-in for the performer's own rules (`Principal.authTime`); on a read nothing is decided and the principal carries no sign-in time.
+          // The principal carries no sign-in time or methods: the performer decides on the person's live authority alone (DEC 254zzz73).
           // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop them
           const { authTime: _ignored, methods: _alsoIgnored, ...person } = caller.principal;
           const decisionCaller: DeployedDecisionCaller = {
             orgId: companyId, developerId: developerIdOf(caller.principal),
-            principal: stepUp === undefined ? person : { ...person, authTime: stepUp.at, methods: [stepUp.method] },
-            ...(stepUp === undefined ? {} : { stepUp }),
+            principal: person,
           };
           const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
           if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
@@ -678,7 +662,6 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           return await agentModelRoute({
             method: request.method, body: request.body, principal: caller.principal, role: membership.role, choice: target.wiring.modelChoice,
             audit: target.wiring.auditFor === undefined ? undefined : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
-            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
         if (isSetupRunPath(path, request.method) || isSetupCheckPath(path, request.method)) {
@@ -688,8 +671,6 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
             startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
-            // L4-D: deciding a setup candidate needs a fresh step-up, checked here against the company's window like every decision.
-            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
         if (isWikiMapPath(path, request.method)) {
@@ -731,10 +712,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedUpkeep({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep,
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep, webApp: caller.webApp === true,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
-            // L4-P3: allowing the company's automatic runs (the setup step) needs a fresh step-up, checked here against the company's window like making a script token.
-            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
         if (isEvalCheckPath(path, request.method)) {
@@ -754,12 +733,11 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           });
         }
         if (isSystemRunsPath(path, request.method)) {
-          // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; allowing needs a fresh step-up; the ceiling is the upkeep wiring's.
+          // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; the ceiling is the upkeep wiring's.
           if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedSystemRuns({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available,
+            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available, webApp: caller.webApp === true,
             audit: target.wiring.auditFor === undefined ? target.runtime.flow.deps.audit : target.wiring.auditFor(caller, target.runtime.flow.deps.audit), now: () => nowOf(target),
-            freshStepUp: (refusal) => freshStepUp(caller, target.wiring, nowOf(target), refusal),
           });
         }
         if (isWikiBuildPath(path, request.method)) {
@@ -788,6 +766,17 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
           });
         }
+        const preview = START_ESTIMATES.exec(path);
+        if (preview !== null) {
+          if (target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          const project = preview[1]!;
+          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          const parsed = parsePreviewRequestV2(jsonBodyOf(request));
+          if (parsed === undefined) throw agentXError("CONFIG_INVALID", "invalid start estimate request");
+          const context = await target.wiring.startEstimates?.(project) ?? { policyRevision: "unavailable", stages: {}, limits: [] };
+          const quote = await startEstimates({ store: target.runtime.flow.deps.store }, { orgId: companyId, project, request: parsed, asOf: new Date(nowOf(target)).toISOString(), context });
+          return json(200, membership.role === "owner" || membership.role === "admin" ? quote : restrictPreviewV2(quote));
+        }
         const playbook = PLAYBOOK.exec(path);
         if (playbook !== null) {
           if (target.playbook === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
@@ -800,15 +789,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (approveEnvironment !== null) {
           const approval = target.wiring.testEnvironmentApproval;
           if (approval === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // A decision needs a fresh step-up, checked before anything else is read (a tool holding an ordinary API token has none).
-          const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), DECIDE_ON_A_PAGE);
           const project = approveEnvironment[1]!;
           // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
           // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
           if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(request));
           if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
-          const result = await approval.approve({ personId: caller.principal.personId, stepUp, project, approval: parsedBody.data });
+          const result = await approval.approve({ personId: caller.principal.personId, project, approval: parsedBody.data });
           if (result.ok) return json(200, { project, message: result.message });
           // The decision's own words (fixed, never an echo); the status by reason.
           throw agentXError(result.reason === "off" ? "NOT_AVAILABLE_HERE" : result.reason === "stale" ? "CHANGE_STALE" : result.reason === "not_found" || result.reason === "not_wired" ? "NOT_FOUND" : "FORBIDDEN", result.message);
@@ -845,18 +832,19 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
           const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
           if (tokens[1] === undefined && request.method === "POST") {
-            // Refuse the role before checking step-up or reading the body; core creation enforces it too.
+            // Refuse the role before reading the body; core creation enforces it too.
             if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
-            const stepUp = await freshStepUp(caller, target.wiring, nowOf(target), MAKE_SCRIPT_TOKEN_ON_A_PAGE);
+            // Owner DEC 254zzz91: a long-lived credential is made only from the Rovara website's own client, never by a CLI or AI-tool token.
+            if (caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
             const canRead = target.wiring.canReadProject;
             if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
             const cap = target.wiring.sessionCapSeconds;
             if (cap !== undefined && (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0)) throw agentXError("RUNTIME_UNAVAILABLE", SESSION_CAP_UNREADABLE);
             // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
-            // The record keeps how the maker proved it was them (the step-up's factor as its amr, and its time), and the token never outlives the install's session cap.
+            // The record keeps how the maker signed in (the verified token's amr, when known), and the token never outlives the install's session cap.
             const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
               if (!(await canRead(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), signIn: { amr: stepUp.method, authTime: stepUp.at } });
+            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), ...(caller.amr === undefined ? {} : { signIn: { amr: caller.amr } }) });
             return json(201, made);
           }
           if (tokens[1] === undefined && request.method === "GET") return json(200, { canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin", tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });

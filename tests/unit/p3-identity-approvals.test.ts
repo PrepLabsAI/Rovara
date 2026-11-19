@@ -1,20 +1,19 @@
 // Lane P3 (owner decisions 60 and 62): identity abilities (I1), one neutral outside account and an open sign-in method id (I2), any role name (I3), the sign-in time on approvals (A1), and the approvers plug-in naming its strong
-// methods (A3), with the company's fresh sign-in window. Approvals are authority, so each rule has a test that it does not WIDEN anything: a comment is never a rejection or a high-risk approval, a missing sign-in time fails closed.
+// methods (A3). DEC 254zzz73 removed the company's own fresh sign-in setting (core/decisions/sign-in-setting.ts); the rule stays a port capability a plug-in may state. Approvals are authority, so each rule has a test that it does not WIDEN anything: a comment is never a rejection or a high-risk approval, a missing sign-in time fails closed.
 /* eslint-disable @typescript-eslint/no-unsafe-assignment -- vitest's expect.* matchers are typed any */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  AppMeResponseSchema, BUILT_IN_SIGN_IN_METHODS, DeveloperSummarySchema, ExternalAccountRefSchema, FRESH_SIGN_IN_SECONDS, IMPLICIT_COMPANY_ID, KNOWN_ORG_ROLES, LinkedIdentitySchema, OrgRoleNameSchema, OrgRoleSchema, SignInMethodIdSchema, ownRoleEntry,
-  actorOfExternalAccount, checkApprovalSignIn, checkApprovalSignInSetting, createWorkflowSnapshot, externalAccountKey, externalAccountOfActor, externalAccountOfHostAccount, isKnownOrgRole, readExternalAccount,
-  submitWorkflowArtifact, DEFAULT_APPROVAL_SIGN_IN_SETTING,
-  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditEvent, type AuditSink, type IdentityProvider, type Principal, type TransactItem, type WorkflowSnapshot,
+  AppMeResponseSchema, BUILT_IN_SIGN_IN_METHODS, DeveloperSummarySchema, ExternalAccountRefSchema, IMPLICIT_COMPANY_ID, KNOWN_ORG_ROLES, LinkedIdentitySchema, OrgRoleNameSchema, OrgRoleSchema, SignInMethodIdSchema, ownRoleEntry,
+  actorOfExternalAccount, checkApprovalSignIn, createWorkflowSnapshot, externalAccountKey, externalAccountOfActor, externalAccountOfHostAccount, isKnownOrgRole, readExternalAccount,
+  submitWorkflowArtifact,
+  type ApprovalProof, type ApprovalRequest, type ApprovalRequirement, type ApprovalVerdict, type Approvers, type AuditSink, type IdentityProvider, type Principal, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerApprovers, createLocalOwnerIdentity, createNoopAuditSink, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { isCommentMethod, strictMethodsFor } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
-import { approvalSignInSettingKey, changeApprovalSignInSetting, readApprovalSignInRule, readApprovalSignInSetting } from "../../packages/broker/src/core/decisions/sign-in-setting.js";
 import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/broker/src/core/merge/people.js";
 import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
 import { TASK_ID as MERGE_TASK, mergeWorld, OWNER_SESSION } from "../support/merge-world.js";
@@ -277,91 +276,6 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
     expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: "yesterday" }, at, SSO)).toEqual({ ok: false, reason: "no_sign_in_time" });
     expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: iso(-600) }, at, SSO)).toEqual({ ok: false, reason: "sign_in_in_future" });
     expect(checkApprovalSignIn({ mode: "any-active" }, { authTime: iso(1) }, at, NO_SSO)).toEqual({ ok: false, reason: "no_company_sign_in" });
-  });
-
-  it("the default window is ten minutes", () => {
-    expect(DEFAULT_APPROVAL_SIGN_IN_SETTING).toEqual({ mode: "window", seconds: FRESH_SIGN_IN_SECONDS });
-    expect(FRESH_SIGN_IN_SECONDS).toBe(600);
-  });
-});
-
-describe("the company's sign-in setting", () => {
-  const owner = person({ roles: ["owner"] });
-  const deps = (store: MemoryDocumentStore, audit: AuditSink = createNoopAuditSink(), sso = false) => ({ store, audit, identity: identityWith(sso), now: () => NOW });
-  const noSso = identityWith(false);
-  const sso = identityWith(true);
-
-  it("a company that chose nothing has the default window", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await readApprovalSignInSetting(store, COMPANY, noSso)).toEqual({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 0, isDefault: true });
-  });
-
-  it("an owner or an admin sets a window; the rule read back is what the plug-in puts in its requirement", async () => {
-    const store = new MemoryDocumentStore();
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 1800 }, expectedRevision: 0 })).toEqual({ ok: true, setting: { mode: "window", seconds: 1800 }, revision: 1 });
-    expect(await readApprovalSignInRule(store, COMPANY, noSso)).toEqual({ mode: "window", seconds: 1800 });
-    const admin = person({ personId: "ravi", roles: ["admin"] });
-    expect(await changeApprovalSignInSetting(deps(store), { companyId: COMPANY, by: admin, setting: { mode: "window", seconds: 300 }, expectedRevision: 1 })).toMatchObject({ ok: true, revision: 2 });
-  });
-
-  it("a member, a role the core does not know, and a person of another company may not change it", async () => {
-    const store = new MemoryDocumentStore();
-    for (const by of [person({ roles: ["member"] }), person({ roles: ["auditor"] }), person({ roles: [] }), person({ companyId: "org_zzzzzzzzzzzzzzzzzzzz" })]) {
-      expect(await changeApprovalSignInSetting(deps(store, undefined, true), { companyId: COMPANY, by, setting: { mode: "window", seconds: 600 }, expectedRevision: 0 })).toEqual({ ok: false, reason: "not_allowed" });
-    }
-    expect(await store.get(approvalSignInSettingKey(COMPANY))).toBeUndefined();
-  });
-
-  it("'trust any active company sign-in' is allowed only when the IDENTITY ADAPTER says it has the company's own sign-in, read inside the function (review M3)", async () => {
-    const store = new MemoryDocumentStore();
-    const any = { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 0 };
-    expect(await changeApprovalSignInSetting(deps(store), any)).toEqual({ ok: false, reason: "needs_company_sign_in" });
-    // No caller flag exists to turn it on: an input that claims the capability changes nothing.
-    expect(await changeApprovalSignInSetting(deps(store), { ...any, companyOwnSignIn: true } as never)).toEqual({ ok: false, reason: "needs_company_sign_in" });
-    expect(await changeApprovalSignInSetting({ ...deps(store), identity: { capabilities: { interactiveSignIn: true, externalAccounts: false } } }, any)).toEqual({ ok: false, reason: "needs_company_sign_in" });
-    expect(await changeApprovalSignInSetting(deps(store, undefined, true), any)).toMatchObject({ ok: true });
-    expect(await readApprovalSignInRule(store, COMPANY, sso)).toEqual({ mode: "any-active" });
-    // The company later loses its own sign-in: the stored choice is not used, the default window is.
-    expect(await readApprovalSignInRule(store, COMPANY, noSso)).toEqual(DEFAULT_APPROVAL_SIGN_IN_SETTING);
-  });
-
-  it("refuses a window outside the limits and anything that is not a setting", async () => {
-    const store = new MemoryDocumentStore();
-    for (const setting of [{ mode: "window", seconds: 59 }, { mode: "window", seconds: 86_401 }, { mode: "window", seconds: 600.5 }, { mode: "never" }, { mode: "window" }, "any-active", null, { mode: "any-active", seconds: 5 }]) {
-      expect(await changeApprovalSignInSetting(deps(store, undefined, true), { companyId: COMPANY, by: owner, setting, expectedRevision: 0 })).toEqual({ ok: false, reason: "invalid" });
-    }
-    expect(checkApprovalSignInSetting({ mode: "window", seconds: 60 }, { companyOwnSignIn: false })).toMatchObject({ ok: true });
-  });
-
-  it("a change that lost a race (an old revision) is refused and changes nothing; the audit step commits with the change", async () => {
-    const store = new MemoryDocumentStore();
-    const staged: AuditEvent[] = [];
-    const audit: AuditSink = { stage: (event) => { staged.push(event); return [{ kind: "put", item: { pk: `AUDIT#${event.eventId}`, sk: "EVENT", action: event.action } } satisfies TransactItem]; }, async record() {} };
-    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 900 }, expectedRevision: 0 })).toMatchObject({ ok: true, revision: 1 });
-    expect(staged[0]).toMatchObject({ action: "setting.approval_sign_in_changed", actor: { id: "maya" }, details: { mode: "window", seconds: 900, revision: 1 } });
-    expect(await store.get({ pk: "AUDIT#setting:approval-sign-in:" + COMPANY + ":1", sk: "EVENT" })).toBeDefined();
-    expect(await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 60 }, expectedRevision: 0 })).toEqual({ ok: false, reason: "stale" });
-    expect((await readApprovalSignInSetting(store, COMPANY, noSso)).setting).toEqual({ mode: "window", seconds: 900 });
-  });
-
-  it("the audit record of a change carries the new seconds and the value it replaced (review L4)", async () => {
-    const store = new MemoryDocumentStore();
-    const staged: AuditEvent[] = [];
-    const audit: AuditSink = { stage: (event) => { staged.push(event); return []; }, async record() {} };
-    await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 600 }, expectedRevision: 0 });
-    await changeApprovalSignInSetting(deps(store, audit), { companyId: COMPANY, by: owner, setting: { mode: "window", seconds: 86_400 }, expectedRevision: 1 });
-    await changeApprovalSignInSetting(deps(store, audit, true), { companyId: COMPANY, by: owner, setting: { mode: "any-active" }, expectedRevision: 2 });
-    expect(staged.map((event) => event.details)).toEqual([
-      { mode: "window", seconds: 600, revision: 1, previous: { mode: "window", seconds: 600, isDefault: true } },
-      { mode: "window", seconds: 86_400, revision: 2, previous: { mode: "window", seconds: 600, isDefault: false } },
-      { mode: "any-active", revision: 3, previous: { mode: "window", seconds: 86_400, isDefault: false } },
-    ]);
-  });
-
-  it("a stored row that cannot be read gives the default window, not 'no rule'", async () => {
-    const store = new MemoryDocumentStore();
-    await store.put({ item: { ...approvalSignInSettingKey(COMPANY), revision: 3, setting: { mode: "window", seconds: 5 } } });
-    expect(await readApprovalSignInSetting(store, COMPANY, sso)).toMatchObject({ setting: DEFAULT_APPROVAL_SIGN_IN_SETTING, revision: 3, isDefault: true });
   });
 });
 

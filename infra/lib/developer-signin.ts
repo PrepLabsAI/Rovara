@@ -8,9 +8,6 @@ import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./bro
 import { packagedFunction } from "./control-plane.js";
 import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
 
-/** One plain address, or empty. The function checks it again (packages/broker/src/aws/step-up-email.ts) and builds no sender for anything else. */
-export const STEP_UP_EMAIL_SENDER_PATTERN = "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$";
-
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
 const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
@@ -23,8 +20,6 @@ export interface DeveloperSignInParameters {
   slackSince: CfnParameter; oidcSince: CfnParameter;
   /** Named environments only: the developer task settings, which the legacy deployment does not have. */
   tasks?: DeveloperTaskParameters;
-  /** Hosted wiring (a) (the legacy deployment too since #1129): the verified SES identity (one address) step-up codes are sent from; empty: no email factor. */
-  stepUpEmailSender?: CfnParameter;
   /** DEC 254h (the legacy deployment too since #1129): GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
   github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
   /** DEC 254zg (a): Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts); the legacy deployment too since #1129. */
@@ -64,12 +59,9 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
     workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
-  // #1129: the legacy deployment (production) declares the ones below too, after all of its own, so its existing parameters keep their order and values: email step-up
-  // (empty sender: no email factor), GitHub sign-in (disabled) and Code's company layer (both switches disabled).
-  // Hosted wiring (a): declared last.
-  const stepUpEmailSender = new CfnParameter(stack, "StepUpEmailSender", { type: "String", default: "", maxLength: 254, allowedPattern: STEP_UP_EMAIL_SENDER_PATTERN, description: "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)" });
-  // DEC 254h: declared after StepUpEmailSender, so the parameters before it keep their order. The client secret is never a parameter: it lives in
-  // the secret agentx/<env>/developer-github, which only the sign-in function may read.
+  // #1129: the legacy deployment (production) declares the ones below too, after all of its own, so its existing parameters keep their order and values: GitHub sign-in
+  // (disabled) and Code's company layer (both switches disabled). DEC 254zzz73 removed the StepUpEmailSender parameter that stood first here.
+  // DEC 254h: the client secret is never a parameter: it lives in the secret agentx/<env>/developer-github, which only the sign-in function may read.
   const github = {
     enabled: new CfnParameter(stack, "DeveloperSignInGithub", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with GitHub (only with company sign-in on); disabled: they may not" }),
     clientId: new CfnParameter(stack, "DeveloperGithubClientId", { type: "String", default: "", allowedPattern: "^[A-Za-z0-9._-]{0,64}$", description: "Client ID of the GitHub OAuth app for developer sign-in" }),
@@ -77,7 +69,7 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
   };
   // DEC 254zg (a): declared last, so every parameter before them keeps its order.
   const company = companySignInParameters(stack);
-  return { ...signIn, tasks, stepUpEmailSender, github, company };
+  return { ...signIn, tasks, github, company };
 }
 
 /**
@@ -300,13 +292,8 @@ export class DeveloperSignIn extends Construct {
       addBrokerName(props.broker, props.naming, "policyHookKey", policyHookKey.keyId, policyHookKey.keyArn);
     }
     const named = props.naming.env !== undefined;
-    // #1129: in the legacy deployment (production) too: email step-up (no email factor while StepUpEmailSender is empty), GitHub sign-in (served only while
-    // DeveloperSignInGithub and CompanySignIn are both enabled) and passkeys (on as soon as this deploys).
+    // #1129: in the legacy deployment (production) too: GitHub sign-in (served only while DeveloperSignInGithub and CompanySignIn are both enabled).
     if (tasks !== undefined) {
-      // Hosted wiring (a): step-up codes by email, sent only as the one identity the parameter names. SES authorizes SendEmail on the sender identity's ARN; the condition pins the From
-      // address too. (While the account is in the SES sandbox, SES also checks the recipient's identity: move the account out of the sandbox before people other than the verified
-      // test addresses step up.) An empty parameter names no identity, and the function then builds no sender.
-      if (p.stepUpEmailSender === undefined) throw new Error("a deployment with developer tasks declares StepUpEmailSender");
       if (p.github === undefined) throw new Error("a deployment with developer tasks declares the GitHub sign-in parameters");
       if (p.company === undefined) throw new Error("a deployment with developer tasks declares the company sign-in parameters");
       // DEC 254h: GitHub sign-in. The client secret is read by reference (its name) by this function only; the grant names that one secret.
@@ -322,21 +309,7 @@ export class DeveloperSignIn extends Construct {
       }));
       addBrokerSetting(props.broker, props.naming, "signInGithub", p.github.enabled.valueAsString);
       addBrokerSetting(props.broker, props.naming, "githubSince", p.github.since.valueAsString);
-      const sender = p.stepUpEmailSender.valueAsString;
-      fn.addEnvironment("STEP_UP_EMAIL_FROM", sender);
-      fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["ses:SendEmail"],
-        resources: [stack.formatArn({ service: "ses", resource: "identity", resourceName: sender })],
-        conditions: { StringEquals: { "ses:FromAddress": sender } },
-      }));
-      // Hosted wiring (b): passkeys owned by Code, with the relying-party id the API's own host (the function reads it from the issuer).
-      fn.addEnvironment("DEVELOPER_PASSKEYS", "enabled");
-      // Lane ID part 2b: listing and removing a person's passkeys (DeveloperSignInStore listPasskeys, removePasskey, removeAllPasskeys), only in their PASSKEYS# partitions.
-      fn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["dynamodb:Query", "dynamodb:DeleteItem"],
-        resources: [table.tableArn],
-        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } },
-      }));
+      // DEC 254zzz73: no step-up, so the sign-in function sends no email (no STEP_UP_EMAIL_FROM, no ses:SendEmail) and keeps no passkeys (no DEVELOPER_PASSKEYS, no PASSKEYS# reads or deletes).
     }
     props.slackSecret.grantRead(fn);
     // DEC 254zg (a): the company layer's switch; #1129: in the legacy deployment (production) too, off by default.
@@ -458,7 +431,7 @@ export class DeveloperSignIn extends Construct {
     if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", named ? company.flag : company.value);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
-      // Hosted wiring (d), named environments only: the company audit and event reads (still behind SIGN_IN_CLIENT_ROUTES, which nothing in infra sets). Membership is read from
+      // Hosted wiring (d), named environments only: the company audit and event reads (the /v1/dev/client/* routes are always on since DEC 254zzz81). Membership is read from
       // COMPANY_MEMBER# (granted below, also named only).
       // Derived by a named broker (DERIVED_BROKER_VARIABLES; DEC 254h, room for GitHub sign-in): synthesis stops unless the broker would set exactly "enabled".
       if (named) addDerivedBrokerVariable(broker, props.naming, "COMPANY_READS", "enabled");

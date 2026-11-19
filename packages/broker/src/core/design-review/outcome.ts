@@ -10,7 +10,7 @@
 // Every end releases the round: the stored packets are removed and each slot key is blocked and finalized, so nothing a worker still holds can spend or be served. A late result for a workflow that is no longer running this
 // round changes nothing.
 import {
-  BUDGET_EXHAUSTED_FAILURE_MESSAGE, DESIGN_REVIEW_ARTIFACT, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WorkflowSnapshotSchema, addDesignUsd, blockWorkflow, closeDesignReview,
+  isBudgetExhaustedMessage, DESIGN_REVIEW_ARTIFACT, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WorkflowSnapshotSchema, addDesignUsd, blockWorkflow, closeDesignReview,
   type TransactItem, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -80,7 +80,7 @@ export async function designReviewOutcome(
 
   // The operation ended without a result to read: what its keys cost is added to the review's total either way (a lost run still spent it), and the round is released.
   const { spentUsd } = await releaseDesignReviewRound(ports, operation);
-  if (ended.error === BUDGET_EXHAUSTED_FAILURE_MESSAGE) return closeDesignReview(workflow, { expectedRevision, outcome: "stopped_at_cap", ...spendOf(spentUsd), now });
+  if (isBudgetExhaustedMessage(ended.error)) return closeDesignReview(workflow, { expectedRevision, outcome: "stopped_at_cap", ...spendOf(spentUsd), now });
   if (ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true) return blockedWith(workflow, WORKFLOW_BLOCK_REASONS.stepRuleFilesUnverified, spentUsd, now);
   if (ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) return blockedWith(workflow, WORKFLOW_BLOCK_REASONS.leftoverProcesses, spentUsd, now);
   return closeDesignReview(workflow, { expectedRevision, outcome: "not_run", notRunReason: modelUnusable(ended.error) ? "no_model_source" : ended.status === "CANCELLED" ? "cancelled" : "worker_failed", ...spendOf(spentUsd), now });

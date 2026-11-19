@@ -9,7 +9,6 @@ import { SlackWorkspaceRefused } from "./slack-workspace-binding.js";
 // text in an error (a JSON parse error can quote it, so parse errors are replaced).
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
-import { SESv2Client } from "@aws-sdk/client-sesv2";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
@@ -23,10 +22,8 @@ import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
 import { CompanyInviteStore } from "../developer/company-invites.js";
 import { CompanyImportStore } from "../developer/company-import.js";
-import type { StepUpDependencies } from "../developer/step-up.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
-import { sesStepUpEmailSender, stepUpEmailSenderAddress } from "./step-up-email.js";
 
 const SECRET_CACHE_MS = 5 * 60 * 1000;
 const SLACK_JWKS_URI = "https://slack.com/openid/connect/keys";
@@ -233,27 +230,6 @@ export function extraPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Para
   return keys;
 }
 
-/** The name passkeys show for this install (WebAuthn's relying-party name). */
-export const PASSKEY_RP_NAME = "AgentX";
-
-/**
- * Hosted wiring (a) and (b): the factors Code owns for a step-up, from the function's environment.
- *   - STEP_UP_EMAIL_FROM: the verified SES identity the code is sent from. Empty or not one plain address: no email factor (logged once, in fixed words).
- *   - DEVELOPER_PASSKEYS=enabled: passkeys on, with the relying-party id the API's own host (the sign-in issuer's host), so the expected origin is always the issuer's.
- * Neither set: undefined, and a step-up is refused for everyone, exactly as before.
- */
-export function stepUpFromEnvironment(env: NodeJS.ProcessEnv, issuer: string, ses: () => Pick<SESv2Client, "send">, log: (entry: Record<string, unknown>) => void): StepUpDependencies | undefined {
-  const configured = env.STEP_UP_EMAIL_FROM ?? "";
-  const from = stepUpEmailSenderAddress(configured);
-  if (configured !== "" && from === undefined) log({ event: "signin.step_up_email_not_configured", detail: "STEP_UP_EMAIL_FROM is not one plain address" });
-  const passkeys = env.DEVELOPER_PASSKEYS === "enabled" ? { rpId: new URL(issuer).hostname, rpName: PASSKEY_RP_NAME } : undefined;
-  if (from === undefined && passkeys === undefined) return undefined;
-  return {
-    ...(from === undefined ? {} : { email: sesStepUpEmailSender({ ses: ses(), from }) }),
-    ...(passkeys === undefined ? {} : { passkeys }),
-  };
-}
-
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
 /** DEC 254zg (a): self-serve company create is served only with BOTH switches on (CompanySignIn and CompanySelfServe); anything else, a missing variable included, is closed. */
@@ -313,14 +289,9 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now, ...(legacyTeamId === undefined ? {} : { legacyTeamId }) }) }),
     now,
     log,
-    ...stepUpOf(stepUpFromEnvironment(env, config.issuer, () => new SESv2Client(region), log)),
     // Guided onboarding PR 4: Add to Slack's Slack side, beside the Slack app's client secret; with the company layer only.
     ...(company === undefined ? {} : { slackInstall: (event: unknown) => handleSlackInstallRequest({ appClient: slackSecret, secrets: slackInstallSecretsFromSecretsManager(secrets, config.env), fetch }, event) }),
   });
-}
-
-function stepUpOf(stepUp: StepUpDependencies | undefined): { stepUp?: StepUpDependencies } {
-  return stepUp === undefined ? {} : { stepUp };
 }
 
 function directoryCall(secrets: SecretsManagerClient): { call?: NonNullable<Parameters<typeof slackDirectory>[0]["call"]> } {

@@ -1,4 +1,4 @@
-// Captured on engine-boundary base 2e717e946 before any T1 production edit. No git-history dependency.
+// Captured on engine-boundary base 2e717e946 before T1; amended only for E's persisted usageStartQuote. No git-history dependency.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type * as Crypto from "node:crypto";
