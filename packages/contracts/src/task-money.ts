@@ -54,10 +54,9 @@ export function mergeTaskMoney(previous: TaskMoneyV1 | undefined, next: TaskMone
 }
 /** One formatter for task lists, sessions and receipts. Unknown spend never becomes zero. */
 export function taskMoneyWords(money: TaskMoneyV1 | undefined): string {
-  if (money !== undefined && !money.terminal && money.revision === 0 && money.state === "unavailable" && money.spentMicros.state === "unavailable" && money.spentMicros.reason === "not_measured" && money.coverage.finalCalls === 0 && money.coverage.estimatedCalls === 0 && money.coverage.awaitingUsageCalls === 0 && money.coverage.incompatibleCurrencyCalls === 0) return "No spend yet";
   if (money === undefined || money.state === "unavailable" || money.spentMicros.state === "unavailable") return "Cost unavailable";
   const micros = money.spentMicros.value;
-  if (micros === 0 && money.coverage.awaitingUsageCalls === 0 && taskMoneyValue(money.unpricedCalls) === 0) return "No spend yet";
+  if (micros === 0 && money.state === "current" && money.coverage.awaitingUsageCalls === 0 && taskMoneyValue(money.unpricedCalls) === 0) return "No spend yet";
   if (micros === 0) return "Cost unavailable";
   const dollars = micros < 10_000 ? "under $0.01" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(micros / 1_000_000);
   if (money.terminal && money.finality === "final") return dollars;

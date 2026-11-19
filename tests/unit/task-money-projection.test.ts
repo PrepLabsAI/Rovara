@@ -14,7 +14,9 @@ it("proves a local zero only with a real workspace and no model operations", asy
  const store = new MemoryDocumentStore();
  expect(await read(store)).toMatchObject({ state: "unavailable", spentMicros: { state: "unavailable" } });
  await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: null } });
- expect(await read(store)).toMatchObject({ state: "current", spentMicros: { value: 0 }, finality: "final" });
+ const empty = await read(store);
+ expect(empty).toMatchObject({ state: "current", spentMicros: { value: 0 }, finality: "final" });
+ expect(taskMoneyWords(empty)).toBe("No spend yet");
  await store.put({ item: { ...operationKey(companyId, task.workspaceId, "run"), id: "run", companyId, kind: "task", status: "SUCCEEDED" } });
  expect(await read(store)).toMatchObject({ state: "unavailable", finality: "unavailable" });
 });
@@ -39,6 +41,7 @@ it("keeps checkpoint spend partial when the final report is missing, and rejects
  const partial = await read(store);
  expect(partial).toMatchObject({ state: "partial", spentMicros: { value: 700 }, coverage: { expectedCalls: { state: "unavailable" } }, finality: "provisional" });
  expect(parseTaskMoneyV1(partial)).toEqual(partial);
+ expect(taskMoneyWords(partial)).toBe("under $0.01 (not yet confirmed)");
  await store.put({ item: entry("usage-checkpoint:run:one", { currency: "EUR" }) });
  const foreign = await read(store);
  expect(foreign).toMatchObject({ state: "unavailable", coverage: { incompatibleCurrencyCalls: 1 } });
@@ -61,12 +64,21 @@ it("never emits unsafe totals as valid money", async () => {
  expect(parseTaskMoneyV1(money)).toEqual(money);
 });
 
-it("distinguishes a new unreported task from an initial ledger-read failure without inventing money", async () => {
+it("keeps unreported tasks and ledger-read failures unavailable without proof of no spend", async () => {
  const live = { taskId: task.taskId, companyId, workspaceId: task.workspaceId, createdAt: at, updatedAt: at };
  const initial = await readTaskMoney({ store: new MemoryDocumentStore(), companyId, task: live, hosted: true });
- expect(initial.spentMicros.state).toBe("unavailable"); expect(taskMoneyWords(initial)).toBe("No spend yet");
+ expect(initial.spentMicros.state).toBe("unavailable"); expect(taskMoneyWords(initial)).toBe("Cost unavailable");
  class BrokenStore extends MemoryDocumentStore { override async get(): Promise<never> { throw new Error("unavailable"); } }
  const broken = await readTaskMoney({ store: new BrokenStore(), companyId, task: live, hosted: true });
  expect(taskMoneyWords(broken)).toBe("Cost unavailable");
  expect(broken.spentMicros).toEqual({ state: "unavailable", reason: "unreadable" });
+});
+
+it.each([false, true])("does not call legacy TOTAL without entries empty (terminal=%s)", async terminal => {
+ const store = new MemoryDocumentStore();
+ await store.put({ item: { ...workspaceKey(companyId, task.workspaceId), companyId, activeOperationId: null } });
+ await store.put({ item: { pk: costPartition(companyId, task.taskId), sk: "TOTAL", companyId, taskId: task.taskId, currency: "USD", micros: 2_750_000, entries: 4, unpricedEntries: 0 } });
+ const snapshot = await readTaskMoney({ store, companyId, task: { taskId: task.taskId, companyId, workspaceId: task.workspaceId, createdAt: at, updatedAt: at, ...(terminal ? { closedAt: at } : {}) } });
+ expect(snapshot.spentMicros.state).toBe("unavailable");
+ expect(taskMoneyWords(snapshot)).toBe("Cost unavailable");
 });

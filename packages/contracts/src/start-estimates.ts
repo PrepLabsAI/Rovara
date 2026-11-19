@@ -9,7 +9,8 @@ export type QuoteLimitScope = "engine_task" | "project_task" | "engine_day" | "g
 export interface QuoteLimit { scope: QuoteLimitScope; maximumMicros: QuoteField<number>; availableMicros: QuoteField<number>; heldMicros: QuoteField<number>; resetAt: QuoteField<string> }
 export interface EstimateBasis { kind: "default" | "history" | "blended"; defaultVersion: QuoteField<string>; samples: number; effectiveSamples: number; newestSampleAt: QuoteField<string>; modelPriced: boolean; confidence: "low" | "medium" | "high"; interval: QuoteField<{ lowQuantile: number; highQuantile: number; targetCoverage: number; observedCoverage: QuoteField<number>; validationSamples: number }> }
 export interface StageQuote { stage: string; optional: boolean; included: boolean; range: QuoteField<QuoteRange>; basis: EstimateBasis; model: QuoteField<QuoteModel>; source: QuoteField<QuoteSource>; price: QuoteField<QuotePrice> }
-export interface PathQuote { path: "QUICK" | "FULL"; scope: "whole_task"; range: QuoteField<QuoteRange>; basis: EstimateBasis; stages: StageQuote[]; planningAllowanceMicros: QuoteField<number>; initialHoldMicros: QuoteField<number>; limits: QuoteLimit[]; limitCoverage: "complete" | "partial"; firstBindingLimit: QuoteField<{ scope: QuoteLimitScope; appliesAt: "start" | "next_call" | "task_total"; requiredMicros: QuoteField<number>; availableMicros: number; blocked: boolean | null; reason: "tightest_known" | "held" | "exhausted" | "overrun" } | null>; notices: Array<"path_may_escalate" | "legacy_dollar_default" | "optional_cost_unavailable" | "compute_excluded" | "limits_partial"> }
+export interface RestrictedQuoteBinding { scope: "RESTRICTED"; blocked: boolean | null }
+export interface PathQuote { path: "QUICK" | "FULL"; scope: "whole_task"; range: QuoteField<QuoteRange>; basis: EstimateBasis; stages: StageQuote[]; planningAllowanceMicros: QuoteField<number>; initialHoldMicros: QuoteField<number>; limits: QuoteLimit[]; limitCoverage: "complete" | "partial"; firstBindingLimit: QuoteField<RestrictedQuoteBinding | { scope: QuoteLimitScope; appliesAt: "start" | "next_call" | "task_total"; requiredMicros: QuoteField<number>; availableMicros: number; blocked: boolean | null; reason: "tightest_known" | "held" | "exhausted" | "overrun" } | null>; notices: Array<"path_may_escalate" | "legacy_dollar_default" | "optional_cost_unavailable" | "compute_excluded" | "limits_partial"> }
 export interface PreviewV2 { quoteVersion: 2; kind: "comparison"; orgId: string; project: string; quoteId: string; asOf: string; expiresAt: string; inputsDigest: string; policyRevision: string; currency: "USD"; options: [PathQuote & { path: "QUICK" }, PathQuote & { path: "FULL" }] }
 const record = (v: unknown): Record<string, unknown> | undefined => v !== null && typeof v === "object" && !Array.isArray(v) && Object.getPrototypeOf(v) === Object.prototype ? v as Record<string, unknown> : undefined;
 const exact = (v: Record<string, unknown>, keys: string): boolean => Object.keys(v).sort().join(" ") === keys.split(" ").sort().join(" ");
@@ -28,14 +29,16 @@ const source = (v: unknown): boolean => shape(v, "kind id name provider connecti
 const price = (v: unknown): boolean => shape(v, "authority version hash fetchedAt", r => word(r.authority, "gateway local_provider") && text(r.version) && text(r.hash) && time(r.fetchedAt));
 const stage = (v: unknown): boolean => shape(v, "stage optional included range basis model source price", s => text(s.stage) && typeof s.optional === "boolean" && typeof s.included === "boolean" && field(s.range, range) && basis(s.basis) && field(s.model, model) && field(s.source, source) && field(s.price, price));
 const limit = (v: unknown): boolean => shape(v, "scope maximumMicros availableMicros heldMicros resetAt", l => scope(l.scope) && [l.maximumMicros, l.availableMicros, l.heldMicros].every(f => field(f, natural)) && field(l.resetAt, time));
-const binding = (v: unknown): boolean => v === null || shape(v, "scope appliesAt requiredMicros availableMicros blocked reason", b => scope(b.scope) && word(b.appliesAt, "start next_call task_total") && field(b.requiredMicros, natural) && natural(b.availableMicros) && (typeof b.blocked === "boolean" || b.blocked === null) && word(b.reason, "tightest_known held exhausted overrun") && (b.appliesAt !== "next_call" || (record(b.requiredMicros)?.state === "unavailable" && b.blocked === null)));
+const binding = (v: unknown): boolean => v === null || shape(v, "scope blocked", b => b.scope === "RESTRICTED" && (typeof b.blocked === "boolean" || b.blocked === null)) || shape(v, "scope appliesAt requiredMicros availableMicros blocked reason", b => scope(b.scope) && word(b.appliesAt, "start next_call task_total") && field(b.requiredMicros, natural) && natural(b.availableMicros) && (typeof b.blocked === "boolean" || b.blocked === null) && word(b.reason, "tightest_known held exhausted overrun") && (b.appliesAt !== "next_call" || (record(b.requiredMicros)?.state === "unavailable" && b.blocked === null)));
 function pathQuote(v: unknown): boolean {
  if (!shape(v, "path scope range basis stages planningAllowanceMicros initialHoldMicros limits limitCoverage firstBindingLimit notices", q => word(q.path, "QUICK FULL") && q.scope === "whole_task" && field(q.range, range) && basis(q.basis) && Array.isArray(q.stages) && q.stages.length > 0 && q.stages.length <= 32 && q.stages.every(stage) && field(q.planningAllowanceMicros, natural) && field(q.initialHoldMicros, natural) && Array.isArray(q.limits) && q.limits.length <= 8 && q.limits.every(limit) && word(q.limitCoverage, "complete partial") && field(q.firstBindingLimit, binding) && Array.isArray(q.notices) && q.notices.length <= 5 && q.notices.every(n => word(n, "path_may_escalate legacy_dollar_default optional_cost_unavailable compute_excluded limits_partial")))) return false;
  const q = v as PathQuote;
  if (new Set(q.limits.map(l => l.scope)).size !== q.limits.length || new Set(q.stages.map(s => s.stage)).size !== q.stages.length) return false;
  if (q.limitCoverage === "partial" && (q.firstBindingLimit.state === "available" && q.firstBindingLimit.value === null || !q.notices.includes("limits_partial"))) return false;
  const bound = q.firstBindingLimit.state === "available" ? q.firstBindingLimit.value : undefined;
- if (bound != null && !q.limits.some(l => l.scope === bound.scope)) return false;
+ if (bound?.scope === "RESTRICTED") {
+  if (q.limits.length !== 0 || q.initialHoldMicros.state !== "unavailable" || q.initialHoldMicros.reason !== "restricted") return false;
+ } else if (bound != null && !q.limits.some(l => l.scope === bound.scope)) return false;
  if (q.initialHoldMicros.state === "available" && q.planningAllowanceMicros.state === "available" && q.initialHoldMicros.value > q.planningAllowanceMicros.value) return false;
  if (q.range.state === "available") {
   const included = q.stages.filter(s => s.included);
@@ -55,4 +58,20 @@ export function parsePreviewRequestV2(raw: unknown): PreviewRequestV2 | undefine
 export function parsePreviewV2(raw: unknown): PreviewV2 | undefined {
  if (!shape(raw, "quoteVersion kind orgId project quoteId asOf expiresAt inputsDigest policyRevision currency options", q => q.quoteVersion === 2 && q.kind === "comparison" && typeof q.orgId === "string" && /^org_[0-9a-z]{20}$/u.test(q.orgId) && typeof q.project === "string" && /^[a-z][a-z0-9-]{0,62}$/u.test(q.project) && text(q.quoteId) && time(q.asOf) && time(q.expiresAt) && Date.parse(q.expiresAt as string) > Date.parse(q.asOf as string) && typeof q.inputsDigest === "string" && /^[0-9a-f]{64}$/u.test(q.inputsDigest) && text(q.policyRevision) && q.currency === "USD" && Array.isArray(q.options) && q.options.length === 2 && q.options.every(pathQuote) && record(q.options[0])?.path === "QUICK" && record(q.options[1])?.path === "FULL")) return undefined;
  return structuredClone(raw) as PreviewV2;
+}
+
+
+/** Member view: company limits and the company-dependent hold never leave the server.
+ * Planning allowance and task estimates are independent of company ceilings. Idempotent
+ * so Cloud can apply the same boundary to both old and already-restricted Code quotes.
+ */
+export function restrictPreviewV2(quote: PreviewV2): PreviewV2 {
+ const restricted = structuredClone(quote);
+ for (const q of restricted.options) {
+  const binding = q.firstBindingLimit.state === "available" ? q.firstBindingLimit.value : undefined;
+  q.firstBindingLimit = { state: "available", value: { scope: "RESTRICTED", blocked: binding === null && q.limitCoverage === "complete" ? false : binding?.blocked ?? null } };
+  q.limits = [];
+  q.initialHoldMicros = { state: "unavailable", reason: "restricted" };
+ }
+ return restricted;
 }

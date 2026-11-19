@@ -6343,7 +6343,7 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     expect(await budgetOf(h, revised)).toEqual({ micros: 8_000_000 - 2 * spent, currency: "USD" });
     // The page's spend line and the record a close keeps are the real figures.
     await h.callback(revised, "result", { status: "FAILED", error: "stopped" });
-    expect((await raw_(h, await h.browse(`/plan/${taskId}`))).body).toContain(`Spent so far: at least $${(2 * spent / 1_000_000).toFixed(6).replace(/(\.\d{2,}?)0+$/u, "$1")} · estimated`);
+    expect((await raw_(h, await h.browse(`/plan/${taskId}`))).body).toContain(`Spent so far: About $${(2 * spent / 1_000_000).toFixed(2)} so far.`);
     expect((await h.api(`/v1/dev/tasks/${taskId}/close`, { method: "POST", body: {} })).status).toBe(200);
     const kept = (await h.runtime.registry.require("storage").query({ pk: runCostKey(IMPLICIT_COMPANY_ID, "payments", "rovara-code", "QUICK", "2000-01-01T00:00:00.000Z", "-").pk })).items;
     expect(kept).toHaveLength(1);

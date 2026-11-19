@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { startEstimates } from "../../packages/broker/src/core/cost/start-estimates.js";
 import { parsePreviewV2, parsePreviewRequestV2 } from "../../packages/contracts/src/start-estimates.js";
@@ -58,4 +60,24 @@ describe("advisory start comparison", () => {
   expect(parsePreviewRequestV2({ quoteVersion: 2, inputText: "x".repeat(4001) })).toBeUndefined();
   expect(parsePreviewRequestV2({ quoteVersion: 2, companyId: orgId })).toBeUndefined();
  });
+});
+
+
+it("strictly accepts the restricted binding's three states without accepting hidden figures", async () => {
+ const quote = await startEstimates({ store }, input);
+ for (const blocked of [true, false, null]) {
+  const restricted = { ...quote, options: quote.options.map(q => ({ ...q, limits: [], initialHoldMicros: { state: "unavailable", reason: "restricted" }, firstBindingLimit: av({ scope: "RESTRICTED", blocked }) })) };
+  expect(parsePreviewV2(restricted)).toEqual(restricted);
+  for (const patch of [{ availableMicros: 123 }, { requiredMicros: av(123) }, { blocked: "false" }, { blocked: undefined }]) {
+   expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, firstBindingLimit: av({ ...q.firstBindingLimit.value, ...patch }) })) })).toBeUndefined();
+  }
+  expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, limits: quote.options[0].limits })) })).toBeUndefined();
+  expect(parsePreviewV2({ ...restricted, options: restricted.options.map(q => ({ ...q, initialHoldMicros: av(123) })) })).toBeUndefined();
+ }
+});
+
+
+it("pins the mirrored PreviewV2 contract and member boundary", () => {
+ const bytes = readFileSync("packages/contracts/src/start-estimates.ts");
+ expect(createHash("sha256").update(bytes).digest("hex")).toBe("420d6c6fe174fb4dd99735bc01d417387ecb87c65ae1f1b7cb26e5888a0426a5");
 });
