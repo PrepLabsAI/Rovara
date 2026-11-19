@@ -85,6 +85,8 @@ export async function planRunLimit(deps: EstimateDependencies, task: { orgId: Or
 const RUN_COST_KEPT_SECONDS = 365 * 24 * 60 * 60;
 
 export interface RecordRunCostInput {
+  /** Monotonic receipt-aware task-ledger revision. Absent preserves historical entry-once behavior. */
+  chargeRevision?: number;
   orgId: OrgId;
   project: string;
   taskId: string;
@@ -109,21 +111,26 @@ export async function recordRunCost(deps: { store: Pick<DocumentStore, "transact
   if (!isCost(input.costUsd)) throw new Error("a run's cost is a finite amount of dollars, not less than nothing");
   const taskKey = { pk: `DEVTASK#${input.taskId}`, sk: "META" };
   const agentId = input.agentId ?? ROVARA_CODE_AGENT_ID;
+  const earlier = input.chargeRevision === undefined ? undefined : await deps.store.get(taskKey);
+  if (input.chargeRevision !== undefined && (!Number.isSafeInteger(input.chargeRevision) || input.chargeRevision < 1)) throw new Error("invalid run cost revision");
+  if (earlier !== undefined && typeof earlier["runCostChargeRevision"] === "number" && earlier["runCostChargeRevision"] >= input.chargeRevision!) return "already_recorded";
+  const endedAt = typeof earlier?.["runCostRecordedAt"] === "string" ? earlier["runCostRecordedAt"] : input.endedAt;
+  const revised = input.chargeRevision !== undefined && earlier?.["runCostRecordedAt"] !== undefined;
   const mark: TransactItem = {
-    kind: "update", key: taskKey, ops: [{ op: "set", path: ["runCostRecordedAt"], value: input.endedAt }],
-    condition: when.and(when.present(), when.or(when.eq("companyId", input.orgId), when.eq("orgId", input.orgId)), when.notExists("runCostRecordedAt")),
+    kind: "update", key: taskKey, ops: [{ op: "set", path: ["runCostRecordedAt"], value: endedAt }, ...(input.chargeRevision === undefined ? [] : [{ op: "set" as const, path: ["runCostChargeRevision"] as const, value: input.chargeRevision }])],
+    condition: when.and(when.present(), when.or(when.eq("companyId", input.orgId), when.eq("orgId", input.orgId)), ...(revised ? [when.eq("runCostRecordedAt", endedAt), earlier?.["runCostChargeRevision"] === undefined ? when.notExists("runCostChargeRevision") : when.eq("runCostChargeRevision", earlier["runCostChargeRevision"])] : [when.notExists("runCostRecordedAt")])),
   };
   const item: TransactItem = {
     kind: "put",
     item: {
-      ...runCostKey(input.orgId, input.project, agentId, input.path, input.endedAt, input.taskId), entityType: "RUN_COST",
-      orgId: input.orgId, project: input.project, agentId, path: input.path, taskId: input.taskId, endedAt: input.endedAt, costUsd: input.costUsd,
-      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(input.endedAt) / 1000) + RUN_COST_KEPT_SECONDS,
+      ...runCostKey(input.orgId, input.project, agentId, input.path, endedAt, input.taskId), entityType: "RUN_COST",
+      orgId: input.orgId, project: input.project, agentId, path: input.path, taskId: input.taskId, endedAt, costUsd: input.partial === true || input.costUsd === 0 ? null : input.costUsd,
+      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(endedAt) / 1000) + RUN_COST_KEPT_SECONDS,
     },
-    condition: when.absent(),
+    ...(revised ? {} : { condition: when.absent() }),
   };
   const feeds = input.costUsd > 0 && input.partial !== true;
-  const result = await deps.store.transact(feeds ? [item, mark] : [mark]);
+  const result = await deps.store.transact(feeds || revised ? [item, mark] : [mark]);
   if (result.applied) return feeds ? "recorded" : "skipped";
   // The mark is the claim: another end got there first when it is on the task now. Anything else (a task that does not exist, a lost race on the item) is for the next end to tell again.
   const fresh = await deps.store.get(taskKey);
@@ -132,7 +139,7 @@ export async function recordRunCost(deps: { store: Pick<DocumentStore, "transact
 }
 
 /** What to record for a run from the cost ledger's total: the dollars, and whether they are a floor (some call unpriced, or not in dollars). Undefined dollars (another currency) cannot feed an estimate in dollars. */
-export function runCostInputOf(cost: { micros: number; currency: string | undefined; unpricedEntries: number }): { costUsd: number; partial?: true } {
+export function runCostInputOf(cost: { micros: number; currency: string | undefined; unpricedEntries: number; provisionalCalls?: number; legacyUnknownEntries?: number; chargeRevision?: number }): { costUsd: number; partial?: true; chargeRevision?: number } {
   const inDollars = cost.currency === undefined || cost.currency === "USD";
-  return { costUsd: inDollars ? cost.micros / 1_000_000 : 0, ...(!inDollars || cost.unpricedEntries > 0 ? { partial: true as const } : {}) };
+  return { costUsd: inDollars ? cost.micros / 1_000_000 : 0, ...(cost.chargeRevision === undefined ? {} : { chargeRevision: cost.chargeRevision }), ...(!inDollars || cost.unpricedEntries > 0 || (cost.provisionalCalls ?? 0) > 0 || (cost.legacyUnknownEntries ?? 0) > 0 ? { partial: true as const } : {}) };
 }

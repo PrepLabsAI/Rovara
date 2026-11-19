@@ -160,16 +160,16 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     },
     outputSchema: {
       group_by: z.string(), since: z.string(), until: z.string(), truncated: z.boolean(),
-      groups: z.array(z.object({ key: z.string(), turns: z.number(), tasks: z.number(), task_duration_ms: z.number(), input_tokens: z.number(), output_tokens: z.number(), cost_usd: z.number(), cost_unknown: z.number() })),
+      groups: z.array(z.object({ key: z.string(), turns: z.number(), tasks: z.number(), task_duration_ms: z.number(), input_tokens: z.number(), output_tokens: z.number(), cost_usd: z.number().optional(), cost_unknown: z.number() })),
       skipped: z.number().optional(),
     },
     async handler(context, input) {
       const usage = await adminOf(context).usage(given({ groupBy: input.group_by as AdminUsageGroupBy, since: input.since as string | undefined, until: input.until as string | undefined }));
-      const groups = usage.groups.map((group) => ({ key: group.key, turns: group.turns, tasks: group.tasks, task_duration_ms: group.taskDurationMs, input_tokens: group.inputTokens, output_tokens: group.outputTokens, cost_usd: group.costUsd, cost_unknown: group.costUnknown }));
-      const total = groups.reduce((sum, group) => sum + group.cost_usd, 0);
+      const groups = usage.groups.map((group) => ({ key: group.key, turns: group.turns, tasks: group.tasks, task_duration_ms: group.taskDurationMs, input_tokens: group.inputTokens, output_tokens: group.outputTokens, ...(typeof group.costUsd === "number" ? { cost_usd: group.costUsd } : {}), cost_unknown: group.costUnknown }));
+      const total = groups.every((group) => typeof group.cost_usd === "number") ? groups.reduce((sum, group) => sum + group.cost_usd!, 0) : undefined;
       return {
         structured: given({ group_by: usage.groupBy, since: usage.since, until: usage.until, truncated: usage.truncated, groups, skipped: usage.skipped }),
-        text: `${groups.length} group${groups.length === 1 ? "" : "s"} by ${usage.groupBy}, about $${total.toFixed(2)} in all${usage.truncated ? ", from the first 5,000 records of each kind" : ""}.`,
+        text: `${groups.length} group${groups.length === 1 ? "" : "s"} by ${usage.groupBy}, ${total === undefined ? "total cost unavailable" : `about $${total.toFixed(2)} in all`}${usage.truncated ? ", from the first 5,000 records of each kind" : ""}.`,
       };
     },
   },

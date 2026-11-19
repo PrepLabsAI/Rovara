@@ -24,6 +24,8 @@ import { revisePlanWithLiveMessage } from "../../core/sessions/live-steer-revise
 import { createLocalSessionControl } from "./host.js";
 import { answerUnderstandQuestions } from "./answers.js";
 import { developerTaskView } from "./task-view.js";
+import { taskOwnerView } from "../../developer/task-owner-view.js";
+import type { TaskRecord } from "../../core/task-flow/records.js";
 import type { SecondReview } from "../../core/second-review/index.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
@@ -65,9 +67,17 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const access = createSessionAccess({ store, members: deps.members });
   const followerDeps = { store, members: deps.members, ...(flow.deps.now === undefined ? {} : { now: flow.deps.now }) };
   /** A row of the list, with the person's own level on that session. */
-  const tile = (session: AgentSessionRecord, level: string): Record<string, unknown> => JSON.parse(JSON.stringify({
+  const maySeeMoney = (task: TaskRecord, you: SessionAccess, caller: TaskCaller): boolean => caller.scriptToken === undefined && caller.principal.companyId === deps.companyId && task.companyId === deps.companyId
+    && (you.orgAdmin || you.companyRole === "member" && taskOwnerView(task)?.developerId === caller.principal.personId);
+  const summaryFor = (session: AgentSessionRecord, revealMoney: boolean) => {
+    if (revealMoney) return session.summary;
+    const { costUsd: _spent, runLimitUsd: _limit, stopAtUsd: _stop, ...summary } = session.summary;
+    void _spent; void _limit; void _stop;
+    return summary;
+  };
+  const tile = (session: AgentSessionRecord, level: string, revealMoney: boolean): Record<string, unknown> => JSON.parse(JSON.stringify({
     contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, title: session.title, project: session.project, agent: session.agent, owner: session.owner,
-    where: session.where, level, revision: session.revision, summary: session.summary, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
+    where: session.where, level, revision: session.revision, summary: summaryFor(session, revealMoney), createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
   })) as Record<string, unknown>;
 
   /** What the person may do, for the session's header (the hosted product's `sessionActionsFor`): `view` watches, `use` also steers, `edit` also stops and retries; a company admin may stop; close is the owner's. */
@@ -85,19 +95,20 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
   const view = async (session: AgentSessionRecord, you: SessionAccess, caller: TaskCaller): Promise<Record<string, unknown>> => {
     if (session.subject.kind !== "task") throw agentXError("NOT_FOUND", "There is no such session.");
     const task = await readTask(flow.deps, session.subject.taskId);
-    if (task === undefined) throw agentXError("NOT_FOUND", "There is no such session.");
+    if (task === undefined || task.companyId !== deps.companyId) throw agentXError("NOT_FOUND", "There is no such session.");
     const snapshot = sessionSnapshot(session);
+    const revealMoney = maySeeMoney(task, you, caller);
     return JSON.parse(JSON.stringify({
       contractVersion: AGENT_SESSION_CONTRACT_VERSION, sessionId: session.sessionId, kind: session.kind, mode: session.mode, title: session.title, project: session.project, agent: session.agent,
       owner: session.owner, startedBy: session.startedBy, where: session.where, status: session.summary.status, step: session.summary.step, peek: session.summary.peek, lastRunFailed: session.summary.lastRunFailed,
-      cost: { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }), payer: { kind: "member", name: session.owner.name } },
+      cost: { ...(revealMoney ? { spentUsd: session.summary.costUsd, ...(session.summary.runLimitUsd === undefined ? {} : { runLimitUsd: session.summary.runLimitUsd }) } : {}), payer: { kind: "member", name: session.owner.name } },
       approvals: [], followers: session.followerCount, viewingNow: await viewingNow(store, session, (flow.deps.now?.() ?? new Date()).getTime()),
       you: {
         level: you.level, owner: you.owner, following: you.owner || (await store.get(agentSessionKey(session.orgId, session.sessionId, `FOLLOWER#${developerIdOf(caller.principal)}`))) !== undefined,
         actions: actionsFor(you, snapshot.actions), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
       },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: await sessionBindingsOf(store, session.orgId, session.sessionId), legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
-      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest)) },
+      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), undefined, revealMoney) },
     })) as Record<string, unknown>;
   };
 
@@ -139,7 +150,11 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         const rows: Array<Record<string, unknown>> = [];
         for (const row of listed.sessions) {
           const level = await access.levelOf({ companyId: caller.principal.companyId, developerId: developerIdOf(caller.principal), principal: caller.principal }, row, {});
-          if (level !== "none") rows.push(tile(row, level));
+          if (level !== "none") {
+            const you = await access.of(caller.principal, row);
+            const task = row.subject.kind === "task" ? await readTask(flow.deps, row.subject.taskId) : undefined;
+            rows.push(tile(row, level, task !== undefined && maySeeMoney(task, you, caller)));
+          }
         }
         return json(200, { sessions: rows, ...(listed.cursor === undefined ? {} : { next: listed.cursor }) });
       }

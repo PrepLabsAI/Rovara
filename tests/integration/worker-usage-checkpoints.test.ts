@@ -29,8 +29,9 @@ function checkpointAdapter(rootPath: string, calls: number, perCall: { input: nu
         sessionFile,
         async prompt() {
           for (let call = 0; call < calls; call += 1) {
+            for (const listener of listeners) listener({ type: "message_start", message: { role: "assistant", stopReason: "pending", content: [] } });
             made += 1;
-            for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [] } });
+            for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [], usage: { input: perCall.input, output: perCall.output, cost: { total: perCall.cost } } } });
             await new Promise((resolve) => setImmediate(resolve));
           }
           if (end?.cancel !== undefined) {
@@ -173,7 +174,7 @@ describe("usage checkpoints", () => {
     const sent: Array<Record<string, unknown>> = [];
     const stats = () => ({ tokens: tokens(10 * made, 0), cost: 0.001 * made });
     const checkpoints = createUsageCheckpointer({ enabled: true, intervalMs: 5, baseline: undefined, stats, model: () => ({ provider: "p", modelId: "m" }), requested: {}, send: (payload) => sent.push(payload), now: () => clock });
-    const end = { type: "message_end", message: { role: "assistant", stopReason: "stop" } };
+    const end = { type: "message_end", message: { role: "assistant", stopReason: "stop", usage: { input: 10 } } };
     made = 1; checkpoints.observe(end);
     expect(sent).toEqual([]);
     clock = 5; checkpoints.observe({ type: "message_end", message: { role: "user" } });
@@ -204,4 +205,38 @@ describe("usage checkpoints", () => {
     expect(usage[0]).toMatchObject({ outcome: "SUCCEEDED", tokens: tokens(300, 30) });
     expect(usage[0]).not.toHaveProperty("checkpoint");
   });
+});
+
+it.each([false, true])("counts missing usage per assistant call with checkpoints enabled=%s, including a wholly empty session", (enabled) => {
+  let stats = { tokens: tokens(10, 2), cost: 0.01 };
+  const sent: Array<Record<string, unknown>> = [];
+  const model = { provider: "p", modelId: "m" };
+  const tracker = createUsageCheckpointer({ enabled, intervalMs: 0, baseline: stats, stats: () => stats, model: () => model, requested: {}, send: payload => sent.push(payload) });
+  tracker.observe({ type: "message_end", message: { role: "user" } });
+  tracker.observe({ type: "message_start", message: { role: "assistant", stopReason: "pending" } });
+  tracker.observe({ type: "message_end", message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } } } });
+  tracker.observe({ type: "message_start", message: { role: "assistant", stopReason: "pending" } });
+  tracker.observe({ type: "message_end", message: { role: "assistant" } });
+  stats = { tokens: tokens(20, 4), cost: 0.02 };
+  tracker.observe({ type: "message_end", message: { role: "assistant", usage: { input: 10, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 12, cost: { total: 0.01 } } } });
+  const end = tracker.endReport(stats, model, "SUCCEEDED", {});
+  const reports = [...sent, ...(end === undefined ? [] : [end])];
+  expect(reports.reduce((sum, r) => sum + Number(r.usageMissingCalls ?? 0), 0)).toBe(2);
+  expect(reports.reduce((sum, r) => sum + Number((r.tokens as Tokens).input), 0)).toBe(10);
+  const empty = createUsageCheckpointer({ enabled, baseline: undefined, stats: () => ({ tokens: tokens(0, 0), cost: 0 }), model: () => model, requested: {}, send: () => undefined });
+  empty.observe({ type: "message_start", message: { role: "assistant", stopReason: "pending" } });
+  empty.observe({ type: "message_end", message: { role: "assistant" } });
+  expect(empty.endReport({ tokens: tokens(0, 0), cost: 0 }, model, "FAILED", {})).toMatchObject({ usageMissingCalls: 1, costUsd: 0 });
+});
+
+it("an agent step without checkpoints reports wholly missing calls through its session hook", async () => {
+  const rootPath = await preparedRoot();
+  const events: WorkerEvent[] = [];
+  await runAgentStep({
+    payload: { kind: "agent", agentId: "agt_aaaaaaaaaaaaaaaaaaaa", version: 1, stepId: "triage", instructions: "Triage.", workspace: "none", inputs: "Request" },
+    operationId: randomUUID(), workspaceId: randomUUID(), conversationId: randomUUID(), capability: "c".repeat(64), brokerUrl: "http://broker.invalid",
+    workspace: { rootPath, localFileTools: true }, modelAccess: { model: { provider: "fixture", modelId: "fixture-model" }, piAdapter: checkpointAdapter(rootPath, 2, { input: 0, output: 0, cost: 0 }) },
+    eventSink: async (batch: readonly WorkerEvent[]) => { events.push(...batch); }, artifactSink: async () => undefined, catalogs: async () => [], call: async () => ({ status: "SUCCEEDED", text: "ok" }),
+  } as unknown as RunAgentStepInput).catch(() => undefined);
+  expect(events.filter(event => event.type === "usage").map(event => event.payload)).toEqual([expect.objectContaining({ usageMissingCalls: 2, costUsd: 0 })]);
 });

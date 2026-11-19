@@ -18,11 +18,11 @@ export function safeEntryOf(entry: TaskLogEntry): TaskLogEntry | undefined {
       rebuilt = entry;
       break;
     case "plan_summary": {
-      const estimate = some(entry.estimate, 80);
       rebuilt = {
         ...entry, needed: some(entry.needed, TASK_LOG_PLAN_NEEDED_MAX),
         lines: entry.lines.map((line) => some(line, TASK_LOG_PLAN_LINE_MAX)).filter((line) => line !== "").slice(0, TASK_LOG_PLAN_LINES_MAX),
-        ...(estimate === "" ? { estimate: undefined } : { estimate }),
+        // Historical rows may still carry private figures. Shared logs never do.
+        estimate: undefined,
       };
       break;
     }

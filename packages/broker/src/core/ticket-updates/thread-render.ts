@@ -2,7 +2,7 @@
 // REPLIES (each one a short block that notifies someone, so each is budgeted). Pure: the same log gives the same words, so an edit that changes nothing is detected by comparing them.
 //
 // What is drawn depends on the level (`TICKET_UPDATE_LEVELS`), and the level is checked here, on every entry, by its kind: `decisions` draws questions only with their answers, answers and approvals, the status and the pull
-// request; `plan_decisions` adds the plan's summary lines, risk and estimate; `full` adds the replies for a question, for the plan ready and for the pull request. `status_only` has no thread (`handler.ts`). Entries that
+// request; `plan_decisions` adds the plan's summary lines and risk; `full` adds the replies for a question, for the plan ready and for the pull request. `status_only` has no thread (`handler.ts`). Entries that
 // were recorded before the project chose its level (`since`) are not drawn: the choice applies to what happens after it.
 //
 // Everything written here is already redacted when the log was written and is made inert again for the ticket (no mention, no markup, no link but a plain https address Rovara vouches for), one bounded block.
@@ -88,7 +88,7 @@ export function renderRoot(input: RootInput): string {
   const plan = of(entries, "plan_summary").at(-1);
   if (plan !== undefined && input.level !== "decisions") {
     lines.push(`Plan: ${inertTicketLine(plan.needed, 300)}`, ...plan.lines.map((line, at) => `${String(at + 1)}. ${inertTicketLine(line, 200)}`));
-    lines.push(`Risk: ${plan.risk}.${plan.estimate === undefined ? "" : ` Estimate: ${inertTicketLine(plan.estimate, 80)}.`}`);
+    lines.push(`Risk: ${plan.risk}.`);
   }
   const decisions = entries.filter((entry): entry is TaskLogEntryOf<"answer"> | TaskLogEntryOf<"approval"> => entry.kind === "answer" || entry.kind === "approval");
   if (decisions.length > 0) {

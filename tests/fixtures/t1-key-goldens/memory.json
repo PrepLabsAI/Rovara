@@ -120,7 +120,38 @@
           },
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
-          "updatedAt": "2026-11-09T10:00:00.000Z"
+          "updatedAt": "2026-11-09T10:00:00.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          }
         },
         {
           "pk": "IDEMPOTENCY#local-owner#DEVTASK",
@@ -379,7 +410,38 @@
           },
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
-          "updatedAt": "2026-11-09T10:00:00.000Z"
+          "updatedAt": "2026-11-09T10:00:00.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          }
         },
         {
           "pk": "IDEMPOTENCY#local-owner#DEVTASK",
@@ -664,7 +726,38 @@
           },
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
-          "updatedAt": "2026-11-09T10:02:20.000Z"
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          }
         },
         {
           "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
@@ -999,7 +1092,38 @@
           },
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
-          "updatedAt": "2026-11-09T10:02:20.000Z"
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          }
         },
         {
           "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
@@ -1343,7 +1467,38 @@
           },
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
-          "updatedAt": "2026-11-09T10:02:20.000Z"
+          "updatedAt": "2026-11-09T10:02:20.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          }
         },
         {
           "pk": "IDEMPOTENCY#<hex64#2>#10000000-0000-4000-8000-000000000002",
@@ -1670,6 +1825,37 @@
           "shared": false,
           "createdAt": "2026-11-09T10:00:00.000Z",
           "updatedAt": "2026-11-09T10:03:30.000Z",
+          "usageStartQuote": {
+            "asOf": "2026-11-09T10:00:00.000Z",
+            "path": "TASK",
+            "range": {
+              "state": "available",
+              "value": {
+                "lowMicros": 2000000,
+                "highMicros": 5000000
+              }
+            },
+            "basis": "default",
+            "modelPriced": false,
+            "inputs": {
+              "model": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "source": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "price": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              },
+              "optionsVersion": {
+                "state": "unavailable",
+                "reason": "legacy_data"
+              }
+            }
+          },
           "closedAt": "2026-11-09T10:03:30.000Z",
           "releasedAt": "2026-11-09T10:03:30.000Z"
         },

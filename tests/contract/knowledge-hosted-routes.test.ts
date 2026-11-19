@@ -150,8 +150,11 @@ describe("the knowledge routes at the developer router", () => {
     const added = all.filter((row) => row.includes("/knowledge/areas") || row.includes("/knowledge/propose") || row === "POST /v1/dev/projects/{project}/lessons full");
     expect(added).toEqual(["POST /v1/dev/projects/{project}/lessons full", "POST /v1/dev/projects/{project}/knowledge/areas full", "POST /v1/dev/projects/{project}/knowledge/propose full"]);
     // The digest of every other row (the order is the table's own).
-    const others = all.filter((row) => !added.includes(row));
-    expect(others).toHaveLength(DEV_ROUTES.length - 3);
+    const preview = "POST /v1/dev/projects/{project}/start-estimates tasks:read";
+    expect(all.filter((row) => row.includes("/start-estimates "))).toEqual([preview]);
+    const withPreview = all.filter((row) => !added.includes(row));
+    const others = withPreview.filter((row) => row !== preview);
+    expect(others).toHaveLength(DEV_ROUTES.length - 4);
     expect(createHash("sha256").update(others.join("\n")).digest("hex")).toBe(OTHER_ROWS_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.
     const switchRows = others.filter((row) => row.includes("/lessons/local-tools "));

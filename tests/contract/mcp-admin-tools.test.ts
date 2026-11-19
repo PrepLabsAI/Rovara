@@ -29,6 +29,44 @@ async function connect(admin: Partial<AdminControlPlaneClient> | undefined) {
 }
 
 describe("the admin read tools (FR-030)", () => {
+  it("keeps admin usage counts when cost is absent without claiming a zero total", async () => {
+    const client = await connect({ usage: async () => ({
+      groupBy: "project", since: "s", until: "u", truncated: false,
+      groups: [{ key: "payments", turns: 2, tasks: 1, taskDurationMs: 60_000, inputTokens: 10, outputTokens: 2, costUnknown: 1 }] as unknown as Awaited<ReturnType<AdminControlPlaneClient["usage"]>>["groups"],
+    }) });
+    try {
+      const result = await client.callTool({ name: "agentx_admin_usage", arguments: { group_by: "project" } });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ groups: [{ key: "payments", turns: 2, cost_unknown: 1 }] });
+      expect(JSON.stringify(result.structuredContent)).not.toContain("cost_usd");
+      expect(JSON.stringify(result.content)).toContain("total cost unavailable");
+      expect(JSON.stringify(result.content)).not.toContain("$");
+    } finally {
+      await client.close();
+    }
+  });
+  it("allows every MCP output money figure to be omitted", async () => {
+    const client = await connect({});
+    try {
+      const { tools } = await client.listTools();
+      const figures: string[] = [];
+      const walk = (node: unknown, path: string): void => {
+        if (node === null || typeof node !== "object") return;
+        const schema = node as { properties?: Record<string, unknown>; required?: string[] };
+        for (const key of Object.keys(schema.properties ?? {})) {
+          if (key.endsWith("_usd") || (path.endsWith("price_usd_per_million") && ["input", "output"].includes(key)) || (path.endsWith("run_estimate") && key === "cost")) {
+            figures.push(`${path}.${key}`);
+            expect(schema.required ?? [], `${path}.${key}`).not.toContain(key);
+          }
+        }
+        for (const [key, value] of Object.entries(node)) walk(value, key === "properties" ? path : `${path}.${key}`);
+      };
+      for (const tool of tools) walk(tool.outputSchema, tool.name);
+      expect(figures).toEqual(expect.arrayContaining(["agentx_get_session.cost.spent_usd", "agentx_stop_session.cost.spent_usd", "agentx_admin_usage.groups.items.cost_usd"]));
+    } finally {
+      await client.close();
+    }
+  });
   it("are exactly FR-030's eight, each with an output schema and no em dash", async () => {
     expect(ADMIN_READ_TOOLS.map((tool) => tool.name)).toEqual([
       "agentx_admin_health", "agentx_admin_failed_tasks", "agentx_admin_turns", "agentx_admin_usage",

@@ -14,7 +14,7 @@ import type {
 } from "@agentx/contracts";
 import { matchApprovedModel, modelOptionsMessage } from "./model-command.js";
 import { SLACK_FORMAT, escapeText } from "./slack-format.js";
-import { DATASET_NAMES } from "./swebench-command.js";
+import { DATASET_NAMES, evalDetail } from "./swebench-command.js";
 
 export interface EvalBatchStartApi {
   startEvalBatch(request: EvalBatchSlackStartRequest): Promise<EvalBatchSlackStartResult>;
@@ -60,7 +60,7 @@ export async function runEvalBatchCommand(
     ...(command.costCapUsd === undefined ? {} : { costCapUsd: command.costCapUsd }),
   });
   if (started.outcome === "REFUSED") {
-    await options.post(`I couldn't start this batch: ${escapeText(started.message)}`);
+    await options.post(`I couldn't start this batch: ${evalDetail(started.message)}`);
     return;
   }
   const { batch } = started;
@@ -83,9 +83,8 @@ export async function runEvalBatchCommand(
 /** The batch's start message: posted by the form in its thread, or by the watcher to open a CLI batch's thread. */
 export function batchStartMessage(batch: EvalBatchWatched, origin: "slack" | "cli"): string {
   const opening = origin === "slack" ? `Started eval batch \`${batch.batchId}\`:` : `Eval batch \`${batch.batchId}\` started from the CLI:`;
-  const ceiling = batch.perRunCeilingUsd === undefined ? "" : ` (each run's ceiling is ${usd(batch.perRunCeilingUsd)})`;
   return [
-    `${opening} ${count(batch.runs, "run")} of ${DATASET_NAMES[batch.benchmark]}: ${count(batch.tasks, "task")} × ${count(batch.models.length, "model")} × ${count(batch.repeats, "repeat")}, with a cost cap of ${usd(batch.costCapUsd)}${ceiling}.`,
+    `${opening} ${count(batch.runs, "run")} of ${DATASET_NAMES[batch.benchmark]}: ${count(batch.tasks, "task")} × ${count(batch.models.length, "model")} × ${count(batch.repeats, "repeat")}.`,
     `Models: ${batch.models.map((entry) => modelLabel(entry.model)).join(", ")}`,
     "I'll post progress here and a summary table when it ends; say `stop` in this thread to stop the batch.",
   ].join("\n");
@@ -99,8 +98,4 @@ export function modelLabel(model: EvalBatchModel): string {
 
 function count(value: number, noun: string): string {
   return `${value} ${noun}${value === 1 ? "" : "s"}`;
-}
-
-export function usd(value: number): string {
-  return `$${value.toFixed(2)}`;
 }

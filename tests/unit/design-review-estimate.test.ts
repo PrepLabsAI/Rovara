@@ -271,7 +271,7 @@ describe("M5 and an unpriced run is bounded by the keys' ceilings, not by a stop
 
 describe("the approve_spend card source", () => {
   const TASK = "11111111-1111-4111-8111-111111111111";
-  const base = { taskId: TASK, subjectId: "dr-spend-1", project: "payments", title: "Partner ranking by region", createdAt: "2026-11-03T10:00:00.000Z", openPath: `/app/sessions/ses_${"a".repeat(20)}`, contentVersion: "v1", capUsd: 1 };
+  const base = { revealMoney: true, taskId: TASK, subjectId: "dr-spend-1", project: "payments", title: "Partner ranking by region", createdAt: "2026-11-03T10:00:00.000Z", openPath: `/app/sessions/ses_${"a".repeat(20)}`, contentVersion: "v1", capUsd: 1 };
   const standard = priced(estimateDesignReviewUsd({ tier: "standard", models, price }));
   const light = priced(estimateDesignReviewUsd({ tier: "light", models, price }));
 
@@ -313,6 +313,20 @@ describe("the approve_spend card source", () => {
     expect(card.recommended.action).toBe("open");
     // $250 is above the admin amount: high risk, and a high card has only "Open to decide".
     expect(card.risk).toBe("high");
+  });
+
+  it.each([false, undefined])("keeps another member's card reduced when revealMoney is %s, with the same risk and choices", (revealMoney) => {
+    for (const estimate of [standard, estimateDesignReviewUsd({ tier: "standard", models, price: () => undefined })]) {
+      const gate = gateDesignReviewCost({ spentUsd: 0, tier: "standard", capUsd: 1, estimate, canSkip: true });
+      if (gate.kind !== "ask") throw new Error("expected an ask");
+      const full = cardOfItem(designSpendCardItem({ ...base, gate }))!.card;
+      const reduced = cardOfItem(designSpendCardItem({ ...base, revealMoney, gate }))!.card;
+      expect(reduced.evidence).toEqual([{ kind: "cost", label: "Design review limit", value: "Blocked", state: "warning" }]);
+      expect(reduced.next.costUsd).toBeUndefined();
+      expect(JSON.stringify(reduced)).not.toContain("$");
+      expect(reduced.risk).toBe(full.risk);
+      expect(reduced.actions.map(({ kind, href, method }) => ({ kind, href, method }))).toEqual(full.actions.map(({ kind, href, method }) => ({ kind, href, method })));
+    }
   });
 
   it("an ordinary spend request is unchanged", () => {

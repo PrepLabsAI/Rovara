@@ -21,13 +21,15 @@ async function world(companyId: OrgId = A) {
   const items = vi.fn((input: { kind: string; taskId: string }) => [{ kind: "put" as const, item: { pk: "MOMENTS", sk: input.taskId, kind: input.kind } }]);
   const ports = intakePortsOf({ store: h.store, companyId, now: () => h.clock.now, log, identity: { getPrincipal: async () => h.owner.principal, resolveExternalAccount: async () => h.owner.principal }, access: h.deps.access, flow: h.flow, owner: h.owner.principal, fenceKey: Buffer.alloc(32, 1), milestones: { items, deliver } });
   const features = createFeatureStore({ store: h.store, companyId, audit: h.deps.audit, now: () => h.clock.now });
-  const start = async (over: { parent?: typeof parent; url?: string; project?: string } = {}) => {
+  const start = async (over: { parent?: typeof parent; url?: string; project?: string; system?: "linear" | "jira" } = {}) => {
     const id = randomUUID();
-    const candidate = { orgId: companyId, project: over.project ?? "payments", channel: "tracker" as const, externalRef: { system: "linear", id, url: over.url ?? `https://linear.app/acme/issue/${id}` }, title: "Fix payment", body: "Fix it", actor: { kind: "person" as const, account: { provider: "linear", tenant: "", accountId: "person" } }, parent: over.parent ?? parent };
+    const system = over.system ?? "linear";
+    const candidate = { orgId: companyId, project: over.project ?? "payments", channel: "tracker" as const, externalRef: { system, id, url: over.url ?? (system === "linear" ? `https://linear.app/acme/issue/${id}` : `https://acme.atlassian.net/browse/${id}`) }, title: "Fix payment", body: "Fix it", actor: { kind: "person" as const, account: { provider: system, tenant: "", accountId: "person" } }, parent: over.parent ?? parent };
     const result = await ingestIntake(ports, candidate);
     expect(result, JSON.stringify(log.mock.calls)).toMatchObject({ outcome: "started" });
     if (result.outcome !== "started") throw new Error("start failed");
-    expect(await readIntakeItem(ports.table, companyId, candidate.project, intakeItemIdOf("linear", id))).toMatchObject({ state: "started", taskId: result.taskId, startedBy: developerIdOf(h.owner.principal) });
+    expect(await readIntakeItem(ports.table, companyId, candidate.project, intakeItemIdOf(system, id))).toMatchObject({ state: "started", taskId: result.taskId, startedBy: developerIdOf(h.owner.principal) });
+    expect(await h.store.get({ pk: `DEVTASK#${result.taskId}`, sk: "META" })).toMatchObject({ origin: "tracker", ticket: { system } });
     expect(await ports.sessionOfTicket(companyId, { kind: "tracker_item", ...candidate.externalRef })).toBeDefined();
     expect(items).toHaveBeenCalledWith(expect.objectContaining({ kind: "started", taskId: result.taskId }), 1, {});
     expect(deliver).toHaveBeenCalledWith(result.taskId);
@@ -44,6 +46,11 @@ it("files tracker suggestions, reuses a parent across tickets/projects, and isol
   expect((await b.features.taskFeature(foreign))!.featureId).not.toBe(assignment!.featureId);
   expect(await a.features.taskFeature(foreign)).toBeUndefined();
   expect((await a.features.list())[0]!.trackerLink).toEqual({ tracker: "linear", id: parent.id, url: parent.url });
+});
+it("keeps Jira intake on the tracker task origin", async () => {
+  const w = await world();
+  const id = await w.start({ system: "jira" });
+  expect(await w.h.store.get({ pk: `DEVTASK#${id}`, sk: "META" })).toMatchObject({ origin: "tracker", ticket: { system: "jira" } });
 });
 it("reuses a person's open company-wide name across projects", async () => {
   const w = await world();

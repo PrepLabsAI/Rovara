@@ -1,3 +1,7 @@
+import { previewRateReaderFromEnvironment } from "../core-host/start-estimates-rate-read.js";
+import { startEstimates } from "../core/cost/start-estimates.js";
+import { hostedPreviewContext } from "../core-host/start-estimates.js";
+import { recordClosedRunUsage } from "../core/cost/run-usage.js";
 // Engine host (migration plan v3.2 lane E2, step 6): the core engine's composition root on the deployed BROKER. The dispatcher's half is aws/worker-machines/dispatcher-core.ts.
 //
 // One object per function container, built at module load. It reads the switch (ROVARA_CORE_ENGINE) once through the core host app (core-host/app.ts): while the switch is OFF (the default)
@@ -616,6 +620,7 @@ export function coreMoneyWiring(registry: Pick<AdapterRegistry, "require">, comp
     // and the callback layer asks its worker to stop (core/task-flow/money-stop.ts `requestSpendStop`). Without the caps (`settings`) nothing is read.
     bookUsage: async (operation, events) => {
       if (operation.companyId !== companyId) throw new Error("operation belongs to another company");
+      // Worker usage is aggregate telemetry only; it cannot authenticate receipts or revise gateway charges.
       const booked = await booking.bookOperationEvents({ id: operation.id, workspaceId: operation.workspaceId, companyId }, events);
       if (settings === undefined || !events.some((event) => event.type === USAGE_EVENT_TYPE)) return booked;
       const taskId = (await store.get((await workspaceKeys({ store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey()))?.["taskId"];
@@ -723,6 +728,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const answersModel = () => (answersModelFor ??= hostedAnswersModel(env, inputs.taskTokens));
   // DEC 243c: with the gateway's offered-models reader, the company's per-step model rule chooses each step's model from that list (one rule per company, kept for its page's routes).
   // One reader for every company: the deployment's own (the gateway's route, signed with the task key) unless the root was given one.
+  const previewRates = coreActive ? previewRateReaderFromEnvironment(env, inputs.taskTokens) : undefined;
   const modelChoices = createCompanyModelChoices({ reader: coreActive && env[CORE_AGENT_MODEL_CHOICE_VARIABLE] === "on" ? inputs.offeredModels ?? offeredModelsReaderFromEnvironment(env, inputs.taskTokens) : undefined, now: () => now().getTime() });
   // DEC 254n (1): the company's own engine model (when it set one) replaces the install's for its tasks; its start is refused unless the gateway offers it THAT company now. The list is read
   // through the same reader as the model choice where the root was given one, else the gateway's own route signed with the task key (only the gateway's origin is needed).
@@ -823,7 +829,11 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       // The per-run stop and the usage flush on Stop and close (core-money-stop): a stopped run whose usage did not arrive keeps its task's whole hold, marked estimated.
       // L2b: every core step on the gateway's agent model (the token's description reads the same route).
       // Configured without the task-token signer: refused here, so no task starts. The money stop is wired in every case.
-      flowOptions: { understandFirst: inputs.understandFirst ?? true, limits: async () => {
+      flowOptions: { captureStartComparison: async ({ project, inputText }) => {
+        const store = registry.require("storage");
+        const context = await hostedPreviewContext({ store, companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store, companyId, install: gateway.flowOptions.modelAccess }).route(); } });
+        return startEstimates({ store }, { orgId: companyId, project, request: { quoteVersion: 2, ...(inputText.length <= 4000 ? { inputText } : {}) }, asOf: now().toISOString(), context });
+      }, understandFirst: inputs.understandFirst ?? true, limits: async () => {
         const fallback = { member: Number(env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"), organization: Number(env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20") };
         if (!isWholeLimit(fallback.member, MAX_PER_PERSON) || !isWholeLimit(fallback.organization, MAX_PER_ORGANIZATION) || fallback.member > fallback.organization) throw new Error("the workspace limits are not readable");
         return await readWorkspaceLimits(inputs.documentClient, inputs.stateTableName, fallback, log);
@@ -845,6 +855,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           ...runCostInputOf(await ledger.taskCost(companyId, task.taskId)),
         });
         log({ component: "cost", event: "cost.run_recorded", outcome });
+        try { await recordClosedRunUsage({ store }, task, closedAt); }
+        catch (error) { log({ component: "cost", event: "cost.run_usage_not_recorded", error: error instanceof Error ? error.name : "unknown" }); }
       },
       // L6a: a task started from Linear keeps the session binding available to merge tracking, within this company's store partition.
       sessionBindings: { read: (_orgId, sessionId) => sessionBindingsOf(registry.require("storage"), companyId, sessionId) },
@@ -1040,6 +1052,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         const healthDeps = healthRuns ? evalHealthRunDeps({ registry, environment: env, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
+          startEstimates: (project) => hostedPreviewContext({ store: runtime.flow.deps.store, companyId: runtime.companyId, project, now, rateQuote: previewRates, workflowVersion: inputs.understandFirst === false ? "1.0.0" : "1.1.0", settings: admissionSettings, projectTaskCap, defaultRoute: async () => { const gateway = modelGateway(); return gateway === undefined ? undefined : companyEngineModelRoute({ store: runtime.flow.deps.store, companyId: runtime.companyId, install: gateway.flowOptions.modelAccess }).route(); } }),
           sessionCapSeconds: hostedSessionCapSeconds(),
           scriptTokens: {}, ...(attention === undefined ? {} : { unsubscribeKey: attention.unsubscribeKey }),
           ...(modelChoices.choiceFor(runtime.companyId) === undefined ? {} : { modelChoice: modelChoices.choiceFor(runtime.companyId)! }),

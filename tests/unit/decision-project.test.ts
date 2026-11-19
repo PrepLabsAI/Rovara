@@ -6,7 +6,7 @@ import { isInfraPath, riskTierOf } from "../../packages/broker/src/core/decision
 import { isSafeRelativePath } from "../../packages/broker/src/core/decisions/text.js";
 
 const TASK = "11111111-1111-4111-8111-111111111111";
-const base = (id: string, extra: Partial<ItemBase> = {}): ItemBase => ({ subjectId: id, taskId: TASK, project: "payments", title: "Retry failed payments", createdAt: "2026-10-30T10:00:00.000Z", contentVersion: "v1", openPath: `/app/sessions/ses_${"a".repeat(20)}`, ...extra });
+const base = (id: string, extra: Partial<ItemBase> = {}): ItemBase => ({ subjectId: id, taskId: TASK, revealMoney: true, project: "payments", title: "Retry failed payments", createdAt: "2026-10-30T10:00:00.000Z", contentVersion: "v1", openPath: `/app/sessions/ses_${"a".repeat(20)}`, ...extra });
 const proof = { proven: 3, passed: 1, failed: 0, notTested: 0 };
 
 const ITEMS: Record<DecisionKind, DecisionItem> = {
@@ -399,4 +399,21 @@ describe("fix_setup (setup and test health SH17)", () => {
     expect(card.next.text).toContain("2 tasks wait on this");
     expect(card.recommended.why).toBe("The code did not fail: the test setup could not give a verdict.");
   });
+});
+
+it("decision cards for other people's tasks carry no money in plan, design, spend text or choices", () => {
+ const items: DecisionItem[] = [
+  { ...ITEMS.approve_plan, runLimit: { currentUsd: 9.73, proposedUsd: 18.61 } } as DecisionItem,
+  { ...ITEMS.approve_spend, subjectId: "design-spend", amountUsd: 3.91, design: { why: "over_cap", capUsd: 2.83, estimateUsd: 3.91, choices: [{ label: "Raise the limit to $18.61", href: "/v1/app/tasks/raise" }, { label: "Run Light (about $1.81)", href: "/v1/app/tasks/light" }] } } as DecisionItem,
+  { ...ITEMS.approve_spend, subjectId: "plain-spend", amountUsd: 17.43 } as DecisionItem,
+ ];
+ for (const role of ["reader", "co-owner"]) {
+  const view = projectDecisionCards(items.map(item => ({ ...item, revealMoney: false })));
+  expect(view.cards, role).toHaveLength(3);
+  const shown = JSON.stringify({ cards: view.cards, tabs: view.tabs, details: view.details });
+  expect(shown).not.toContain("$");
+  for (const figure of [1.2, 3.1, 9.73, 18.61, 2.83, 3.91, 1.81, 17.43]) expect(shown).not.toContain(String(figure));
+  expect(view.cards.map(card => card.risk)).toEqual(projectDecisionCards(items).cards.map(card => card.risk));
+ }
+ expect(JSON.stringify(projectDecisionCards(items).cards)).toContain("$17.43");
 });

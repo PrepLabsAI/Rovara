@@ -9,10 +9,11 @@
 //   - while the install has a company rules service (the policy hook), nothing is built: that service is asked only at an approver's verdict, which a website press does not make, so a press there would
 //     merge without the company's rules. The route then says merging from Rovara is not set up (the person merges on GitHub). Asking the service for a person's press is a follow-up.
 // No CI mode reader on the runtime (an invalid or missing wiring): throws, and the route says merging is not set up.
-import type { AdapterRegistry, AuditSink, CodeSettings, OrgId } from "@agentx/contracts";
+import type { AdapterRegistry, ApprovalRequest, AuditSink, CodeSettings, OrgId, Principal } from "@agentx/contracts";
 import { agentXError } from "@agentx/contracts";
 import type { CoreRuntime } from "../core-host/core-runtime.js";
 import type { MergeDependencies } from "../core/merge/merge.js";
+import type { MergeTask } from "../core/merge/seams.js";
 import type { CodeSettingsReader } from "../core/merge/seams.js";
 import { fixedCodeSettings } from "../core/merge/defaults.js";
 import { storeLinkedChangeRequests } from "../core/merge/linked.js";
@@ -22,12 +23,12 @@ import { pullRequestRecordOf } from "../core/build-step/records.js";
 import { createMilestoneService, createRepositoryResolver, mergeTaskOf, sessionTimeline, wakeMergeTracking } from "../services/merge-tracking.js";
 import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
 import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
+import { personPressOf } from "../core/policy-hook/approvers.js";
 
 export const HOSTED_MERGE_SETTINGS_REFUSED = "the project's merge rules could not be read";
 
 export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry: AdapterRegistry; settings: CodeSettingsReader | undefined; defaults: CodeSettings; now: () => number; policyHook: boolean; audit?: AuditSink | undefined }): MergeDependencies {
   const { runtime, registry, now } = input;
-  if (input.policyHook) throw new Error("the company rules service is not asked for a website press yet");
   const companyId: OrgId = runtime.companyId;
   const flow = runtime.flow.deps;
   const ciMode = runtime.ciReporting?.ciMode;
@@ -35,6 +36,10 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
   const store = flow.store;
   const resolve = createRepositoryResolver(flow, registry);
   const given = input.settings ?? fixedCodeSettings(input.defaults);
+  const approvers = registry.require("approvers");
+  const personPress = input.policyHook ? personPressOf(approvers) : undefined;
+  if (input.policyHook && personPress === undefined) throw new Error("the company rules service is not asked for a website press yet");
+  const identity = registry.require("identity");
   // Asked about another company, the settings refuse: a runtime never reads another company's merge rules.
   const settings: CodeSettingsReader = { read: async (orgId, project) => {
     if (orgId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_SETTINGS_REFUSED);
@@ -49,11 +54,15 @@ export function hostedMergeDependencies(input: { runtime: CoreRuntime; registry:
       recordedBase: async (workspaceId, repositoryId, number) => (await pullRequestRecordOf(flow, workspaceId, repositoryId, number))?.baseBranch,
       requireSyncForMerge: async (task) => { await wakeMergeTracking(store, task.taskId, now()); },
     },
-    approvers: registry.require("approvers"),
+    approvers,
     // The request's own sink when the route gives it (it names the client the press came through), else the flow's.
     audit: input.audit ?? flow.audit,
-    people: createIdentityMergePeople(registry.require("identity"), { hostProvider: "github" }),
-    identity: registry.require("identity"),
+    people: createIdentityMergePeople(identity, { hostProvider: "github" }),
+    identity,
+    ...(personPress === undefined ? {} : {
+      requesterOf: async (task: MergeTask) => task.creatorId === undefined ? undefined : identity.getPrincipal(companyId, task.creatorId),
+      personPress: (request: ApprovalRequest, presser: Principal) => personPress.decideForPerson(request, presser),
+    }),
     settings,
     milestones: flow.milestones ?? createMilestoneService({ store, now }),
     timeline: sessionTimeline(),

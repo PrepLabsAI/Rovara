@@ -23,6 +23,8 @@ const SUBJECT_ID = /^[A-Za-z0-9_-]{1,150}$/u;
 
 /** What every pending item carries. */
 export interface ItemBase {
+  /** Internal read authority, set from the stored task owner or live company role; omitted fails closed. */
+  revealMoney?: boolean | undefined;
   /** The item's own id (an approval id, a task id and document version, ...), `[A-Za-z0-9_-]{1,150}`. */
   subjectId: string;
   taskId?: string | undefined;
@@ -183,11 +185,11 @@ function costText(cost: Cost | undefined): string | undefined {
 function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?: number; minutes?: number; evidence: EvidenceChip[]; why: string } {
   switch (item.kind) {
     case "approve_plan": {
-      const money = costText(item.cost);
+      const money = item.revealMoney === true ? costText(item.cost) : undefined;
       return {
         question: item.path === "full" ? "Approve this coding plan?" : "Approve this plan and start the build?",
         next: `${money === undefined ? "Rovara builds the change and opens a pull request" : `Builds in ${item.cost?.minutes === undefined ? "a few minutes" : `${String(item.cost.minutes.low)} to ${String(item.cost.minutes.high)} minutes`}, ${money}, and opens a pull request`}.`,
-        ...(item.cost === undefined ? {} : { costUsd: item.cost.highUsd }),
+        ...(item.revealMoney !== true || item.cost === undefined ? {} : { costUsd: item.cost.highUsd }),
         ...(item.cost?.minutes === undefined ? {} : { minutes: item.cost.minutes.high }),
         // A plan whose files or checks could not be read shows neither chip: never "0 files" or "every claim has a check" for something unknown.
         evidence: [
@@ -214,7 +216,7 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
           chip("review", "Reviewers", coverage === "none" ? "did not run" : `${String(review.reviewers.verified)}/${String(review.reviewers.planned)} verified`, coverage === "all" ? "good" : coverage === "partial" ? "warning" : "bad"),
           chip("review", "Open blockers", String(review.blockers.length), review.blockers.length === 0 ? "good" : "bad"),
           chip("review", "Disagreements", String(review.disagreements.length), review.disagreements.length === 0 ? "good" : "warning"),
-          ...(review.costUsd === undefined ? [] : [chip("cost", "Cost", usd(review.costUsd), "unknown")]),
+          ...(item.revealMoney !== true || review.costUsd === undefined ? [] : [chip("cost", "Cost", usd(review.costUsd), "unknown")]),
           chip("other", "Files named", plural(item.files.length, "file", "files"), "unknown"),
         ],
         why: review.blockers.length > 0 ? "A blocker is still open: approving needs a one-line reason." : coverage === "all" ? "Fresh-context reviewers read it and no blocker is open." : "Design review did not fully run: look before you approve.",
@@ -258,6 +260,12 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
     case "approve_setting":
       return { question: plainLine(`Change this setting: ${item.settingLabel}?`, 160), next: "Rovara works less safely until the setting is changed back.", evidence: [chip("risk", "Effect", "less safe", "bad")], why: "A less-safe setting needs a full look." };
     case "approve_spend":
+      if (item.revealMoney !== true) return {
+        question: item.design === undefined ? plainLine(`Raise the limit for ${item.scopeLabel}?`, 160) : item.design.why === "cost_unavailable" ? "Run the design review without a price?" : "The design review is blocked by its limit. What now?",
+        next: item.design === undefined ? "The limit is raised so the task can continue." : "Nothing runs until you choose. The design review stays within its limit.",
+        evidence: [chip("cost", item.design === undefined ? "Task limit" : "Design review limit", "Blocked", "warning")],
+        why: "The task is paused until a person decides.",
+      };
       if (item.design !== undefined) {
         const unpriced = item.design.why === "cost_unavailable";
         return {
@@ -355,7 +363,7 @@ function actionsOf(item: DecisionItem, cardId: string, risk: DecisionRisk): { ac
   if (item.kind === "approve_request") return { actions: [open, { kind: "reject", label: "Decline", href: `${base}/reject`, method: "POST" }], recommended: "open" };
   // A HIGH design cost card keeps its choices (decided on its task page behind the evidence, each under the decide-grade sign-in); it still opens first, and Slack and Home show only Open.
   if (risk === "high" && item.kind === "approve_spend" && item.design !== undefined) {
-    return { actions: [open, ...item.design.choices.slice(0, 3).map((choice): CardAction => ({ kind: "choose", label: plainLine(choice.label, 60), href: choice.href, method: "POST" }))], recommended: "open" };
+    return { actions: [open, ...item.design.choices.slice(0, 3).map((choice): CardAction => ({ kind: "choose", label: plainLine(item.revealMoney === true ? choice.label : choice.label.replace(/\s*\(about \$[0-9.,]+\)/gu, "").replace(/ to \$[0-9.,]+/gu, ""), 60), href: choice.href, method: "POST" }))], recommended: "open" };
   }
   if (risk === "high") return { actions: changes === undefined ? [open] : [open, changes], recommended: "open" };
   // A question or a checks choice is answered on its own page: the card only opens it (an answer or a choice is a POST of that page, never a link).
@@ -375,7 +383,7 @@ function actionsOf(item: DecisionItem, cardId: string, risk: DecisionRisk): { ac
   }
   // A design review's cost gate (DR8): the choices the gate allowed are the card's actions. None allowed: the card only opens the page.
   if (item.kind === "approve_spend" && item.design !== undefined) {
-    const choices: CardAction[] = item.design.choices.slice(0, 3).map((choice) => ({ kind: "choose", label: plainLine(choice.label, 60), href: choice.href, method: "POST" }));
+    const choices: CardAction[] = item.design.choices.slice(0, 3).map((choice) => ({ kind: "choose", label: plainLine(item.revealMoney === true ? choice.label : choice.label.replace(/\s*\(about \$[0-9.,]+\)/gu, "").replace(/ to \$[0-9.,]+/gu, ""), 60), href: choice.href, method: "POST" }));
     return choices.length === 0 ? { actions: [open], recommended: "open" } : { actions: [...choices, open], recommended: "choose" };
   }
   if (!APPROVABLE.has(item.kind)) return { actions: [open], recommended: "open" };
@@ -414,10 +422,10 @@ export function cardOfItem(item: DecisionItem, locks: DecisionLocks = {}): { car
     recommended: { action: closed ? "open" : recommended, why: plainLine(words.why, 120) },
     next: { text: plainLine(words.next, 160), ...(words.costUsd === undefined ? {} : { costUsd: words.costUsd }), ...(words.minutes === undefined ? {} : { minutes: words.minutes }) },
     evidence: words.evidence.slice(0, 6),
-    risk, riskReasons: tier.reasons,
+    risk, riskReasons: item.revealMoney === true ? tier.reasons : tier.reasons.map(reason => reason.replace(/\$[0-9.,]+/gu, "the approval threshold")),
     friction: decisionFriction(risk, tier.secondPerson),
     actions: closed ? [] : actions,
-    ...(item.kind === "approve_plan" && item.runLimit !== undefined && Number.isFinite(item.runLimit.proposedUsd)
+    ...(item.revealMoney === true && item.kind === "approve_plan" && item.runLimit !== undefined && Number.isFinite(item.runLimit.proposedUsd)
       ? { runLimit: { proposedUsd: item.runLimit.proposedUsd, ...(item.runLimit.currentUsd === undefined || !Number.isFinite(item.runLimit.currentUsd) ? {} : { currentUsd: item.runLimit.currentUsd }) } } : {}),
     ...(item.kind === "approve_plan" && !closed && item.planFeature !== undefined && PlanFeatureSchema.safeParse(item.planFeature).success ? { planFeature: item.planFeature } : {}),
     rejectReasons: closed || !actions.some((action) => action.kind === "reject") ? [] : [...REJECTABLE_REASONS],

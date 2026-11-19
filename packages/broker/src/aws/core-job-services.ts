@@ -24,6 +24,8 @@ import { ticketMomentsOnChange } from "../core/ticket-updates/moments.js";
 import type { AttentionDeliveryDependencies } from "../core/notify/attention.js";
 import { boundedCorePass } from "./core-job-pass.js";
 import { evalCheckEvidencePort } from "../core/ci-evidence/eval-check-setting.js";
+import { createTaskRepositoryEdgesSeam } from "../core/merge/repository-edges.js";
+import { hostedEvidenceBlobs } from "../core-host/hosted-evidence.js";
 
 // One invocation shares recovery pages and ownership reads across all company passes. No cache survives a scheduled run.
 const recoveryPass = new AsyncLocalStorage<{
@@ -165,6 +167,7 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         ciMode: ci.ciMode,
         // L4-EVCI2: the customer's confirmed eval check, kept per company and project (core/ci-evidence/eval-check-setting.ts); nothing confirmed: a pass is what it was.
         ciEvidence: evalCheckEvidencePort({ store, companyId }),
+        repositoryEdges: createTaskRepositoryEdgesSeam({ flow: depsFor(recoveryStore(store, companyId)), blobs: hostedEvidenceBlobs({ blobs: registry.require("object-storage"), store, companyId }), companyId }),
         ...(options.repository === undefined ? {} : { repository: options.repository }), ...(options.summaryCheck === undefined ? {} : { summaryCheck: options.summaryCheck }), ...(options.humanEdit === undefined ? {} : { humanEdit: options.humanEdit }),
       });
       const report = await tracking.sweep({ budgetMs: Math.max(0, deadlineMs - now()) });

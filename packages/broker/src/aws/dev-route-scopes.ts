@@ -24,6 +24,7 @@ export interface DevRoute {
 }
 
 export const DEV_ROUTES: readonly DevRoute[] = [
+  { method: "POST", path: "/v1/dev/projects/{project}/start-estimates", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/projects/{project}/machine-size", requires: "tasks:read" },
   { method: "POST", path: "/v1/dev/projects/{project}/machine-size", requires: "full" },
   { method: "GET", path: "/v1/dev/projects/{name}/settings", requires: "full" },

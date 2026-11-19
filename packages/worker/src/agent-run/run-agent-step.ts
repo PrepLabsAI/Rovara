@@ -262,7 +262,7 @@ export async function runAgentStep(input: RunAgentStepInput): Promise<AgentStepR
       const stats = session.getSessionStats();
       const usage = redactCredentials(createTaskUsageTelemetry(stats, usageModelOf(session), outcome));
       // With checkpoints, the end tells only what is left (marked final); without, the whole step as before.
-      const endReport = checkpoints?.checkpointed === true ? checkpoints.endReport(stats, usageModelOf(session), outcome, input.modelAccess.model) : usageForControlPlane(usage, input.modelAccess.model);
+      const endReport = checkpoints?.endReport(stats, usageModelOf(session), outcome, input.modelAccess.model) ?? usageForControlPlane(usage, input.modelAccess.model);
       if (endReport !== undefined) await events.append("usage", endReport);
       await input.artifactSink({ name: "usage.json", mediaType: "application/json", content: JSON.stringify(usage, null, 2) });
     }

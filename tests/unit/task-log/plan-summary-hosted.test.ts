@@ -40,10 +40,12 @@ async function world(options: { company?: OrgId; objectKey?: string; closed?: bo
 const gate = (risk = "medium") => ({ requirement: async () => ({ requirement: { methods: ["m"], minApprovers: 1, selfApprovalAllowed: true }, risk, revision: 1, artifactDigest: "0".repeat(64) }) });
 
 describe("the plan summary source reads the task's own plan only", () => {
-  it("gives what the card says (needed, lines, the gate's risk, the estimate) for this company's open task at the plan review", async () => {
+  it("gives what the card says (needed, lines, the gate's risk) for this company's open task at the plan review", async () => {
     const w = await world();
     const facts = await planSummarySourceOf({ store: w.store, artifacts: w.blobs, gate: gate("medium") })(A, TASK);
-    expect(facts).toMatchObject({ needed: "Add a cap to campaigns", lines: ["Add a spend field", "Refuse a start above it", "Show the cap on the page"], risk: "medium", estimate: "$4 to $10" });
+    expect(facts).not.toHaveProperty("estimate");
+    expect(JSON.stringify(facts)).not.toContain("$");
+    expect(facts).toMatchObject({ needed: "Add a cap to campaigns", lines: ["Add a spend field", "Refuse a start above it", "Show the cap on the page"], risk: "medium" });
   });
 
   it("is nothing for a closed task, another company's task, or a task that waits on nothing", async () => {
@@ -88,7 +90,9 @@ describe("a hosted company's plan summary goes through its own decision gate", (
     const flow = { store: w.store, audit: { record: async () => undefined } } as never;
     const summary = hostedPlanSummaryOf({ flow, registry: registryOf(w.blobs) as never, companyId: A, now: () => new Date("2026-11-17T12:00:00.000Z") });
     const facts = await summary(A, TASK);
-    expect(facts).toMatchObject({ needed: "Add a cap to campaigns", estimate: "$4 to $10" });
+    expect(facts).not.toHaveProperty("estimate");
+    expect(JSON.stringify(facts)).not.toContain("$");
+    expect(facts).toMatchObject({ needed: "Add a cap to campaigns" });
     expect(["low", "medium", "high"]).toContain(facts!.risk);
   });
 

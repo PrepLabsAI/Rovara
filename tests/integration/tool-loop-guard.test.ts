@@ -265,9 +265,10 @@ describe("the tool-call limit in a worker task", () => {
     // run-task's own extensions (the guard, verification) are kept; only the shell is swapped.
     const adapter: PiSessionAdapter = { create: (input) => base.create({ ...input, bashOperations: operations }) };
     const events: WorkerEvent[] = [];
+    const usageArtifacts: Array<{ calls: unknown[] }> = [];
     await expect(runTaskInvocation(taskInvocation(), {
       rootPath, model: FAUX_MODEL, piAdapter: adapter,
-      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined,
+      eventSink: async (batch) => { events.push(...batch); }, artifactSink: async (artifact) => { if (artifact.name === "usage.json") usageArtifacts.push(JSON.parse(String(artifact.content)) as { calls: unknown[] }); },
     })).rejects.toThrow(/OPERATION_INTERRUPTED: the agent used more than 200 tool calls in one task; stopped it\. Split the request into smaller tasks\./);
     // The 201st call was refused before it ran, and the run ended there: the model was not asked to go on.
     expect(ran).toHaveLength(TOOL_CALL_LIMIT);
@@ -275,6 +276,14 @@ describe("the tool-call limit in a worker task", () => {
     const errors = events.filter((event) => event.type === "error").map((event) => (event.payload as { message?: string }).message);
     expect(errors).toEqual([expect.stringMatching(/more than 200 tool calls/)]);
     expect((events.find((event) => event.type === "usage")?.payload as { outcome?: string } | undefined)?.outcome).toBe("FAILED");
+    // E's per-call history crosses the 64 KiB event bound here. Keep accounting and
+    // the guard's outcome; the complete history remains in the artifact.
+    const usage = events.find((event) => event.type === "usage")!.payload;
+    expect(usage).not.toHaveProperty("truncated");
+    expect(usage).toHaveProperty("tokens.total", expect.any(Number));
+    expect(usageArtifacts).toHaveLength(1);
+    // Pi also persists the abort after the refused call; retain that call history too.
+    expect(usageArtifacts[0]!.calls.length).toBeGreaterThanOrEqual(TOOL_CALL_LIMIT + 1);
   }, 120_000);
 });
 
