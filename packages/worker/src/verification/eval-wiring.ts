@@ -85,6 +85,7 @@ export interface EvalHostSources {
   readonly meter?: EvalMeterOptions;
   /** L4-EINT (E4): the stand-in set's version for the base-cache key (present only when stand-ins are on). */
   readonly standInSetVersion?: (() => Promise<string | undefined>) | undefined;
+  readonly fillMissingRows?: EvalFinalCheckPorts["fillMissingRows"] | undefined;
 }
 
 /** The longest the one eval-plan ask may take. */
@@ -101,6 +102,7 @@ export interface EvalCheckHost {
   readonly changedPrompt?: (frame: ModelEgressFrame) => boolean;
   readonly meter?: EvalMeterOptions;
   readonly standInSetVersion?: (() => Promise<string | undefined>) | undefined;
+  readonly fillMissingRows?: EvalFinalCheckPorts["fillMissingRows"] | undefined;
 }
 
 /**
@@ -184,7 +186,7 @@ export function evalModelPathPattern(rowId: string, model: string): RegExp {
  * DEC 253n(2): the check round's fresh sandbox and model pin, built per run from the delivered plan (`deliveredPlan`) and this check's pin. `available()` answers only what the host can know before
  * the plan is read (a pinned worker image and the model helper's walls); everything else is checked at `run`, which throws (Not run) before anything starts when it does not hold.
  */
-export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<EvalSourceInvocation, "operationId"> & { readonly workspaceId?: string }, deliveredPlan: () => Promise<unknown>, deliveredEnvironment: () => Promise<EvalEnvironment | undefined> = async () => undefined, deliveredStandIns: () => Promise<EvalStandInDescriptor | undefined> = async () => undefined): Pick<EvalCheckHost, "sandbox" | "runDir" | "modelAllowed" | "standInSetVersion"> {
+export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<EvalSourceInvocation, "operationId"> & { readonly workspaceId?: string }, deliveredPlan: () => Promise<unknown>, deliveredEnvironment: () => Promise<EvalEnvironment | undefined> = async () => undefined, deliveredStandIns: () => Promise<EvalStandInDescriptor | undefined> = async () => undefined): Pick<EvalCheckHost, "sandbox" | "runDir" | "modelAllowed" | "standInSetVersion" | "fillMissingRows"> {
   const image = host.environment[EVAL_WORKER_IMAGE_VARIABLE]?.trim();
   // The model the running plan pins (set when a run has read its plan): a frame for another row or model is refused before the stage.
   let pinned: { row: string; path: RegExp } | undefined;
@@ -243,7 +245,7 @@ export function plannedFreshEvalSandbox(host: EvalFreshHost, invocation: Pick<Ev
     // Short and the worker's own: each run makes a private (0700) folder in it for the bridge socket and removes it.
     runDir: tmpdir(),
     modelAllowed: (frame) => pinned !== undefined && frame.row === pinned.row && pinned.path.test(frame.path),
-    ...(standInsOn ? { standInSetVersion: async () => (await prepare())?.version } : {}),
+    ...(standInsOn ? { standInSetVersion: async () => (await prepare())?.version, fillMissingRows: async request => (await prepare())?.databases?.fillMissingRows(request) ?? [] } : {}),
   };
 }
 
@@ -270,7 +272,7 @@ export function evalHostSourcesFor(invocation: EvalSourceInvocation, host: { rea
     };
     return { ...sources, plan,
       sandbox: check.sandbox, runDir: check.runDir, modelAllowed: check.modelAllowed,
-      ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }), ...(check.standInSetVersion === undefined ? {} : { standInSetVersion: check.standInSetVersion }) };
+      ...(check.changedPrompt === undefined ? {} : { changedPrompt: check.changedPrompt }), ...(check.meter === undefined ? {} : { meter: check.meter }), ...(check.standInSetVersion === undefined ? {} : { standInSetVersion: check.standInSetVersion }), ...(check.fillMissingRows === undefined ? {} : { fillMissingRows: check.fillMissingRows }) };
   } catch { return undefined; }
 }
 
@@ -327,6 +329,7 @@ export function evalFinalCheckForTask(input: EvalTaskBindingInput): EvalFinalChe
       exec: createBridgedEvalExec({ sandbox: sources.sandbox, runDir: sources.runDir, modelAllowed: sources.modelAllowed, changedPrompt, ...(input.now === undefined ? {} : { now: input.now }) }),
       ...(sources.meter === undefined ? {} : { meter: sources.meter }),
       ...(sources.standInSetVersion === undefined ? {} : { standInSetVersion: sources.standInSetVersion }),
+      ...(sources.fillMissingRows === undefined ? {} : { fillMissingRows: sources.fillMissingRows }),
     });
   } catch { return undefined; }
 }

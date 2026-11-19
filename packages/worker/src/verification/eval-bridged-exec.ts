@@ -14,7 +14,9 @@ import { realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
-import { EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { seedLockHolds, EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { checkoutSeedReader } from "../service-seed-lock.js";
+import { seedPathInRepository } from "../eval-repository-path.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
 import { createModelBridge } from "../model-bridge.js";
 import { createModelBridgeLedger } from "../model-bridge-ledger.js";
@@ -816,7 +818,39 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         if (input.signal.aborted) throw new Error("eval stage stopped");
         // 4. L4-E12 (E1): this run's OWN copy of the project's services, on this round's network at .16 to .47 (never in a dry run: a dry run must SEE what the eval needs, so it is given nothing). A start that fails ends the run.
         if (!dryRun && config.services !== undefined) {
-          servicesRun = await config.services.start(helper.network, input.signal);
+          const net = helper.network;
+          // Only the stand-in path supplies a runner; switch-off calls are unchanged. Each command
+          // gets the side's own checkout and the SAME round network, with the eval box's walls.
+          servicesRun = config.reportStandInDatabases !== true ? await config.services.start(net, input.signal) : await config.services.start(net, input.signal, started => async (command, signal, lock) => {
+            if (signal.aborted || input.signal.aborted || now() >= deadline) throw new Error("eval stage stopped");
+            const path = seedPathInRepository(`${command.cwd}/.rovara-command`, config.repository.directory);
+            if (path === undefined) throw new Error("the eval seed folder is unavailable");
+            const cwd = posix.dirname(path);
+            if (lock !== undefined && !await seedLockHolds(command, lock, checkoutSeedReader(checkout, cwd, [checkout]))) throw new Error("the eval seed lock differs");
+            const name = `${net.name}-eval`;
+            installBoxes.push(name);
+            installing = name;
+            installed = true;
+            try {
+              // The existing argument guard pins the reserved eval name/address. This temporary
+              // preparation box is removed before the eval box takes that name and address.
+              // No bridge token is given to a project preparation command.
+              await writeFile(envFile, freshEvalEnvironment({ rowId: config.rowId, token: MODEL_DUMMY_KEY, side: input.side, runs: 1, ids: input.ids, helperIp: helper!.helperIp, pythonUserBase: environment !== undefined, services: [...started.env, ...Object.entries(command.env ?? {})] }), { mode: 0o600 });
+              const args = freshEvalSandboxRunArgs({ net, image: config.image, name, checkout, envFile, block: block.block, command: { executable: command.executable, args: command.args, cwd }, serviceHosts: started.hosts }, { bridgeDir });
+              const began = await call(args, SANDBOX_START_MS);
+              await rm(envFile, { force: true });
+              if (began.exitCode !== 0 || signal.aborted || input.signal.aborted) throw new Error("the eval seed could not start");
+              if (bridgeFolderMountProblems({ helper: await containerMounts(docker, helper!.helperName), sandbox: await containerMounts(docker, name), bridgeDir, checkout }).length > 0) throw new Error("the eval seed is not isolated");
+              const waited = await call(["wait", name], Math.min(command.timeoutSeconds * 1000, remainingMs()));
+              if (signal.aborted || input.signal.aborted) throw new Error("eval stage stopped");
+              const code = /^-?\d+$/u.test(waited.stdout.trim()) ? Number(waited.stdout.trim()) : null;
+              return { exitCode: waited.exitCode === 0 ? code : null, timedOut: waited.timedOut === true };
+            } finally {
+              await call(["rm", "--force", name]);
+              await rm(envFile, { force: true });
+              installing = undefined;
+            }
+          });
           secrets.push(...servicesRun.secrets);
         }
         if (input.signal.aborted) throw new Error("eval stage stopped");
@@ -926,6 +960,8 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           await mkdir(dirname(target), { recursive: true, mode: 0o700 });
           await writeFile(target, bytes, { mode: 0o600 });
         }
+        // Capture actual database lookups before the disposable helpers and network disappear.
+        await servicesRun?.observe?.(input.ids, input.signal).catch(() => undefined);
         // 8. L4-E56: the stand-in's summary, read while the helper is still up and after the sandbox's last exit (the helper writes it before it sends each answer). An unreadable one says nothing, so the run counts as having hit a gap.
         // L4-EINT: what this run was stood in for: databases by engine (the services' own ports), planned outside hosts, and the fixed telemetry entries answered `OK`. A database-only round reports no gap and empty counts.
         const databases = config.reportStandInDatabases !== true ? [] : [...new Set((servicesRun?.started ?? []).flatMap((entry) => entry.ports.map((port) => evalStandInEngineOfPort(port))).filter((engine): engine is NonNullable<typeof engine> => engine !== undefined))];

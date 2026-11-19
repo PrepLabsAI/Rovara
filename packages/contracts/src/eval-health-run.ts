@@ -2,7 +2,7 @@
 // times (`runEvalHealth`), in a fresh sandbox, through the model gateway, and the broker keeps the result as the project's baseline and tells the person pass or fail per case, or why it did not run.
 //
 // What crosses the wire (the worker's one post, `eval-health-result`): which request and claim it answers, and either the measured baseline record or a closed reason. Nothing else: no cost, no company, no project, no
-// key parts. The broker holds the claim (its own random id, written when the run was claimed), derives the cache key from ITS OWN plan, and reads the questions from ITS OWN plan; a body can only fill in answers.
+// key parts beyond the optional stand-in digest. The broker holds the claim (its own random id, written when the run was claimed), derives the cache key from ITS OWN plan, and reads the questions from ITS OWN plan; a body can only fill in answers.
 import { z } from "zod";
 import { EvalBaseRecordSchema } from "./eval-base-cache.js";
 import { EvalBlockedReachSchema, evalBlockedReachClause, type EvalBlockedReach } from "./eval-run-diagnostic.js";
@@ -49,7 +49,7 @@ export const EvalHealthResultBodySchema = z.object({
   requestId: z.string().uuid(),
   claimId: z.string().uuid(),
   result: z.discriminatedUnion("status", [
-    z.object({ status: z.literal("measured"), record: EvalBaseRecordSchema }).strict(),
+    z.object({ status: z.literal("measured"), record: EvalBaseRecordSchema, standInSetVersion: z.string().regex(/^[a-f0-9]{64}$/u).optional() }).strict(),
     /** TH1: `blocked` names what the sealed eval tried to reach (fixed shape, host names only), and only with `blocked_connection`. */
     z.object({ status: z.literal("not_run"), reason: z.enum(EVAL_HEALTH_WORKER_REASONS), blocked: EvalBlockedReachSchema.optional() }).strict(),
   ]),

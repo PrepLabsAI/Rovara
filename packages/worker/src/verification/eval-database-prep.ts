@@ -11,7 +11,7 @@
 // THE FILL PASS. A lookup that finds no row is something the stand-in database can only know by being watched (the wiring's observer reports it as a `ZeroRowLookup`). `createFillPass` turns what the observer saw into ONE pass:
 // the same missing keys are written to BOTH sides' databases (identical rows, by the generator), and the questions that asked are returned for the round to ask again, once, on both sides (`eval-round.ts`, `fillMissingRows`).
 import { createHash } from "node:crypto";
-import { formatCommandLine, standInSetVersion, type ProjectCommand } from "@agentx/contracts";
+import { formatCommandLine, standInSetVersion, type ProjectCommand, type SeedScriptLock } from "@agentx/contracts";
 import type { DockerCli } from "../swebench/containers.js";
 import { loadSeedFile, readDatabaseText, seedFileDigest, SeedFileError, type SeedFileTarget } from "../service-seed-file.js";
 import {
@@ -43,7 +43,7 @@ export function postgresStandInDatabase(input: { docker: Pick<DockerCli, "execBy
 }
 
 /** One thing a side loads: a project command (a migration or a seed command) or a repository SQL file's bytes. */
-export type StandInStep = { readonly kind: "command"; readonly command: ProjectCommand } | { readonly kind: "file"; readonly bytes: Buffer };
+export type StandInStep = { readonly kind: "command"; readonly command: ProjectCommand; readonly lock?: SeedScriptLock } | { readonly kind: "file"; readonly bytes: Buffer };
 
 export type StandInPrepareFailure = "migration_failed" | "migration_timeout" | "migration_rollback" | "seed_failed" | "seed_timeout" | "too_many_steps" | "stopped";
 const SENTENCES: Record<StandInPrepareFailure, string> = {

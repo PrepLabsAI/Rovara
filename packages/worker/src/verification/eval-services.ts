@@ -9,7 +9,7 @@
 // WHAT IS NOT HERE: emulators, fakes and a company's own images (`backing` other than `local`) are not served on the eval network yet (E5 to E8); they are listed as `unsupported`, the eval runs without them and the dry run's list says
 // what it needed. Seeds, migrations and generated rows are E3: the `seed` seam runs after every service is healthy and before the eval command starts, and a failure there stops the run.
 import { createHash } from "node:crypto";
-import { CATALOG_REGISTRY_ROOT, type TaskDependencyPlan } from "@agentx/contracts";
+import { CATALOG_REGISTRY_ROOT, type TaskDependencyPlan, type ProjectCommand, type SeedScriptLock } from "@agentx/contracts";
 import type { ServicesNetwork } from "../run-network.js";
 import { createRunDirectoryFiles, helperSecretValues, removeRunDirectory } from "../service-env.js";
 import { HelperStartError, startHelpers, type StartedHelper } from "../service-helpers.js";
@@ -24,7 +24,12 @@ export const EVAL_SERVICES_MAX = 12;
 /** One retry of a start that failed (design 3, rule 4: a stand-in that will not start is Rovara's problem: retry once, then Not run). */
 const START_ATTEMPTS = 2;
 
+/** Internal runner: the fresh sandbox supplies its checkout, network, limits and cleanup. */
+export type EvalSeedCommandRunner = (command: ProjectCommand, signal: AbortSignal, lock?: SeedScriptLock) => Promise<{ exitCode: number | null; timedOut: boolean }>;
+export interface EvalDatabaseObservation { observe(ids: readonly string[], signal: AbortSignal): Promise<void> }
+
 export interface EvalServicesStarted {
+  readonly observe?: EvalDatabaseObservation["observe"];
   /** Every name the box reaches a service by and the helper's address (.16 to .47 of the round's slot). */
   readonly hosts: readonly RunHostEntry[];
   /** `[NAME, value]` in the order they go into the box's env file: the connection variables of every service (`DATABASE_URL`, `PGHOST`, ...). Plain values only. */
@@ -46,7 +51,7 @@ export interface EvalServicesStarter {
    * Starts a FRESH copy of the project's services on this round's network. Resolves with nothing started (`started: []`) for a plan with no real-software service. Throws a fixed-word Error on any failure, after removing whatever
    * it made.
    */
-  start(net: ServicesNetwork, signal: AbortSignal): Promise<EvalServicesStarted>;
+  start(net: ServicesNetwork, signal: AbortSignal, commands?: (started: Omit<EvalServicesStarted, "stop">) => EvalSeedCommandRunner): Promise<EvalServicesStarted>;
 }
 
 export interface EvalServicesInput {
@@ -55,7 +60,7 @@ export interface EvalServicesInput {
   /** The task's dependency plan (`payload.testServices.dependencies`): the broker's own, checked here against the worker's catalog again. */
   readonly dependencies: readonly TaskDependencyPlan[] | undefined;
   /** E3's seam: loads the project's migrations and seeds into this round's services (they are healthy, the eval has not started). Absent: the services start empty. */
-  readonly seed?: ((started: Omit<EvalServicesStarted, "stop">, net: ServicesNetwork, signal: AbortSignal) => Promise<void>) | undefined;
+  readonly seed?: ((started: Omit<EvalServicesStarted, "stop">, net: ServicesNetwork, signal: AbortSignal, runCommand?: EvalSeedCommandRunner) => Promise<void | EvalDatabaseObservation>) | undefined;
 }
 
 const sha = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -66,11 +71,11 @@ export function createEvalServicesStarter(input: EvalServicesInput): EvalService
   const dependencies = input.dependencies;
   if (config === undefined || dependencies === undefined || !dependencies.some((plan) => plan.backing === "local")) return undefined;
   return {
-    async start(net, signal) {
+    async start(net, signal, commands) {
       let lastError: unknown;
       for (let attempt = 1; attempt <= START_ATTEMPTS; attempt += 1) {
         if (signal.aborted) throw new Error("eval stage stopped");
-        try { return await startOnce(config, dependencies, input.seed, net, signal); } catch (error) { lastError = error; }
+        try { return await startOnce(config, dependencies, input.seed, net, signal, commands); } catch (error) { lastError = error; }
       }
       void lastError;
       throw new Error(EVAL_SERVICES_FAILURE_SENTENCE);
@@ -78,7 +83,7 @@ export function createEvalServicesStarter(input: EvalServicesInput): EvalService
   };
 }
 
-async function startOnce(config: TestServicesConfig, dependencies: readonly TaskDependencyPlan[], seed: EvalServicesInput["seed"], net: ServicesNetwork, signal: AbortSignal): Promise<EvalServicesStarted> {
+async function startOnce(config: TestServicesConfig, dependencies: readonly TaskDependencyPlan[], seed: EvalServicesInput["seed"], net: ServicesNetwork, signal: AbortSignal, commands?: (started: Omit<EvalServicesStarted, "stop">) => EvalSeedCommandRunner): Promise<EvalServicesStarted> {
   const locals = dependencies.filter((plan) => plan.backing === "local");
   const unsupported = dependencies.filter((plan) => plan.backing !== "local").map((plan) => plan.id);
   if (locals.length === 0 || locals.length > EVAL_SERVICES_MAX) throw new Error(EVAL_SERVICES_FAILURE_SENTENCE);
@@ -111,8 +116,8 @@ async function startOnce(config: TestServicesConfig, dependencies: readonly Task
       targets: helpers.helpers.flatMap((helper) => { const item = resolved.find((candidate) => candidate.request.id === helper.id); return item === undefined ? [] : [{ id: helper.id, container: helper.container, family: item.plan.family, user: item.request.credentials?.user, database: item.request.credentials?.database }]; }),
       unsupported,
     };
-    await seed?.(started, net, signal);
-    return { ...started, stop };
+    const observation = await seed?.(started, net, signal, commands?.(started));
+    return { ...started, ...(observation === undefined ? {} : observation), stop };
   } catch (error) {
     await stop();
     // The message is always the fixed sentence; the cause stays with the error and is never read into a message or a log line.

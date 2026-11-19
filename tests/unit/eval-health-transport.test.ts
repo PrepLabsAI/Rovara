@@ -7,6 +7,7 @@ import {
   EVAL_HEALTH_RESULT_MAX_BYTES, EVAL_HEALTH_RESULT_PATH, EVAL_HEALTH_RUN_MAX_MS, EVAL_PLAN_DELIVERY_ACTION, EvalPlanDeliverySchema, PREPARE_EVAL_HEALTH_FEATURE, WORKER_INVOCATION_FEATURES,
   WorkerInvocationSchema, type EvalBaseRecord, type EvalReservationAdapter, type ProjectDefinition,
 } from "@agentx/contracts";
+import { evalHealthRunDeps } from "../../packages/broker/src/core-host/eval-health-wiring.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
 import { gatewayForCallbacks, gatewayModelAccessFromEnvironment, taskKeySigner, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_AGENT_MODEL_VARIABLE } from "../../packages/broker/src/core-host/gateway-model-access.js";
@@ -155,6 +156,20 @@ describe("the run's own preparation", () => {
   });
 });
 
+describe("the hosted health stand-in source", () => {
+  it("uses the operator switch and scopes the descriptor to its company", async () => {
+    const w = await world(); const required: string[] = [];
+    const registry = { names: () => [], get: () => undefined, require: (point: string) => { required.push(point); return point === "storage" ? w.h.store : {}; } } as never;
+    const input = { registry, companyId: A, members: w.w.members, now: () => w.h.clock.now, modelGatewayConfigured: true };
+    expect(evalHealthRunDeps(input)).not.toHaveProperty("standIns");
+    expect(required).not.toContain("object-storage");
+    const on = evalHealthRunDeps({ ...input, environment: { AGENTX_EVAL_STAND_INS: "1" } });
+    expect(on.standIns).toBeTypeOf("function");
+    expect(required).toContain("object-storage");
+    expect(await on.standIns!({ companyId: "other", project })).toBeUndefined();
+  });
+});
+
 describe("the plan and grant callback for the run's preparation", () => {
   it("answers the plan on main's head and the grant of the request's approved item, no-store, to the run's own capability", async () => {
     const w = await world(); const run = await w.started();
@@ -201,6 +216,13 @@ describe("the plan and grant callback for the run's preparation", () => {
 });
 
 describe("the result callback", () => {
+  it("accepts the optional version only on the run's own measured callback", async () => {
+    const w = await world(); const run = await w.started(); const version = "c".repeat(64);
+    const raw = resultBody(run);
+    const measured = { ...raw, result: { ...raw.result, standInSetVersion: version } };
+    expect((await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), measured)).statusCode).toBe(200);
+    expect((await readEvalHealthRow({ store: w.h.store, companyId: A }, project))?.claim).toMatchObject({ standInSetVersion: version });
+  });
   it("takes the run's one result: the baseline is kept and the request finishes, and a second post is the same answer", async () => {
     const w = await world(); const run = await w.started();
     const reply = await w.post(run, EVAL_HEALTH_RESULT_PATH, w.token(run), resultBody(run));
