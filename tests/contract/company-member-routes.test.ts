@@ -353,7 +353,8 @@ describe("the removal preview", () => {
     task("t6", { developerId: OWNER });
     expect(await h.call("GET", member(MEMBER, "removal-preview"))).toEqual({ status: 200, body: {
       personId: MEMBER, role: "member", name: "Max", openTasks: 2, awaitingTheirDecision: 1, ownedProjects: ["alpha"], projectGrants: ["beta"], mayRemove: true,
-      successor: { personId: ADMIN, name: "Ada" }, handOver: nothingMoved,
+      // Only alpha is handed over: gamma (a grant row in this company naming company B's project) and the legacy/foreign rows are not this company's projects (b21 hand-over fix).
+      successor: { personId: ADMIN, name: "Ada" }, handOver: { ...nothingMoved, projects: 1 },
     } });
     expect(h.forwarded).toEqual([]);
   });
