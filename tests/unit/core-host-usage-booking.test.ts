@@ -205,7 +205,7 @@ describe("the ledger without holds (the laptop) is unchanged", () => {
     await createCostLedger({ store, metering: meter, now: () => NOW }).recordUsage({ companyId: ORG, entryId: "e", at: NOW.toISOString(), taskId: "t", usage: { provider: "p", modelId: "m", tokens: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 } } });
     expect(await store.get(companyDayKey(ORG, DAY))).toEqual({ ...companyDayKey(ORG, DAY), entityType: "COST_DAY", companyId: ORG, day: DAY, usdMicros: 7, entries: 1, uncountedEntries: 0 });
     expect(await store.get({ pk: costPartition(ORG, "t"), sk: "TOTAL" })).toEqual({
-      pk: costPartition(ORG, "t"), sk: "TOTAL", entityType: "COST_TOTAL", taskId: "t", companyId: ORG, currency: "USD", micros: 7,
+      pk: costPartition(ORG, "t"), sk: "TOTAL", entityType: "COST_TOTAL", taskId: "t", companyId: ORG, currency: "USD", micros: 7, revision: 1,
       tokensInput: 7, tokensOutput: 0, tokensCacheRead: 0, tokensCacheWrite: 0, entries: 1, unpricedEntries: 0, updatedAt: NOW.toISOString(),
     });
   });
@@ -336,4 +336,38 @@ it.each([
   expect(await w.ledger.companyDayCost(ORG, DAY)).toMatchObject({ uncountedEntries: missing ? 1 : 0 });
   const admission = createHostedAdmission({ store: w.store, ledger: w.ledger, settings: { allowedCompanies: "all", companyDayCapMicros: 100_000_000, taskCapMicros: 100_000_000 }, now: () => NOW });
   expect(await admission.admit({ companyId: ORG, idempotencyKey: "refusal-check", action: "task.start", subject: { type: "task", id: randomUUID() } })).toMatchObject(missing ? { allowed: false, code: "spend_unknown" } : { allowed: true });
+});
+
+
+describe("one task-money projection", () => {
+  const task = { taskId: "money-task", companyId: ORG, workspaceId: "money-workspace", status: "CLOSED", updatedAt: NOW.toISOString(), createdAt: NOW.toISOString() };
+  const read = async (store: MemoryDocumentStore, extra = {}) => {
+    const module = await import("../../packages/broker/src/core/cost/ledger.js");
+    const project = Reflect.get(module, "readTaskMoney");
+    expect(project).toBeTypeOf("function");
+    return project({ store, companyId: ORG, task, ...extra });
+  };
+  it("never converts a missing report to zero, including a terminal task", async () => {
+    const money = await read(new MemoryDocumentStore(), { hosted: true });
+    expect(money).toMatchObject({ state: "unavailable", spentMicros: { state: "unavailable" }, finality: "unavailable", terminal: true });
+  });
+  it("counts awaiting usage once, keeps terminal money provisional and replaces corrections", async () => {
+    const { chargeReceipt: receipt } = await import("./charge-receipt-fixture.js");
+    const store = new MemoryDocumentStore();
+    const ledger = createCostLedger({ store, metering, now: () => NOW });
+    const r = receipt({ companyId: ORG, taskId: task.taskId, amountMicros: { state: "available", value: 80 }, originalReservationMicros: { state: "available", value: 80 } });
+    await ledger.applyChargeReceipt(r);
+    const first = await read(store, { hosted: true, revealPayer: true });
+    expect(first).toMatchObject({ state: "partial", revision: 1, spentMicros: { value: 80 }, estimatedMicros: { value: 80 }, awaitingUsageMicros: { value: 80 }, awaitingUsageCalls: { value: 1 }, finality: "provisional" });
+    await ledger.applyChargeReceipt(receipt({ ...r, revision: 2, replacesRevision: 1, status: "final", reason: "confirmed_not_sent", amountMicros: { state: "available", value: 0 } }));
+    const corrected = await read(store, { hosted: true });
+    expect(corrected).toMatchObject({ revision: 2, spentMicros: { value: 0 }, awaitingUsageCalls: { value: 0 }, finality: "provisional" });
+  });
+  it("counts calls with no amount without inventing a dollar and restricts payer detail", async () => {
+    const { chargeReceipt: receipt } = await import("./charge-receipt-fixture.js");
+    const store = new MemoryDocumentStore();
+    const ledger = createCostLedger({ store, metering, now: () => NOW });
+    await ledger.applyChargeReceipt(receipt({ companyId: ORG, taskId: task.taskId, amountMicros: { state: "unavailable", reason: "not_measured" }, originalReservationMicros: { state: "unavailable", reason: "not_measured" } }));
+    expect(await read(store, { hosted: true })).toMatchObject({ spentMicros: { state: "unavailable" }, awaitingUsageCalls: { value: 1 }, awaitingUsageMicros: { state: "unavailable" }, payer: { state: "unavailable", reason: "restricted" }, allocations: [] });
+  });
 });

@@ -14,13 +14,13 @@ afterEach(async () => { while (cleanup.length > 0) await cleanup.pop()!(); });
 const PROJECT = { name: "payments", revision: 1, setup: [], readiness: [], orchestratorInstructions: "Delegate work.", repositories: [{ name: "demo", url: "https://examplehost/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "host-app" }] };
 
 describe("the laptop app's route chain", () => {
-  it("answers the wiki build's controls and the upkeep switch (not the owner routes' 'route not found'), and the knowledge suggestion route", async () => {
+  it.each([true, false])("answers the wiki build's controls and the upkeep switch (not the owner routes' 'route not found'), and the knowledge suggestion route (run limit enabled: %s)", async (limited) => {
     const root = await mkdtemp(join(tmpdir(), "rovara-chain-"));
     cleanup.push(() => rm(root, { recursive: true, force: true }));
     const stateDirectory = join(root, "state");
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const runtime = await startLocalRuntime({
-      stateDirectory, cwd: join(root, "project"), environment: {}, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9",
+      stateDirectory, cwd: join(root, "project"), environment: { ROVARA_RUN_LIMIT: limited ? "1" : "0" }, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9",
       machines: new FakeWorkerMachines({ startingChecks: 0, features: [...WORKER_INVOCATION_FEATURES] }), timers: false, openBrowser: async () => undefined,
     });
     cleanup.push(() => runtime.stop());
@@ -30,6 +30,11 @@ describe("the laptop app's route chain", () => {
       return { status: response.status, body: await response.json() as { error?: { message?: string }; [key: string]: unknown } };
     };
     expect((await api("/v1/admin/projects", "POST", PROJECT)).status).toBeLessThan(300);
+    const started = await api("/v1/dev/tasks", "POST", { requestId: "11111111-1111-4111-8111-111111111111", project: "payments", instructions: "Add health endpoint", workflow: true, workflowPath: "QUICK" });
+    expect(started.status).toBeLessThan(300);
+    const taskId = (started.body["task"] as { taskId: string }).taskId;
+    const detail = await api(`/v1/dev/tasks/${taskId}`);
+    expect(detail.body["task"]).toMatchObject({ money: { stop: { taskMaximumMicros: limited ? { state: "available", value: 2_000_000 } : { state: "unavailable" } } } });
     const upkeep = await api("/v1/app/projects/payments/upkeep");
     expect(upkeep.status).toBe(200);
     expect(upkeep.body).toMatchObject({ canManage: true });

@@ -1,0 +1,1273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "taskId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048
+    },
+    "currency": {
+      "type": "string",
+      "const": "USD"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "asOf": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "current",
+        "partial",
+        "unavailable"
+      ]
+    },
+    "spentMicros": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "finalMicros": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "estimatedMicros": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "heldMicros": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "unpricedCalls": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "awaitingUsageCalls": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "awaitingUsageMicros": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "payer": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "available"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "member",
+                        "project",
+                        "agent",
+                        "chain"
+                      ]
+                    },
+                    "id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "const": "mixed"
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 2048
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "const": "unavailable"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "not_measured",
+                "missing_price",
+                "unreadable",
+                "restricted",
+                "legacy_data",
+                "not_applicable"
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "allocations": {
+      "maxItems": 100,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "payer": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "available"
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "member",
+                              "project",
+                              "agent",
+                              "chain"
+                            ]
+                          },
+                          "id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "id",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "mixed"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2048
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "not_measured",
+                      "missing_price",
+                      "unreadable",
+                      "restricted",
+                      "legacy_data",
+                      "not_applicable"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "usageValueMicros": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "available"
+                  },
+                  "value": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "not_measured",
+                      "missing_price",
+                      "unreadable",
+                      "restricted",
+                      "legacy_data",
+                      "not_applicable"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "rovaraChargeMicros": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "available"
+                  },
+                  "value": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "state",
+                  "value"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "const": "unavailable"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "not_measured",
+                      "missing_price",
+                      "unreadable",
+                      "restricted",
+                      "legacy_data",
+                      "not_applicable"
+                    ]
+                  }
+                },
+                "required": [
+                  "state",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "billing": {
+            "type": "string",
+            "enum": [
+              "customer",
+              "exempt",
+              "external_provider",
+              "unavailable"
+            ]
+          }
+        },
+        "required": [
+          "payer",
+          "usageValueMicros",
+          "rovaraChargeMicros",
+          "billing"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "expectedCalls": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "available"
+                },
+                "value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "state",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not_measured",
+                    "missing_price",
+                    "unreadable",
+                    "restricted",
+                    "legacy_data",
+                    "not_applicable"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "finalCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "estimatedCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "awaitingUsageCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "incompatibleCurrencyCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "expectedCalls",
+        "finalCalls",
+        "estimatedCalls",
+        "awaitingUsageCalls",
+        "incompatibleCurrencyCalls"
+      ],
+      "additionalProperties": false
+    },
+    "stop": {
+      "type": "object",
+      "properties": {
+        "taskMaximumMicros": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "available"
+                },
+                "value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "state",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not_measured",
+                    "missing_price",
+                    "unreadable",
+                    "restricted",
+                    "legacy_data",
+                    "not_applicable"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "nextCallAvailableMicros": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "available"
+                },
+                "value": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "state",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not_measured",
+                    "missing_price",
+                    "unreadable",
+                    "restricted",
+                    "legacy_data",
+                    "not_applicable"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "limits": {
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "engine_task",
+                  "project_task",
+                  "engine_day",
+                  "gateway_task",
+                  "project_month",
+                  "person_month",
+                  "company_month",
+                  "purpose_month"
+                ]
+              },
+              "maximumMicros": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "available"
+                      },
+                      "value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "unavailable"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "not_measured",
+                          "missing_price",
+                          "unreadable",
+                          "restricted",
+                          "legacy_data",
+                          "not_applicable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "availableMicros": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "available"
+                      },
+                      "value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "unavailable"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "not_measured",
+                          "missing_price",
+                          "unreadable",
+                          "restricted",
+                          "legacy_data",
+                          "not_applicable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "heldMicros": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "available"
+                      },
+                      "value": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "unavailable"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "not_measured",
+                          "missing_price",
+                          "unreadable",
+                          "restricted",
+                          "legacy_data",
+                          "not_applicable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "resetAt": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "available"
+                      },
+                      "value": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d\\.\\d{3}(?:Z))$"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "value"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "state": {
+                        "type": "string",
+                        "const": "unavailable"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "enum": [
+                          "not_measured",
+                          "missing_price",
+                          "unreadable",
+                          "restricted",
+                          "legacy_data",
+                          "not_applicable"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "reason"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            },
+            "required": [
+              "scope",
+              "maximumMicros",
+              "availableMicros",
+              "heldMicros",
+              "resetAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "coverage": {
+          "type": "string",
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "bindingScope": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "available"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "engine_task",
+                        "project_task",
+                        "engine_day",
+                        "gateway_task",
+                        "project_month",
+                        "person_month",
+                        "company_month",
+                        "purpose_month"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "value"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "const": "unavailable"
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "not_measured",
+                    "missing_price",
+                    "unreadable",
+                    "restricted",
+                    "legacy_data",
+                    "not_applicable"
+                  ]
+                }
+              },
+              "required": [
+                "state",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "taskMaximumMicros",
+        "nextCallAvailableMicros",
+        "limits",
+        "coverage",
+        "bindingScope"
+      ],
+      "additionalProperties": false
+    },
+    "terminal": {
+      "type": "boolean"
+    },
+    "finality": {
+      "type": "string",
+      "enum": [
+        "final",
+        "provisional",
+        "unavailable"
+      ]
+    }
+  },
+  "required": [
+    "version",
+    "taskId",
+    "currency",
+    "revision",
+    "asOf",
+    "state",
+    "spentMicros",
+    "finalMicros",
+    "estimatedMicros",
+    "heldMicros",
+    "unpricedCalls",
+    "awaitingUsageCalls",
+    "awaitingUsageMicros",
+    "payer",
+    "allocations",
+    "coverage",
+    "stop",
+    "terminal",
+    "finality"
+  ],
+  "additionalProperties": false,
+  "$id": "https://rovara.ai/contracts/task-money.v1.json",
+  "examples": [
+    {
+      "version": 1,
+      "taskId": "money-task",
+      "currency": "USD",
+      "revision": 1,
+      "asOf": "2026-11-18T00:00:00.000Z",
+      "state": "partial",
+      "spentMicros": {
+        "state": "available",
+        "value": 80
+      },
+      "finalMicros": {
+        "state": "available",
+        "value": 0
+      },
+      "estimatedMicros": {
+        "state": "available",
+        "value": 80
+      },
+      "heldMicros": {
+        "state": "unavailable",
+        "reason": "not_measured"
+      },
+      "unpricedCalls": {
+        "state": "available",
+        "value": 0
+      },
+      "awaitingUsageCalls": {
+        "state": "available",
+        "value": 1
+      },
+      "awaitingUsageMicros": {
+        "state": "available",
+        "value": 80
+      },
+      "payer": {
+        "state": "unavailable",
+        "reason": "restricted"
+      },
+      "allocations": [],
+      "coverage": {
+        "expectedCalls": {
+          "state": "unavailable",
+          "reason": "not_measured"
+        },
+        "finalCalls": 0,
+        "estimatedCalls": 1,
+        "awaitingUsageCalls": 1,
+        "incompatibleCurrencyCalls": 0
+      },
+      "stop": {
+        "taskMaximumMicros": {
+          "state": "unavailable",
+          "reason": "not_measured"
+        },
+        "nextCallAvailableMicros": {
+          "state": "unavailable",
+          "reason": "not_measured"
+        },
+        "limits": [],
+        "coverage": "partial",
+        "bindingScope": {
+          "state": "unavailable",
+          "reason": "not_measured"
+        }
+      },
+      "terminal": true,
+      "finality": "provisional"
+    }
+  ]
+}

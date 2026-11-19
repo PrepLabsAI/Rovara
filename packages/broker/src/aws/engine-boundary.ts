@@ -1,3 +1,4 @@
+import type { TaskMoneyV1 } from "@agentx/contracts";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Engine boundary (migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task goes by the task's stored engine (its stamp,
 // core-host/engine-stamp.ts), never by the switch.
@@ -176,7 +177,7 @@ export interface CoreTaskEntry {
    * Core task web routes (Cloud #188 item 5): what one of the caller's own core tasks has cost and its limit, for the task list's detail. The company is the caller's live membership's and the task must be one they may
    * act on; `undefined` for anything else (and for any failure). Absent: the deployment gives the list no money for core tasks.
    */
-  taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>;
+  taskMoney?(caller: CoreEntryCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>;
   /**
    * Understand's round on the task list's detail: whether the core's own task read would show this caller the task (the owner, a co-owner or a reader of its People list, in their live company). `false` for anything else
    * and for any failure. Absent: the deployment gives the list no round for core tasks.
@@ -225,7 +226,7 @@ const isStart = (request: BrokerRequest): boolean => request.method === "POST" &
  * routes take it from membership.
  */
 export function coreTaskEntryFrom(
-  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean> },
+  routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; taskMoney?(caller: DeployedCaller, taskId: string): Promise<{ costUsd?: number; runLimitUsd: number; money?: TaskMoneyV1 } | undefined>; taskReadable?(caller: DeployedCaller, taskId: string): Promise<boolean> },
   deployedCallerOf: (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined>,
   /** L4-U5b: the deployment's thread recording, asked with the caller as the core knows them (`deployedCallerOf`). Absent: the entry has no `recordThread`. */
   recordThread?: (deployed: DeployedCaller, input: { taskId: string; conversation: ConversationRef; actor: ActorRef }) => Promise<boolean>,
