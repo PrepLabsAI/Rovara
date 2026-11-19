@@ -85,10 +85,12 @@ export async function githubAppInstallationToken(input: { appId: string; private
 /** #1166: the App's id and private key, from the control plane stack's parameters (GitHubAppId, GitHubAppPrivateKeySecretArn) and that secret. Undefined on any failure. */
 export async function githubAppFromStack(stackName: string, region: string): Promise<{ appId: string; privateKey: string } | undefined> {
   try {
-    const { CloudFormationClient, DescribeStacksCommand } = await import("@aws-sdk/client-cloudformation");
+    // The stack's parameters through the AWS CLI, as release-production.ts reads its stacks: a public script imports only the four public adapters' SDKs (port guard, cloud-aws).
+    const described = spawnSync("aws", ["cloudformation", "describe-stacks", "--stack-name", stackName, "--region", region, "--query", "Stacks[0].Parameters", "--output", "json"], { encoding: "utf8", timeout: 20_000 });
+    if (described.status !== 0) return undefined;
+    const rows = JSON.parse(described.stdout) as Array<{ ParameterKey?: string; ParameterValue?: string }> | null;
+    const parameter = (key: string) => rows?.find((row) => row.ParameterKey === key)?.ParameterValue;
     const { SecretsManagerClient, GetSecretValueCommand } = await import("@aws-sdk/client-secrets-manager");
-    const stack = (await new CloudFormationClient({ region }).send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0];
-    const parameter = (key: string) => stack?.Parameters?.find((row) => row.ParameterKey === key)?.ParameterValue;
     const appId = parameter("GitHubAppId"); const secretArn = parameter("GitHubAppPrivateKeySecretArn");
     if (appId === undefined || secretArn === undefined || !secretArn.startsWith("arn:")) return undefined;
     const text = (await new SecretsManagerClient({ region }).send(new GetSecretValueCommand({ SecretId: secretArn }))).SecretString ?? "";
