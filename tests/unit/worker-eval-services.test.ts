@@ -369,3 +369,18 @@ describe("E2: review fixes (embedded resolver, default, cleanup)", () => {
     expect(log.filter((line) => line.startsWith("stop "))).toHaveLength(1);
   });
 });
+
+
+it("passes the round's command runner to seeding and captures the database ledger before stop", async () => {
+  const daemon = fakeEvalDaemon(); const config = await servicesConfig(daemon.docker); const events: string[] = [];
+  const starter = createEvalServicesStarter({ config, dependencies: [postgresPlan()], seed: async (started, _net, signal, runCommand) => {
+    expect(started.env.some(([name]) => name === "DATABASE_URL")).toBe(true);
+    expect(await runCommand!({ cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 30 }, signal)).toEqual({ exitCode: 0, timedOut: false });
+    events.push("seeded");
+    return { observe: async ids => { events.push(`observed ${ids.join(",")}`); } };
+  } })!;
+  const w = await world(daemon, { services: starter, reportStandInDatabases: true });
+  await w.sandbox().run(w.input());
+  expect(events).toEqual(["seeded", "observed q1,q2"]);
+  expect(daemon.containers).toEqual([]); expect(daemon.networks).toEqual([]);
+});

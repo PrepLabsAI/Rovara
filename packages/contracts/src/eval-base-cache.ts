@@ -31,6 +31,8 @@ export const EVAL_BASE_ROUND_KINDS = ["check_sealed", "check_unsealed"] as const
 
 export const EvalBaseRecordSchema = z.object({
   schemaVersion: z.literal(1),
+  /** The stand-in set measured, when this is a versioned baseline. */
+  standInSetVersion: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   /** Per-measure base scores and their spread, as the runner reported them in Rovara's own base round. */
   measures: z.array(MeasuresFileEntrySchema).min(1).max(EVIDENCE_MEASURES_MAX),
   questions: EvalQuestionRowsSchema.refine(rows => rows.every(row => row.samples.length === 3), "three saved runs required").optional(),

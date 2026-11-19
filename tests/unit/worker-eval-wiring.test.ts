@@ -361,3 +361,18 @@ describe("the gateway origin the broker delivers (hosted worker)", () => {
     expect(b.runs).toEqual([]);
   });
 });
+
+
+it("carries the internal fill capability through host sources and re-asks both sides exactly once", async () => {
+  const b = await sources(); const net = network(); const asked: Array<readonly string[]> = [];
+  const fillMissingRows = async (r: { readonly ids: readonly string[] }) => { asked.push(r.ids); return ["q1"]; };
+  const check = { sandbox: b.sources.sandbox, runDir: b.runDir, modelAllowed: b.sources.modelAllowed, fillMissingRows };
+  expect(evalHostSourcesFor({ workspaceId: SCOPE, operationId: SCOPE, callbackCapability: CAP_A }, { controlPlaneUrl: CONTROL, check })?.fillMissingRows).toBe(fillMissingRows);
+  const ports = bind(b, net, { sources: { ...b.sources, fillMissingRows } })!;
+  expect(ports.fillMissingRows).toBe(fillMissingRows);
+  // The host-to-round seam can be exercised without opening a real Unix socket.
+  ports.runner = b.w.ports.runner; ports.meter = b.w.ports.meter;
+  expect(evalResultFromArtifact(await run(ports)).outcome).toBe("ran");
+  expect(asked).toHaveLength(1);
+  expect(b.w.stages.map(r => [r.side, r.ids, r.runs])).toEqual([["new", ["q0", "q1", "q2", "q3"], 1], ["old", ["q1"], 3], ["new", ["q1"], 1]]);
+});

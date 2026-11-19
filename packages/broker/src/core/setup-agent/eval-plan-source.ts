@@ -11,11 +11,12 @@
 //             "spend not approved", with zero calls.
 //   cache     this company's own base-score cache (`createDocumentBaseScoreCache`), read by the callback at the plan's own key.
 //
-// Every source answers only its own company: a scope naming another company is no answer. Nothing here reads the request.
-import { createDocumentBaseScoreCache, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type OrgId } from "@agentx/contracts";
-import type { EvalPlanRead, EvalPlanRun, EvalPlanScope, EvalPlanSources } from "../proof/eval-plan-delivery.js";
+// Every source answers only its own company: a scope naming another company is no answer. The optional baseline hint comes only from the broker's finished health claim.
+import { createDocumentBaseScoreCache, evalBaseCacheKey, evalCodeHash, type AdapterRegistry, type BaseScoreCache, type DocumentStore, type OrgId } from "@agentx/contracts";
+import { baselineParts, type EvalPlanRead, type EvalPlanRun, type EvalPlanScope, type EvalPlanSources } from "../proof/eval-plan-delivery.js";
 import type { EvalEnvironmentSource } from "./eval-environment-source.js";
 import type { SessionMembers } from "../sessions/access.js";
+import { readEvalHealthRow } from "./eval-health-request.js";
 import { readApprovedEvalPlan } from "./eval-spend.js";
 import { createBoundEvalSpendCapabilities } from "./eval-reservation.js";
 
@@ -63,14 +64,25 @@ export function createEvalPlanSources(deps: EvalPlanSourceDeps): EvalPlanSources
       // L4-EINT: the stand-in descriptor of THIS company's project. Any fault is "none".
       let standIns: unknown;
       try { standIns = await deps.standIns?.(scope); } catch { standIns = undefined; }
+      const plan = {
+        company: deps.companyId, project: scope.project, ...body,
+        key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },
+        planDigest: spend.plan.evalPlanDigest,
+      };
+      // The health run may have saved the versioned baseline. Offer only that exact plan's bound version;
+      // the worker still matches its independently prepared set before using the delivered record.
+      let baselineStandInSetVersion: string | undefined;
+      if (deps.standIns !== undefined) {
+        const health = await readEvalHealthRow(table, scope.project);
+        const parts = baselineParts(plan);
+        if (health?.state === "finished" && health.result?.saved === true && health.claim?.standInSetVersion !== undefined
+          && parts !== undefined && evalBaseCacheKey(health.claim.parts) === evalBaseCacheKey(parts)) baselineStandInSetVersion = health.claim.standInSetVersion;
+      }
       return {
+        ...(baselineStandInSetVersion === undefined ? {} : { baselineStandInSetVersion }),
         ...(environment === undefined ? {} : { environment }),
         ...(standIns === undefined ? {} : { standIns }),
-        plan: {
-          company: deps.companyId, project: scope.project, ...body,
-          key: { company: deps.companyId, project: scope.project, baseCommit, codeHash: evalCodeHash(baseCommit), judgePin: body.judgePin, ...key },
-          planDigest: spend.plan.evalPlanDigest,
-        },
+        plan,
         // The grant of exactly the item this plan was read with: its digest is bound, and its "current" plan is that item's (never a later read's).
         approval: createBoundEvalSpendCapabilities(deps.registry, { ...table, project: scope.project, digest: spend.digest,
           // Re-read at grant time: the same item must still be approved WITH its stored plan bound to it (a plan row lost or edited since gives no grant).

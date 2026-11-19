@@ -31,6 +31,19 @@ describe("the health job measures the evals on main", () => {
     expect(w.calls).toHaveLength(6); expect(w.closed).toHaveLength(1);
     expect(writes).toBe(0);
   });
+  it("uses the prepared stand-in version and sends it with the measured result", async () => {
+    const w = await world(2); const version = "c".repeat(64); let asked = 0;
+    const answer = await runEvalHealthJob(job(), { ...portsOf(w), standInSetVersion: async () => { asked += 1; return version; } }, signal());
+    expect(answer.result).toMatchObject({ status: "measured", standInSetVersion: version });
+    expect(EvalHealthResultBodySchema.safeParse(answer).success).toBe(true);
+    expect(asked).toBe(1); expect(w.holds).toHaveLength(1);
+  });
+  it("refuses an invalid prepared version before any hold", async () => {
+    const w = await world(2);
+    const answer = await runEvalHealthJob(job(), { ...portsOf(w), standInSetVersion: async () => "BAD" }, signal());
+    expect(answer.result).toEqual({ status: "not_run", reason: "not_connected" });
+    expect(w.holds).toEqual([]); expect(w.calls).toEqual([]);
+  });
   it("says nothing about a key, company, project, cost or payer: the body is exactly the contract", async () => {
     const w = await world(2);
     const answer = await runEvalHealthJob(job(), portsOf(w), signal());

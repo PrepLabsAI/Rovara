@@ -9,7 +9,7 @@
 // the company's own (`cache(companyId)`) and read at the plan's own key. Any fault, a missing source, or an answer over `EVAL_PLAN_DELIVERY_MAX_BYTES` is "not_available": the worker then reads
 // "not connected" and spends nothing. A refusal is one fixed sentence that names no company, project or source.
 import {
-  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, EvalStandInDescriptorSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor,
+  EVAL_PLAN_DELIVERY_MAX_BYTES, EvalEnvironmentSchema, EvalStandInDescriptorSchema, PrepareEvalHealthSchema, EvalPlanDeliveryGrantSchema, EvalPlanDeliverySchema, EvalRequestSchema, WorkflowReviewBaseSchema, agentXError, evalBaseCacheKey, savedEnvRepositoryIsFor, standInSettingsFingerprint,
   type BaseScoreCache, type EvalBaseCacheKeyParts, type EvalPlanDelivery, type EvalSpendApproval,
 } from "@agentx/contracts";
 import { isLiveOperation } from "../e2e/uploads-chunks.js";
@@ -31,6 +31,8 @@ export interface EvalPlanRun {
 export interface EvalPlanRead {
   /** The confirmed final-check plan of this company's project (Rovara's own selection, inventory and pins). */
   readonly plan: unknown;
+  /** Broker-only hint from a finished health claim for this exact plan; never supplied by the worker. */
+  readonly baselineStandInSetVersion?: string;
   /** The persisted spend approval of the very item `plan` was read with (F3e `createEvalSpendCapabilities(...).approval`, bound to that item's digest), or undefined when it is not wired here. */
   readonly approval: EvalSpendApproval | undefined;
   /**
@@ -84,11 +86,12 @@ export function baselineParts(plan: Record<string, unknown>): EvalBaseCacheKeyPa
   try { evalBaseCacheKey(parts); return parts; } catch { return undefined; }
 }
 
-async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string, unknown>): Promise<Extract<EvalPlanDelivery, { status: "ready" }>["baseline"]> {
-  const parts = cache === undefined ? undefined : baselineParts(plan);
-  if (cache === undefined || parts === undefined) return null;
+async function baselineOf(cache: BaseScoreCache | undefined, plan: Record<string, unknown>, version?: string): Promise<Extract<EvalPlanDelivery, { status: "ready" }>["baseline"]> {
+  const plain = cache === undefined ? undefined : baselineParts(plan);
+  const parts = plain === undefined || version === undefined ? plain : { ...plain, standInSetVersion: version, settingsFingerprint: standInSettingsFingerprint(plain.settingsFingerprint, version) };
+  if (cache === undefined || parts === undefined || plain === undefined) return null;
   const found = await cache.read(parts).catch(() => undefined);
-  const measurement = cache.readMeasurement === undefined ? "unavailable" as const : await cache.readMeasurement(parts).catch(() => "unavailable" as const);
+  const measurement = cache.readMeasurement === undefined ? "unavailable" as const : await cache.readMeasurement(plain).catch(() => "unavailable" as const);
   return { key: evalBaseCacheKey(parts), record: found ?? null, measurement };
 }
 
@@ -134,7 +137,7 @@ export async function handleEvalPlanDelivery(deps: EvalPlanDeliveryDeps, operati
       const parsed = EvalStandInDescriptorSchema.safeParse(found.standIns);
       if (parsed.success) standIns = parsed.data; else log("eval_stand_ins_invalid");
     }
-    const baseline = await baselineOf(deps.sources.cache(scope.companyId), plan);
+    const baseline = await baselineOf(deps.sources.cache(scope.companyId), plan, found.baselineStandInSetVersion);
     const answerWith = (env: typeof environment, stand: typeof standIns = standIns) => EvalPlanDeliverySchema.safeParse({ status: "ready", plan, approval, baseline, ...(env === undefined ? {} : { environment: env }), ...(stand === undefined ? {} : { standIns: stand }) });
     let answer = answerWith(environment);
     if (!answer.success) { log("eval_plan_unavailable"); return NOT_AVAILABLE; }
