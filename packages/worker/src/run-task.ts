@@ -1212,6 +1212,7 @@ async function runTask(
     if (report !== undefined && report.pages.length > wikiPagesRead) { wikiPagesRead = report.pages.length; void emit("progress", { [WIKI_READ_REPORT_FIELD]: report }).catch(() => undefined); }
   };
   const unsubscribe = session.subscribe((event) => {
+    checkpoints.observe(event);
     monitor.observe(event);
     noteWikiRead(event);
     knowledgeStep?.observe(event);
@@ -1238,7 +1239,6 @@ async function runTask(
       lastModelNote = modelNote?.modelCall;
       finalText = assistantText((event as { message?: unknown }).message);
       activeFindings.concludeWith(finalText);
-      checkpoints.observe(event);
     }
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
@@ -1475,7 +1475,7 @@ async function runTask(
             // With checkpoints, the end tells only what is left (marked final); without, the whole part as before.
             const checkpointed = partCheckpoints.get(partSession);
             partCheckpoints.delete(partSession);
-            const endReport = checkpointed?.checkpointed === true ? checkpointed.endReport(stats, partModel, partOutcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            const endReport = checkpointed?.endReport(stats, partModel, partOutcome, dependencies.model) ?? usageForControlPlane(redactedUsage, dependencies.model);
             if (endReport !== undefined) await emit("usage", endReport);
             await artifactSink({ name: `usage-part-${itemId.slice(0, 8)}.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           } catch (error) {
@@ -1521,6 +1521,7 @@ async function runTask(
             guard.onLimit = (error) => { if (stoppedBy === undefined) { stoppedBy = error; void open.abort().catch(() => undefined); } };
             unsubscribe = open.subscribe((event) => {
               if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(stubContextEvent(event)));
+              partUsage.observe(event);
               fileChanges.observe(event);
               partFindings.observe(event);
               const note = sanitizeModelCallEvent(event, 0);
@@ -1536,7 +1537,6 @@ async function runTask(
                 lastNote = note?.modelCall;
                 lastText = assistantText((event as { message?: unknown }).message);
                 partFindings.concludeWith(lastText);
-                partUsage.observe(event);
               }
               if (stoppedBy !== undefined) return;
               const action = guard.observe(event);
@@ -1918,16 +1918,16 @@ async function runTask(
           onLoadedKnowledge: (manifest) => { void emit("progress", loadedKnowledgePayload(manifest)); },
           // Per-run dollar stop: each reviewer reports its usage as it goes too (its session is made new, so it starts from nothing).
           // Kept with the parts' so a stop sends what each reviewer spent at once too.
-          ...(checkpointsAsked ? { usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; } } : {}),
+          usageCheckpoints: (reviewer: PiSessionHandle) => { const made = checkpointsFor(reviewer, undefined); partCheckpoints.set(reviewer, made); return made; },
           onUsage: async ({ role, stats, model, outcome, secondReviewTry, checkpoints: reviewerCheckpoints }) => {
             // The reviewer has ended: a later stop has nothing more of it to send.
             for (const [session, made] of partCheckpoints) if (made === reviewerCheckpoints) partCheckpoints.delete(session);
             const reviewerModel = { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) };
             const usage = createTaskUsageTelemetry(stats, reviewerModel, outcome);
             const redactedUsage = redactCredentials(usage);
-            // SR-1: the usage event stays exactly the telemetry shape the activity index reads (an extra field would make it unreadable and it would be dropped); the second reviewer's calls are told apart by their own artifact names.
+            // The optional missing-call count is understood by the strict readers in both repositories. Second reviewer calls retain their own artifact names.
             // With checkpoints (a deployed install's broker, which reads only the figures), the end tells what is left, marked final.
-            const endReport = reviewerCheckpoints?.checkpointed === true ? reviewerCheckpoints.endReport(stats, reviewerModel, outcome, dependencies.model) : usageForControlPlane(redactedUsage, dependencies.model);
+            const endReport = reviewerCheckpoints?.endReport(stats, reviewerModel, outcome, dependencies.model) ?? usageForControlPlane(redactedUsage, dependencies.model);
             if (endReport !== undefined) await events.append("usage", endReport);
             await artifactSink({ name: reviewUsageArtifactName(role, secondReviewTry), mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
           },
@@ -2133,7 +2133,7 @@ async function runTask(
       const redactedUsage = redactCredentials(usage);
       // What the checkpoints have not reported yet (all of the run's spend when there were none). A run that made no model call (a review run's own session is not used: its reviewers have
       // sessions of their own) has nothing to report, on a fresh session and on a reopened one alike. Without this a reopened run would send the whole conversation's running total again.
-      const endReport = usageBaselineKnown ? checkpoints.endReport(running, runModel, outcome, dependencies.model) : undefined;
+      const endReport = checkpoints.endReport(usageBaselineKnown ? running : { tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }, runModel, outcome, dependencies.model);
       if (endReport !== undefined) {
         await emit("usage", endReport);
         // Kept once the control plane has the event (after the final flush below).

@@ -1,4 +1,4 @@
-511 record kinds: 144 company-scoped, 19 install-wide, 348 needs-company. 271 routes: 93 company-scoped, 9 install-wide, 169 needs-company.
+512 record kinds: 144 company-scoped, 19 install-wide, 349 needs-company. 271 routes: 93 company-scoped, 9 install-wide, 169 needs-company.
 
 # Company inventory (R4, public Code / code/next)
 
@@ -238,6 +238,7 @@ The membership-absent path and the seven original golden pairs keep their respon
 | record | entity:COMMENT_THREAD | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:CONNECTOR_INVOCATION | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:CONVERSATION | needs-company | State table | no | - | T1 MIXED: core conversations for new workspaces use company workspace keys; existing implicit workspaces retain legacy rows. Mainline legacy conversation writers remain aws/broker.ts: createConversation and aws/developer-tasks.ts: task creation. Proofs: task-flow-company-keys.test.ts; lifecycle.test.ts in t1-key-goldens (new and legacy); queue-company.test.ts "legacy unscoped workspace rows belong to the implicit company only"; readers.test.ts named AWS missing-row gaps. No switch-on approval. |
+| record | entity:COST_ADJUSTMENT | needs-company | State table | no | - | Owner-approved charge receipt revisions (C): immutable adjustment in costPartition, committed with the entry-once revision and original-day delta. Retains the cost family's T1 classification. |
 | record | entity:COST_ENTRY | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:COST_ENTRY_ONCE | needs-company | State table | no | - | T1: prove every read scoped before promoting this family; current coverage is not sufficient. |
 | record | entity:COST_HOLD | company-scoped | State table | no | - | Lane L8 spend hold: `ORG#<company>#COST_HOLD`, reached only from a reservation id that names its company (`hold:<company>:<hash>`); two-company test in core-host-spend-holds. |
@@ -1081,7 +1082,7 @@ A hit means a query does not itself prove per-row company isolation. It is not a
 | forwarding | packages/broker/src/core/channel/thread-notices.ts:85:137:sk | key | Runtime sort component forwarded within the feeding partition; not an independent record family. | claimKey, planCardKey, taskKey |
 | forwarding | packages/broker/src/core/ci-fix/ci-fix.ts:219:5:computed | [input.ttlAttribute ?? INDEX_EXPIRY_ATTRIBUTE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | ciEvidenceKey |
 | forwarding | packages/broker/src/core/cost/estimate.ts:49:41:pk | key.pk | Generic runtime pk forwarding; preserves caller/loaded record identity rather than assigning a new record family. | runCostKey |
-| forwarding | packages/broker/src/core/cost/ledger.ts:78:73:sk | entry.entryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | costPartition |
+| forwarding | packages/broker/src/core/cost/ledger.ts:95:73:sk | entry.entryId | Runtime sort component forwarded within the feeding partition; not an independent record family. | costPartition |
 | forwarding | packages/broker/src/core/decisions/approval-gate.ts:213:60:sk | proofKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, approvalProofMarkerKey, approvalRecordKey, spentOnceKey |
 | forwarding | packages/broker/src/core/decisions/approval-gate.ts:204:92:sk | proofKey | Runtime sort component forwarded within the feeding partition; not an independent record family. | approvalProofKey, legacyApprovalProofMarkerKey, approvalRecordKey, spentOnceKey |
 | forwarding | packages/broker/src/core/design-review/effective-setting.ts:9:68:computed | [EFFECTIVE] | Runtime property name forwarding; family-bearing pk/entityType constructors are inventoried separately. | caller records consumed by packages/broker/src/core/design-review/effective-setting.ts (EFFECTIVE) |

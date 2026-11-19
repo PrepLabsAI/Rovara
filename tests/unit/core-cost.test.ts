@@ -211,3 +211,28 @@ describe("the limit a task's model calls are held to", () => {
     expect(remainingUsd(8, undefined)).toBe(0);
   });
 });
+
+import { chargeReceipt } from "./charge-receipt-fixture.js";
+import { companyDayKey, costPartition } from "../../packages/broker/src/core/cost/ledger.js";
+it("atomically replaces charge revisions on the original day across months and detects conflicting replay", async () => {
+  const store = new MemoryDocumentStore();
+  const ledger = createCostLedger({ store, metering: createPriceTableMetering(table), now: () => new Date("2026-02-02T00:00:00.000Z") });
+  const apply = Reflect.get(ledger, "applyChargeReceipt") as (r: unknown) => Promise<unknown>;
+  expect(apply).toBeTypeOf("function");
+  const first = chargeReceipt({ companyId: ORG, taskId: TASK });
+  expect(await apply(first)).toMatchObject({ result: "applied", deltaMicros: 80 });
+  expect(await apply(first)).toMatchObject({ result: "duplicate", deltaMicros: 0 });
+  const final = chargeReceipt({ ...first, revision: 2, replacesRevision: 1, status: "final", reason: "reported_cost", amountMicros: { state: "available", value: 30 }, providerCostMicros: { state: "available", value: 30 }, recordedAt: "2026-02-02T00:00:00.000Z" });
+  expect(await apply(final)).toMatchObject({ result: "applied", deltaMicros: -50 });
+  expect(await apply(first)).toMatchObject({ result: "older" });
+  await expect(apply({ ...final, amountMicros: { state: "available", value: 31 } })).rejects.toThrow();
+  const up = { ...final, revision: 3, replacesRevision: 2, amountMicros: { state: "available", value: 90 }, providerCostMicros: { state: "available", value: 90 } };
+  expect(await apply(up)).toMatchObject({ result: "applied", deltaMicros: 60 });
+  expect(await ledger.taskCost(ORG, TASK)).toMatchObject({ micros: 90, entries: 1, unpricedEntries: 0 });
+  expect(await ledger.companyDayCost(ORG, "2026-01-31")).toMatchObject({ usdMicros: 90, entries: 1 });
+  expect(await ledger.companyDayCost(ORG, "2026-02-02")).toMatchObject({ usdMicros: 0, entries: 0 });
+  const total = await store.get({ pk: costPartition(ORG, TASK), sk: "TOTAL" });
+  expect(total).toMatchObject({ finalMicros: 90, estimatedMicros: 0, awaitingUsageMicros: 0 });
+  expect((await store.query({ pk: costPartition(ORG, TASK), sk: { op: "beginsWith", prefix: "ADJUST#" } })).items).toHaveLength(3);
+  expect(await store.get(companyDayKey(ORG, "2026-01-31"))).toMatchObject({ loadMicros: 90 });
+});

@@ -370,16 +370,26 @@ export function createHostedMoneyStop(deps: { store: DocumentStore; companyId: s
     async keepWholeHold(reservationId, mark) {
       // What the run's unreported spend is kept at: never less than the fixed estimate. The hold's room is kept first (the whole hold, as spent); what the room does not cover is booked
       // as the estimate entry. A hold its checkpoints nearly used up thus never keeps only its last cents for a call that was still going.
+      // A receipt-covered operation already books each recoverable per-call R. An unflushed tail without
+      // coverage proof has no recoverable R: mark it unavailable before releasing the engine planning hold.
+      // This blocks admission and avoids adding a fabricated Full-planning amount to the known calls.
+      const covered = await deps.store.query({ pk: costPartition(deps.companyId, mark.taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${mark.operationId}:` }, limit: 1 });
+      if (covered.items.length > 0) {
+        await estimates.recordUsage({ companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId, usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "unavailable", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } } }, { status: "awaiting_usage" });
+        if (companyOfReservation(reservationId) === deps.companyId) await closeHold(deps.store, reservationId, { kind: "release" }, deps.now);
+        return;
+      }
       const ours = companyOfReservation(reservationId) === deps.companyId;
       const room = ours ? await openHoldRoom(deps.store, reservationId) : 0;
       if (ours) await closeHold(deps.store, reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: mark.operationId } }, deps.now);
-      const rest = unflushedEstimateMicros(deps.settings) - room;
-      if (rest <= 0) return;
+      // Keep an estimated marker even when the hold covered all of it: the task total must
+      // not look exact simply because no additional dollars needed booking.
+      const rest = Math.max(0, unflushedEstimateMicros(deps.settings) - room);
       await estimates.recordUsage({
         companyId: deps.companyId, entryId: unflushedEntryId(mark.operationId), at: deps.now().toISOString(), taskId: mark.taskId,
         usage: { provider: UNFLUSHED_ESTIMATE_PROVIDER, modelId: "estimate", tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
         reportedCost: { micros: rest, currency: "USD" },
-      });
+      }, { status: "estimated" });
     },
   };
 }

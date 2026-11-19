@@ -1,3 +1,4 @@
+import { parseChargeReceiptV1, type ChargeReceiptV1 } from "./charge-receipt.js";
 import { z } from "zod";
 import { isKeyedModelProvider } from "./model-providers.js";
 import { ThinkingLevelSchema } from "./models.js";
@@ -7,6 +8,10 @@ export type PiCacheRetention = "short" | "long";
 export type TaskUsageOutcome = "SUCCEEDED" | "FAILED" | "CANCELLED";
 
 export interface TaskUsageTelemetry {
+  /** Optional evidence envelope. Worker-carried receipts are not authenticated or ingested by the engine. */
+  chargeReceipts?: ChargeReceiptV1[];
+  /** Assistant calls that ended without token usage or provider cost; absent on older workers. */
+  usageMissingCalls?: number;
   schemaVersion: 1;
   outcome: TaskUsageOutcome;
   provider: string;
@@ -38,6 +43,8 @@ const TokenCount = z.number().int().nonnegative();
 
 export const TaskUsageTelemetrySchema = z.object({
   schemaVersion: z.literal(1),
+  usageMissingCalls: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  chargeReceipts: z.array(z.custom<ChargeReceiptV1>(v => parseChargeReceiptV1(v) !== undefined)).min(1).max(64).optional(),
   outcome: z.enum(["SUCCEEDED", "FAILED", "CANCELLED"]),
   provider: z.string().min(1).max(128),
   modelId: z.string().min(1).max(256),
