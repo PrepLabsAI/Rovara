@@ -97,7 +97,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
         actions: actionsFor(you, snapshot.actions), ...(you.mayAsk && deps.ask !== undefined ? { live: { ask: true } } : {}),
       },
       link: `${deps.origin()}/v1/app/sessions/${session.sessionId}`, bindings: await sessionBindingsOf(store, session.orgId, session.sessionId), legs: session.legs, revision: session.revision, createdAt: session.createdAt, updatedAt: session.updatedAt, endedAt: session.endedAt,
-      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest)) },
+      body: { kind: "task", task: await developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), undefined, true) },
     })) as Record<string, unknown>;
   };
 

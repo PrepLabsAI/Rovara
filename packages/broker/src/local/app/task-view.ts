@@ -14,7 +14,7 @@ const PLAN_CONTENT_MAX_BYTES = 32_768;
 /** What the task view says of the second review: the lines, and whether the owner must acknowledge on the task page. The acknowledgement is the owner's act on the local page, never a token's. */
 export interface SecondReviewViewPart { lines: string[]; needsAcknowledgement: boolean; acknowledged: boolean }
 
-export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage, secondReview?: SecondReviewViewPart, money?: TaskMoneyV1): Promise<Record<string, unknown>> {
+export async function developerTaskView(task: TaskRecord, view: TaskView, blobs: ObjectStorage, secondReview?: SecondReviewViewPart, money?: TaskMoneyV1, revealMoney = false): Promise<Record<string, unknown>> {
   const workflow = task.workflow;
   let planContent: string | undefined;
   if (workflow !== undefined && workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
@@ -26,7 +26,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     if (loaded !== undefined) planContent = loaded.markdown.slice(0, PLAN_CONTENT_MAX_BYTES);
   }
   return JSON.parse(JSON.stringify({
-    taskId: task.taskId, ...(money === undefined ? {} : { money }), ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
+    taskId: task.taskId, ...(!revealMoney || money === undefined ? {} : { money }), ...(view.owner === undefined ? {} : { owner: view.owner }), title: task.title, project: task.project, status: view.status, startingRevision: task.startingRevision, client: task.client, shared: false,
     ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
     ...(workflow === undefined ? {} : { workflow: { ...workflow, ...(planContent === undefined ? {} : { planContent }) } }),
@@ -34,7 +34,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     ...(view.setupRecheck === undefined ? {} : { setupRecheck: view.setupRecheck }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
     // What the run is expected to cost (kept with the plan), for the tools and the CLI.
-    ...(task.runEstimate === undefined ? {} : { runEstimate: task.runEstimate }),
+    ...(!revealMoney || task.runEstimate === undefined ? {} : { runEstimate: task.runEstimate }),
     ...(secondReview === undefined || secondReview.lines.length === 0 ? {} : { secondReview: { ...secondReview, ...(secondReview.needsAcknowledgement && !secondReview.acknowledged ? { canAcknowledge: true } : {}) } }),
   })) as Record<string, unknown>;
 }

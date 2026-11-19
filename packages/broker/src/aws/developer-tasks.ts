@@ -262,6 +262,8 @@ import { TASK_ENTRY_AREAS, involvedOnCore, ownerOfExistingTask, ownerOfTaskId, s
 export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDependencies, "registerTaskWebPerson" | "listTaskWebCandidates"> {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
+  /** Request-bound stored-owner/live-company-role check, shared by reads and action responses. */
+  taskMoneyVisible?(task: DeveloperTaskRecord): Promise<boolean>;
   slackTeamId?: string;
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
@@ -1388,7 +1390,8 @@ export async function taskView(
     try { e2ePresentation = await deps.workflowE2EPresentation({ task, operations, actor: options.actor ?? "owner" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
-  const spent = taskSpent(task);
+  const revealMoney = deps.taskMoneyVisible === undefined ? options.actor !== "viewer" : await deps.taskMoneyVisible(task).catch(() => false);
+  const spent = revealMoney ? taskSpent(task) : undefined;
   const owner = taskOwnerView(task);
   return {
     taskId: task.taskId,
@@ -1755,7 +1758,8 @@ async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: Devel
   const workflow = viewWorkflow ?? task.workflow;
   const pulls = (task.workflow?.pullRequests ?? []).slice(0, 32).map((pull) => ({ repository: pull.repositoryId, number: pull.number, url: pull.url, state: pull.state }));
   const money = engine === "core" ? await deps.coreTasks?.taskMoney?.(caller, task.taskId).catch(() => undefined) : undefined;
-  const spent = engine === "workflow" ? taskSpent(task)?.usd : money?.costUsd;
+  const revealMoney = engine === "workflow" && (deps.taskMoneyVisible === undefined ? taskOwnerView(task)?.developerId === caller.developerId : await deps.taskMoneyVisible(task).catch(() => false));
+  const spent = engine === "workflow" ? (revealMoney ? taskSpent(task)?.usd : undefined) : money?.costUsd;
   // Understand's round is a core task's (a workflow task never asks questions). It is built from the workflow the list already has, and shown only when the core's own task read would show this caller the task.
   const asked = engine === "core" ? understandRoundOf(workflow) : undefined;
   const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(() => false)) === true ? asked : undefined;

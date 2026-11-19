@@ -92,7 +92,7 @@ export function createOwnerRoutes(deps: OwnerRoutesDeps): (request: BrokerReques
     const task = await loadOwnedTask(flow.deps, caller, taskId);
     const cap = await deps.roundCap?.(task).catch(() => undefined);
     const maximum = cap === undefined ? undefined : Math.round(cap.limitUsd * 1_000_000);
-    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), await readTaskMoney({ store: flow.deps.store, companyId, task, revealPayer: true, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) }));
+    return developerTaskView(task, await taskViewOf(flow.deps, task), deps.blobs, deps.secondReview?.taskView(task, task.workflow?.candidate?.digest), await readTaskMoney({ store: flow.deps.store, companyId, task, revealPayer: true, ...(maximum === undefined ? {} : { taskMaximumMicros: maximum }) }), true);
   };
   const opens: number[] = [];
   let opening = false;

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NEXT_STEPS } from "../../packages/mcp/src/index.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { taskView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const PLANTED = "xoxb-2222222222-planted-secret";
@@ -416,4 +418,29 @@ describe("no developer task code reads the deployment mode (FR-024)", () => {
   it.skipIf(!existsSync("packages/mcp/src"))("the MCP package", () => {
     for (const path of files("packages/mcp/src")) expect(readFileSync(path, "utf8"), path).not.toMatch(/deploymentMode|ec2-ebs|agentcore/i);
   });
+});
+
+// A People co-owner is still a viewer of the stored owner's money.
+it("withholds legacy spend from reader and co-owner views while retaining the owner's spend", async () => {
+ const h = await running();
+ const task = { ...h.db.get(`DEVTASK#${h.taskId}`, "META"), spentUsd: 28.4812, spentRuns: 1 } as Parameters<typeof taskView>[1];
+ const deps = { documentClient: h.db, tableName: "test", actions: h.actions, now: Date.now } as unknown as Parameters<typeof taskView>[0];
+ expect(await taskView(deps, task, { events: 0, details: false, actor: "owner" })).toMatchObject({ spent: { usd: 28.4812 } });
+ for (const role of ["reader", "co-owner"]) {
+  const view = await taskView(deps, task, { events: 0, details: false, actor: "viewer" });
+  expect(view, role).not.toHaveProperty("spent");
+  expect(JSON.stringify(view)).not.toContain("28.4812");
+ }
+});
+
+it("uses the request's stored owner and live company role even for a co-owner's action response", async () => {
+ const h = await running(), companyId = "org_aaaaaaaaaaaaaaaaaaaa";
+ const task = { ...h.db.get(`DEVTASK#${h.taskId}`, "META"), companyId, spentUsd: 28.4812, spentRuns: 1 } as unknown as Parameters<typeof taskView>[1];
+ for (const [developerId, role, company, visible] of [[MAYA.developerId, "member", companyId, true], [OMAR.developerId, "member", companyId, false], [OMAR.developerId, "admin", companyId, true], [OMAR.developerId, "owner", companyId, true], [OMAR.developerId, "admin", "org_bbbbbbbbbbbbbbbbbbbb", false]] as const) {
+  const caller = { ...MAYA, developerId, amr: "slack" as const };
+  const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "test", tasks: h.actions, now: Date.now, developer: { issuer: "https://example.test", signInTableName: "signin" }, companies: { membershipOf: async () => ({ companyId: company, role }) } } as unknown as Parameters<typeof developerTaskRouteDependencies>[0], caller);
+  const view = await taskView(deps, task, { events: 0, details: false });
+  if (visible) expect(view).toMatchObject({ spent: { usd: 28.4812 } });
+  else expect(view).not.toHaveProperty("spent");
+ }
 });

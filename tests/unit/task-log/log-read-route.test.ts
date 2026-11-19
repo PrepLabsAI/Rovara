@@ -190,12 +190,14 @@ describe("what is shown of an entry", () => {
     await row("answer:r1:q1", { kind: "answer", questionId: "q1", round: 1, text: `use ${token} then ok`, by: `Ana ${token}`, surface: "web" });
     await row("question:r1:q1", { kind: "question", questionId: "q1", round: 1, text: `which? ${token}`, choices: [`a ${token}`, "b"] });
     await row("approval:hand", { kind: "approval", what: "plan", outcome: "approved", by: `Nick ${token}`, surface: "web" });
-    await row("plan:r1", { kind: "plan_summary", revision: 1, needed: `need ${token}`, lines: [`do ${token}`], risk: "low", estimate: `est ${token}` });
+    await row("plan:r1", { kind: "plan_summary", revision: 1, needed: `need ${token}`, lines: [`do ${token}`], risk: "low", estimate: "$4.37 to $10.19" });
     const answer = await get(routes(store), OWNER);
     expect(answer?.statusCode).toBe(200);
     expect(answer!.body).not.toContain(token);
     expect(answer!.body).toContain("[REDACTED]");
     expect(entriesOf(answer!.body)).toHaveLength(4);
+    expect(answer!.body).not.toContain("$4.37");
+    expect(answer!.body).not.toContain("estimate");
   });
 
   it("leaves out an entry that does not parse and an entry whose key is not its row's", async () => {

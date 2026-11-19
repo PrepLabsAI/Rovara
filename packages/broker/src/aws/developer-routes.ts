@@ -1,3 +1,4 @@
+import { taskOwnerView } from "../developer/task-owner-view.js";
 import { slackRecordScope } from "./slack-workspace-tokens.js";
 import { listSlackWorkspaceScopes, SlackWorkspaceRefused, type SlackWorkspaceBindings } from "./slack-workspace-binding.js";
 import { SlackWorkspaceScopeSchema, type SlackWorkspaceScope } from "@agentx/contracts";
@@ -112,7 +113,7 @@ import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access
 import { routeCompanyReads, type CompanyReadsConfiguration } from "../developer/company-reads.js";
 import { evaluateProjectAuthority, mayUseProject } from "../developer/task-project-access.js";
 import { renameTaskOwner } from "../developer/task-owner-name.js";
-import { checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { taskCompanyId, checkTaskPersonIdentity, listTaskWebCandidates, registerTaskChannelPeople, registerTaskWebPerson, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { decodeJwt } from "jose";
@@ -2060,6 +2061,15 @@ export function developerTaskRouteDependencies(
   return {
     documentClient: deps.documentClient,
     tableName: deps.tableName,
+    taskMoneyVisible: async (task) => {
+      const own = taskOwnerView(task)?.developerId === caller.developerId;
+      const reader = deps.companies ?? deps.developer.companies;
+      if (reader === undefined) return own;
+      const membership = await reader.membershipOf?.(caller.developerId);
+      if (membership === undefined) return own && await reader.companyOf(caller.developerId) === taskCompanyId(task);
+      return membership.companyId === taskCompanyId(task)
+        && (own || membership.role === "owner" || membership.role === "admin");
+    },
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     issuer: deps.developer.issuer,
     ...(deps.developer.coreTasks === undefined ? {} : { coreTasks: deps.developer.coreTasks }),

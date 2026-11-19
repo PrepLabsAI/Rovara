@@ -1019,6 +1019,8 @@ it("shows task money only to its stored owner or a live company admin, never a r
  const foreign = remember(OTHER, "member", "task-owner");
  const runtime = await app.runtimeFor(FAKE_COMPANY);
  const { task } = await runtime.flow.start({ principal: owner.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Owned task", workflow: true, workflowPath: "QUICK" });
+ const runEstimate = { lowUsd: 4.37, highUsd: 10.19, runLimitUsd: 12.71, stopAtUsd: 12.71, basis: "default" as const, samples: 0 };
+ await world.store.put({ item: { ...await world.store.get(taskKey(task.taskId)), runEstimate, spentUsd: 1.23, spentRuns: 1 } as never });
  runtime.flow.deps.access.canRead = async () => true;
  runtime.flow.deps.access.canAct = async principal => principal.personId !== "reader";
  // Use the ledger's real partition and an engine aggregate, just as worker accounting does.
@@ -1031,7 +1033,7 @@ it("shows task money only to its stored owner or a live company admin, never a r
  for (const caller of [owner, admin]) {
   const answer = await read(caller);
   expect(answer?.statusCode).toBe(200);
-  expect(JSON.parse(answer!.body)).toMatchObject({ task: { owner: { developerId: "task-owner" }, money: { spentMicros: { value: 1_230_000 }, estimatedMicros: { value: 1_230_000 }, stop: { taskMaximumMicros: { value: 12_000_000 } } } } });
+  expect(JSON.parse(answer!.body)).toMatchObject({ task: { owner: { developerId: "task-owner" }, runEstimate, money: { spentMicros: { value: 1_230_000 }, estimatedMicros: { value: 1_230_000 }, stop: { taskMaximumMicros: { value: 12_000_000 } } } } });
  }
  for (const caller of [reader, coOwner]) {
   cap.mockClear();
@@ -1040,7 +1042,10 @@ it("shows task money only to its stored owner or a live company admin, never a r
   expect(answer?.statusCode).toBe(200);
   const body = JSON.parse(answer!.body) as { task: { money?: unknown } };
   expect(body.task.money).toBeUndefined();
-  expect(answer!.body).not.toMatch(/1230000|12000000|1\.23/);
+  const walk = (value: unknown): number[] => typeof value === "number" ? [value] : value !== null && typeof value === "object" ? Object.values(value).flatMap(walk) : [];
+  for (const figure of [4.37, 10.19, 12.71, 1.23, 1_230_000, 12_000_000]) expect(walk(body)).not.toContain(figure);
+  expect(body.task).not.toHaveProperty("runEstimate");
+  expect(body.task).not.toHaveProperty("spent");
   expect(query.mock.calls.filter(([input]) => input.pk === costPk)).toEqual([]);
   expect(cap).not.toHaveBeenCalled();
   query.mockRestore();
