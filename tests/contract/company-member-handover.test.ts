@@ -189,7 +189,12 @@ describe("the hand-over moves what the person owned, in one transaction, with th
 });
 
 describe("projects the person administers (company layout keys, DEC 254zzz80)", () => {
+  /** A project of a company, where the company layout keeps it (a named company's own partition). */
+  const projectOf = (h: ReturnType<typeof world>, companyId: string, project: string) => h.db.set({ pk: `ORG#${companyId}#PROJECT#${project}`, sk: "REV#000000000001", entityType: "PROJECT",
+    definition: { name: project, revision: 1, orchestratorInstructions: "x", setup: [{ executable: "npm", args: ["ci"], cwd: "repo/r", timeoutSeconds: 900 }],
+      readiness: [{ executable: "npm", args: ["test"], cwd: "repo/r", timeoutSeconds: 900 }], repositories: [{ name: "r", url: "https://github.com/acme/r", defaultBranch: "main", path: "repo/r", credentialRef: "github-agentx-sdlc" }] } });
   const grant = (h: ReturnType<typeof world>, companyId: string, person: string, project: string, role: string, extra: Record<string, unknown> = {}) => {
+    projectOf(h, companyId, project);
     h.db.set({ ...grantKeyFor(companyId, person, project), entityType: "MEMBERSHIP", ownerKey: person, projectName: project, role, grantId: randomUUID(), grantedAt: TIME, companyId, ...extra });
     h.db.set({ ...projectMemberRowKeyFor(companyId, project, person), entityType: "PROJECT_MEMBER", role, grantedAt: TIME, companyId });
   };
@@ -208,6 +213,19 @@ describe("projects the person administers (company layout keys, DEC 254zzz80)", 
     }
     expect(roleOn(h, A, PEER, "gamma")).toBeUndefined(); expect(roleOn(h, A, LEAVER, "gamma")).toBe("developer");
     expect(h.db.get(grantKeyFor(A, PEER, "alpha").pk, grantKeyFor(A, PEER, "alpha").sk)).toMatchObject({ entityType: "MEMBERSHIP", ownerKey: PEER, projectName: "alpha", role: "administrator" });
+  });
+
+  it("a grant in this company's partition naming another company's project, or a project that doesn't exist, is left as it is (never counted or moved)", async () => {
+    const h = world();
+    grant(h, A, LEAVER, "alpha", "administrator");
+    // gamma is company B's project; ghost exists nowhere. Both grants sit in A's partition.
+    h.db.set({ ...grantKeyFor(A, LEAVER, "gamma"), entityType: "MEMBERSHIP", ownerKey: LEAVER, projectName: "gamma", role: "administrator", grantId: randomUUID(), grantedAt: TIME });
+    projectOf(h, B, "gamma");
+    h.db.set({ ...grantKeyFor(A, LEAVER, "ghost"), entityType: "MEMBERSHIP", ownerKey: LEAVER, projectName: "ghost", role: "administrator", grantId: randomUUID(), grantedAt: TIME });
+    expect((await h.preview(LEAVER, PEER)).body["handOver"]).toMatchObject({ projects: 1 });
+    expect((await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).body["moved"]).toMatchObject({ projects: 1 });
+    expect(roleOn(h, A, PEER, "alpha")).toBe("administrator");
+    for (const project of ["gamma", "ghost"]) { expect(roleOn(h, A, PEER, project), project).toBeUndefined(); expect(roleOn(h, A, LEAVER, project), project).toBe("administrator"); }
   });
 
   it("another company's grants, and a row under the successor's key that names another company, are never moved or overwritten", async () => {
