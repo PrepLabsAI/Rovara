@@ -155,10 +155,13 @@ describe("company broker authority on execution", () => {
     expect(JSON.stringify(result.body)).toContain(WEB);
   });
   it("a queued service request rechecks membership and link before reading project models", async () => {
-    const h = await brokerWorld();
+    const h = await brokerWorld(); legacyRevisionIsA(h);
     const execute = () => call(h.handler, { method: "GET", path: "/v1/service/project/models", service: { principal: orchestratorPrincipal,
       thread: `${SLACK_TEAM}/${SLACK_CHANNEL}/${TS}`, slackUser: USER } });
-    const allowed = await execute(); expect(JSON.stringify(allowed.body)).not.toContain(WEB);
+    // The control is a real answer (round-3 review L3): the request reaches company A's own project's models (this fixture approves none), never a refusal before it.
+    const allowed = await execute();
+    expect(allowed.body).toMatchObject({ error: { code: "CONFIG_INVALID", message: "this project has no approved coding models; ask an administrator to configure models" } });
+    expect(JSON.stringify(allowed.body)).not.toContain(WEB);
     h.members.clear(); expect(JSON.stringify((await execute()).body)).toContain(WEB);
   });
   it("workflow start resolves the web person before writing", async () => {

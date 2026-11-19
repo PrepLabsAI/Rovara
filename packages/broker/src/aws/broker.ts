@@ -3195,7 +3195,6 @@ async function slackServiceIdentity(
   await companySlackCaller(dependencies, context.thread, context.requester.userId);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  await refuseForeignLegacyNamesake(dependencies, binding);
   const subject = slackThreadSubject(context.thread);
   const own: AuthenticatedIdentity = {
     issuer: SLACK_THREAD_OWNER_ISSUER,
@@ -3400,30 +3399,19 @@ async function deleteSlackBinding(
 }
 
 /**
- * DEC 254zzz98 (delta review H1): the workflow thread routes a Slack thread reaches (the thread workspace, its preparation and close, the GitHub MCP and connector routes,
- * the model settings) read the project's LEGACY revision `PROJECT#<name>` by name. A NAMED company's binding (read from its own partition; it carries `companyId`) names its
- * project only by name, and names are not unique between a named company's own partition and the legacy namespace. So a legacy revision of that name that is not this
- * company's (the built-in company's, unstamped, or another company's) must never serve this thread: the request is refused as unbound. Checked on every Slack service
- * request (this is the thread identity), so a legacy namesake registered after the thread started is refused at the next request. The built-in company: unchanged.
+ * DEC 254zzz98 (delta review H1, re-review M, round-3 M1): the row a Slack thread's route actually read. When the thread's binding is a NAMED company's (it carries `companyId`),
+ * the legacy revision the route loaded by name must be that company's own (recordInCompany): names are not unique between a named company's own partition and the legacy
+ * namespace, so a built-in (or another company's) namesake, a pinned older revision of another company, or one registered mid-request never serves the thread; it is refused
+ * as unbound. Checked on each legacy read (not on the identity), so a namesake never blocks the company's routes that read no legacy revision (the core's quick start, answers,
+ * thread notes). Any other identity (no Slack binding, or the built-in company's): the row, unchanged.
  */
-async function refuseForeignLegacyNamesake(dependencies: AwsBrokerDependencies, binding: SlackChannelBinding): Promise<void> {
-  const company = namedCompany((binding as { companyId?: unknown }).companyId as string | undefined);
-  if (company === undefined) return;
-  const response = await dependencies.documentClient.send(new QueryCommand({
-    TableName: dependencies.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :revision)",
-    ExpressionAttributeValues: { ":pk": `PROJECT#${binding.projectName}`, ":revision": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-  })) as { Items?: unknown[] };
-  const legacy = response.Items?.[0];
-  if (legacy !== undefined && !recordInCompany(legacy, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+function slackThreadOwnRow<T>(identity: AuthenticatedIdentity | undefined, row: T): T {
+  return bindingOwnRow(identity?.slack?.binding, row);
 }
 
-/**
- * DEC 254zzz98 (re-review M): the row a Slack thread's route actually read. When the thread's binding is a NAMED company's (it carries `companyId`), the legacy revision the route
- * loaded by name must be that company's own (recordInCompany); any other is refused as unbound, so a namesake registered between the identity check and this read never serves
- * the thread, and a pinned older revision of another company neither. Any other identity (no Slack binding, or the built-in company's): the row, unchanged.
- */
-function slackThreadOwnRow<T>(identity: AuthenticatedIdentity, row: T): T {
-  const company = namedCompany((identity.slack?.binding as { companyId?: unknown } | undefined)?.companyId as string | undefined);
+/** The same check for a route that holds the channel binding itself (the SWE-bench routes): a NAMED company's binding needs the legacy row it read to be that company's. */
+function bindingOwnRow<T>(binding: SlackChannelBinding | undefined, row: T): T {
+  const company = namedCompany((binding as { companyId?: unknown } | undefined)?.companyId as string | undefined);
   if (company !== undefined && !recordInCompany(row, company)) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
   return row;
 }
@@ -3900,7 +3888,7 @@ async function ensureThreadWorkspace(
     const taskAnswer = input.taskAnswer === undefined ? undefined : SlackTaskAnswerRequestSchema.safeParse(input.taskAnswer);
     if (taskAnswer !== undefined && !taskAnswer.success) throw agentXError("CONFIG_INVALID", "taskAnswer needs the task's ID");
     if (taskAnswer?.data.taskId === identity.sharedTask.taskId && identity.sharedTask.taskAnswer === true && slack !== undefined) {
-      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask, taskAnswer.data.commentId);
+      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask, taskAnswer.data.commentId, identity);
       if (answer !== undefined) return answer;
     }
     return sharedThreadWorkspace(dependencies, identity, identity.sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
@@ -4358,7 +4346,8 @@ async function taskAnswerWorkspace(
   dependencies: AwsBrokerDependencies,
   thread: SlackThread,
   shared: NonNullable<AuthenticatedIdentity["sharedTask"]>,
-  commentId?: string,
+  commentId: string | undefined,
+  identity: AuthenticatedIdentity,
 ): Promise<SlackThreadWorkspaceResult | undefined> {
   const workspace = await requireWorkspace(dependencies, shared.workspaceId);
   // A merged (or rejected) task gave back its workspace but is not closed: its thread is still answered, which needs no
@@ -4369,7 +4358,7 @@ async function taskAnswerWorkspace(
     { taskId: shared.taskId, workspaceId: shared.workspaceId, thread, ...(commentId === undefined ? {} : { commentId }) },
   );
   if (taskContext === undefined) return undefined;
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   return {
     outcome: "WORKSPACE", mode: "task-answer", workspaceId: workspace.id, status: workspace.status, operationId: null, created: false,
     orchestratorInstructions: settings.definition.orchestratorInstructions, taskContext,
@@ -4960,9 +4949,10 @@ async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
   input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; operationId?: string; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowE2EBaselineSource?: true; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowApprovedPlan?: WorkflowApprovedPlan; workflowReviewFeedback?: WorkflowReviewFeedback; workflowReviewNote?: WorkflowReviewNote; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
-  now: string,
+  now: string,  /** The Slack thread's identity when a thread asked (acceptTask): its binding's company checks the legacy revision read (slackThreadOwnRow). */
+  identity?: AuthenticatedIdentity,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   const resolvedModel = await resolveProjectModel(dependencies, settings);
   // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
   const chatgpt = dependencies.chatgpt === undefined ? undefined
@@ -5467,7 +5457,7 @@ async function acceptTask(
     ...(options.workflowReviewNote === undefined ? {} : { workflowReviewNote: options.workflowReviewNote }),
     ...(options.retiredClaimIds === undefined ? {} : { retiredClaimIds: options.retiredClaimIds }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
-  }, now);
+  }, now, identity);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -5591,7 +5581,7 @@ async function acceptPullRequest(
       `workspace is ${workspace.status}`,
     );
   }
-  const { project, settingsRevision } = await publicationProject(dependencies, workspace);
+  const { project, settingsRevision } = await publicationProject(dependencies, workspace, identity);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
   const body = await attributedBody(dependencies, identity, request.body);
@@ -5761,7 +5751,7 @@ async function acceptPullRequestLifecycle(
   // Ruling A: nothing replaces, reverts, edits, closes or reopens a gated task's pull request through AgentX on request.
   // The workflow's own push of its reviewed fix is the one change it makes, and only its dispatch asks for it.
   if (candidate === undefined && await gatedTaskWorkspace(dependencies, workspaceId)) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_ACTION_REFUSAL);
-  const { project, settingsRevision } = await publicationProject(dependencies, workspace);
+  const { project, settingsRevision } = await publicationProject(dependencies, workspace, identity);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
   const existingRecord = await getItem<PullRequestRecord>(
@@ -14775,9 +14765,10 @@ async function getThreadWorkspace(
 async function publicationProject(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
+  identity: AuthenticatedIdentity,
 ): Promise<{ project: RegisteredProjectRecord; settingsRevision: number }> {
-  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
-  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  const pinned = slackThreadOwnRow(identity, await requireProject(dependencies, workspace.projectName, workspace.projectRevision));
+  const settings = slackThreadOwnRow(identity, await requireLatestProject(dependencies, workspace.projectName));
   if (settings.definition.revision === pinned.definition.revision) {
     return { project: pinned, settingsRevision: pinned.definition.revision };
   }
@@ -15239,15 +15230,16 @@ function swebenchDependencies(dependencies: AwsBrokerDependencies): EvalBatchDep
 function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): SwebenchSlackContext {
   const slack = identity.slack;
   if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-  return { thread: slack.thread, requester: slack.requester, ...swebenchProjectContext(dependencies, slack.binding.projectName) };
+  return { thread: slack.thread, requester: slack.requester, ...swebenchProjectContext(dependencies, slack.binding) };
 }
 
 /** The project and its approved models, for a run or batch whose thread and requester the caller supplies. */
-function swebenchProjectContext(dependencies: AwsBrokerDependencies, projectName: string): Pick<SwebenchSlackContext, "projectName" | "projectModel"> {
+function swebenchProjectContext(dependencies: AwsBrokerDependencies, binding: SlackChannelBinding): Pick<SwebenchSlackContext, "projectName" | "projectModel"> {
+  const projectName = binding.projectName;
   return {
     projectName,
     projectModel: async (requested) => {
-      const project = await requireLatestProject(dependencies, projectName);
+      const project = bindingOwnRow(binding, await requireLatestProject(dependencies, projectName));
       const policy = project.definition.models;
       if (requested !== undefined) {
         const approved = policy?.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
@@ -15265,7 +15257,7 @@ async function routeStartEvalBatch(dependencies: AwsBrokerDependencies, identity
   const binding = await getSlackBinding(dependencies, body.teamId, body.channelId);
   if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
   await requireAdministrator(dependencies, identity, binding.projectName);
-  return startBatch(swebenchDependencies(dependencies), swebenchProjectContext(dependencies, binding.projectName), body);
+  return startBatch(swebenchDependencies(dependencies), swebenchProjectContext(dependencies, binding), body);
 }
 
 /** Spec 052 FR-009, FR-010: show, stop or read the results of a batch, for an administrator of its channel's project. */
