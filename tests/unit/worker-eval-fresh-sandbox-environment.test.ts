@@ -65,6 +65,11 @@ function fakeDaemon(options: DaemonOptions = {}) {
       if (a === "network" && b === "rm") { const index = networks.findIndex((n) => n.name === args[2]); if (index < 0) return fail("No such network"); if (containers.some((c) => c.network === networks[index]!.name)) return fail("active endpoints"); networks.splice(index, 1); return ok(); }
       if (a === "run") {
         order.push(`run:${values(args, "--name")[0]!.includes("-install-") ? "install" : values(args, "--name")[0]!.endsWith("-eval") ? "eval" : "helper"}`);
+        const resolverMount = values(args, "--mount")[0];
+        if (resolverMount !== undefined) {
+          const source = resolverMount.split(",src=")[1]!.split(",dst=")[0]!;
+          expect(readFileSync(source, "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
+        }
         if (options.failRun?.(args) === true) return fail("run failed");
         const name = values(args, "--name")[0]!;
         const network = values(args, "--network")[0]!;
@@ -142,7 +147,7 @@ async function world(daemon = fakeDaemon(), over: Partial<FreshEvalSandboxConfig
     docker: daemon.docker, image: IMAGE, workspace: WS, taskId: "op-1", roundBudgetMs: 600_000, repository: { directory: join(root, "repo"), baseCommit: BASE, candidateCommit: CANDIDATE },
     command: { executable: "node", args: ["eval.js"], cwd: "." }, report: REPORT, rowId: "gemini", scratchDir: join(root, "scratch"), workingSandbox: daemon.working.name, environment: OFFERED,
     materialize: async (_root, commit, destination) => { materialized.push({ commit, destination, workingPaused: daemon.working.paused }); await writeFile(join(destination, "eval.js"), `// ${commit}`); },
-    sleep: () => Promise.resolve(), ...over,
+    sleep: () => Promise.resolve(), gatewayResolverDirectory: join(root, "name-files"), ...over,
   };
   const input = (o: Partial<FreshEvalSandboxRun> = {}): FreshEvalSandboxRun => ({ side: "new", ids: ["q1", "q2"], runs: 1, signal: new AbortController().signal, model: { socketPath: join(bridgeDir, EVAL_BRIDGE_SOCKET_NAME), token: TOKEN }, ...o });
   return { root, bridgeDir, config, sandbox: createFreshEvalSandbox(config), input, materialized, daemon };
@@ -212,7 +217,11 @@ describe("install steps", () => {
     await w.sandbox.run(w.input());
     const [install] = installArgsOf(w.daemon.calls);
     expect(flag(install!, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(install!, "--dns")).toEqual(["172.28.250.2"]);
+    expect(flag(install!, "--dns")).toEqual([]);
+    const resolverMount = flag(install!, "--mount")[0]!;
+    expect(resolverMount).toMatch(/,dst=\/etc\/resolv\.conf,readonly$/u);
+    const source = resolverMount.split(",src=")[1]!.split(",dst=")[0]!;
+    expect(existsSync(source)).toBe(false); // removed after the install boxes, even though the eval had its own network
     expect(install).not.toContain("agentx-task");
     // The sealed run is unchanged: the round network only.
     expect(flag(runArgsOf(w.daemon.calls, "-eval")!, "--network")[0]).not.toBe("rovara-snet");

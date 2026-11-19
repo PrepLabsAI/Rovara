@@ -27,6 +27,17 @@ const refusal = (config: Record<string, unknown>) => devcontainerConfigRefusal({
 
 describe("dev container settings AgentX refuses (docker containment)", () => {
   it.each([
+    ["--sysctl", "net.ipv6.conf.all.disable_ipv6=0"],
+    ["--sysctl=net.ipv6.conf.default.disable_ipv6=0"],
+    ["--sysctl", "net/ipv6/conf/all/disable_ipv6=0"],
+    ["--sysctl", "net.ipv4.ip_forward=1"],
+    ["--sysctl", "net.ipv4.ip_unprivileged_port_start=0"],
+    ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"],
+  ])("refuses repository network sysctls: %j", (...runArgs) => {
+    expect(refusal({ runArgs })).toContain("--sysctl");
+  });
+
+  it.each([
     ["--privileged", ["--privileged"]],
     ["--privileged", ["--privileged=true"]],
     ["--pid", ["--pid=host"]],

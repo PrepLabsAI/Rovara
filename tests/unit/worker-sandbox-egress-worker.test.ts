@@ -1,6 +1,7 @@
 // Lane L4-NETG (DEC 254zzz77): what the WORKER does on a gateway-mode EC2 host. Everything that runs task code goes on the internal network with the gateway as its only name server, and nothing falls back to a bridge with a
 // way out: the task sandbox, the setup run's sandbox, an eval install box and the devcontainer. Not in gateway mode (`bridge`, and every laptop), none of this applies and the arguments are exactly what they were.
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,14 +10,15 @@ import type * as CollectedProcessModule from "../../packages/worker/src/collecte
 const captured = vi.hoisted(() => ({ calls: [] as string[][], environments: [] as Array<NodeJS.ProcessEnv | undefined> }));
 vi.mock("../../packages/worker/src/collected-process.js", async (importOriginal) => {
   const original = await importOriginal<typeof CollectedProcessModule>();
-  return { ...original, runCollected: async (_executable: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => { captured.calls.push([...args]); captured.environments.push(options?.env); return { exitCode: 0, stdout: "", stderr: "" }; } };
+  return { ...original, runCollected: async (_executable: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => { captured.calls.push([...args]); captured.environments.push(options?.env); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
 });
 
 const { TASK_SANDBOX_NETWORK, TaskSandbox, daemonProxyFromEnvironment, gatewayEgressFor, gatewayEgressFromEnvironment, sandboxDnsFromEnvironment } = await import("../../packages/worker/src/task-sandbox.js");
 const { setupSharedNetwork } = await import("../../packages/worker/src/setup-agent-invocation.js");
 const { DEVCONTAINER_GATEWAY_DOCKER, createDevcontainerCli, ensureGatewayNetwork } = await import("../../packages/worker/src/devcontainer.js");
 const { evalInstallArgProblems, evalInstallRunArgs } = await import("../../packages/worker/src/verification/eval-bridged-exec.js");
-const { createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
+const { sandboxPortIsolationArgs } = await import("../../packages/worker/src/sandbox-port-isolation.js");
+const { guardedSetupDocker, createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
 
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
@@ -52,16 +54,18 @@ describe("gatewayEgressFor", () => {
 describe("the task sandbox on a gateway-mode worker", () => {
   const cleanup: string[] = [];
   afterEach(async () => { await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
-  async function start(environment: NodeJS.ProcessEnv, extra: Partial<ConstructorParameters<typeof TaskSandbox>[0]> = {}): Promise<{ calls: string[][]; error?: unknown }> {
+  async function start(environment: NodeJS.ProcessEnv, extra: Partial<ConstructorParameters<typeof TaskSandbox>[0]> = {}): Promise<{ calls: string[][]; sandbox: InstanceType<typeof TaskSandbox>; error?: unknown }> {
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-sandbox-")));
-    cleanup.push(root);
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-resolver-")));
+    cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
-    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
+    const sandbox = new TaskSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment, gatewayResolverDirectory: resolverRoot, ...extra });
     try {
-      await new TaskSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment, ...extra }).start();
-      return { calls };
+      await sandbox.start();
+      return { calls, sandbox };
     } catch (error) {
-      return { calls, error };
+      return { calls, sandbox, error };
     }
   }
 
@@ -71,13 +75,103 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(calls.filter((call) => call[0] === "network")).toEqual([]);
     const run = calls.find((call) => call[0] === "run")!;
     expect(flag(run, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(run, "--dns")).toEqual(["172.28.250.2"]);
+    expect(flag(run, "--dns")).toEqual([]);
+    const resolverMount = flag(run, "--mount").find((value) => value.includes("dst=/etc/resolv.conf,readonly"));
+    expect(resolverMount).toBeDefined();
+    const resolverPath = /^type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(resolverMount!)![1]!;
+    expect(await readFile(resolverPath, "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
     expect(run).not.toContain(TASK_SANDBOX_NETWORK);
+  });
+
+  it.each([false, true])("gates ordinary/setup commands before exec and refuses a failed gate (setup=%s)", async (setup) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "icc-order-")));
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "icc-names-")));
+    cleanup.push(root, resolverRoot);
+    let isolated = false;
+    let failGate = false;
+    let port = "101";
+    const repositoryExecs: string[] = [];
+    const seenPorts: string[] = [];
+    let byteExecs = 0;
+    const docker = { execBytes: async () => { byteExecs += 1; return { exitCode: 0, stdout: Buffer.from('{}'), stderr: "" }; }, run: async (args: readonly string[]) => {
+      if (args[0] === "inspect") return { exitCode: 0, stdout: "02:42:ac:1c:fa:03", stderr: "" };
+      if (args[0] === "exec" && args.some(a => a.includes("iflink"))) return { exitCode: 0, stdout: port, stderr: "" };
+      if (args[0] === "run" && args.includes("NET_ADMIN")) {
+        seenPorts.push(args.at(-1)!);
+        isolated = !failGate;
+        return { exitCode: failGate ? 1 : 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "exec" && args.includes("repository-command")) {
+        if (!isolated) throw new Error("repository executed before isolation");
+        repositoryExecs.push(port);
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    } };
+    const options = { rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV, gatewayResolverDirectory: resolverRoot };
+    const sandbox = setup ? createSetupSandbox(options) : new TaskSandbox(options);
+    await sandbox.exec(["repository-command"], {});
+    expect(repositoryExecs).toEqual(["101"]);
+    expect(seenPorts).toContain("101");
+    // Docker reattached the endpoint: the next exec must gate its NEW port.
+    isolated = false; port = "202";
+    await sandbox.exec(["repository-command"], {});
+    expect(repositoryExecs).toEqual(["101", "202"]);
+    expect(seenPorts).toContain("202");
+    isolated = false; failGate = true;
+    await expect(sandbox.exec(["repository-command"], {})).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(repositoryExecs).toEqual(["101", "202"]);
+    const before = byteExecs;
+    const opsDocker = sandbox.fileOpsTarget().docker;
+    if (opsDocker?.execBytes === undefined) throw new Error("expected a Docker exec for the sandbox");
+    await expect(opsDocker.execBytes(["exec", sandbox.name, "node"], { maxStdoutBytes: 1 })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(byteExecs).toBe(before);
+  });
+
+  it("the setup seam permits only the exact worker-owned isolation helper", async () => {
+    let launches = 0;
+    const docker = guardedSetupDocker({ run: async () => { launches += 1; return { exitCode: 0, stdout: "", stderr: "" }; } },
+      { rootPath: "/mnt/workspace", gateway: { network: "rovara-snet", dns: "172.28.250.2" }, isolationImage: IMAGE });
+    const args = sandboxPortIsolationArgs(IMAGE, "101");
+    await docker.run(args);
+    expect(launches).toBe(1);
+    for (const bad of [args.map(a => a === IMAGE ? "repository-image" : a), args.map(a => a === "NET_ADMIN" ? "SYS_ADMIN" : a),
+      [...args.slice(0, 1), "--volume", "/:/host", ...args.slice(1)], args.map(a => a.includes("se_port_isolation") ? "arbitrary code" : a)]) {
+      await expect(docker.run(bad)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    }
+    expect(launches).toBe(1);
+  });
+
+  it("removes the run-owned resolver after the sandbox is removed", async () => {
+    const { calls, sandbox } = await start(GATEWAY_ENV);
+    const mount = flag(calls.find((call) => call[0] === "run")!, "--mount").find((value) => value.includes("dst=/etc/resolv.conf,readonly"))!;
+    const file = /^type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(mount)![1]!;
+    expect(existsSync(file)).toBe(true);
+    await sandbox.dispose();
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("mounts worker-owned hosts read-only and updates that inode for local services only", async () => {
+    const { calls, sandbox } = await start(GATEWAY_ENV);
+    const mount = flag(calls.find(call => call[0] === "run")!, "--mount").find(value => value.includes("dst=/etc/hosts,readonly"))!;
+    const path = /^type=bind,src=([^,]+),dst=\/etc\/hosts,readonly$/u.exec(mount)![1]!;
+    const { stat } = await import("node:fs/promises");
+    const inode = (await stat(path)).ino;
+    await sandbox.setServiceHosts([{ address: "172.30.1.16", aliases: ["postgres", "test-db"] }]);
+    expect(await readFile(path, "utf8")).toContain("172.30.1.16 test-db\n");
+    expect((await stat(path)).ino).toBe(inode);
+    for (const alias of ["example.com", "localhost", "ghcr.io", "db\n1.1.1.1 example.com"]) await expect(sandbox.setServiceHosts([{ address: "172.30.1.16", aliases: [alias] }])).rejects.toThrow();
+    await expect(sandbox.setServiceHosts([{ address: "8.8.8.8", aliases: ["test-db"] }])).rejects.toThrow();
+    await sandbox.setServiceHosts([]);
+    expect(await readFile(path, "utf8")).toBe("127.0.0.1 localhost\n::1 localhost ip6-localhost\n");
+    await sandbox.dispose();
+    expect(existsSync(path)).toBe(false);
   });
 
   it("ignores a name server a caller asked for: the gateway is the only one", async () => {
     const { calls } = await start(GATEWAY_ENV, { dns: ["8.8.8.8", "1.1.1.1"] });
-    expect(flag(calls.find((call) => call[0] === "run")!, "--dns")).toEqual(["172.28.250.2"]);
+    const run = calls.find((call) => call[0] === "run")!;
+    expect(flag(run, "--dns")).toEqual([]);
+    expect(flag(run, "--mount").some((value) => value.includes("dst=/etc/resolv.conf,readonly"))).toBe(true);
   });
 
   it("REFUSES to start on a network of its own (a bridge with a way out), and without the network or the name server; docker is never asked to run anything", async () => {
@@ -86,6 +180,7 @@ describe("the task sandbox on a gateway-mode worker", () => {
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway" }, {}],
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet" }, {}],
       [{ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_DNS: "172.28.250.2" }, {}],
+      [GATEWAY_ENV, { gatewayResolverDirectory: "/dev/null/rovara-resolver" }],
     ] as const) {
       const { calls, error } = await start(environment, extra);
       expect(error, JSON.stringify(environment)).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
@@ -112,29 +207,33 @@ describe("the task sandbox on a gateway-mode worker", () => {
     expect(setupSharedNetwork({ AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_NETWORK: "rovara-snet-0123" })).toBeUndefined();
     expect(setupSharedNetwork({ AGENTX_SANDBOX_NETWORK: "rovara-snet-0123" })).toBe("rovara-snet-0123");
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-setup-")));
-    cleanup.push(root);
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-setup-resolver-")));
+    cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
-    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
-    await createSetupSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV }).start();
+    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
+    await createSetupSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV, gatewayResolverDirectory: resolverRoot }).start();
     const run = calls.find((call) => call[0] === "run")!;
     expect(flag(run, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(run, "--dns")).toEqual(["172.28.250.2"]);
+    expect(flag(run, "--dns")).toEqual([]);
+    expect(flag(run, "--mount").some((value) => value.includes("dst=/etc/resolv.conf,readonly"))).toBe(true);
   });
 });
 
 describe("the eval install box on a gateway-mode worker", () => {
   const input = { network: "rovara-snet", image: IMAGE, name: "rovara-eval-install-abc-1-1", checkout: "/scratch/run-1/checkout", command: { executable: "python3", args: ["-m", "pip", "install", "-r", "requirements.txt"], cwd: "." }, taskId: "op-1", workspace: "0123456789abcdef" };
 
-  it("takes the gateway as its one name server, and the argument check accepts exactly that one", () => {
-    const args = evalInstallRunArgs({ ...input, dns: "172.28.250.2" });
+  it("pins the exact read-only resolver source and refuses a writable, absent, extra or different mount", () => {
+    const expected = { ...input, dns: "172.28.250.2", resolvConfPath: "/scratch/names/resolv.conf" };
+    const args = evalInstallRunArgs(expected);
     expect(flag(args, "--network")).toEqual(["rovara-snet"]);
-    expect(flag(args, "--dns")).toEqual(["172.28.250.2"]);
-    expect(evalInstallArgProblems(args, { ...input, dns: "172.28.250.2" })).toEqual([]);
-    // Any other name server, a second one, or none where one is expected: refused.
-    expect(evalInstallArgProblems(args, { ...input, dns: "8.8.8.8" }).length).toBeGreaterThan(0);
-    expect(evalInstallArgProblems([...args.slice(0, args.indexOf("--workdir")), "--dns", "8.8.8.8", ...args.slice(args.indexOf("--workdir"))], { ...input, dns: "172.28.250.2" }).length).toBeGreaterThan(0);
-    expect(evalInstallArgProblems(evalInstallRunArgs(input), { ...input, dns: "172.28.250.2" }).length).toBeGreaterThan(0);
-    expect(() => evalInstallRunArgs({ ...input, dns: "not an address" })).toThrow("the eval install step's arguments are unsound");
+    expect(flag(args, "--dns")).toEqual([]);
+    expect(flag(args, "--mount")).toEqual(["type=bind,src=/scratch/names/resolv.conf,dst=/etc/resolv.conf,readonly"]);
+    expect(evalInstallArgProblems(args, expected)).toEqual([]);
+    const bad = [args.map(value => value.replace(",readonly", ",rw")), args.map(value => value.replace("/scratch/names/", "/etc/")), args.map(value => value.replace("dst=/etc/resolv.conf", "dst=/tmp/resolv.conf")), evalInstallRunArgs(input)];
+    for (const variant of bad) expect(evalInstallArgProblems(variant, expected).length).toBeGreaterThan(0);
+    const at = args.indexOf("--workdir");
+    expect(evalInstallArgProblems([...args.slice(0, at), "--dns", "8.8.8.8", ...args.slice(at)], expected).length).toBeGreaterThan(0);
+    expect(() => evalInstallRunArgs({ ...expected, resolvConfPath: "/bad,path" })).toThrow("the eval install step's arguments are unsound");
   });
 
   it("without a gateway there is no --dns, and a --dns in the arguments is still refused (as before)", () => {

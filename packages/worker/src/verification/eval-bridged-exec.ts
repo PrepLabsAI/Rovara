@@ -1,3 +1,4 @@
+import { createGatewayNameFiles, GATEWAY_RESOLVER_DIRECTORY } from "../gateway-name-files.js";
 // The eval's sandbox exec over the F1-c model bridge (plan v3.2 row 20.2; TE-F1C-RUNTASK-NOT-WIRED, TE-F1E-RUNTASK-WIRING).
 //
 // ONE bridge per exec run, listening on a Unix socket in a private folder of its own. The eval process runs in a FRESH sandbox (a `FreshEvalSandbox`:
@@ -341,6 +342,8 @@ export interface FreshEvalSandboxConfig {
   readonly standIns?: { readonly round: EvalStandInRound; readonly start?: typeof startEvalStandIns | undefined } | undefined;
   /** L4-NETG: the name server an install step is given (`--dns`), set only on a worker whose sandboxes go through the egress gateway (the gateway's address on the shared network). Default: none (the network's own resolver, as before). */
   readonly installDns?: string | undefined;
+  /** Test seam for the host-shared runtime name files. */
+  readonly gatewayResolverDirectory?: string;
   /**
    * L4-EINT (review M1): true only when the operator's stand-in switch is on. Then the run names the databases it was stood in for (and the PR says "Ran against stand-ins for Postgres"). Absent: a services round reports
    * nothing of the kind, byte for byte as before the switch existed (those services are real software, not stand-ins, when the switch is off).
@@ -607,6 +610,7 @@ export interface EvalInstallArgsInput {
   readonly network: string;
   /** L4-NETG: the one name server (an IPv4 address), set only when the shared network is the gateway-mode internal network. Absent: no `--dns`, byte-identical to before. */
   readonly dns?: string | undefined;
+  readonly resolvConfPath?: string;
   readonly image: string;
   readonly name: string;
   readonly checkout: string;
@@ -627,26 +631,27 @@ export function evalInstallRunArgs(input: EvalInstallArgsInput): string[] {
   const args = [
     "run", "--detach", "--pull=never", "--name", input.name, "--stop-timeout", "1",
     "--label", `${TASK_SANDBOX_LABEL}=${input.taskId}`, "--label", `${TASK_SANDBOX_WORKSPACE_LABEL}=${input.workspace}`,
-    "--network", input.network, ...(input.dns === undefined ? [] : ["--dns", input.dns]), ...modelHostAddHostArgs(installModelBlock()),
+    "--network", input.network, ...(input.resolvConfPath !== undefined || input.dns === undefined ? [] : ["--dns", input.dns]), ...modelHostAddHostArgs(installModelBlock()),
     "--user", INSTALL_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
     "--memory", "4g", "--memory-swap", "4g", "--cpus", "2", "--pids-limit", "1024",
     "--log-driver", "json-file", ...INSTALL_LOG_OPTIONS.flatMap(option => ["--log-opt", option]),
     "--tmpfs", INSTALL_TMPFS,
     "--volume", `${input.checkout}:${WORKSPACE}:rw`,
+    ...(input.resolvConfPath === undefined ? [] : ["--mount", `type=bind,src=${input.resolvConfPath},dst=/etc/resolv.conf,readonly`]),
     "--env", "HOME=/tmp", "--env", `PYTHONUSERBASE=${EVAL_PYTHON_USER_BASE}`,
     "--workdir", workdir,
     "--entrypoint", SANDBOX_INIT,
     input.image, "--", input.command.executable, ...input.command.args,
   ];
-  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network, ...(input.dns === undefined ? {} : { dns: input.dns }) }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
+  if (evalInstallArgProblems(args, { checkout: input.checkout, network: input.network, ...(input.dns === undefined ? {} : { dns: input.dns }), ...(input.resolvConfPath === undefined ? {} : { resolvConfPath: input.resolvConfPath }) }).length > 0) throw agentXError("CONFIG_INVALID", "the eval install step's arguments are unsound");
   return args;
 }
 
-const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--dns", "--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
+const INSTALL_VALUE_FLAGS: ReadonlySet<string> = new Set(["--mount", "--dns", "--name", "--stop-timeout", "--label", "--network", "--add-host", "--user", "--cap-drop", "--security-opt", "--memory", "--memory-swap", "--cpus", "--pids-limit", "--log-driver", "--log-opt", "--tmpfs", "--volume", "--env", "--workdir", "--entrypoint"]);
 const INSTALL_SINGLE_FLAGS: ReadonlySet<string> = new Set(["--detach", "--pull=never", "--read-only"]);
 
 /** Reads an install step's `docker run` arguments back and names every way they are unsound, in fixed words. Allow-list: a flag the install box does not take (an env file, a second mount, a published port, a device, a DNS server, an address, a capability) is a problem. */
-export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string; readonly dns?: string | undefined }): string[] {
+export function evalInstallArgProblems(args: readonly string[], expected: { readonly checkout: string; readonly network: string; readonly dns?: string | undefined; readonly resolvConfPath?: string }): string[] {
   const problems: string[] = [];
   const flags = new Map<string, string[]>();
   let at = 0;
@@ -670,7 +675,8 @@ export function evalInstallArgProblems(args: readonly string[], expected: { read
   if (image === undefined || !/^(?:[A-Za-z0-9][A-Za-z0-9._/:-]{0,200}@sha256:[a-f0-9]{64}|sha256:[a-f0-9]{64})$/u.test(image)) problems.push("the install box must run the worker's pinned image");
   if (!INSTALL_NETWORK_NAME.test(expected.network) || !only("--network", expected.network)) problems.push("the install box must be on the shared sandbox network and on no other network");
   // L4-NETG: a name server only when the caller expects exactly that one (the gateway's address); otherwise any `--dns` is a flag the install box does not take, as before.
-  if (expected.dns === undefined ? flags.has("--dns") : isIP(expected.dns) !== 4 || !only("--dns", expected.dns)) problems.push("a flag the install box does not take");
+  if (expected.resolvConfPath !== undefined || expected.dns === undefined ? flags.has("--dns") : isIP(expected.dns) !== 4 || !only("--dns", expected.dns)) problems.push("a flag the install box does not take");
+  if (expected.resolvConfPath === undefined ? flags.has("--mount") : !isAbsolute(expected.resolvConfPath) || /[,:\n\r]/u.test(expected.resolvConfPath) || !only("--mount", `type=bind,src=${expected.resolvConfPath},dst=/etc/resolv.conf,readonly`)) problems.push("the install box must mount exactly its run-owned read-only resolver");
   if (!only("--cap-drop", "ALL")) problems.push("the install box must drop every capability");
   if (!only("--security-opt", "no-new-privileges")) problems.push("the install box must have no-new-privileges and no other security option");
   if (!flags.has("--read-only")) problems.push("the install box's root must be read-only");
@@ -719,6 +725,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
       let helper: StartedModelHelper | undefined;
       let sandboxName: string | undefined;
       const installBoxes: string[] = [];
+      let installNameDirectory: string | undefined;
       let paused = false;
       let finished = false;
       let killed: Promise<unknown> | undefined;
@@ -777,6 +784,12 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         const gateway = installs.length === 0 ? undefined : gatewayEgressFor(config.environment ?? process.env);
         const installNetwork = installs.length === 0 ? "" : gateway?.network ?? config.installNetwork ?? sandboxNetworkFromEnvironment(config.environment ?? process.env) ?? TASK_SANDBOX_NETWORK;
         const installDns = gateway?.dns ?? config.installDns;
+        let installResolvConfPath: string | undefined;
+        if (gateway !== undefined) {
+          const files = await createGatewayNameFiles((config.environment ?? process.env).AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace", gateway.dns, config.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY);
+          installNameDirectory = files.directory;
+          installResolvConfPath = files.resolvConfPath;
+        }
         const taskHash = createHash("sha256").update(`eval-install\0${config.taskId}`).digest("hex").slice(0, 12);
         let step = 0;
         for (const command of installs) {
@@ -785,7 +798,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
           installBoxes.push(name);
           installing = name;
           installed = true;
-          const started = await call(evalInstallRunArgs({ network: installNetwork, ...(installDns === undefined ? {} : { dns: installDns }), image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
+          const started = await call(evalInstallRunArgs({ network: installNetwork, ...(installDns === undefined ? {} : { dns: installDns }), ...(installResolvConfPath === undefined ? {} : { resolvConfPath: installResolvConfPath }), image: config.image, name, checkout, command, taskId: config.taskId, workspace: config.workspace }), SANDBOX_START_MS);
           if (started.exitCode !== 0) throw new EvalSandboxRunFailure(diagnoseEvalFailure({ phase: "install", output: started.stderr, secrets }));
           const waited = await call(["wait", name], Math.min(EVAL_INSTALL_STEP_MAX_MS, remainingMs()));
           if (input.signal.aborted) throw new Error("eval stage stopped");
@@ -983,6 +996,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         // Once more after the first removal has returned: a removal sent while `docker run` was still creating the container may have found nothing. (The network's stop also removes every container with its labels.)
         if (sandboxName !== undefined) await call(["rm", "--force", sandboxName]);
         for (const box of installBoxes) await call(["rm", "--force", box]);
+        if (installNameDirectory !== undefined) await rm(installNameDirectory, { recursive: true, force: true });
         // This run's services go before the network does (the network's own stop would remove them too; this one waits for their files).
         await standIn?.stop().catch(() => undefined);
         await servicesRun?.stop().catch(() => undefined);

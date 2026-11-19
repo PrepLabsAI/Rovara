@@ -18,7 +18,7 @@
 // Needs ROVARA_DOCKER=1, passwordless sudo, and the container firewall of boot.sh (the CI job installs it first, as for the other network-wall tests).
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile, chmod } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
@@ -38,8 +38,10 @@ import { browserEvidenceExecutorArgs, parseCaptureOutput } from "../../packages/
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { createLinuxHost, linuxRunInput } from "../support/linux-runtime.js";
-import { ensureLocalImage } from "../support/ci-images.js";
+import { ciImage, ensureLocalImage } from "../support/ci-images.js";
 import { APP_NODE_IMAGE } from "../support/linux-runtime.js";
+import { DOCKER_25_DIND_IMAGE, startDind, type Dind } from "../support/linux-dind.js";
+import { createGatewayNameFiles } from "../../packages/worker/src/gateway-name-files.js";
 import { docker, sudo } from "../support/linux-network-walls.js";
 import { repoExecutorSeccompProfilePath } from "../../scripts/executor-smoke.js";
 
@@ -48,6 +50,9 @@ const stagePath = new URL("../../packages/worker/ec2/sandbox-egress.sh", import.
 const wrapperPath = new URL("../../packages/worker/ec2/devcontainer-docker.sh", import.meta.url).pathname;
 const GATEWAY_IP = "172.28.250.2";
 const NETWORK = "rovara-snet";
+const ICC_PEER = "rovara-netg-icc-peer";
+const ICC_CLIENT = "rovara-netg-icc-client";
+const ICC_PEER_IP = "172.28.250.16";
 // A host name, not an image: the registry the sandbox side is denied (a bare host keeps the CI image guard, which reads every `host/path`, to real image references).
 const REGISTRY_HOST = "ghcr.io";
 // A digest-pinned reference on a raw address: only ever fetched by a daemon that must refuse it.
@@ -65,7 +70,7 @@ let agentxDirExisted = false;
 let allowDirExisted = false;
 let rulesBefore: Record<string, string[]> = {};
 
-const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"]];
+const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"], ["ip6tables", "FORWARD"]];
 /** The rules in each chain the stage touches, as `-S` prints them (`-A CHAIN ...`). */
 async function ruleSnapshot(): Promise<Record<string, string[]>> {
   const found: Record<string, string[]> = {};
@@ -119,6 +124,53 @@ const tlsHelloOutcome = (host: string, name: string): string => `
 const t=require('tls');const s=t.connect({host:${JSON.stringify(host)},port:443,servername:${JSON.stringify(name)},rejectUnauthorized:false,timeout:5000});
 s.on('secureConnect',()=>{console.log('handshake');process.exit(0)});s.on('timeout',()=>{console.log('timeout');process.exit(0)});s.on('error',e=>{console.log('error '+e.code);process.exit(0)});`;
 
+// The fixture image lacks the worker's tini/helper files. These ordinary sandboxes
+// start a trusted sleeping Node entrypoint with the same dropped capabilities and
+// mounted resolver; the production stage's synchronous gate runs on the host.
+async function ordinarySandbox(name: string, ip?: string): Promise<void> {
+  const files = await createGatewayNameFiles(`/worker/${name}`, GATEWAY_IP, join(dir, "ordinary-names"));
+  const made = await docker("run", "-d", "--name", name, "--pull=never", "--network", NETWORK,
+    ...(ip === undefined ? [] : ["--ip", ip]), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000",
+    "--mount", `type=bind,src=${files.resolvConfPath},dst=/etc/resolv.conf,readonly`,
+    "--mount", `type=bind,src=${files.hostsPath},dst=/etc/hosts,readonly`,
+    "--entrypoint", "/usr/local/bin/node", APP_NODE_IMAGE, "-e", "setInterval(()=>{},3600000)");
+  expect(made.code, made.stderr).toBe(0);
+  await isolateSandboxBridgePort(name);
+}
+
+async function isolateSandboxBridgePort(name: string): Promise<void> {
+  const gated = await sudo("bash", "-c", '. "$1"; index=$(se_container_port_index "$2") && se_port_isolation "$index" on', "--", stageFile, name);
+  expect(gated.code, gated.stderr).toBe(0);
+}
+
+// A host-owned raw probe enters ONLY the ordinary sandbox's network namespace.
+// No task receives NET_RAW. Kernel ARP replies do not depend on the test TCP server.
+const ARP_PROBE = String.raw`import socket,struct,fcntl,select,time,sys
+s=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0806))
+for _,name in socket.if_nameindex():
+ try: ip=fcntl.ioctl(s.fileno(),0x8915,struct.pack('256s',name.encode()))[20:24]
+ except OSError: continue
+ if ip[:3]==socket.inet_aton('172.28.250.0')[:3]: break
+else: raise RuntimeError('no sandbox interface')
+s.bind((name,0)); mac=s.getsockname()[4]; target=socket.inet_aton(sys.argv[1])
+packet=b'\xff'*6+mac+b'\x08\x06'+struct.pack('!HHBBH',1,0x0800,6,4,1)+mac+ip+b'\0'*6+target
+end=time.monotonic()+3; next_send=0
+while time.monotonic()<end:
+ if time.monotonic()>=next_send: s.send(packet); next_send=time.monotonic()+0.25
+ if select.select([s],[],[],0.1)[0]:
+  p=s.recv(2048)
+  if len(p)>=42 and p[12:14]==b'\x08\x06' and p[20:22]==b'\0\x02' and p[28:32]==target and p[38:42]==ip:
+   print('reply'); sys.exit(0)
+print('no-reply')`;
+async function arpFrom(container: string, target: string): Promise<string> {
+  const pid = await docker("inspect", "--format", "{{.State.Pid}}", container);
+  expect(pid.code, pid.stderr).toBe(0);
+  expect(pid.stdout.trim()).toMatch(/^[1-9][0-9]*$/u);
+  const probed = await sudo("nsenter", "-t", pid.stdout.trim(), "-n", "python3", "-c", ARP_PROBE, target);
+  expect(probed.code, probed.stderr).toBe(0);
+  return probed.stdout.trim();
+}
+
 /** The HOST's own HTTPS (the vitest process runs on the host network, exactly like the worker and the host's Docker): the status, or the error code. */
 function hostHttps(host: string): Promise<string> {
   return new Promise((resolve) => {
@@ -156,8 +208,20 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
+    await ordinarySandbox(ICC_PEER, ICC_PEER_IP);
+    await ordinarySandbox(ICC_CLIENT);
+    const peer = await docker("exec", "--detach", ICC_PEER, "node", "-e", "require('net').createServer(s=>s.end('peer')).listen(4567,'0.0.0.0')");
+    expect(peer.code, peer.stderr).toBe(0);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if ((await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567))).stdout.trim() === "open") break;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    const peerControl = await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567));
+    expect(peerControl.stdout.trim(), peerControl.stderr).toBe("open");
   }, 300_000);
   afterAll(async () => {
+    await docker("rm", "--force", ICC_CLIENT);
+    await docker("rm", "--force", ICC_PEER);
     await docker("rm", "--force", HELD_CONTAINER);
     await docker("rm", "--force", "rovara-egw");
     await docker("network", "rm", "agentx-task");
@@ -180,13 +244,39 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 240_000);
 
   it("the sandbox network is internal, has no host address, and the gateway is on exactly its two networks", async () => {
-    const inspected = await docker("network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{index .Options \"com.docker.network.bridge.name\"}}|{{.EnableIPv6}}", NETWORK);
-    expect(inspected.stdout.trim()).toBe("bridge|true|true|rvs0|false");
+    const inspected = await docker("network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{index .Options \"com.docker.network.bridge.name\"}}|{{.EnableIPv6}}|{{index .Options \"com.docker.network.bridge.enable_icc\"}}", NETWORK);
+    expect(inspected.stdout.trim()).toBe("bridge|true|true|rvs0|false|false");
+    const outer = await docker("network", "inspect", "--format", '{{index .Options "com.docker.network.bridge.enable_icc"}}', "rovara-xnet");
+    expect(outer.stdout.trim()).toBe("");
+    const reuse = await sudo("bash", "-c", '. "$1"; se_ensure_network "$SE_OUTER_NET" false "" "$SE_OUTER_BRIDGE" "$SE_OUTER_SUBNET"', "--", stageFile);
+    expect(reuse.code, reuse.stderr).toBe(0);
     const gateway = await docker("inspect", "--format", "{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-egw");
     expect(gateway.stdout.trim()).toBe("true|unless-stopped|true|[ALL]|rovara-snet rovara-xnet");
     const env = await readFile(join(dir, "worker.env"), "utf8");
     expect(env).toContain(`AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=${NETWORK}\nAGENTX_SANDBOX_DNS=${GATEWAY_IP}\n`);
   });
+
+  it("blocks ARP between two ordinary sandbox ports while the gateway answers ARP and can reach the live peer", async () => {
+    expect(await arpFrom("rovara-egw", ICC_PEER_IP)).toBe("reply");
+    expect(await arpFrom(ICC_CLIENT, GATEWAY_IP)).toBe("reply");
+    expect(await arpFrom(ICC_CLIENT, ICC_PEER_IP)).toBe("no-reply");
+    expect(await arpFrom(ICC_PEER, (await docker("inspect", "--format", '{{(index .NetworkSettings.Networks "rovara-snet").IPAddress}}', ICC_CLIENT)).stdout.trim())).toBe("no-reply");
+    const lookup = await docker("exec", ICC_CLIENT, "node", "-e", lookupOutcome("registry.npmjs.org"));
+    expect(lookup.stdout.trim(), lookup.stderr).toBe(GATEWAY_IP);
+    const tls = await docker("exec", ICC_CLIENT, "node", "-e", tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"));
+    expect(tls.stdout.trim(), tls.stderr).toBe("handshake");
+  }, 120_000);
+
+  it("a live peer on the shared sandbox bridge is unreachable while the gateway resolver and TLS forwarder still answer", async () => {
+    const peer = await docker("exec", ICC_CLIENT, "node", "-e", connectOutcome(ICC_PEER_IP, 4567));
+    expect(peer.stdout.trim(), peer.stderr).not.toBe("open");
+    expect(peer.stdout.trim()).toMatch(/^(ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|timeout)$/u);
+
+    const lookup = await sandbox(lookupOutcome("registry.npmjs.org"));
+    expect(lookup.stdout.trim(), lookup.stderr).toBe(GATEWAY_IP);
+    const tls = await sandbox(tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"));
+    expect(tls.stdout.trim(), tls.stderr).toBe("handshake");
+  }, 120_000);
 
   // The S3 deny list is read by the stage from the contracts, exactly as in production (here through the same stub as the registry list); an S3 name is refused to a sandbox though the HOST resolves it.
   it("an S3 name the host resolves is NXDOMAIN to a sandbox (the S3 deny list the stage read from the contracts is in force), in every spelling that list covers", async () => {
@@ -242,8 +332,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const looked = await sandbox(lookupOutcome("registry.npmjs.org"));
     expect(looked.stdout.trim(), looked.stderr).toBe(GATEWAY_IP);
     const fetched = await sandbox(httpsOutcome("https://registry.npmjs.org/"));
-    if (/^status /u.test(control)) expect(fetched.stdout.trim(), `${fetched.stderr}`).toMatch(/^status \d{3}$/u);
-    else expect(fetched.stdout.trim()).toMatch(/^(status \d{3}|error .*|timeout)$/u);
+    expect(control).toMatch(/^status \d{3}$/u);
+    expect(fetched.stdout.trim(), `${fetched.stderr}`).toMatch(/^status \d{3}$/u);
+    expect((await sandbox(tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"))).stdout.trim()).toBe("handshake");
   }, 120_000);
 
   it("a sandbox cannot reach the host, the metadata address, the gateway's other side or another private address", async () => {
@@ -256,7 +347,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   it("a devcontainer started through the wrapper is on the sandbox network with the gateway as its only name server and no NET_RAW, and cannot reach a raw address", async () => {
     const real = (await run("which", ["docker"])).stdout.trim();
     const wrapper = join(dir, "devcontainer-docker.sh");
-    await writeFile(wrapper, (await readFile(wrapperPath, "utf8")).split("/usr/local/bin/docker").join(real));
+    await writeFile(wrapper, (await readFile(wrapperPath, "utf8")).split("/usr/local/bin/docker").join(real).split("/var/lib/rovara-egress/runs").join(join(dir, "wrapper-names")));
     await chmod(wrapper, 0o755);
     const env = { ...process.env, AGENTX_SANDBOX_NETWORK: NETWORK, AGENTX_SANDBOX_DNS: GATEWAY_IP };
     const viaWrapper = (...args: string[]) => run(wrapper, args, { env }).then((done) => ({ code: 0, stdout: done.stdout, stderr: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" }));
@@ -266,9 +357,13 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const facts = await docker("inspect", "--format", "{{.HostConfig.NetworkMode}}|{{.HostConfig.Dns}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-dc-probe");
       // Docker prints a capability as given (NET_RAW) or normalised (CAP_NET_RAW) by version: the same capability either way (the worker's own check, devcontainer-policy.ts dropsNetRaw, accepts both).
       const [mode, dnsServers, capDrop, networks] = facts.stdout.trim().split("|");
-      expect([mode, dnsServers, (capDrop ?? "").replace(/CAP_/gu, ""), (networks ?? "").trim()]).toEqual([NETWORK, `[${GATEWAY_IP}]`, "[NET_RAW]", NETWORK]);
+      expect([mode, dnsServers, (capDrop ?? "").replace(/CAP_/gu, ""), (networks ?? "").trim()]).toEqual([NETWORK, "[]", "[NET_RAW]", NETWORK]);
+      const inspected = JSON.parse((await docker("inspect", "rovara-dc-probe")).stdout) as Array<{ Config: { Labels: Record<string, string> }; Mounts: Array<{ Type: string; Source: string; Destination: string; RW: boolean }> }>;
+      const source = inspected[0]!.Config.Labels["rovara.egress.resolver"]!;
+      expect(inspected[0]!.Mounts).toContainEqual(expect.objectContaining({ Type: "bind", Source: source, Destination: "/etc/resolv.conf", RW: false }));
+      expect(await readFile(source, "utf8")).toBe(`nameserver ${GATEWAY_IP}\noptions ndots:0 timeout:3 attempts:1\n`);
     } finally {
-      await docker("rm", "--force", "rovara-dc-probe");
+      await viaWrapper("rm", "--force", "rovara-dc-probe");
     }
     const raw = await viaWrapper("run", "--rm", "--pull=never", "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", connectOutcome("1.1.1.1", 443));
     expect(raw.stdout.trim(), raw.stderr).toMatch(/^(ENETUNREACH|EHOSTUNREACH|timeout)$/u);
@@ -310,7 +405,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   async function wrapperDocker(args: string[], environment: Record<string, string> = {}): Promise<{ code: number; stdout: string; stderr: string }> {
     const real = (await run("which", ["docker"])).stdout.trim();
     const wrapper = join(dir, "devcontainer-docker-build.sh");
-    await writeFile(wrapper, (await readFile(wrapperPath, "utf8")).split("/usr/local/bin/docker").join(real));
+    await writeFile(wrapper, (await readFile(wrapperPath, "utf8")).split("/usr/local/bin/docker").join(real).split("/var/lib/rovara-egress/runs").join(join(dir, "wrapper-names")));
     await chmod(wrapper, 0o755);
     const env = { ...process.env, AGENTX_SANDBOX_NETWORK: NETWORK, AGENTX_SANDBOX_DNS: GATEWAY_IP, DOCKER_BUILDKIT: "1", ...environment };
     // (DOCKER_BUILDKIT=1 on purpose: the runner has the buildx plugin, like the worker image, and the wrapper itself must keep the build on the classic builder.)
@@ -542,10 +637,18 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect((await sudo("cat", DAEMON_JSON)).stdout).toContain(`"dns": ["${GATEWAY_IP}"]`);
       expect((await sudo("cat", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf")).stdout).toContain("http://172.28.251.2:3128");
 
+      const files = await createGatewayNameFiles(`/worker/${sandboxName}`, GATEWAY_IP, join(dir, "ordinary-names"));
+      // Like ordinary sandboxes, start only a trusted sleeper, then apply the
+      // production port gate before executing the app in its shared namespace.
       const started = await docker("run", "-d", "--pull=never", "--name", sandboxName, "--network", NETWORK, "--dns", GATEWAY_IP,
+        "--mount", `type=bind,src=${files.resolvConfPath},dst=/etc/resolv.conf,readonly`,
+        "--mount", `type=bind,src=${files.hostsPath},dst=/etc/hosts,readonly`,
         "--cap-drop=ALL", "--security-opt", "no-new-privileges", "-v", `${fixture}:/fixture:ro`, "--env", `PORT=${String(port)}`,
-        "--workdir", "/fixture/after", image, "node", "../server.mjs");
+        "--workdir", "/fixture/after", image, "node", "-e", "setInterval(()=>{},3600000)");
       expect(started.code, started.stderr).toBe(0);
+      await isolateSandboxBridgePort(sandboxName);
+      const app = await docker("exec", "--detach", sandboxName, "node", "../server.mjs");
+      expect(app.code, app.stderr).toBe(0);
       await readyIn(sandboxName, `http://127.0.0.1:${String(port)}/health`, "ok");
 
       // rvi* is the production application/test-services bridge family. This
@@ -556,8 +659,14 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       const peerScript = `require('http').createServer((_,r)=>r.end(${JSON.stringify(marker)})).listen(${String(remotePort)},'0.0.0.0')`;
       const peerIps: Record<string, string> = {};
       for (const [name, network] of [[remoteName, CONTROL_NETWORK], [staleName, "agentx-task"], [otherName, otherNetwork], [innerName, NETWORK]] as const) {
-        const peer = await docker("run", "-d", "--pull=never", "--name", name, "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e", peerScript);
+        const peer = await docker("run", "-d", "--pull=never", "--name", name, "--network", network, "--cap-drop=ALL", "--security-opt", "no-new-privileges", image, "node", "-e",
+          network === NETWORK ? "setInterval(()=>{},3600000)" : peerScript);
         expect(peer.code, peer.stderr).toBe(0);
+        if (network === NETWORK) {
+          await isolateSandboxBridgePort(name);
+          const serving = await docker("exec", "--detach", name, "node", "-e", peerScript);
+          expect(serving.code, serving.stderr).toBe(0);
+        }
         const address = await docker("inspect", "--format", `{{(index .NetworkSettings.Networks "${network}").IPAddress}}`, name);
         expect(address.code, address.stderr).toBe(0);
         expect(address.stdout.trim()).toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
@@ -708,11 +817,10 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(result.local?.body).toContain("Account");
       expect(result.dnsDenied).toEqual({ error: "ENOTFOUND" });
       expect(result.dnsAllowed).toEqual({ addresses: [GATEWAY_IP] });
-      // Same rovara-snet bridge traffic is permitted by production (no ICC
-      // disable). Isolation applies to leaving rvs+, not to peers on rvs0.
-      expect(result.inner).toEqual({ status: 200, body: marker });
       const isNetworkDenial = (answer: { status?: number; error?: string } | undefined): boolean => answer?.status === undefined && /net::ERR_(ADDRESS_UNREACHABLE|CONNECTION_TIMED_OUT|CONNECTION_REFUSED)\b/u.test(answer?.error ?? "");
-      for (const key of ["raw1", "raw2", "peer", "stale", "otherSandbox", "host", "gatewayOuter", "metadata", "daemonProxy"] as const) {
+      // ICC-off plus isolated ordinary ports must also refuse the live peer on
+      // this same bridge; the shared resolver/allowed HTTPS controls must pass.
+      for (const key of ["raw1", "raw2", "peer", "stale", "otherSandbox", "inner", "host", "gatewayOuter", "metadata", "daemonProxy"] as const) {
         expect(isNetworkDenial(result[key]), `${key}: ${JSON.stringify(result[key])}`).toBe(true);
       }
       expect(result.registry?.error).toMatch(/net::ERR_NAME_NOT_RESOLVED/u);
@@ -759,4 +867,97 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(result.failure).toMatch(/sandbox egress gateway|did not pass its checks/u);
     expect(await readFile(join(dir, "worker.env"), "utf8")).toBe("AWS_REGION=us-west-2\n");
   }, 180_000);
+});
+
+
+// L4-NETG-DNS25: stays in this isolated CI step. This daemon has its own namespace/firewall and deterministic upstream DNS;
+// none of these assertions depends on public DNS or internet availability. Run after the host-stage suite restores Docker.
+describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("mounted gateway name files on Docker 25", () => {
+  let root = "";
+  let dind: Dind | undefined;
+  let files: Awaited<ReturnType<typeof createGatewayNameFiles>>;
+  const inner = "dns25-inner";
+  const outer = "dns25-control";
+  const gateway = "dns25-gateway";
+  const upstream = "dns25-upstream";
+  const service = "dns25-service";
+  const gatewayIp = "172.29.245.2";
+  const serviceIp = "172.29.245.16";
+  const rawIp = "172.29.246.16";
+  const upstreamIp = "172.29.246.3";
+  const cli = (...args: string[]) => dind!.docker(...args);
+  const client = (network: string, script: string, user = "1000:1000") => cli("run", "--rm", "--pull=never", "--network", network,
+    "--mount", `type=bind,src=${files.resolvConfPath},dst=/etc/resolv.conf,readonly`,
+    "--mount", `type=bind,src=${files.hostsPath},dst=/etc/hosts,readonly`,
+    "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", user, APP_NODE_IMAGE, "node", "-e", script);
+  beforeAll(async () => {
+    // /tmp is a separate tmpfs inside dind; the shared path must be under /var/tmp instead.
+    root = await realpath(await mkdtemp(join("/var/tmp", "rovara-netg-dns25-")));
+    const image = ciImage("docker-dind", DOCKER_25_DIND_IMAGE);
+    await ensureLocalImage(image, DOCKER_25_DIND_IMAGE);
+    dind = await startDind(image, [{ path: root }]);
+    await dind.load(APP_NODE_IMAGE);
+    await cli("network", "create", "--driver", "bridge", "--ipv6=false", "--internal", "--subnet", "172.29.245.0/24",
+      "-o", "com.docker.network.bridge.inhibit_ipv4=true", "-o", "com.docker.network.bridge.name=dns25in", inner);
+    await cli("network", "create", "--subnet", "172.29.246.0/24", outer);
+    // A worker/VPC resolver stand-in: the allowed name AND the registry both have public answers here, so a blocked registry
+    // lookup can only come from the real gateway's own deny list (not from upstream NXDOMAIN).
+    const dnsProgram = `const s=require('dgram').createSocket('udp4');s.on('message',(m,r)=>{let at=12,n=[];while(m[at]){n.push(m.toString('latin1',at+1,at+1+m[at]));at+=m[at]+1}at++;const nx=!['allowed.gate.test',${JSON.stringify(REGISTRY_HOST)}].includes(n.join('.')),a=!nx&&m.readUInt16BE(at)===1;
+const h=Buffer.alloc(12);m.copy(h,0,0,2);h.writeUInt16BE(nx?0x8183:0x8180,2);h.writeUInt16BE(1,4);h.writeUInt16BE(a?1:0,6);s.send(Buffer.concat([h,m.subarray(12,at+4),a?Buffer.from([0xc0,0x0c,0,1,0,1,0,0,0,5,0,4,93,184,216,34]):Buffer.alloc(0)]),r.port,r.address)});s.bind(53,'0.0.0.0',()=>console.log('ready'));`;
+    await cli("run", "-d", "--name", upstream, "--network", outer, "--ip", upstreamIp, "--cap-drop", "ALL", "--read-only", "--user", "1000:1000",
+      "--sysctl", "net.ipv4.ip_unprivileged_port_start=53", "--pull=never", APP_NODE_IMAGE, "node", "-e", dnsProgram);
+    const config = { mode: "host", sandboxDenied: SANDBOX_REGISTRY_DENY, nets: { sandbox: "172.29.245.0/24", external: "172.29.246.0/24" } };
+    await cli("create", "--name", gateway, "--network", outer, "--ip", "172.29.246.2", "--dns", upstreamIp,
+      "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "1000:1000", "--sysctl", "net.ipv4.ip_forward=0", "--sysctl", "net.ipv4.ip_unprivileged_port_start=53",
+      "--env", `ROVARA_GW_CONFIG=${JSON.stringify(config)}`, "--pull=never", APP_NODE_IMAGE, "node", "-e", EGRESS_GATEWAY_SOURCE);
+    await cli("network", "connect", "--ip", gatewayIp, inner, gateway);
+    await cli("start", gateway);
+    // Same TCP server for the raw-IP control and local-service alias. Its external-side address is outside the internal subnet.
+    await cli("create", "--name", service, "--network", outer, "--ip", rawIp, "--cap-drop", "ALL", "--user", "1000:1000", "--pull=never", APP_NODE_IMAGE, "node", "-e",
+      "require('net').createServer(s=>s.end('ready')).listen(8080,'0.0.0.0',()=>console.log('ready'))");
+    await cli("network", "connect", "--ip", serviceIp, inner, service);
+    await cli("start", service);
+    files = await createGatewayNameFiles("/worker/dns25", gatewayIp, join(root, "names"));
+    await writeFile(files.hostsPath, `127.0.0.1 localhost\n${serviceIp} test-db\n`);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if ((await cli("logs", upstream)).includes("ready") && (await cli("logs", service)).includes("ready") && (await client(inner, lookupOutcome("allowed.gate.test"))) === gatewayIp) return;
+      await new Promise(done => setTimeout(done, 250));
+    }
+    throw new Error("Docker 25 gateway/control did not become ready");
+  }, 300_000);
+  afterAll(async () => {
+    try {
+      if (dind !== undefined) {
+        for (const name of [service, gateway, upstream]) await cli("rm", "--force", name).catch(() => undefined);
+        for (const name of [inner, outer]) await cli("network", "rm", name).catch(() => undefined);
+      }
+    } finally {
+      await dind?.stop();
+      if (root !== "") await rm(root, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("is Docker 25 on the IPv4-only internal network with no host address", async () => {
+    expect(dind!.version).toMatch(/^25\./u);
+    const inspected: unknown = JSON.parse(await cli("network", "inspect", inner));
+    expect(inspected).toEqual([expect.objectContaining({ Internal: true, EnableIPv6: false, Options: { "com.docker.network.bridge.inhibit_ipv4": "true", "com.docker.network.bridge.name": "dns25in" } })]);
+  });
+  it("resolves an allowed name via the mounted real gateway resolver and refuses a blocked name with that same passing DNS control", async () => {
+    expect(await client(inner, lookupOutcome("allowed.gate.test"))).toBe(gatewayIp);
+    expect(await client(inner, lookupOutcome(REGISTRY_HOST))).toBe("ENOTFOUND");
+    expect(await client(inner, lookupOutcome("allowed.gate.test"))).toBe(gatewayIp);
+  });
+  it("cannot reach a raw IP on the internal network, while the identical client reaches the identical target on an ordinary bridge", async () => {
+    expect(await client(outer, connectOutcome(rawIp, 8080))).toBe("open");
+    expect(await client(inner, connectOutcome(rawIp, 8080))).toMatch(/^(ENETUNREACH|EHOSTUNREACH|timeout)$/u);
+  });
+  it("resolves the service alias through the worker-owned hosts file and reaches that service", async () => {
+    expect(await client(inner, lookupOutcome("test-db"))).toBe(serviceIp);
+    expect(await client(inner, connectOutcome("test-db", 8080))).toBe("open");
+  });
+  it("cannot write either name-file mount, even as container root, with a passing writable-file control", async () => {
+    const script = `const fs=require('fs');fs.writeFileSync('/tmp/write-control','ok');console.log('control:'+fs.readFileSync('/tmp/write-control','utf8'));for(const p of ['/etc/resolv.conf','/etc/hosts']){try{fs.appendFileSync(p,'bad');console.log(p+':WRITABLE')}catch(e){console.log(p+':'+e.code)}}`;
+    expect(await client(inner, script, "0:0")).toBe("control:ok\n/etc/resolv.conf:EROFS\n/etc/hosts:EROFS");
+    expect(await readFile(files.resolvConfPath, "utf8")).toContain(`nameserver ${gatewayIp}\n`);
+  });
 });
