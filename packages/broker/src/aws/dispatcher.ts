@@ -20,14 +20,14 @@ import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
-import { createTaskPersonRuntime, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { createTaskPersonRuntime, ownCompanyAuthorityRows, taskPersonLatestRevisionQuery, taskPersonNamedLatestRevision, taskPersonRevisionFromResponse, withTaskPersonMembershipRead, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 import { coreEngineServes, readCoreEngineFlags } from "../core-host/flags.js";
 import type { CoreDispatchHost } from "./worker-machines/core-dispatch-host.js";
 import { coreDispatchQueueArn, createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow, withCoreDispatch } from "./worker-machines/dispatcher-core.js"; import { loadCallbackSigningKey } from "./callback-signing-key.js"; import { createDispatcherLessonsPeople } from "./worker-machines/dispatcher-people.js"; // one line: no line of dispatcher.ts moves (the company inventory pins its sites by line)
 import { createHostedMoneyStop, gatewayModelKeysModules, hostedSecurityModules, readHostedAdmissionSettings, runStopWiredFrom } from "../core-host/hosted-modules.js"; import { dispatcherProjectTaskCap } from "./engine-policy-hook.js";
 import { sessionWorkerPing, type SessionWorkerPing } from "./worker-machines/session-worker-machines.js";
-import { namedCompany } from "./company-layout.js";
+import { grantsPkFor, namedCompany, slackChannelBindingPkFor } from "./company-layout.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -421,14 +421,32 @@ function taskPersonRuntimePorts(input: {
         admission.assertOpen();
         return taskPersonRevisionFromResponse(response);
       },
-      async memberships(developerId, admission, abortSignal) {
+      async memberships(developerId, admission, abortSignal, companyId) {
+        // R2-F1 review round 3: a NAMED company's grants are its own partition's (lane 2, `grantsPkFor`); a row there naming another company is dropped.
+        const named = namedCompany(companyId);
+        if (named !== undefined) {
+          const own = await queryPages<{ pk: string; sk: string; projectName: string; role?: string; companyId?: unknown; orgId?: unknown }>({
+            pk: grantsPkFor(named, developerId), prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role", "companyId", "orgId"], abortSignal,
+          });
+          admission.assertOpen();
+          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
+        }
         const result = await queryPages<{ pk: string; sk: string; projectName: string; role?: string }>({
           pk: `MEMBER#${developerId}`, prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role"], abortSignal,
         });
         admission.assertOpen();
         return result;
       },
-      async bindings(teamId, admission, abortSignal) {
+      async bindings(teamId, admission, abortSignal, companyId) {
+        // R2-F1 review round 3: a NAMED company's channel bindings are its own partition's (lane 3, `slackChannelBindingPkFor`); a row naming another company is dropped.
+        const named = namedCompany(companyId);
+        if (named !== undefined) {
+          const own = await queryPages<SlackChannelBinding & { pk: string; sk: string; companyId?: unknown; orgId?: unknown }>({
+            pk: slackChannelBindingPkFor(named, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt", "companyId", "orgId"], abortSignal,
+          });
+          admission.assertOpen();
+          return { items: ownCompanyAuthorityRows(own.items, named), complete: own.complete };
+        }
         const result = await queryPages<SlackChannelBinding & { pk: string; sk: string }>({
           pk: channelBindingPartition(SLACK_CHANNEL, teamId), prefix: channelBindingSortPrefix(SLACK_CHANNEL), projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
         });

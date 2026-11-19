@@ -523,3 +523,19 @@ describe("Task Person invite handler", () => {
     expect(f.send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("R2-F1 review round 3: the invite fence for a NAMED company's witnesses", () => {
+  const B = `org_${"b".repeat(20)}`;
+  const revision = { pk: `ORG#${B}#PROJECT#project-alpha`, sk: "REV#000000000007", revision: 7, developerTasksPresent: false };
+  const witness = (developerId: string, membershipPk: string): TaskPersonProjectAuthorityWitness => ({
+    taskId, developerId, project: "project-alpha", access: "granted", projectRevision: revision,
+    membership: { pk: membershipPk, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" },
+  });
+  it("derives the company's own revision and grant predicates, and refuses a legacy or another company's grant beside them", () => {
+    const conditions = taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: witness(actorId, `ORG#${B}#MEMBER#${actorId}`), target: witness(targetId, `ORG#${B}#MEMBER#${targetId}`) });
+    expect(conditions?.map((condition) => condition.pk)).toEqual([revision.pk, `ORG#${B}#MEMBER#${actorId}`, `ORG#${B}#MEMBER#${targetId}`]);
+    for (const stale of [`MEMBER#${targetId}`, `ORG#org_${"a".repeat(20)}#MEMBER#${targetId}`]) {
+      expect(taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: witness(actorId, `ORG#${B}#MEMBER#${actorId}`), target: witness(targetId, stale) }), stale).toBeUndefined();
+    }
+  });
+});

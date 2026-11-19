@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
-import { SLACK_CHANNEL, isChannelBindingKeyOf } from "@agentx/contracts";
+import { orgOfProjectPk } from "@agentx/contracts";
+import { grantsPkFor, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
 import { mayUseProject, type ProjectAuthorityWitness, type ProjectUseRole } from "../developer/task-project-access.js";
 
 export type TaskPersonProjectAuthorityWitness = ProjectAuthorityWitness & {
@@ -23,7 +24,7 @@ export type TaskPersonInviteStateCondition =
 function projectRevisionCondition(witness: TaskPersonProjectAuthorityWitness, project: string): TaskPersonInviteStateCondition | undefined {
   const revision = witness.projectRevision;
   if (!Number.isSafeInteger(revision.revision) || revision.revision < 0
-    || revision.pk !== `PROJECT#${project}` || revision.sk !== `REV#${String(revision.revision).padStart(12, "0")}`
+    || revision.pk !== revisionPkFor(orgOfProjectPk(revision.pk), project) || revision.sk !== `REV#${String(revision.revision).padStart(12, "0")}`
     || typeof revision.developerTasksPresent !== "boolean") return undefined;
   const hasValue = Object.hasOwn(revision, "developerTasks");
   if (revision.developerTasksPresent !== hasValue) return undefined;
@@ -39,16 +40,18 @@ function positiveRowCondition(
   project: string,
   teamId: string,
 ): TaskPersonInviteStateCondition | undefined {
+  // R2-F1 review round 3: the company the witness's revision key names; a NAMED company's grant and binding keys are its own partition's.
+  const company = orgOfProjectPk(witness.projectRevision.pk);
   if (witness.access === "granted") {
     const membership = witness.membership;
     if (membership === undefined || witness.binding !== undefined
-      || membership.pk !== `MEMBER#${witness.developerId}` || membership.sk !== `PROJECT#${project}`
+      || membership.pk !== grantsPkFor(company, witness.developerId) || membership.sk !== `PROJECT#${project}`
       || membership.projectName !== project || !mayUseProject(membership.role)) return undefined;
     return { kind: "developer-grant", pk: membership.pk, sk: membership.sk, projectName: membership.projectName, role: membership.role };
   }
   const binding = witness.binding;
   if (binding === undefined || witness.membership !== undefined
-    || !isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: teamId, space: binding.channelId })
+    || !slackChannelBindingKeyMatches(binding, company, teamId, binding.channelId)
     || binding.teamId !== teamId || binding.projectName !== project || typeof binding.updatedAt !== "string"
     || binding.updatedAt.length === 0) return undefined;
   return {

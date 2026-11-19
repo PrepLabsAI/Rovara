@@ -196,7 +196,8 @@ it.each(["github/tools?repository=demo", "connectors/github/tools"])("the GitHub
   db.set({ pk: "SLACK_BINDING#T0123456789", sk: "CHANNEL#C0123456789", teamId: "T0123456789", channelId: "C0123456789", projectName: "demo", projectRevision: 1, updatedAt: NOW });
   db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", deploymentMode: "ec2-ebs", id: workspaceId, ownerKey, projectName: "demo", projectRevision: 1,
     environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, createdAt: NOW, updatedAt: NOW });
-  db.set({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
+  // DEC 254zzz80 (lane 2): the grant of a project of named company B lives in B's own partition.
+  db.set({ pk: `ORG#org_bbbbbbbbbbbbbbbbbbbb#MEMBER#${ownerKey}`, sk: "PROJECT#demo", ownerKey, projectName: "demo", role: "developer" });
   db.set({ pk: "PROJECT#demo", sk: "REV#000000000001", companyId: "org_bbbbbbbbbbbbbbbbbbbb", definition: { name: "demo", revision: 1,
     repositories: [{ name: "demo", url: "https://github.com/example/demo.git", credentialRef: "github" }], integrations: { githubMcp: { tools: [{ name: "get_me", access: "read" }] } } } });
   const response = await call(handler, { method: "GET", path: `/v1/service/workspaces/${workspaceId}/${path}`, service: { principal: orchestratorPrincipal, thread, slackUser: "U0123456789" } });

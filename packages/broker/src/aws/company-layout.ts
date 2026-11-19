@@ -141,3 +141,13 @@ export async function namedCompanySlackBinding(client: Client, tableName: string
     return SlackChannelBindingSchema.safeParse(binding).success ? { ...binding, companyId: company } : undefined;
   } catch { return undefined; }
 }
+
+/**
+ * Whether a Slack channel binding row sits at its key for this company (R2-F1 review round 3): a NAMED company's own `ORG#<company>#SLACK_BINDING#<team>` /
+ * `CHANNEL#<channel>`, else the legacy key exactly as `isChannelBindingKeyOf` checks it. A team or channel that is not a valid ref never matches.
+ */
+export function slackChannelBindingKeyMatches(item: { pk?: unknown; sk?: unknown }, companyId: string | undefined, teamId: string, channelId: string): boolean {
+  if (!ChannelSpaceRefSchema.safeParse({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId }).success) return false;
+  const key = slackChannelBindingKeyFor(companyId, teamId, channelId);
+  return item.pk === key.pk && item.sk === key.sk;
+}

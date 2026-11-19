@@ -19,8 +19,10 @@ export const SLACK_BINDING_READ_KEYS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING
 export const COMPANY_SLACK_CHANNEL_BINDING_KEYS = ["ORG#org_????????????????????#SLACK_BINDING#*"] as const;
 
 /**
- * DEC 254zzz80 (R2-F1 lane 1 review M2; NEW IAM, needs the owner's OK): a NAMED company's project revisions, `ORG#<company>#PROJECT#<name>` / `REV#...`. The Slack Lambda and the
- * channel API ask only whether the company holds the project (slack-company-wiring.ts getProject): Query, keys plus `companyId` and `candidate`, never a definition.
+ * DEC 254zzz80 (R2-F1 lane 1 review M2; NEW IAM, needs the owner's OK): a NAMED company's project partition, `ORG#<company>#PROJECT#<name>`. The Slack Lambda and the channel API
+ * ask only whether the company holds the project (slack-company-wiring.ts getProject reads its `REV#` rows): Query, keys plus `companyId` and `candidate`, never a definition.
+ * IAM cannot narrow the sort key here, so the grant covers EVERY sort key in that partition (`REV#…`, `META`, `SELECTION`, `SETUP_HOST_*`, `AUTOMATIC_RUNS…` and any later
+ * one), limited to those four attributes: those rows' keys and their `companyId`/`candidate` values (if any) are readable, nothing else of them.
  */
 export const COMPANY_PROJECT_REVISION_KEYS = ["ORG#org_????????????????????#PROJECT#*"] as const;
 

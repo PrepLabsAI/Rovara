@@ -1,5 +1,6 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { agentXError, SLACK_CHANNEL, isChannelBindingKeyOf } from "@agentx/contracts";
+import { agentXError, orgOfProjectPk } from "@agentx/contracts";
+import { grantsPkFor, revisionPkFor, slackChannelBindingKeyMatches } from "./company-layout.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
@@ -144,7 +145,9 @@ async function allowedStillCurrent(
   if (authorityWitness !== undefined) {
     const witness = authorityWitness;
     const expectedRevisionSk = `REV#${String(witness.projectRevision.revision).padStart(12, "0")}`;
-    if (witness.taskId !== task.taskId || witness.project !== task.project || witness.projectRevision.pk !== `PROJECT#${task.project}`
+    // R2-F1 review round 3: the company the witness's revision key names (a NAMED company's own `ORG#<company>#PROJECT#<name>`); its grant and binding keys are that company's too.
+    const company = orgOfProjectPk(witness.projectRevision.pk);
+    if (witness.taskId !== task.taskId || witness.project !== task.project || witness.projectRevision.pk !== revisionPkFor(company, task.project)
       || witness.projectRevision.sk !== expectedRevisionSk || !Number.isSafeInteger(witness.projectRevision.revision)
       || witness.projectRevision.revision < 0 || (witness.access !== "granted" && witness.access !== "channel")) return false;
     const definitionNames = { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" };
@@ -157,7 +160,7 @@ async function allowedStillCurrent(
       ConditionExpression: definitionPolicy, ExpressionAttributeNames: definitionNames, ExpressionAttributeValues: definitionValues } });
     if (witness.access === "granted") {
       const membership = witness.membership;
-      if (membership === undefined || membership.pk !== `MEMBER#${witness.developerId}` || membership.sk !== `PROJECT#${task.project}`
+      if (membership === undefined || membership.pk !== grantsPkFor(company, witness.developerId) || membership.sk !== `PROJECT#${task.project}`
         || membership.projectName !== task.project || !mayUseProject(membership.role)) return false;
       checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: membership.pk, sk: membership.sk },
         // The row must still hold the role the start saw: a change in between refuses the dispatch.
@@ -165,7 +168,7 @@ async function allowedStillCurrent(
         ExpressionAttributeValues: { ":project": task.project, ":role": membership.role } } });
     } else {
       const binding = witness.binding;
-      if (binding === undefined || !isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: binding.teamId, space: binding.channelId })
+      if (binding === undefined || !slackChannelBindingKeyMatches(binding, company, binding.teamId, binding.channelId)
         || binding.projectName !== task.project || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) return false;
       checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: binding.pk, sk: binding.sk },
         ConditionExpression: "teamId = :teamId AND channelId = :channelId AND projectName = :projectName AND updatedAt = :updatedAt",

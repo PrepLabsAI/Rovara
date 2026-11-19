@@ -114,6 +114,18 @@ export async function taskPersonNamedLatestRevision(
   return taskPersonRevisionFromResponse({ Items: row === undefined ? [] : [row] });
 }
 
+/**
+ * R2-F1 review round 3: a NAMED company's grant or binding rows read from its own partition, kept only when they name no other company (`ownPartitionRow`), with the company
+ * fields removed so the rows have the legacy readers' shape.
+ */
+export function ownCompanyAuthorityRows<T extends Record<string, unknown>>(items: readonly T[], company: OrgId): Array<Omit<T, "companyId" | "orgId">> {
+  return items.filter((item) => ownPartitionRow(item, company)).map((item) => {
+    const { companyId: _company, orgId: _org, ...rest } = item;
+    void _company; void _org;
+    return rest;
+  });
+}
+
 /** C2: the fields of a `COMPANY_MEMBER#<developerId>` / `COMPANY` row the web proof reads (the reviewed `Membership` record, company-check.ts). */
 export const TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES = [
   "pk", "sk", "entityType", "personId", "companyId", "role", "joinedAt", "joinedVia", "revokedAt", "revokedBy",
@@ -180,9 +192,12 @@ function identityDependencies(input: {
   onProjectAuthority(witness: ProjectAuthorityWitness): void;
 }): TaskPersonIdentityDependencies {
   const { task, developerId, slackTeamId, admission, ports } = input;
+  // R2-F1 review round 3: the task's NAMED company (the company the task record names), whose own revision, grants and bindings the checks read; else the legacy rows.
+  const taskRow = task as unknown as { companyId?: unknown; orgId?: unknown };
+  const taskCompany = namedCompany(typeof taskRow.companyId === "string" ? taskRow.companyId : typeof taskRow.orgId === "string" ? taskRow.orgId : undefined);
   const readBindings = async (project: string): Promise<readonly string[]> => {
     admission.assertOpen();
-    const result = await ports.projectAuthorityReader.bindings(slackTeamId, admission, admission.admitStateRead());
+    const result = await ports.projectAuthorityReader.bindings(slackTeamId, admission, admission.admitStateRead(), taskCompany);
     admission.assertOpen();
     if (!result.complete) throw unavailable();
     return result.items.filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort();
@@ -244,7 +259,8 @@ function identityDependencies(input: {
       // Fail closed and without a verdict: a revision of another company (or of an unreadable company) is never read as "no grant", which would demote a person; the step parks like any unavailable proof.
       if (typeof taskCompanyId !== "string" || (named === undefined ? !recordInCompany({ companyId: latest.revision.companyId }, taskCompanyId)
         : latest.revision.pk !== revisionPkFor(named, project) || !ownPartitionRow({ ...(latest.revision.companyId === undefined ? {} : { companyId: latest.revision.companyId }) }, named))) throw unavailable();
-      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead());
+      // The person's grants in the same company's partition (lane 2): a legacy row, or another company's grant, never counts.
+      const grants = await ports.projectAuthorityReader.memberships(targetDeveloperId, admission, admission.admitStateRead(), named);
       admission.assertOpen();
       if (!grants.complete) throw unavailable();
       const result = evaluateProjectAuthority({ project, developerId: targetDeveloperId, teamId: slackTeamId, revision: latest.revision, memberships: grants.items, bindings: [], ...(named === undefined ? {} : { companyId: named }) });
@@ -265,6 +281,7 @@ function identityDependencies(input: {
         freshMemberOf,
         ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
         admission,
+        ...(taskCompany === undefined ? {} : { companyId: taskCompany }),
       });
       if (result.kind === "allowed") {
         if (result.witness === undefined) throw unavailable();

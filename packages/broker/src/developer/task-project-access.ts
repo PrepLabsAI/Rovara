@@ -4,10 +4,9 @@ import {
   developerTaskPolicy,
   type DeveloperTaskPolicy,
   type SlackChannelBinding,
-  SLACK_CHANNEL, isChannelBindingKeyOf,
 } from "@agentx/contracts";
 import type { TaskAuthorityAdmission } from "../aws/task-authority-admission.js";
-import { revisionPkFor } from "../aws/company-layout.js";
+import { grantsPkFor, namedCompany, revisionPkFor, slackChannelBindingKeyMatches } from "../aws/company-layout.js";
 
 export interface ProjectAuthorityRevision {
   pk?: string;
@@ -43,8 +42,9 @@ export interface ProjectAuthorityReader {
   /** Use the supplied signal for page one; count each later Query page before issue. */
   /** `companyId`: DEC 254zzz80, a NAMED company's project is read from its own partition (company-layout.ts); absent or the built-in company, the legacy row. */
   latestRevision(project: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal, companyId?: string): Promise<{ revision?: ProjectAuthorityRevision; complete: boolean }>;
-  memberships(developerId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal): Promise<{ items: readonly ProjectDeveloperMembership[]; complete: boolean }>;
-  bindings(teamId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal): Promise<{ items: readonly ProjectChannelBinding[]; complete: boolean }>;
+  /** `companyId`: a NAMED company's grants (`ORG#<company>#MEMBER#<person>`, lane 2) and channel bindings (`ORG#<company>#SLACK_BINDING#<team>`, lane 3); else the legacy rows. */
+  memberships(developerId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal, companyId?: string): Promise<{ items: readonly ProjectDeveloperMembership[]; complete: boolean }>;
+  bindings(teamId: string, admission: BoundedProjectReadAdmission, abortSignal: AbortSignal, companyId?: string): Promise<{ items: readonly ProjectChannelBinding[]; complete: boolean }>;
 }
 
 /** Pure policy evaluation. It performs no I/O, logging, name lookup, or human error decoration. */
@@ -57,18 +57,19 @@ export function evaluateProjectAuthority(input: {
   bindings: readonly ProjectChannelBinding[];
   freshMemberOf?: readonly string[];
   slackUserId?: string;
-  /** DEC 254zzz80: the company whose partition the revision was read from (a named company's own `ORG#<company>#PROJECT#<name>`); absent: the legacy row. */
+  /** DEC 254zzz80: the company whose partition the revision, the grants and the bindings were read from (a named company's own `ORG#<company>#...` keys); absent: the legacy rows. */
   companyId?: string;
 }): ProjectAuthorityResult {
   if (!AgentXNameSchema.safeParse(input.project).success || input.revision === undefined) return { kind: "not-found" };
   const revisionKey = `REV#${String(input.revision.revision).padStart(12, "0")}`;
   if (!Number.isSafeInteger(input.revision.revision) || input.revision.revision < 0) return { kind: "unavailable" };
   if (input.developerId !== undefined && input.teamId !== undefined && (input.revision.pk !== revisionPkFor(input.companyId, input.project) || input.revision.sk !== revisionKey)) return { kind: "unavailable" };
-  if (input.developerId !== undefined && input.memberships.some((row) => row.projectName === input.project
-    && (row.pk !== `MEMBER#${input.developerId}` || row.sk !== `PROJECT#${input.project}`))) return { kind: "unavailable" };
+  const developerId = input.developerId;
+  if (developerId !== undefined && input.memberships.some((row) => row.projectName === input.project
+    && (row.pk !== grantsPkFor(input.companyId, developerId) || row.sk !== `PROJECT#${input.project}`))) return { kind: "unavailable" };
   const teamId = input.teamId;
   if (teamId !== undefined && input.bindings.some((binding) => binding.projectName === input.project
-    && (!isChannelBindingKeyOf(binding, { channel: SLACK_CHANNEL, tenant: teamId, space: binding.channelId }) || binding.teamId !== teamId))) return { kind: "unavailable" };
+    && (!slackChannelBindingKeyMatches(binding, input.companyId, teamId, binding.channelId) || binding.teamId !== teamId))) return { kind: "unavailable" };
 
   const policy = developerTaskPolicy(input.revision.definition);
   const matchingBindings = input.bindings.filter((binding) => binding.projectName === input.project);
@@ -118,21 +119,24 @@ export async function readProjectAuthority(
     slackUserId?: string;
     freshMemberOf?: readonly string[];
     admission: BoundedProjectReadAdmission;
+    /** R2-F1 review round 3: the task's NAMED company, whose own revision, grants and bindings are read (absent: the legacy rows). */
+    companyId?: string;
   },
 ): Promise<ProjectAuthorityResult> {
+  const company = namedCompany(input.companyId);
   if (!AgentXNameSchema.safeParse(input.project).success) return { kind: "not-found" };
   try {
     input.admission.assertOpen();
-    const latest = await reader.latestRevision(input.project, input.admission, input.admission.admitStateRead());
+    const latest = await reader.latestRevision(input.project, input.admission, input.admission.admitStateRead(), company);
     input.admission.assertOpen();
     if (!latest.complete) return { kind: "unavailable" };
     if (latest.revision === undefined) return { kind: "not-found" };
 
-    const memberships = await reader.memberships(input.developerId, input.admission, input.admission.admitStateRead());
+    const memberships = await reader.memberships(input.developerId, input.admission, input.admission.admitStateRead(), company);
     input.admission.assertOpen();
     if (!memberships.complete) return { kind: "unavailable" };
 
-    const bindings = await reader.bindings(input.teamId, input.admission, input.admission.admitStateRead());
+    const bindings = await reader.bindings(input.teamId, input.admission, input.admission.admitStateRead(), company);
     input.admission.assertOpen();
     if (!bindings.complete) return { kind: "unavailable" };
 
@@ -145,6 +149,7 @@ export async function readProjectAuthority(
       bindings: bindings.items,
       ...(input.freshMemberOf === undefined ? {} : { freshMemberOf: input.freshMemberOf }),
       ...(input.slackUserId === undefined ? {} : { slackUserId: input.slackUserId }),
+      ...(company === undefined ? {} : { companyId: company }),
     });
   } catch {
     return { kind: "unavailable" };

@@ -103,6 +103,8 @@ export function slackCompanyDependenciesFromEnvironment(env: NodeJS.ProcessEnv, 
         if (typeof name !== "string" || name.length === 0 || name.length > PROJECT_NAME_MAX || name.includes("#")) return undefined;
         // DEC 254zzz80 (R2-F1): a NAMED company's project is in its own partition; it holds the project when its newest revision that is not a candidate (a setup waiting for
         // approval) names no other company. Keys and those two fields only (COMPANY_PROJECT_REVISION_KEYS grants exactly pk, sk, companyId, candidate there).
+        // Known gap (fails closed): the catalog pointer is not read (no grant for it), so a project whose only usable revision is an approved candidate (the pointer names it,
+        // the row keeps `candidate`), or whose newest 20 revisions are all candidates, reads as "not held" here: its Slack checks refuse until a plain revision exists.
         const named = namedCompany(companyId);
         if (named !== undefined) {
           const pk = revisionPkFor(named, name);
