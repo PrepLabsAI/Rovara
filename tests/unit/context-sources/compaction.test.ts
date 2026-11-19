@@ -169,19 +169,56 @@ describe("the hook", () => {
     expect(seen[0]).not.toContain("connected sources");
   });
 
-  it("cancels when the summary fails, whether or not sources were involved", async () => {
+  it("uses a fallback when the summary fails, whether or not sources were involved", async () => {
     const fail: CompactionSummariser = async () => { throw new Error("model down"); };
     const withSource = await run({}, fail, preparation([toolResult(FRAMED)]));
-    expect(withSource.result).toEqual({ cancel: true });
+    expect(withSource.result?.compaction?.summary).toBeTypeOf("string");
     const withoutSource = await run({ planFacts: () => "facts" }, fail, preparation([{ role: "user", content: "go" }]));
-    expect(withoutSource.result).toEqual({ cancel: true });
+    expect(withoutSource.result?.compaction?.summary).toBeTypeOf("string");
   });
 
-  it("cancels when the hook itself fails after cleaning (cleaning is done in place)", async () => {
+  it("uses a fallback when the hook itself fails after cleaning (cleaning is done in place)", async () => {
     const prep = preparation([toolResult(FRAMED)]);
     const { result } = await run({}, async () => { throw new Error("boom"); }, prep);
     expect(JSON.stringify(prep.messagesToSummarize)).not.toContain("alpha bravo");
-    expect(result).toEqual({ cancel: true });
+    expect(result?.compaction?.summary).toBeTypeOf("string");
+  });
+
+  it("falls back near the context limit with verbatim facts and no source text, without a model usage", async () => {
+    const guard = createSourceTextGuard();
+    guard.remember(SECRET);
+    const facts = "Claim 1: retry twice\nDo not touch package.json";
+    const prep = preparation([toolResult(FRAMED), { role: "assistant", content: [{ type: "text", text: SECRET }] }], {
+      tokensBefore: 127_999, previousSummary: `${SECRET}\n${FRAMED}`, turnPrefixMessages: [toolResult(FRAMED)],
+    });
+    const seen: Array<{ keptApprovedPlan: boolean }> = [];
+    const { result, handlers } = await run({ sourceGuard: () => guard, planFacts: () => facts, onCompacted: (info) => { seen.push(info); } }, async () => { throw new Error(SECRET); }, prep);
+    expect(result).toMatchObject({ compaction: { firstKeptEntryId: "k", tokensBefore: 127_999 } });
+    expect(result?.compaction?.summary).toContain("2 earlier messages; 1 turn-prefix messages");
+    expect(result?.compaction?.summary.endsWith(`${PLAN_FACTS_HEADING}\n${facts}`)).toBe(true);
+    expect(result?.compaction?.summary).not.toContain(SECRET);
+    expect(result?.compaction?.summary).not.toContain("<source-result");
+    expect(result?.compaction).not.toHaveProperty("usage");
+    handlers.session_compact!({ type: "session_compact", compactionEntry: { tokensBefore: 127_999, summary: result!.compaction!.summary }, fromExtension: true, reason: "overflow", willRetry: true });
+    expect(seen).toMatchObject([{ keptApprovedPlan: true, fromHook: true }]);
+  });
+
+  it.each([undefined, "Claim 1: retry twice"])("uses a minimal summary if the structural fallback itself fails (facts: %s), even if diagnostics throw", async (facts) => {
+    const messages = new Proxy([toolResult(FRAMED)], { get(target, key, receiver) {
+      if (key === "length") throw new Error(SECRET);
+      return Reflect.get(target, key, receiver) as unknown;
+    } });
+    const handlers = load(compactionExtension({ planFacts: () => facts }, async () => done("must not run"), () => { throw new Error("report failed"); }));
+    const result = await handlers.session_before_compact!(before(preparation(messages))) as { compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number } };
+    expect(result.compaction).toEqual({ summary: facts === undefined ? "Conversation compacted. Earlier details are unavailable." : `${PLAN_FACTS_HEADING}\n${facts}`, firstKeptEntryId: "k", tokensBefore: 10 });
+    expect(result.compaction.summary).not.toContain(SECRET);
+  });
+
+  it("keeps maximum production plan and item facts within the 16,384 character fallback cap", async () => {
+    const facts = `${"p".repeat(PLAN_FACTS_MAX_CHARS)}\n\n${itemScopeFacts({ title: "t".repeat(80), description: "d".repeat(2_000), repository: "r".repeat(200) }, PART_SCOPE_SENTENCE)}`;
+    const { result } = await run({ planFacts: () => facts }, async () => { throw new Error("down"); }, preparation([toolResult(FRAMED)]));
+    expect(result?.compaction?.summary.endsWith(`${PLAN_FACTS_HEADING}\n${facts}`)).toBe(true);
+    expect(result?.compaction?.summary.length).toBeLessThanOrEqual(16_384);
   });
 
   it("lets an abort through", async () => {
@@ -190,7 +227,7 @@ describe("the hook", () => {
     await expect(run({}, async () => { throw new Error("aborted"); }, preparation([toolResult(FRAMED)]), { signal: controller.signal })).rejects.toThrow("aborted");
   });
 
-  it("cancels, and leaves the preparation as it was, when cleaning fails part way", async () => {
+  it("uses a fallback, and leaves the preparation as it was, when cleaning fails part way", async () => {
     const guard = createSourceTextGuard();
     guard.remember(SECRET);
     let calls = 0;
@@ -198,42 +235,54 @@ describe("the hook", () => {
     const history = [toolResult(FRAMED)];
     const prefix = [{ role: "user", content: "go" }];
     const prep = preparation(history, { turnPrefixMessages: prefix });
-    const { result } = await run({ sourceGuard: () => failing as never }, async () => done("S"), prep);
-    expect(result).toEqual({ cancel: true });
+    const { result } = await run({ sourceGuard: () => failing as never, planFacts: () => "Keep the public API" }, async () => done("S"), prep);
+    expect(result?.compaction?.summary).toBeTypeOf("string");
+    expect(result?.compaction?.summary).toContain(`${PLAN_FACTS_HEADING}\nKeep the public API`);
+    expect(result?.compaction?.summary).not.toContain(SECRET);
+    expect(result?.compaction?.summary).not.toContain("<source-result");
     // Neither array was replaced by a half-cleaned one.
     expect(prep.messagesToSummarize).toBe(history);
     expect(prep.turnPrefixMessages).toBe(prefix);
   });
 
-  it("cancels when scrubbing the earlier summary fails, and when the facts reader throws with sources in the conversation", async () => {
+  it("uses a fallback when scrubbing the earlier summary fails, and when the facts reader throws with sources in the conversation", async () => {
     const throwing = { active: () => true, scrub: (value: unknown) => value, redact: () => { throw new Error("redact failed"); } };
     const a = await run({ sourceGuard: () => throwing as never }, async () => done("S"), preparation([{ role: "user", content: "go" }], { previousSummary: "old" }));
-    expect(a.result).toEqual({ cancel: true });
+    expect(a.result?.compaction?.summary).toBeTypeOf("string");
     const b = await run({ planFacts: () => { throw new Error("facts failed"); } }, async () => done("S"), preparation([toolResult(FRAMED)]));
-    expect(b.result).toEqual({ cancel: true });
-    // A facts-reader failure must not fall through to Pi's unguarded summary.
+    expect(b.result?.compaction?.summary).toBeTypeOf("string");
+    // A facts-reader failure must still supply a summary rather than fall through to Pi's unguarded summary.
     const c = await run({ planFacts: () => { throw new Error("facts failed"); } }, async () => done("S"), preparation([{ role: "user", content: "go" }]));
-    expect(c.result).toEqual({ cancel: true });
+    expect(c.result?.compaction?.summary).toBeTypeOf("string");
   });
 
-  it("cancels when it fails before it could look at the guard and a source is anywhere in the conversation, whether as a frame, a context tool's result or a tool's name", async () => {
+  it("uses a fallback when it fails before it could look at the guard and a source is anywhere in the conversation, whether as a frame, a context tool's result or a tool's name", async () => {
     const guardFails = () => { throw new Error("the guard could not be read"); };
     // A source's frame in the messages.
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "assistant", content: [{ type: "text", text: FRAMED }] }]))).result).toEqual({ cancel: true });
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "assistant", content: [{ type: "text", text: FRAMED }] }]))).result?.compaction?.summary).toBeTypeOf("string");
     // A context tool's call, with no frame yet.
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "assistant", content: [{ type: "toolCall", name: "src_sim_search_tickets", arguments: {} }] }]))).result).toEqual({ cancel: true });
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "assistant", content: [{ type: "toolCall", name: "src_sim_search_tickets", arguments: {} }] }]))).result?.compaction?.summary).toBeTypeOf("string");
     // A source in the earlier summary, or in the start of the last turn.
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { previousSummary: "It used search_team_knowledge." }))).result).toEqual({ cancel: true });
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { turnPrefixMessages: [toolResult("x", "search_team_knowledge")] }))).result).toEqual({ cancel: true });
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { previousSummary: "It used search_team_knowledge." }))).result?.compaction?.summary).toBeTypeOf("string");
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }], { turnPrefixMessages: [toolResult("x", "search_team_knowledge")] }))).result?.compaction?.summary).toBeTypeOf("string");
     // No source anywhere: a failed guard still must not fall through to Pi's own summary.
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text: "Done." }] }]))).result).toEqual({ cancel: true });
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([{ role: "user", content: "go" }, { role: "assistant", content: [{ type: "text", text: "Done." }] }]))).result?.compaction?.summary).toBeTypeOf("string");
   });
 
-  it("cancels when it cannot even look through the conversation (an unreadable message errs toward a source being there)", async () => {
+  it("uses a fallback when it cannot even look through the conversation (an unreadable message errs toward a source being there)", async () => {
     const circular: Record<string, unknown> = { role: "user" };
     circular.self = circular;
     const guardFails = () => { throw new Error("the guard could not be read"); };
-    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([circular]))).result).toEqual({ cancel: true });
+    expect((await run({ sourceGuard: guardFails }, async () => done("S"), preparation([circular]))).result?.compaction?.summary).toBeTypeOf("string");
+  });
+
+  it("retains usage when a completed model summary cannot be scrubbed and the fallback replaces it", async () => {
+    const usage = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 } };
+    const guard = { active: () => true, scrub: (value: unknown) => value, redact: () => { throw new Error("redact failed"); } };
+    const { result } = await run({ sourceGuard: () => guard as never, planFacts: () => "Keep the public API" }, async () => ({ ...done(SECRET), usage }), preparation([{ role: "user", content: "go" }]));
+    expect(result?.compaction).toMatchObject({ usage });
+    expect(result?.compaction?.summary).not.toContain(SECRET);
+    expect(result?.compaction?.summary.endsWith(`${PLAN_FACTS_HEADING}\nKeep the public API`)).toBe(true);
   });
 
   it("says the plan was kept only when the worker's own summary carries it", async () => {

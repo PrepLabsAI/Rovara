@@ -1,6 +1,6 @@
 // Conversation compaction (packages/worker/src/compaction.ts): Pi's real session on its scripted model, compacted by hand on the worker's own path.
 // A summary is built from stubbed messages and never holds a source's text, whichever stage compacted; Build's summary keeps the approved plan's key facts; a compaction is reported;
-// a session with no sources and no plan compacts exactly as Pi does by default. No network, no Docker.
+// every session uses Rovara compaction, including a source-free session and a failed main summary. No network, no Docker.
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,21 +138,39 @@ describe("a stage that read a source", () => {
     expect(asked.join("")).toContain("see Sources");
   });
 
-  it("with sources involved, a summary that cannot be made is not written at all", async () => {
+  it("recovers from context overflow when the main summary fails, preserving facts without source text or Pi default compaction", async () => {
+    const seen: ConversationCompacted[] = [];
+    const continued: string[] = [];
+    const facts = "Claim 1: retry twice\nDo not touch package.json";
+    const summaryFailure = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "400 invalid request: summary unavailable" });
     const w = await world([
       fauxAssistantMessage([fauxToolCall("src_sim_search_tickets", { query: "x" }, { id: "t1" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage("Done."),
-      fauxAssistantMessage("Noted."),
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" }),
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" }),
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" }),
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" }),
+      fauxAssistantMessage(`The source said ${SECRET}`),
+      // Pi's real overflow recovery must compact and retry this turn.
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }),
+      summaryFailure,
+      (context) => { continued.push(JSON.stringify(context.messages)); return fauxAssistantMessage("Continued after fallback."); },
     ], "PLAN");
     const guard = createSourceTextGuard();
     const tools = createContextTools(catalog, async () => ({ status: "OK", text: FRAMED }), { workspaceId: "ws", conversationId: "conv", operationId: "op" }, { onText: (text) => guard.remember(text) });
-    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, contextTools: tools, extensionFactories: [w.probe], compaction: { sourceGuard: () => guard } }, w.adapter);
-    try { await handle.prompt("go"); await handle.prompt("more"); await expect(w.compactNow()).rejects.toBeDefined(); } finally { handle.dispose(); }
-    expect(await summaries(handle)).toEqual([]);
+    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, contextTools: tools, extensionFactories: [w.probe], compaction: { sourceGuard: () => guard, planFacts: () => facts, onCompacted: (info) => { seen.push(info); } } }, w.adapter);
+    try {
+      await handle.prompt("go");
+      await handle.prompt("more");
+    } finally { handle.dispose(); }
+    const saved = await summaries(handle);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.endsWith(`${PLAN_FACTS_HEADING}\n${facts}`)).toBe(true);
+    expect(saved[0]).not.toContain(SECRET);
+    expect(saved[0]).not.toContain("<source-result");
+    expect(saved[0]!.length).toBeLessThanOrEqual(16_384);
+    expect(seen).toEqual([expect.objectContaining({ reason: "overflow", willRetry: true, fromHook: true, keptApprovedPlan: true })]);
+    expect(continued).toHaveLength(1);
+    expect(continued[0]).toContain("retry twice");
+    expect(continued[0]).not.toContain(SECRET);
+    const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"compaction"')).map((line) => JSON.parse(line) as { fromHook?: boolean; usage?: unknown });
+    expect(entries[0]!.fromHook).toBe(true);
+    expect(entries[0]!.usage).toBeUndefined(); // Deterministic fallback makes no model call.
   }, 60_000);
 });
 
