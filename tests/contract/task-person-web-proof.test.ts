@@ -67,7 +67,7 @@ const task = (overrides: Partial<Omit<DeveloperTaskRecord, "companyId">> & { com
   createdAt: CREATED, updatedAt: CREATED, companyId: COMPANY_A,
   workflow: { revision: 7, stage: "PLAN_REVIEW", state: "WAITING" } as never,
   ...overrides,
-});
+}) as DeveloperTaskRecord; // overrides may carry a malformed companyId on purpose (refusal tests)
 
 const slackRow = (personId: string, slackUserId: string, name: string) => ({
   pk: `DEVTASK#${TASK_A}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: developerIdForSlackUser(slackUserId),
