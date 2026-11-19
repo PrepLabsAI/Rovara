@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, type ClientRepositoriesResponse } from "@agentx/contracts";
+import { revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { REPOSITORIES_NOT_AVAILABLE } from "../../packages/broker/src/aws/client-project-create.js";
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
@@ -13,6 +14,8 @@ import { createBroker, loadSlackBroker, registerSlackProject } from "../support/
 
 const STAGING_COMPANY = "org_stagingshape00000000";
 const OTHER = "org_bbbbbbbbbbbbbbbbbbbb";
+// DEC 254zzz80 (#1106, batch b21): a named company's project revision lives in that company's own partition (company-layout.ts revisionKeyFor).
+const revisionOf = (db: { get: (pk: string, sk: string) => Record<string, unknown> | undefined }, companyId: string | undefined, name: string) => { const key = revisionKeyFor(companyId, name, 1); return db.get(key.pk as string, key.sk as string); };
 const STAGING_INSTALLATION = 700001;
 const OTHER_INSTALLATION = 88;
 const repo = (fullName: string, id: number) => ({ fullName, githubRepositoryId: id, private: true, defaultBranch: "main" });
@@ -91,7 +94,7 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(created.statusCode).toBe(200);
     const name = (json(created) as { name: string }).name;
-    expect(h.db.get(`PROJECT#${name}`, "REV#000000000001")?.companyId).toBe(STAGING_COMPANY);
+    expect(revisionOf(h.db, STAGING_COMPANY, name)?.companyId).toBe(STAGING_COMPANY);
     const bulk = await h.call("/v1/dev/client/projects/bulk", { repositories: ["acme-staging/docs"] });
     expect(bulk.statusCode).toBe(200);
     expect((json(bulk)["results"] as Array<{ outcome: string }>).map((row) => row.outcome)).toEqual(["created"]);
@@ -104,13 +107,13 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     const refused = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(refused.statusCode).toBe(400);
     expect(refused.body).not.toContain(STAGING_COMPANY);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined();
+    expect(h.db.get("PROJECT#web", "REV#000000000001")).toBeUndefined(); expect(revisionOf(h.db, OTHER, "web")).toBeUndefined(); expect(revisionOf(h.db, STAGING_COMPANY, "web")).toBeUndefined();
     expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
     // And the other way round: the staging company sees nothing of the second company's.
     const staging = await hosted({ role: "owner" });
     expect(ids(await staging.call("/v1/dev/client/repositories"))).not.toContain(OTHER_INSTALLATION);
     expect((await staging.call("/v1/dev/client/projects", { repository: "other-co/payroll" })).statusCode).toBe(400);
-    expect(staging.db.get("PROJECT#payroll", "REV#000000000001")).toBeUndefined();
+    expect(staging.db.get("PROJECT#payroll", "REV#000000000001")).toBeUndefined(); expect(revisionOf(staging.db, STAGING_COMPANY, "payroll")).toBeUndefined(); expect(revisionOf(staging.db, OTHER, "payroll")).toBeUndefined();
   });
 
   it("the multi-repository and bulk creates refuse another company's repository and write nothing", async () => {
@@ -153,7 +156,7 @@ describe("hosted client project routes with the company GitHub bindings", () => 
     expect(ids(await h.call("/v1/dev/client/repositories"))).toEqual([STAGING_INSTALLATION]);
     const created = await h.call("/v1/dev/client/projects", { repository: "acme-staging/web" });
     expect(created.statusCode).toBe(200);
-    expect(h.db.get("PROJECT#web", "REV#000000000001")?.companyId).toBe(STAGING_COMPANY);
+    expect(revisionOf(h.db, STAGING_COMPANY, "web")?.companyId).toBe(STAGING_COMPANY);
     // The legacy member of the implicit company (staging's fourth row): the marker is written, so no installation is the implicit company's.
     const legacy = await hosted({ administrator: true, company: IMPLICIT_COMPANY_ID, role: "member" });
     expect(ids(await legacy.call("/v1/dev/client/repositories"))).toEqual([]);
