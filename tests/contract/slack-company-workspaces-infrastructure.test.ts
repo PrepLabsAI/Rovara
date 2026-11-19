@@ -51,7 +51,8 @@ beforeAll(() => {
   legacy = controlPlane(undefined);
   proofEnv = controlPlane("agentxlivetest123");
   on = Object.keys(named.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
-});
+  // #1120: three control plane synths; on a busy CI runner they pass the 10 s default, as the other stack tests allow for.
+}, 240_000);
 
 describe("Slack company mode's switch (18a)", () => {
   it("is one default-off parameter whose condition is exactly 'enabled' AND company sign-in on (DEC 254zk)", () => {
