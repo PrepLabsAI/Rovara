@@ -39,6 +39,8 @@ const ClaimSchema = z.object({
   claimId: z.string().uuid(), at: z.iso.datetime(),
   bases: z.array(z.object({ repositoryId: z.string().min(1).max(200), baseCommitSha: hex40 }).strict()).min(1).max(16),
   parts: KeyPartsSchema,
+  /** Bound by the broker when accepting the measured result; parts/mark remain the original lock identity. */
+  standInSetVersion: hash.optional(),
   /** The baseline's measuring mark (so a task that arrives meanwhile reads "measuring", not a second measurement); finished with the run. */
   mark: z.object({ claimId: z.string().uuid(), startedAt: z.number().int().min(0), expiresAt: z.number().int().min(0), state: z.literal("measuring") }).strict().optional(),
 }).strict();

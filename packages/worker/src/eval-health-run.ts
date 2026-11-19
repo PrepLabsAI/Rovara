@@ -77,7 +77,7 @@ async function measure(deps: EvalHealthRiderDeps, job: { requestId: string; clai
   const environment = evalEnvironmentWithGateway(deps.environment ?? process.env, invocation.payload.evalGatewayUrl);
   const ports = deps.ports !== undefined ? deps.ports(invocation) : (() => {
     const sources = evalHostSourcesFor({ workspaceId: invocation.workspaceId, operationId: invocation.operationId, callbackCapability: invocation.callbackCapability },
-      { controlPlaneUrl: deps.controlPlaneUrl, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }), fresh: { environment, docker: deps.docker, workspaceKey: () => setupWorkspaceKey(deps.rootPath),
+      { controlPlaneUrl: deps.controlPlaneUrl, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }), fresh: { environment, docker: deps.docker, standIns: { dependencies: invocation.payload.testServices?.dependencies }, workspaceKey: () => setupWorkspaceKey(deps.rootPath),
         // L4-E12 (E1): the baseline's three runs each get their own copy of the task's services, when this worker offers them.
         services: () => createEvalServicesStarter({ config: testServicesConfigFromEnvironment(environment, deps.docker), dependencies: invocation.payload.testServices?.dependencies }) } });
     const bound = evalFinalCheckForTask({ requested: true, environment, controlPlaneUrl: deps.controlPlaneUrl, capability: invocation.callbackCapability, sources, ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }) });

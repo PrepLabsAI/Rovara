@@ -995,7 +995,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         // L4-EVH (DEC 254zzz20 D5): the opt-in eval health run is offered only where a run can really happen (the model gateway, a bound reservation adapter and its cap source), and a person's yes starts it.
         const modelGatewayConfigured = (() => { try { return modelGateway() !== undefined; } catch { return false; } })();
         const healthRuns = evalHealthRunsAvailable({ registry, modelGatewayConfigured });
-        const healthDeps = healthRuns ? evalHealthRunDeps({ registry, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
+        const healthDeps = healthRuns ? evalHealthRunDeps({ registry, environment: env, companyId: runtime.companyId, now: () => now().getTime(), members: setupApproval.evalMembers, flow: runtime.flow.deps, modelGatewayConfigured }) : undefined;
         return {
           origin: inputs.origin,
           sessionCapSeconds: hostedSessionCapSeconds(),
@@ -1288,7 +1288,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             log: (event) => { log({ event: `core_engine.${event}` }); },
           }), env),
           // L4-EVH: the opt-in eval health run's own preparation asks for its plan and posts its one result here (only where a run can really happen).
-          ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
+          ...(evalHealthRunsAvailable({ registry, modelGatewayConfigured: wiring !== undefined }) ? { evalHealth: evalHealthRunDeps({ registry, environment: env, companyId, now: () => now().getTime(), members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }), modelGatewayConfigured: true }) } : {}),
           // Guided onboarding L2-3: a hosted setup run's callback (its journal, website asks, polls and eval report). No person types a command into a hosted run (the command route is
           // the laptop page's only), so nothing is ever handed over.
           // L4-E7: and the stand-in writer's sample data goes to this install's object storage (the broker's own bucket access; keys are `private/<company>/standins/<project>/<digest>`).
