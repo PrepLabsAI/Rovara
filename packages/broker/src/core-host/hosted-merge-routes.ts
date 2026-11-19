@@ -2,7 +2,7 @@
 //
 //   GET  /v1/app/tasks/{taskId}/merge   { mayMerge, ready, message?, risk?, heads?, pullRequests }: whether this person may press Merge, and whether it would merge now (the merge core's view, from what
 //                                        tracking last read), with the heads and the risk level a press would merge at
-//   POST /v1/app/tasks/{taskId}/merge   { requestId, expectedHeads?, risk? }: merges the task's pull requests through the merge core; what the person was shown (heads, risk) must still be what merges
+//   POST /v1/app/tasks/{taskId}/merge   { requestId, expectedHeads, risk }: merges the task's pull requests through the merge core; what the person was shown (heads, risk, both required) must still be what merges
 //
 // What this file decides, and nothing else (every merge rule is the merge core's, core/merge/merge.ts `pressMergeAsPerson`, which runs every gate `pressMerge` runs except the approver proof):
 //   - WHERE: a press comes only from the Rovara website's own sign-in client (`webApp`, set by the broker's sign-in from the client's registration, never from a request; DEC 254zzz91). The CLI's token or an
@@ -52,7 +52,7 @@ export const MERGE_LOCK_MS = 15 * 60_000;
 export const HOSTED_MERGE_WORDS = {
   notAllowed: "Only the task's owner, a co-owner, a project admin or a company admin can merge this task.",
   notSetUp: "Merging from Rovara is not set up on this install yet; merge the pull request on GitHub.",
-  body: "send a requestId (a UUID) and, if you were shown them, the heads and the risk level; nothing else",
+  body: "send a requestId (a UUID), the heads and the risk level you were shown, and nothing else",
   inProgress: "A merge of this task is already being made. Reload the page in a moment.",
   requestReused: "That request was already used by someone else. Reload the page and press Merge again.",
   unavailable: "Rovara couldn't reach GitHub just now, so nothing was merged. Try again in a minute.",
@@ -86,7 +86,8 @@ export interface HostedMergeInput {
 }
 
 const HeadSchema = z.object({ repositoryId: z.string().min(1).max(200), number: z.number().int().positive(), headSha: z.string().regex(/^[a-f0-9]{40}$/u) }).strict();
-const MergeBodySchema = z.object({ requestId: z.string().uuid(), expectedHeads: z.array(HeadSchema).min(1).max(MAX_PULL_REQUESTS).optional(), risk: z.enum(["low", "medium", "high"]).optional() }).strict();
+/** DEC 254zzz104: a press names what the person was shown (the heads and the risk level the readiness read gave); without them nothing is merged. */
+const MergeBodySchema = z.object({ requestId: z.string().uuid(), expectedHeads: z.array(HeadSchema).min(1).max(MAX_PULL_REQUESTS), risk: z.enum(["low", "medium", "high"]) }).strict();
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(value) });
 const wordsOf = (error: AgentXError): string => error.message.slice(error.code.length + 2);
@@ -188,7 +189,7 @@ async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId:
   let merged: Array<{ repositoryId: string; number: number }>;
   try {
     // The task is read again inside the core, after the lock: every gate runs on the task as it is now.
-    merged = (await pressMergeAsPerson(deps, { taskId, requestId, presserPersonId: personId, ...(expectedHeads === undefined ? {} : { expectedHeads }), ...(risk === undefined ? {} : { risk }) })).pullRequests;
+    merged = (await pressMergeAsPerson(deps, { taskId, requestId, presserPersonId: personId, expectedHeads, risk })).pullRequests;
   } catch (error) {
     await input.audit.record(event(MERGE_RESULT_AUDIT, { outcome: error instanceof AgentXError ? error.code : "failed" })).catch(() => input.log?.({ event: "hosted_merge.audit_result_failed", companyId, taskId }));
     await release();

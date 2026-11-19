@@ -302,7 +302,7 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
   it("a script token never reaches it (it reads like a missing route), and nothing is read for it", async () => {
     const { repository, wiring } = mergeWiring();
     const { routes, own, taskId } = await started({ wiring });
-    for (const request of [post(MERGE(taskId), { requestId: randomUUID() }), get(MERGE(taskId))]) {
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
       const answer = await routes.route(request, { ...own, webApp: true, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
       expect(answer?.statusCode).toBe(404);
       expect(errorOf(answer).message).toBe("route not found");
@@ -314,13 +314,13 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
     const { repository, wiring } = mergeWiring();
     const { routes, own, taskId } = await started({ wiring });
     for (const caller of [{ ...own }, { ...own, webApp: undefined }, { ...own, webApp: "true" as never }] as DeployedCaller[]) {
-      const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID() }), caller);
+      const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), caller);
       expect(answer?.statusCode).toBe(403);
       expect(errorOf(answer).message).toBe(ON_THE_WEBSITE_MESSAGE);
     }
     expect(repository).not.toHaveBeenCalled();
     // The owner on the website reaches the merge core (here: seams the install cannot build, so "not set up"), for the press and the read alike.
-    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID() }), { ...own, webApp: true });
+    const page = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
     expect(errorOf(page)).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
     expect(errorOf(await routes.route(get(MERGE(taskId)), own))).toEqual({ code: "NOT_FOUND", message: HOSTED_MERGE_WORDS.notSetUp });
     expect(repository).toHaveBeenCalledTimes(2);
@@ -330,7 +330,7 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
     const { wiring } = mergeWiring();
     const { routes, remember, taskId } = await started({ wiring });
     const other = remember(OTHER, "owner");
-    for (const request of [post(MERGE(taskId), { requestId: randomUUID() }), get(MERGE(taskId))]) {
+    for (const request of [post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), get(MERGE(taskId))]) {
       const answer = await routes.route(request, { ...other, webApp: true });
       expect(answer?.statusCode).toBe(404);
       expect(errorOf(answer).code).toBe("TASK_NOT_FOUND");
@@ -339,7 +339,7 @@ describe("DEC 254zzz94: the Merge button through the dev routes", () => {
 
   it("an install that does not wire it says merging from Rovara is not set up", async () => {
     const { routes, own, taskId } = await started();
-    const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID() }), { ...own, webApp: true });
+    const answer = await routes.route(post(MERGE(taskId), { requestId: randomUUID(), expectedHeads: [{ repositoryId: "demo", number: 1, headSha: "a".repeat(40) }], risk: "low" }), { ...own, webApp: true });
     expect(answer?.statusCode).toBe(404);
     expect(errorOf(answer).message).toBe(HOSTED_MERGE_WORDS.notSetUp);
   });
