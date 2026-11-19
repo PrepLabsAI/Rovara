@@ -99,7 +99,7 @@ it.each([{ entityType: "OTHER" }, { personId: "2".repeat(64) }, { companyId: "wr
   expect(await h.store.join({ personId, companyId: IMPLICIT_COMPANY_ID })).toEqual({ ok: false, reason: "not_invited" });
 });
 
-const operatorKinds = ["company-create", "company-preapprove", "company-preapproval-withdraw", "company-preapprovals-list", "company-member-revoke", "company-member-restore", "company-member-role-set", "company-member-list", "company-issuer-set", "company-signin-client-set",
+const operatorKinds = ["company-create", "company-preapprove", "company-preapproval-withdraw", "company-preapproval-resend", "company-preapprovals-list", "company-member-revoke", "company-member-restore", "company-member-role-set", "company-member-list", "company-issuer-set", "company-signin-client-set",
   // DEC 254a, 253z: invite codes and the self-serve switch (an administrator's applied change), and self-serve create (the broker's route).
   "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"];
 const operatorOwners = new Set([
@@ -116,7 +116,7 @@ it("only the strict member helper constructs member kinds; broker sources never 
   // All broker directories, with exact owner exceptions (no company-*.ts wildcard).
   for (const source of sources.filter((entry) => entry.path.startsWith("packages/broker/src/") && !operatorOwners.has(entry.path))) {
     expect(source.text, source.path).not.toContain("company-operator");
-    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw", "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"] : source.path === "packages/broker/src/aws/company-member-forwarding.ts" ? ["company-member-revoke", "company-member-role-set", "company-member-list"] : [];
+    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw", "company-preapproval-resend", "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"] : source.path === "packages/broker/src/aws/company-member-forwarding.ts" ? ["company-member-revoke", "company-member-role-set", "company-member-list"] : [];
     for (const kind of operatorKinds.filter((kind) => !allowed.includes(kind))) {
       expect(source.text, source.path).not.toMatch(new RegExp(`["'\x60]${kind}["'\x60]`));
     }

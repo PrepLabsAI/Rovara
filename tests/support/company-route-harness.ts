@@ -11,7 +11,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/client/projects/{id}", "POST /v1/dev/access",
   "GET /v1/dev/tasks/{taskId}/events", "GET /v1/dev/tasks/{taskId}/readers",
   "GET /v1/dev/tasks/{taskId}/messages", "GET /v1/dev/tasks/{taskId}/comments", "GET /v1/dev/tasks/{taskId}/diff",
-  "GET /v1/admin/sign-in-clients", "POST /v1/dev/company/preapprovals", "DELETE /v1/dev/company/preapprovals/", "DELETE /v1/dev/company/preapprovals/{id}",
+  "GET /v1/admin/sign-in-clients", "POST /v1/dev/company/preapprovals", "POST /v1/dev/company/preapprovals/{id}/resend", "DELETE /v1/dev/company/preapprovals/", "DELETE /v1/dev/company/preapprovals/{id}",
   "GET /v1/dev/projects/{id}/settings", "PUT /v1/dev/projects/{id}/settings", "GET /v1/dev/company/settings-compliance",
   "GET /v1/dev/company/members", "GET /v1/dev/company/members/{id}/removal-preview", "POST /v1/dev/company/members/{id}/removal", "PUT /v1/dev/company/members/{id}/role",
   "POST /v1/dev/company/github/connect", "POST /v1/dev/company/github/claim", "POST /v1/dev/company/github/choose", "GET /v1/dev/company/github", "DELETE /v1/dev/company/github/{id}",

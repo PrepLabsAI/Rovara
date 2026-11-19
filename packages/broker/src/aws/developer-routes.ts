@@ -508,9 +508,11 @@ async function setMyName(deps: DeveloperRouteDependencies, caller: DeveloperCall
 // DEC 254h: a pre-approval always carries the SHA-256 of the invite link secret the route made for it; the secret never leaves the broker.
 type CompanyPreapprovalRequest =
   | { kind: "company-preapprove"; companyId: string; email: string; role: "member"; expiresInHours: number; createdBy: string; inviteHash: string }
+  | { kind: "company-preapproval-resend"; companyId: string; emailHash: string; expiresInHours: number; createdBy: string; inviteHash: string }
   | { kind: "company-preapproval-withdraw"; companyId: string; emailHash: string; createdBy: string };
 const CompanyPreapprovalInvoke = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-preapprove"), companyId: OrgIdSchema, email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/), inviteHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  z.object({ kind: z.literal("company-preapproval-resend"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), expiresInHours: z.number().int().min(1).max(720), createdBy: z.string().regex(/^[a-f0-9]{64}$/), inviteHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   z.object({ kind: z.literal("company-preapproval-withdraw"), companyId: OrgIdSchema, emailHash: z.string().regex(/^[a-f0-9]{64}$/), createdBy: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
 ]);
 const PreapprovalExpiry = z.number().int().positive();
@@ -2168,15 +2170,17 @@ export function developerTaskRouteDependencies(
 
 const CompanyInviteInput = z.object({ email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720) }).strict();
 /**
- * DEC 254h: `POST` also makes the invite link's single-use secret, bound to this company and this pre-approval, and answers it ONCE with the
- * pre-approval's expiry; only its SHA-256 travels to the sign-in Lambda and is stored. `DELETE` withdraws the pre-approval, which ends its secret.
+ * DEC 254h / 254zzz184: `POST` makes a single-use link; `POST .../{inviteId}/resend` atomically replaces it for a live pending invite. `DELETE`
+ * withdraws the pre-approval. The secret is answered once and only its SHA-256 travels to the sign-in Lambda and is stored.
  */
 async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanyPreapprovalCreated | { ok: true }> {
   const notFound = () => agentXError("NOT_FOUND", "not found");
   if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
   const isPost = request.method === "POST" && url.pathname === "/v1/dev/company/preapprovals";
   const hash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})$/.exec(url.pathname)?.[1];
-  if (!isPost && !(request.method === "DELETE" && hash !== undefined)) throw notFound();
+  const resendHash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})\/resend$/.exec(url.pathname)?.[1];
+  const isResend = request.method === "POST" && resendHash !== undefined;
+  if (!isPost && !isResend && !(request.method === "DELETE" && hash !== undefined)) throw notFound();
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw notFound();
   // Named scopes never authorize invitations; full access is checked before the live membership role.
@@ -2189,6 +2193,7 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
     if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
   } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
+  if (isResend && caller.webApp !== true) throw agentXError("FORBIDDEN", "resending an invite is done in the Rovara web app");
   let forwarded: CompanyPreapprovalRequest;
   let link: { secret: string; secretHash: string } | undefined;
   if (isPost) {
@@ -2196,6 +2201,11 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "a member invitation needs an email and an expiry from 1 to 720 hours");
     link = newCompanyInviteLink();
     forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
+  } else if (isResend) {
+    const parsed = z.object({ expiresInHours: z.number().int().min(1).max(720) }).strict().safeParse(jsonBody(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", "an invite resend needs an expiry from 1 to 720 hours");
+    link = newCompanyInviteLink();
+    forwarded = { kind: "company-preapproval-resend", companyId: member.companyId, emailHash: resendHash, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
   } else forwarded = { kind: "company-preapproval-withdraw", companyId: member.companyId, emailHash: hash!, createdBy: caller.developerId };
   let answer: false | { expiresAt?: number } | undefined;
   try { answer = await deps.developer.companyPreapprovals?.(forwarded); }

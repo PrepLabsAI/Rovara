@@ -526,6 +526,15 @@ describe("the core app entry", () => {
   });
 });
 
+it("registers only the approved full-access invite resend developer route", async () => {
+  const { APP_ROUTES, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
+  const path = "/v1/dev/company/preapprovals/" + "a".repeat(64) + "/resend";
+  expect(devRouteOf("POST", path)).toMatchObject({ method: "POST", path: "/v1/dev/company/preapprovals/{inviteId}/resend", requires: "full" });
+  for (const method of ["GET", "PUT", "DELETE", "PATCH"]) expect(devRouteOf(method, path)).toBeUndefined();
+  expect(appRouteOf("POST", path)).toBeUndefined();
+  expect(APP_ROUTES.some((row) => row.path.includes("/company/preapprovals"))).toBe(false);
+});
+
 // Internal worker routes are inventoried in the scope table, with no person scope.
 it("inventories exactly four worker-only saved image callbacks without exposing app or developer aliases", async () => {
   const { APP_ROUTES, DEV_ROUTES, SAVED_ENV_WORKER_ROUTES, savedEnvWorkerRouteOf, appRouteOf, devRouteOf } = await import("../../packages/broker/src/aws/dev-route-scopes.js");
