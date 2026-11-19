@@ -12,10 +12,17 @@ import { evidencePackKey, loadEvidencePack } from "../../packages/broker/src/cor
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { createHostedEvidence, hostedEvidenceBlobs } from "../../packages/broker/src/core-host/hosted-evidence.js";
+import { createHostedEvidence, hostedKeepEvidence, hostedEvidenceBlobs } from "../../packages/broker/src/core-host/hosted-evidence.js";
 import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { DIGEST, SHA } from "../support/evidence-v2-fixtures.js";
+import { writeFileSync } from "node:fs";
+import { routeKnownFailing } from "../../packages/broker/src/core-host/known-failing-routes.js";
+import { deployedDecisionCards, approvalDecisionProofs, deployedSessionMembers } from "../../packages/broker/src/core-host/deployed-decisions.js";
+import { createHostedApprovers, approvalProofKeyOf } from "../../packages/broker/src/core-host/hosted-approvers.js";
+import { routeDecisionCards } from "../../packages/broker/src/core/decisions/routes.js";
+import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
+import { projectPk, type AdapterRegistry } from "@agentx/contracts";
 import { BaselineRowSchema } from "../../packages/contracts/src/index.js";
 import { mintTrustedBaselineRun, recordBaselineRow } from "../../packages/broker/src/core/test-env/baseline-cache.js";
 
@@ -65,7 +72,7 @@ async function world(options: { env?: NodeJS.ProcessEnv } = {}) {
   const members = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => members.get(`${caller.principal.personId}|${caller.principal.companyId}`));
   const person = (personId: string, companyId: string): DeployedCaller => { members.set(`${personId}|${companyId}`, { companyId, role: "member" }); return { principal: localOwnerPrincipal({ companyId, personId }), client: "cli" }; };
-  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ origin: () => "https://api.example" }) });
+  const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ origin: () => "https://api.example", testEnvironment: { env: options.env ?? {}, catalogName: "owner-starter-list" } }) });
   const blobs = (await app.registry()).require("object-storage");
 
   /** A task of `companyId` started by `owner` whose current candidate failed `readiness:0`, with the worker's raw file (and causes) saved as the callback saves them. */
@@ -245,4 +252,60 @@ describe("the baseline words (TE-C1)", () => {
       expect(await w.hosted.get(companyId)!.baselineOf(t.record, DIGEST)).toBeUndefined();
     }
   });
+});
+
+
+it("KF end to end: callback artifacts produce a hosted card; one website approval reaches the production result reader and exact Undo", async () => {
+  const env = { ROVARA_VERIFICATION_RESULTS: "1" };
+  const w = await world({ env });
+  const owner = w.person(OWNER_ID, FAKE_COMPANY);
+  const t = await w.taskOf(owner, FAKE_COMPANY);
+  const runtime = t.runtime, flow = runtime.flow.deps;
+  const workflow = { ...t.record.workflow!, stage: "VERIFY" as const, state: "BLOCKED" as const, checkPolicy: { required: [{ ...CHECK("readiness:0", "unit tests"), kind: "test" as const }], optional: [], selectedOptionalIds: [], proposed: [] } };
+  await w.fake.store.put({ item: { ...(await w.fake.store.get(taskKey(t.taskId)))!, workflow } as never });
+  const baseline = { recordedAt: new Date(w.fake.clock.now).toISOString(), envRevision: 1, branch: "main", headSha: SHA, finishedAt: new Date(w.fake.clock.now).toISOString(), tests: { total: 2, passed: 1, failed: 1, skipped: 0 }, failed: [FAILING], flaky: [] };
+  await w.fake.store.put({ item: { pk: projectPk(FAKE_COMPANY, "payments"), sk: "TESTENV#BASELINE#LATEST", baseline } });
+  const keep = hostedKeepEvidence({ store: w.fake.store, blobs: w.blobs, companyId: FAKE_COMPANY, env, now: () => w.fake.clock.now, log: () => undefined });
+  await keep({ task: t.record, operation: t.operation, workflow, candidateDigest: DIGEST, checks: [{ ...failedEntry, before: "failed", class: "already_failing" }] });
+  let role: "owner" | "admin" | "member" = "member";
+  let grant: "administrator" | "developer" = "administrator";
+  const people = { membershipOf: async () => ({ companyId: FAKE_COMPANY, role }), projectGrantRole: async () => grant };
+  const key = approvalProofKeyOf("test-signing-key".repeat(4));
+  const identity = { getPrincipal: async () => owner.principal };
+  const approvers = createHostedApprovers({ store: w.fake.store, identity, key, now: () => new Date(w.fake.clock.now) });
+  const original = await w.app.registry();
+  const registry = { require: (point: string) => point === "approvers" ? approvers : point === "identity" ? identity : original.require(point as never) } as AdapterRegistry;
+  const cards = deployedDecisionCards({ runtime, registry, people, proofs: approvalDecisionProofs(key, () => w.fake.clock.now), env });
+  const caller = { orgId: FAKE_COMPANY, developerId: developerIdOf(owner.principal), principal: owner.principal, webApp: true as const };
+  const list = await routeDecisionCards(cards, caller, { method: "GET", pathname: "/v1/app/decisions", searchParams: new URLSearchParams(), body: {} });
+  const view = list!.body as { cards: Array<{ id: string; kind: string; subjectId: string }>; digests: Record<string, string> };
+  const card = view.cards.find((card) => card.kind === "fix_setup")!;
+  expect(card).toBeDefined();
+  const path = `/v1/app/decisions/${card.id.replace(":", "/")}`;
+  const act = (action: string, webApp = true) => routeDecisionCards(cards, { ...caller, ...(webApp ? { webApp: true as const } : { webApp: undefined }) }, { method: "POST", pathname: `${path}/${action}`, searchParams: new URLSearchParams(), body: { requestId: randomUUID(), shownDigest: view.digests[card.id] } });
+  for (const companyRole of ["owner", "admin"] as const) {
+    role = companyRole; grant = "developer";
+    expect((await cards.sources.list(caller)).some((item) => item.kind === "fix_setup")).toBe(true);
+  }
+  role = "member"; grant = "developer";
+  await expect(act("approve")).rejects.toThrow();
+  grant = "administrator";
+  await act("evidence-opened");
+  await expect(act("approve", false)).rejects.toThrow();
+  expect((await act("approve"))!.statusCode).toBe(200);
+  // A newer complete nightly has no failures; the active mark is now the only exemption.
+  await w.fake.store.put({ item: { pk: projectPk(FAKE_COMPANY, "payments"), sk: "TESTENV#BASELINE#LATEST", baseline: { ...baseline, tests: { total: 2, passed: 2, failed: 0, skipped: 0 }, failed: [] } } });
+  const taskRead = () => w.routes.route({ method: "GET", path: `/v1/dev/tasks/${t.taskId}`, headers: {} }, owner);
+  expect(body(await taskRead())).toMatchObject({ task: { testing: { result: "partially_verified" } } });
+  const members = deployedSessionMembers(FAKE_COMPANY, people);
+  const route = (method: string, body?: unknown) => routeKnownFailing({ flow, principal: owner.principal, companyId: FAKE_COMPANY, members, webApp: true, path: "/v1/app/projects/payments/known-failing", request: { method, path: "/v1/app/projects/payments/known-failing", headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, env });
+  const read = await route("GET"), answer = JSON.parse(read.body) as { marks: Array<Record<string, unknown>> };
+  expect(answer.marks).toHaveLength(1);
+  const mark = answer.marks[0]!;
+  const undo = { action: "undo", requestId: randomUUID(), name: mark["name"], checkId: mark["checkId"], markedBy: mark["markedBy"], markedAt: mark["markedAt"], epoch: mark["epoch"] };
+  const undone = await route("POST", undo);
+  expect(JSON.parse(undone.body)).toMatchObject({ status: "done", marks: [] });
+  await expect(route("POST", undo)).rejects.toThrow();
+  expect(body(await taskRead())).toMatchObject({ task: { testing: { result: "code_failed" } } });
+  if (process.env["KF_SNAPSHOT_OUT"] !== undefined) writeFileSync(process.env["KF_SNAPSHOT_OUT"], JSON.stringify({ _about: "Generated by Code hosted-keep-evidence.test.ts KF end-to-end, using real hosted producer, card dispatcher, approval subject and read/Undo handlers.", read: JSON.parse(read.body) as unknown, undo, undone: JSON.parse(undone.body) as unknown }, null, 2) + "\n");
 });

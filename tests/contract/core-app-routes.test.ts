@@ -57,6 +57,7 @@ describe("the /v1/app route table", () => {
 
   // Written out by hand: what the core serves on AWS (core-host/dev-routes.ts over the session, decision, playbook and script-token handlers, and the person erase), with its scope.
   const SERVED: Array<[string, string, ClientScope | "full"]> = [
+    ["GET", "/v1/app/projects/payments/known-failing", "full"], ["POST", "/v1/app/projects/payments/known-failing", "full"],
     ["GET", "/v1/app/sessions", "tasks:read"], ["GET", "/v1/app/sessions/s1", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/follow", "tasks:read"], ["DELETE", "/v1/app/sessions/s1/follow", "tasks:read"], ["POST", "/v1/app/sessions/s1/unfollow", "tasks:read"], ["POST", "/v1/app/sessions/s1/presence", "tasks:read"],
     ["POST", "/v1/app/sessions/s1/stop", "tasks:act"], ["POST", "/v1/app/sessions/s1/retry", "tasks:act"], ["POST", "/v1/app/sessions/s1/messages", "tasks:act"],

@@ -286,6 +286,21 @@ describe("results and the sweep", () => {
 });
 
 describe("dispatching to a worker machine", () => {
+  it("starts one worker machine for each task workspace", async () => {
+    const h = createHarness();
+    await h.registerProject();
+    const first = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "first task" });
+    const second = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "second task" });
+    await drain(h);
+
+    const firstWorkspace = (await h.store.get(workspaceKey(T1_COMPANY, first.task.workspaceId))) as unknown as WorkspaceRecord;
+    const secondWorkspace = (await h.store.get(workspaceKey(T1_COMPANY, second.task.workspaceId))) as unknown as WorkspaceRecord;
+    expect(firstWorkspace.id).not.toBe(secondWorkspace.id);
+    expect(firstWorkspace.machine!.machineId).not.toBe(secondWorkspace.machine!.machineId);
+    expect(lastInvocation(h, firstWorkspace.machine!.machineId).workspaceId).toBe(firstWorkspace.id);
+    expect(lastInvocation(h, secondWorkspace.machine!.machineId).workspaceId).toBe(secondWorkspace.id);
+  });
+
   it("does not send a read-only step to a worker that cannot keep it read-only", async () => {
     const h = createHarness({ understandFirst: true, machines: { features: [] } });
     await h.registerProject();

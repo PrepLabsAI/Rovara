@@ -33,7 +33,7 @@ export interface DeveloperTaskActions {
    * Makes sure the project's catalog row carries its latest-revision pointer, repairing a row written before the pointer
    * existed from the revision history (index only). CONFIG_INVALID, naming the project, when it cannot be repaired.
    */
-  ensureProjectCatalogPointer(projectName: string): Promise<void>;
+  ensureProjectCatalogPointer(projectName: string, task?: { companyId?: unknown }): Promise<void>;
   preparation(identity: AuthenticatedIdentity, project: RegisteredProjectRecord, requestId: string): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }>;
   /** Unchecked: callers must load the owned task and check project access first. */
   workspace(workspaceId: string): Promise<WorkspaceInstance>;

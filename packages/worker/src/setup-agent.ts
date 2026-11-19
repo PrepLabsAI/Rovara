@@ -1,3 +1,5 @@
+import { sandboxPortIsolationArgs } from "./sandbox-port-isolation.js";
+import { gatewayWorkerDirectory } from "./gateway-name-files.js";
 // Setup agent (design setup-test-health 3.1-3.2 and 12, task SH7): the worker's half of the setup run that RUNS things. This module is the part that can be built and tested without the model session:
 // the sandbox the commands run in and the rules around it, the shell the agent gets, the check that tracked files were left alone, and the reading of the final answer. The session itself is created
 // by the caller (run-task.ts, SH14) with `setupAgentSessionParts`, and the journal and the limits are SH8 (`SetupAgentHooks` is where they plug in).
@@ -13,7 +15,7 @@
 //   - a command has a time limit even when the model names none;
 //   - the answer is read by the draft's reader (`readSetupProposalAnswer`): bounded, redacted, cited, secrets by name only. Repository text and command output are data.
 import { isIP } from "node:net";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { agentXError, isCredentialKey, redactText, remoteCodeReason, type SetupProposal, type SetupRunEndWord } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
@@ -24,7 +26,7 @@ import { SETUP_AGENT_MAX_OUTPUT_TOKENS } from "./setup-agent-journal.js";
 import { readSetupProposalAnswer, type SetupDraftRepository } from "./setup-draft.js";
 import type { SetupScan } from "./setup-scan.js";
 import type { TrackedPaths } from "./setup-citations.js";
-import { MASK_OPTIONS, SANDBOX_INIT, TASK_SANDBOX_NETWORK, TASK_SANDBOX_USER, TaskSandbox, sandboxNetworkFromEnvironment, type TaskSandboxOptions } from "./task-sandbox.js";
+import { GATEWAY_RESOLVER_DIRECTORY, MASK_OPTIONS, SANDBOX_INIT, TASK_SANDBOX_NETWORK, TASK_SANDBOX_USER, TaskSandbox, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskSandboxOptions } from "./task-sandbox.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 
 /** The agent's tools: read-only file tools and the shell. No write tool, no edit tool. Passed to the session as `agentTools`. */
@@ -69,7 +71,7 @@ export function credentialShapedVariables(environment: Readonly<Record<string, s
 
 const ALLOWED_RUN_FLAGS: ReadonlyMap<string, number> = new Map([
   ["--detach", 0], ["--name", 1], ["--label", 1], ["--network", 1], ["--user", 1], ["--cpus", 1], ["--memory", 1], ["--memory-swap", 1], ["--pids-limit", 1],
-  ["--cap-drop", 1], ["--security-opt", 1], ["--volume", 1], ["--tmpfs", 1], ["--workdir", 1], ["--entrypoint", 1], ["--dns", 1], ["--ip", 1],
+  ["--cap-drop", 1], ["--security-opt", 1], ["--volume", 1], ["--mount", 1], ["--tmpfs", 1], ["--workdir", 1], ["--entrypoint", 1], ["--dns", 1], ["--ip", 1],
 ]);
 const SETUP_NETWORK_NAME = /^agentx-setup-[0-9a-f]{12}$/u;
 const REFUSED_RUN = "AgentX refused to start the setup sandbox: its container options are not the sandbox's";
@@ -83,7 +85,7 @@ const REFUSED_RUN = "AgentX refused to start the setup sandbox: its container op
  *   - flags the sandbox does not use (an environment variable in any spelling, `--privileged`, `--device`, `--pid`...) are refused as unknown.
  * Throws `RUNTIME_UNAVAILABLE` with a fixed sentence (no argument is repeated, since an argument could be a secret).
  */
-export function assertSetupSandboxRunArgs(args: readonly string[], options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined }): void {
+export function assertSetupSandboxRunArgs(args: readonly string[], options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined; gateway?: { network: string; dns: string } | undefined; gatewayResolverDirectory?: string | undefined }): void {
   const refuse = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", REFUSED_RUN); };
   const root = resolve(options.rootPath);
   if (!isAbsolute(root) || root === "/" || args[0] !== "run") return refuse();
@@ -112,9 +114,27 @@ export function assertSetupSandboxRunArgs(args: readonly string[], options: { ro
   const dnsServers = seen.get("--dns") ?? [];
   if (options.network !== undefined) {
     if (!SETUP_NETWORK_NAME.test(options.network.name) || dnsServers.length !== 1 || dnsServers[0] !== options.network.helperIp) return refuse();
+  } else if (options.gateway !== undefined) {
+    if (!exactly("--network", options.gateway.network) || dnsServers.length !== 0) return refuse();
+    const mounts = seen.get("--mount") ?? [];
+    const sources = new Map<string, string>();
+    for (const mount of mounts) {
+      const match = /^type=bind,src=(\/[^,]+),dst=(\/etc\/(?:resolv\.conf|hosts)),readonly$/u.exec(mount);
+      if (match === null || sources.has(match[2]!)) return refuse();
+      sources.set(match[2]!, match[1]!);
+    }
+    const resolverRoot = gatewayWorkerDirectory(root, options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY);
+    const resolver = sources.get("/etc/resolv.conf");
+    if (resolver === undefined) return refuse();
+    const relativeSource = relative(resolverRoot, resolver);
+    if (!/^run-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/resolv\.conf$/u.test(relativeSource)
+      || resolve(resolver) !== resolver || resolver !== resolve(resolverRoot, relativeSource)
+      || sources.get("/etc/hosts") !== join(dirname(resolver), "hosts")) return refuse();
   } else if (dnsServers.length > 3 || dnsServers.some((server) => isIP(server) === 0)) return refuse();
   if (!exactly("--user", TASK_SANDBOX_USER) || !exactly("--cap-drop", "ALL") || !exactly("--security-opt", "no-new-privileges")) return refuse();
-  if (!exactly("--workdir", root) || !exactly("--entrypoint", SANDBOX_INIT) || !exactly("--volume", `${root}:${root}`) || !seen.has("--detach")) return refuse();
+  const volumes = seen.get("--volume") ?? [];
+  const mounts = seen.get("--mount") ?? [];
+  if (!exactly("--workdir", root) || !exactly("--entrypoint", SANDBOX_INIT) || volumes.length !== 1 || volumes[0] !== `${root}:${root}` || mounts.length !== (options.gateway === undefined ? 0 : 2) || !seen.has("--detach")) return refuse();
   if (!/^[1-9][0-9]{0,6}$/u.test(only("--pids-limit") ?? "")) return refuse();
   const cpus = seen.get("--cpus");
   if (cpus !== undefined && !(cpus.length === 1 && /^[1-9][0-9]{0,3}$/u.test(cpus[0]!))) return refuse();
@@ -168,10 +188,17 @@ export function assertSetupSandboxExecArgs(args: readonly string[]): void {
  * The Docker seam of a setup sandbox for the workspace `rootPath`. `run` must pass `assertSetupSandboxRunArgs`; `exec` (and the file tools' byte-exact exec) must pass `assertSetupSandboxExecArgs`.
  * Everything else (inspect, network, rm, ps) passes. Wraps the real Docker, or a fake in a test.
  */
-export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined }): DockerCli {
+export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined; gateway?: { network: string; dns: string } | undefined; gatewayResolverDirectory?: string | undefined; isolationImage?: string | undefined }): DockerCli {
   return {
     async run(args: readonly string[], runOptions?: CollectedProcessOptions): Promise<CollectedProcess> {
-      if (args[0] === "run") assertSetupSandboxRunArgs(args, options);
+      if (args[0] === "run") {
+        let isolationHelper = false;
+        if (options.gateway !== undefined && options.isolationImage !== undefined && /^[1-9][0-9]{0,9}$/u.test(args.at(-1) ?? "")) {
+          const expected = sandboxPortIsolationArgs(options.isolationImage, args.at(-1)!);
+          isolationHelper = args.length === expected.length && args.every((arg, index) => arg === expected[index]);
+        }
+        if (!isolationHelper) assertSetupSandboxRunArgs(args, options);
+      }
       if (args[0] === "exec") assertSetupSandboxExecArgs(args);
       return docker.run(args, runOptions);
     },
@@ -188,7 +215,9 @@ export function guardedSetupDocker(docker: DockerCli = createDockerCli(), option
 export function createSetupSandbox(options: Omit<TaskSandboxOptions, "docker"> & { docker?: DockerCli }): TaskSandbox {
   const helperIp = options.dns?.[0];
   if (options.network !== undefined && (options.dns?.length !== 1 || helperIp === undefined)) throw agentXError("CONFIG_INVALID", "a setup sandbox on a run network has exactly its helper as resolver");
-  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! }, sharedNetwork: sandboxNetworkFromEnvironment(options.environment ?? process.env) }) });
+  const environment = options.environment ?? process.env;
+  const gateway = gatewayEgressFor(environment);
+  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! }, sharedNetwork: sandboxNetworkFromEnvironment(environment), ...(gateway === undefined ? {} : { gateway }), gatewayResolverDirectory: options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY, isolationImage: options.image ?? environment["AGENTX_SANDBOX_IMAGE"] }) });
 }
 
 // ---- tracked files are left alone

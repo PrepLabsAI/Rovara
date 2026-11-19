@@ -102,7 +102,12 @@ export function createTransactionalOutbox(dependencies: TransactionalOutboxDepen
           });
           // Another relay may have marked it first: then the copy this call sent was a duplicate the queue or the consumer drops.
           if (marked.applied) report.delivered += 1;
-        } catch {
+        } catch (error) {
+          // Error names identify the failed boundary without logging payloads, URLs or raw provider messages.
+          console.warn(JSON.stringify({ event: "outbox.relay_failed", companyId: options.companyId, outboxId: item.id, queue: item.queue,
+            operation: handedOver ? "mark_queued" : "enqueue", error: error instanceof Error ? error.name : "unknown",
+            ...(error instanceof Error && error.cause instanceof Error ? { cause: error.cause.name } : {}),
+          }));
           if (handedOver) {
             // The message is on its queue; only the mark failed. It stays pending and is handed over again (and dropped as a repeat); it is not a failed delivery.
             report.failed += 1;
