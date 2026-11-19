@@ -1,5 +1,5 @@
 // Lane L4-NETG (DEC 254zzz77): the sandbox egress gateway of an EC2 worker host, on REAL Docker. The boot's own stage (packages/worker/ec2/sandbox-egress.sh) is run unchanged as root against the CI runner's Docker and iptables, with
-// only the two reads from the worker image (the gateway program and the deny list, which the unit test proves are the contracts' own) and the systemd unit replaced; the runner's Node image stands in for the worker image.
+// only the three reads from the worker image (the gateway program and the two deny lists, which the contract test proves are the contracts' own: a read left to run here would run in the CI node image, which has no /opt/agentx/node_modules) and the systemd unit replaced; the runner's Node image stands in for the worker image.
 // Then each claim is shown from where a sandbox sits, against a control that is NOT behind the wall, so a failure is the wall and not a broken test:
 //   - the sandbox network is internal and the gateway is its only way out;
 //   - a raw-IP HTTPS connection and DNS-over-HTTPS by IP fail from the sandbox network;
@@ -21,13 +21,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile, chmod } from "node:fs/promises
 import { existsSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
+import { lookup as hostLookup } from "node:dns/promises";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
-import { SANDBOX_REGISTRY_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
+import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
@@ -55,6 +56,7 @@ let stageFile = "";
 let firewallScript = "";
 let daemonBefore: string | undefined;
 let agentxDirExisted = false;
+let allowDirExisted = false;
 let rulesBefore: Record<string, string[]> = {};
 
 const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"]];
@@ -77,6 +79,7 @@ async function takeBackRules(): Promise<void> {
 async function stage(program: string, names: readonly string[] = SANDBOX_REGISTRY_DENY): Promise<{ code: number; failure: string; output: string }> {
   await writeFile(join(dir, "program"), program);
   await writeFile(join(dir, "names"), names.join("\n"));
+  await writeFile(join(dir, "s3names"), SANDBOX_S3_DENY.join("\n"));
   await rm(failureFile, { force: true });
   const script = `set -uo pipefail
 log() { printf 'agentx-boot: %s\\n' "$*" >&2; }
@@ -87,6 +90,7 @@ AGENTX_WORKER_IMAGE="${APP_NODE_IMAGE}"
 . "${stageFile}"
 se_program() { cat "${join(dir, "program")}"; }
 se_denied_names() { cat "${join(dir, "names")}"; }
+se_denied_s3_names() { cat "${join(dir, "s3names")}"; }
 se_install_restore_unit() { return 0; }
 sandbox_egress_main`;
   const result = await sudo("bash", "-c", script);
@@ -131,6 +135,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     stageFile = join(dir, "sandbox-egress.sh");
     await writeFile(stageFile, (await readFile(stagePath, "utf8")).split("/usr/local/libexec/rovara-container-firewall").join(firewallScript));
     agentxDirExisted = existsSync("/etc/agentx");
+    allowDirExisted = existsSync("/var/lib/rovara-egress");
     rulesBefore = await ruleSnapshot();
     const had = await sudo("test", "-f", DAEMON_JSON);
     daemonBefore = had.code === 0 ? (await sudo("cat", DAEMON_JSON)).stdout : undefined;
@@ -155,6 +160,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await docker("network", "rm", "rovara-xnet");
     await sudo("rm", "-f", "/etc/agentx/worker-dns");
     if (!agentxDirExisted) await sudo("rmdir", "/etc/agentx");
+    if (!allowDirExisted) await sudo("rm", "-rf", "/var/lib/rovara-egress");
     await takeBackRules();
     // Docker's own configuration is put back, and Docker restarted on it with the runner's container firewall.
     await sudo("rm", "-f", "/etc/systemd/system/docker.service.d/30-rovara-build-proxy.conf");
@@ -175,6 +181,20 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const env = await readFile(join(dir, "worker.env"), "utf8");
     expect(env).toContain(`AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=${NETWORK}\nAGENTX_SANDBOX_DNS=${GATEWAY_IP}\n`);
   });
+
+  // The S3 deny list is read by the stage from the contracts, exactly as in production (here through the same stub as the registry list); an S3 name is refused to a sandbox though the HOST resolves it.
+  it("an S3 name the host resolves is NXDOMAIN to a sandbox (the S3 deny list the stage read from the contracts is in force), in every spelling that list covers", async () => {
+    const control = await hostLookup("s3.amazonaws.com", { family: 4 }).then((found) => found.address, () => "");
+    expect(control, "the runner must resolve S3 itself, or this proves nothing").toMatch(/^\d+\.\d+\.\d+\.\d+$/u);
+    for (const name of ["s3.amazonaws.com", "netg3-no-such-bucket.s3.amazonaws.com", "s3.us-west-2.amazonaws.com", "netg3-no-such-bucket.s3.us-west-2.amazonaws.com", "netg3-no-such-bucket.s3.dualstack.us-west-2.amazonaws.com", "s3-us-west-2.amazonaws.com"]) {
+      const looked = await sandbox(lookupOutcome(name));
+      expect(looked.stdout.trim(), `${name}: ${looked.stderr}`).toBe("ENOTFOUND");
+    }
+    // The gateway's own config carries the stage's deny list: every name of it, read from the contracts at test time.
+    const create = (await docker("inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", "rovara-egw")).stdout;
+    const config = JSON.parse(/ROVARA_GW_CONFIG=(.*)/u.exec(create)![1]!) as { sandboxDeniedS3: string[] };
+    expect(config.sandboxDeniedS3).toEqual([...SANDBOX_S3_DENY]);
+  }, 120_000);
 
   it("a raw-IP HTTPS connection fails from a sandbox though it works from a container on the default bridge", async () => {
     const control = await onBridge(connectOutcome("1.1.1.1", 443));
