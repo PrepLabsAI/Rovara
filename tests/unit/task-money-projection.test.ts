@@ -3,7 +3,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { readTaskMoney } from "../../packages/broker/src/core/cost/task-money.js";
 import { costPartition, createCostLedger } from "../../packages/broker/src/core/cost/ledger.js";
 import { workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { parseTaskMoneyV1 } from "../../packages/contracts/src/task-money.js";
+import { parseTaskMoneyV1, taskMoneyWords } from "../../packages/contracts/src/task-money.js";
 import { chargeReceipt } from "./charge-receipt-fixture.js";
 const companyId = "org_aaaaaaaaaaaaaaaaaaaa";
 const at = "2026-11-18T00:00:00.000Z";
@@ -59,4 +59,14 @@ it("never emits unsafe totals as valid money", async () => {
  const money = await read(store);
  expect(money).toMatchObject({ state: "unavailable", spentMicros: { state: "unavailable" } });
  expect(parseTaskMoneyV1(money)).toEqual(money);
+});
+
+it("distinguishes a new unreported task from an initial ledger-read failure without inventing money", async () => {
+ const live = { taskId: task.taskId, companyId, workspaceId: task.workspaceId, createdAt: at, updatedAt: at };
+ const initial = await readTaskMoney({ store: new MemoryDocumentStore(), companyId, task: live, hosted: true });
+ expect(initial.spentMicros.state).toBe("unavailable"); expect(taskMoneyWords(initial)).toBe("No spend yet");
+ class BrokenStore extends MemoryDocumentStore { override async get(): Promise<never> { throw new Error("unavailable"); } }
+ const broken = await readTaskMoney({ store: new BrokenStore(), companyId, task: live, hosted: true });
+ expect(taskMoneyWords(broken)).toBe("Cost unavailable");
+ expect(broken.spentMicros).toEqual({ state: "unavailable", reason: "unreadable" });
 });

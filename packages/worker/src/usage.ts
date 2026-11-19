@@ -136,7 +136,7 @@ export function createUsageCheckpointer(input: {
       checkpointed = true;
       last = now();
       // `checkpoint`: the spend so far, not the session's end (its outcome is not known yet).
-      input.send({ ...usageForControlPlane(usage, input.requested), ...(usageMissingCalls > 0 ? { usageMissingCalls } : {}), checkpoint: true });
+      input.send(usageForControlPlane({ ...usage, ...(usageMissingCalls > 0 ? { usageMissingCalls } : {}), checkpoint: true }, input.requested));
     } catch { /* stats that cannot be read now are reported at the end */ }
   };
   return {
@@ -178,7 +178,7 @@ export function createUsageCheckpointer(input: {
       const usageMissingCalls = missingCalls - reportedMissingCalls;
       if (!checkpointed && spentNothing(left) && usageMissingCalls === 0) return undefined;
       const usage = redactCredentials(telemetryOf(left, model, outcome)) as Record<string, unknown>;
-      return { ...usageForControlPlane(usage, requested), ...(usageMissingCalls > 0 ? { usageMissingCalls } : {}), ...(checkpointed ? { final: true } : {}) };
+      return usageForControlPlane({ ...usage, ...(usageMissingCalls > 0 ? { usageMissingCalls } : {}), ...(checkpointed ? { final: true } : {}) }, requested);
     },
   };
 }

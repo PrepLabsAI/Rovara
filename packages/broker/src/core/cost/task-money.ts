@@ -26,6 +26,7 @@ export async function readTaskMoney(input: {
   };
   if (task.companyId !== companyId) return base;
   let unreadable = structuredClone(base);
+  unreadable.spentMicros = unknown("unreadable");
   try {
     const pk = costPartition(companyId, task.taskId);
     const total = await store.get({ pk, sk: "TOTAL" });
