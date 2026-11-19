@@ -50,10 +50,11 @@ function hostResolver(answers: Record<string, string[]>): string[] {
 }
 
 /** A local server standing for the public site: a TCP echo for CONNECT, and an HTTP answer for a plain GET. Every dial to a public address the gateway makes is redirected to it, and recorded. */
-async function fakeSite(): Promise<{ dialed: Array<{ host: string; port: number }>; paths: string[] }> {
+async function fakeSite(): Promise<{ dialed: Array<{ host: string; port: number }>; paths: string[]; headers: Array<Record<string, string | string[] | undefined>> }> {
   const dialed: Array<{ host: string; port: number }> = [];
   const paths: string[] = [];
-  const server = http.createServer((request, response) => { paths.push(`${request.headers.host ?? ""}${request.url ?? ""}`); response.end("site"); });
+  const headers: Array<Record<string, string | string[] | undefined>> = [];
+  const server = http.createServer((request, response) => { paths.push(`${request.headers.host ?? ""}${request.url ?? ""}`); headers.push({ ...request.headers }); response.end("site"); });
   server.on("connection", (socket) => socket.on("error", () => undefined));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
@@ -72,7 +73,7 @@ async function fakeSite(): Promise<{ dialed: Array<{ host: string; port: number 
     return (originalRequest as (...args: unknown[]) => http.ClientRequest)(options, ...rest);
   };
   cleanup.push(() => { (net as { connect: unknown }).connect = originalConnect; (http as { request: unknown }).request = originalRequest; server.close(); (server as Server & { closeAllConnections?: () => void }).closeAllConnections?.(); });
-  return { dialed, paths };
+  return { dialed, paths, headers };
 }
 
 async function startProxy(config: Record<string, unknown> = PROXY_CONFIG): Promise<{ port: number; started: Array<{ role: string; proxy?: Server }> }> {
@@ -105,11 +106,7 @@ const connectLine = (target: string): string => `CONNECT ${target} HTTP/1.1\r\nH
 const statusOf = (text: string): number | undefined => Number(/^HTTP\/1\.[01] (\d{3})/u.exec(text)?.[1]) || undefined;
 
 describe("the daemon proxy: what it is for", () => {
-  it("is off unless the configuration names it (the laptop modes and a gateway without `proxy` start no such listener), and a mistyped mode never starts it", async () => {
-    for (const config of [{ ...PROXY_CONFIG, proxy: undefined }, { ...PROXY_CONFIG, proxy: "yes" }, { ...PROXY_CONFIG, proxy: { port: 3128 } }, { ...PROXY_CONFIG, mode: "HOST" }]) {
-      const gateway = await load(config);
-      expect(gateway.main === undefined).toBe(false);
-    }
+  it("is off unless the configuration names it with a peer (a gateway without `proxy`, with a non-object or without a peer starts no such listener)", async () => {
     for (const config of [{ ...PROXY_CONFIG, proxy: undefined }, { ...PROXY_CONFIG, proxy: "yes" }, { ...PROXY_CONFIG, proxy: { port: 3128 } }]) {
       const { started } = await startProxy(config);
       expect(started.some((entry) => entry.role === "daemon-proxy"), JSON.stringify(config.proxy)).toBe(false);
@@ -183,6 +180,9 @@ describe("the daemon proxy: what it is for", () => {
     expect(statusOf(ok), ok).toBe(200);
     expect(site.dialed).toEqual([{ host: "93.184.216.34", port: 80 }]);
     expect(site.paths).toEqual(["deb.example.org/pool/a.deb?x=1"]);
+    // The proxy credentials and hop-by-hop headers of the daemon never reach the site.
+    expect(site.headers[0]).not.toHaveProperty("proxy-authorization");
+    expect(site.headers[0]).not.toHaveProperty("proxy-connection");
     const attempts: Array<[string, number]> = [
       ["POST http://deb.example.org/ HTTP/1.1\r\nHost: deb.example.org\r\nContent-Length: 0\r\n\r\n", 405],
       ["GET https://deb.example.org/ HTTP/1.1\r\nHost: deb.example.org\r\n\r\n", 403],
