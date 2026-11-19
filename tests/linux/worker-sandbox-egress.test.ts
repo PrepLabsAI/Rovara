@@ -45,6 +45,7 @@ const wrapperPath = new URL("../../packages/worker/ec2/devcontainer-docker.sh", 
 const GATEWAY_IP = "172.28.250.2";
 const NETWORK = "rovara-snet";
 const ICC_PEER = "rovara-netg-icc-peer";
+const ICC_CLIENT = "rovara-netg-icc-client";
 const ICC_PEER_IP = "172.28.250.16";
 // A host name, not an image: the registry the sandbox side is denied (a bare host keeps the CI image guard, which reads every `host/path`, to real image references).
 const REGISTRY_HOST = "ghcr.io";
@@ -63,7 +64,7 @@ let agentxDirExisted = false;
 let allowDirExisted = false;
 let rulesBefore: Record<string, string[]> = {};
 
-const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"]];
+const RULE_CHAINS: ReadonlyArray<readonly [string, string]> = [["iptables", "DOCKER-USER"], ["iptables", "INPUT"], ["ip6tables", "INPUT"], ["ip6tables", "FORWARD"]];
 /** The rules in each chain the stage touches, as `-S` prints them (`-A CHAIN ...`). */
 async function ruleSnapshot(): Promise<Record<string, string[]>> {
   const found: Record<string, string[]> = {};
@@ -117,6 +118,49 @@ const tlsHelloOutcome = (host: string, name: string): string => `
 const t=require('tls');const s=t.connect({host:${JSON.stringify(host)},port:443,servername:${JSON.stringify(name)},rejectUnauthorized:false,timeout:5000});
 s.on('secureConnect',()=>{console.log('handshake');process.exit(0)});s.on('timeout',()=>{console.log('timeout');process.exit(0)});s.on('error',e=>{console.log('error '+e.code);process.exit(0)});`;
 
+// The fixture image lacks the worker's tini/helper files. These ordinary sandboxes
+// start a trusted sleeping Node entrypoint with the same dropped capabilities and
+// mounted resolver; the production stage's synchronous gate runs on the host.
+async function ordinarySandbox(name: string, ip?: string): Promise<void> {
+  const files = await createGatewayNameFiles(`/worker/${name}`, GATEWAY_IP, join(dir, "ordinary-names"));
+  const made = await docker("run", "-d", "--name", name, "--pull=never", "--network", NETWORK,
+    ...(ip === undefined ? [] : ["--ip", ip]), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000",
+    "--mount", `type=bind,src=${files.resolvConfPath},dst=/etc/resolv.conf,readonly`,
+    "--mount", `type=bind,src=${files.hostsPath},dst=/etc/hosts,readonly`,
+    "--entrypoint", "/usr/local/bin/node", APP_NODE_IMAGE, "-e", "setInterval(()=>{},3600000)");
+  expect(made.code, made.stderr).toBe(0);
+  const gated = await sudo("bash", "-c", '. "$1"; index=$(se_container_port_index "$2") && se_port_isolation "$index" on', "--", stageFile, name);
+  expect(gated.code, gated.stderr).toBe(0);
+}
+
+// A host-owned raw probe enters ONLY the ordinary sandbox's network namespace.
+// No task receives NET_RAW. Kernel ARP replies do not depend on the test TCP server.
+const ARP_PROBE = String.raw`import socket,struct,fcntl,select,time,sys
+s=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0806))
+for _,name in socket.if_nameindex():
+ try: ip=fcntl.ioctl(s.fileno(),0x8915,struct.pack('256s',name.encode()))[20:24]
+ except OSError: continue
+ if ip[:3]==socket.inet_aton('172.28.250.0')[:3]: break
+else: raise RuntimeError('no sandbox interface')
+s.bind((name,0)); mac=s.getsockname()[4]; target=socket.inet_aton(sys.argv[1])
+packet=b'\xff'*6+mac+b'\x08\x06'+struct.pack('!HHBBH',1,0x0800,6,4,1)+mac+ip+b'\0'*6+target
+end=time.monotonic()+3; next_send=0
+while time.monotonic()<end:
+ if time.monotonic()>=next_send: s.send(packet); next_send=time.monotonic()+0.25
+ if select.select([s],[],[],0.1)[0]:
+  p=s.recv(2048)
+  if len(p)>=42 and p[12:14]==b'\x08\x06' and p[20:22]==b'\0\x02' and p[28:32]==target and p[38:42]==ip:
+   print('reply'); sys.exit(0)
+print('no-reply')`;
+async function arpFrom(container: string, target: string): Promise<string> {
+  const pid = await docker("inspect", "--format", "{{.State.Pid}}", container);
+  expect(pid.code, pid.stderr).toBe(0);
+  expect(pid.stdout.trim()).toMatch(/^[1-9][0-9]*$/u);
+  const probed = await sudo("nsenter", "-t", pid.stdout.trim(), "-n", "python3", "-c", ARP_PROBE, target);
+  expect(probed.code, probed.stderr).toBe(0);
+  return probed.stdout.trim();
+}
+
 /** The HOST's own HTTPS (the vitest process runs on the host network, exactly like the worker and the host's Docker): the status, or the error code. */
 function hostHttps(host: string): Promise<string> {
   return new Promise((resolve) => {
@@ -154,17 +198,19 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await writeFile(join(dir, "worker.env"), "AWS_REGION=us-west-2\n");
     const made = await stage(EGRESS_GATEWAY_SOURCE);
     expect(made.code, `${made.failure}\n${made.output}`).toBe(0);
-    const peer = await docker("run", "-d", "--name", ICC_PEER, "--network", NETWORK, "--ip", ICC_PEER_IP, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", "require('net').createServer(s=>s.end('peer')).listen(4567,'0.0.0.0',()=>console.log('READY'))");
+    await ordinarySandbox(ICC_PEER, ICC_PEER_IP);
+    await ordinarySandbox(ICC_CLIENT);
+    const peer = await docker("exec", "--detach", ICC_PEER, "node", "-e", "require('net').createServer(s=>s.end('peer')).listen(4567,'0.0.0.0')");
     expect(peer.code, peer.stderr).toBe(0);
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      if ((await docker("logs", ICC_PEER)).stdout.includes("READY")) break;
+      if ((await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567))).stdout.trim() === "open") break;
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    expect((await docker("logs", ICC_PEER)).stdout).toContain("READY");
     const peerControl = await docker("exec", ICC_PEER, "node", "-e", connectOutcome("127.0.0.1", 4567));
     expect(peerControl.stdout.trim(), peerControl.stderr).toBe("open");
   }, 300_000);
   afterAll(async () => {
+    await docker("rm", "--force", ICC_CLIENT);
     await docker("rm", "--force", ICC_PEER);
     await docker("rm", "--force", HELD_CONTAINER);
     await docker("rm", "--force", "rovara-egw");
@@ -190,14 +236,29 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   it("the sandbox network is internal, has no host address, and the gateway is on exactly its two networks", async () => {
     const inspected = await docker("network", "inspect", "--format", "{{.Driver}}|{{.Internal}}|{{index .Options \"com.docker.network.bridge.inhibit_ipv4\"}}|{{index .Options \"com.docker.network.bridge.name\"}}|{{.EnableIPv6}}|{{index .Options \"com.docker.network.bridge.enable_icc\"}}", NETWORK);
     expect(inspected.stdout.trim()).toBe("bridge|true|true|rvs0|false|false");
+    const outer = await docker("network", "inspect", "--format", '{{index .Options "com.docker.network.bridge.enable_icc"}}', "rovara-xnet");
+    expect(outer.stdout.trim()).toBe("");
+    const reuse = await sudo("bash", "-c", '. "$1"; se_ensure_network "$SE_OUTER_NET" false "" "$SE_OUTER_BRIDGE" "$SE_OUTER_SUBNET"', "--", stageFile);
+    expect(reuse.code, reuse.stderr).toBe(0);
     const gateway = await docker("inspect", "--format", "{{.State.Running}}|{{.HostConfig.RestartPolicy.Name}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.CapDrop}}|{{range $n, $c := .NetworkSettings.Networks}}{{$n}} {{end}}", "rovara-egw");
     expect(gateway.stdout.trim()).toBe("true|unless-stopped|true|[ALL]|rovara-snet rovara-xnet");
     const env = await readFile(join(dir, "worker.env"), "utf8");
     expect(env).toContain(`AGENTX_SANDBOX_EGRESS=gateway\nAGENTX_SANDBOX_NETWORK=${NETWORK}\nAGENTX_SANDBOX_DNS=${GATEWAY_IP}\n`);
   });
 
+  it("blocks ARP between two ordinary sandbox ports while the gateway answers ARP and can reach the live peer", async () => {
+    expect(await arpFrom("rovara-egw", ICC_PEER_IP)).toBe("reply");
+    expect(await arpFrom(ICC_CLIENT, GATEWAY_IP)).toBe("reply");
+    expect(await arpFrom(ICC_CLIENT, ICC_PEER_IP)).toBe("no-reply");
+    expect(await arpFrom(ICC_PEER, (await docker("inspect", "--format", '{{(index .NetworkSettings.Networks "rovara-snet").IPAddress}}', ICC_CLIENT)).stdout.trim())).toBe("no-reply");
+    const lookup = await docker("exec", ICC_CLIENT, "node", "-e", lookupOutcome("registry.npmjs.org"));
+    expect(lookup.stdout.trim(), lookup.stderr).toBe(GATEWAY_IP);
+    const tls = await docker("exec", ICC_CLIENT, "node", "-e", tlsHelloOutcome(GATEWAY_IP, "registry.npmjs.org"));
+    expect(tls.stdout.trim(), tls.stderr).toBe("handshake");
+  }, 120_000);
+
   it("a live peer on the shared sandbox bridge is unreachable while the gateway resolver and TLS forwarder still answer", async () => {
-    const peer = await sandbox(connectOutcome(ICC_PEER_IP, 4567));
+    const peer = await docker("exec", ICC_CLIENT, "node", "-e", connectOutcome(ICC_PEER_IP, 4567));
     expect(peer.stdout.trim(), peer.stderr).not.toBe("open");
     expect(peer.stdout.trim()).toMatch(/^(ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|timeout)$/u);
 

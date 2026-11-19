@@ -130,7 +130,7 @@ se_rule() { local tool=$1; shift; "$tool" -C "$@" 2>/dev/null || "$tool" -I "$@"
 # The metadata address stays dropped for every container by wall_off_containers' own rule.
 se_walls() {
   local range resolver proto bridge
-  # Docker's ICC-off bridge rule blocks every same-bridge flow. Keep only the
+  # Docker's ICC-off bridge rule blocks same-bridge IPv4 forwarding. Keep only the
   # sandbox services that the gateway provides, and only replies from it.
   for proto in udp tcp; do se_rule iptables DOCKER-USER -i rvs+ -o rvs+ -d "$SE_INNER_IP/32" -p "$proto" --dport 53 -j ACCEPT || return 1; done
   for port in 80 443; do se_rule iptables DOCKER-USER -i rvs+ -o rvs+ -d "$SE_INNER_IP/32" -p tcp --dport "$port" -j ACCEPT || return 1; done
@@ -152,7 +152,10 @@ se_walls() {
     se_rule iptables INPUT -i "$bridge" -j DROP || return 1
     ! command -v ip6tables >/dev/null || se_rule ip6tables INPUT -i "$bridge" -j DROP || echo "ip6tables $bridge rule failed" >&2
   done
-  for bridge in rvs+ rvx+; do
+  # Required even when Docker disabled IPv6 on the network: namespace sysctls must not open a peer path.
+  se_rule ip6tables FORWARD -i rvs+ -j DROP || return 1
+  se_rule ip6tables INPUT -i rvs+ -j DROP || return 1
+  for bridge in rvx+; do
     ! command -v ip6tables >/dev/null || se_rule ip6tables INPUT -i "$bridge" -j DROP || echo "ip6tables $bridge rule failed" >&2
   done
   iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null
@@ -165,7 +168,7 @@ se_network_is() {
   if [[ "$name" == "$SE_INNER_NET" ]]; then
     [[ "$found" == "bridge|$internal|$inhibit|$bridge|false|false|$subnet " ]]
   else
-    [[ "$found" == "bridge|$internal|$inhibit|$bridge|false|<no value>|$subnet " ]]
+    [[ "$found" == "bridge|$internal|$inhibit|$bridge|false||$subnet " ]]
   fi
 }
 # A network of this name is not trusted (the data root lives on the workspace volume, so one can be left from an earlier session): one that is not exactly as made here is removed and made again.
@@ -179,6 +182,42 @@ se_ensure_network() {
     docker network create --driver bridge --ipv6=false --subnet "$subnet" -o "com.docker.network.bridge.name=$bridge" "$name" >/dev/null || return 1
   fi
   se_network_is "$name" "$internal" "$inhibit" "$bridge" "$subnet"
+}
+
+# Ordinary/setup sandboxes start only the image's trusted sleeping init. Before
+# repository exec, the worker resolves that endpoint's host ifindex and invokes
+# se_port_isolation in a mount-free, NET_ADMIN-only helper on the host network.
+# Also used on the host at restore. Never identify a port by learned ARP/FDB data.
+se_port_isolation() {
+  local index=$1 mode=$2 port found=""
+  [[ "$index" =~ ^[1-9][0-9]{0,9}$ && ( "$mode" == on || "$mode" == off ) ]] || return 1
+  for port in /sys/class/net/rvs0/brif/*; do
+    [[ -f "/sys/class/net/${port##*/}/ifindex" && "$(cat "/sys/class/net/${port##*/}/ifindex")" == "$index" ]] || continue
+    [[ -z "$found" ]] || return 1
+    found=${port##*/}
+  done
+  [[ -n "$found" ]] || return 1
+  bridge link set dev "$found" isolated "$mode" || return 1
+  local want=1
+  [[ "$mode" == on ]] || want=0
+  [[ "$(cat "/sys/class/net/$found/brport/isolated")" == "$want" ]]
+}
+se_container_port_index() {
+  local mac
+  mac=$(docker inspect --format '{{(index .NetworkSettings.Networks "rovara-snet").MacAddress}}' "$1") || return 1
+  [[ "$mac" =~ ^([0-9a-f]{2}:){5}[0-9a-f]{2}$ ]] || return 1
+  docker exec "$1" /usr/local/bin/node -e 'const fs=require("fs");const root="/sys/class/net/";const names=fs.readdirSync(root).filter(n=>fs.readFileSync(root+n+"/address","utf8").trim()===process.argv[1]);if(names.length!==1)process.exit(1);process.stdout.write(fs.readFileSync(root+names[0]+"/iflink","utf8"));' "$mac"
+}
+se_restore_ports() {
+  local gateway port index
+  gateway=$(se_container_port_index "$SE_GATEWAY") || return 1
+  se_port_isolation "$gateway" off || return 1
+  for port in /sys/class/net/rvs0/brif/*; do
+    [[ -f "/sys/class/net/${port##*/}/ifindex" ]] || return 1
+    index=$(cat "/sys/class/net/${port##*/}/ifindex") || return 1
+    [[ "$index" == "$gateway" ]] && continue
+    se_port_isolation "$index" on || return 1
+  done
 }
 
 # The gateway program and the deny list come from the worker image's own contracts (the very text the laptop runs), read with no network and no capability. Only plain names reach the gateway's configuration.
@@ -292,14 +331,17 @@ se_proxy_probe() {
 # After a reboot or a Docker restart: the walls and the gateway again, before the worker starts. Any miss exits non-zero, and the worker (which Requires this unit) does not start.
 se_install_restore_unit() {
   { printf 'readonly SE_GATEWAY=%s SE_INNER_NET=%s SE_OUTER_NET=%s SE_INNER_IP=%s\n' "$SE_GATEWAY" "$SE_INNER_NET" "$SE_OUTER_NET" "$SE_INNER_IP"
-    declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is se_dropin_is se_allow_dir
+    declare -f se_rule se_task_bridge se_walls se_gateway_running se_daemon_dns_is se_dropin_is se_allow_dir se_network_is se_port_isolation se_container_port_index se_restore_ports
     printf 'readonly SE_DAEMON_JSON=%s SE_TASK_NETWORK=%s SE_ALLOW_DIR=%s SE_DROPIN=%s\n' "$SE_DAEMON_JSON" "$SE_TASK_NETWORK" "$SE_ALLOW_DIR" "$SE_DROPIN"
     printf 'SE_DROPIN_WANT=%q\n' "$SE_DROPIN_WANT"
     printf 'se_daemon_dns_is || exit 1\n'
     printf 'se_dropin_is || exit 1\n'
+    printf 'readonly SE_INNER_BRIDGE=%s SE_INNER_SUBNET=%s SE_OUTER_BRIDGE=%s SE_OUTER_SUBNET=%s\n' "$SE_INNER_BRIDGE" "$SE_INNER_SUBNET" "$SE_OUTER_BRIDGE" "$SE_OUTER_SUBNET"
+    printf 'se_network_is "$SE_INNER_NET" true true "$SE_INNER_BRIDGE" "$SE_INNER_SUBNET" || exit 1\n'
+    printf 'se_network_is "$SE_OUTER_NET" false "" "$SE_OUTER_BRIDGE" "$SE_OUTER_SUBNET" || exit 1\n'
     printf 'se_walls || exit 1\nse_allow_dir || exit 1\n'
     printf 'se_gateway_running || { docker start "$SE_GATEWAY" >/dev/null 2>&1; sleep 3; }\n'
-    printf 'se_gateway_running || exit 1\n'
+    printf 'se_gateway_running || exit 1\nse_restore_ports || exit 1\n'
   } >"$SE_RESTORE" || return 1
   chmod 0700 "$SE_RESTORE" || return 1
   cat >"/etc/systemd/system/$SE_UNIT" <<UNIT || return 1
@@ -337,6 +379,7 @@ sandbox_egress_main() {
   se_gateway || fail "could not start the sandbox egress gateway"
   BOOT_STEP="check the sandbox egress gateway"
   se_gateway_running || fail "the sandbox egress gateway is not running on its two networks"
+  se_restore_ports || fail "could not set and verify sandbox bridge port isolation"
   se_probe || fail "the sandbox egress gateway did not pass its checks (a registry name must be refused and a raw address unreachable from a sandbox)"
   BOOT_STEP="check the Docker daemon proxy"
   se_proxy_probe || fail "the sandbox egress gateway's daemon proxy did not answer, or did not refuse a raw address, an S3 bucket and a port other than 443"

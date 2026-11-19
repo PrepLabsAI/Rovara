@@ -1,3 +1,4 @@
+import { sandboxPortIsolationArgs } from "./sandbox-port-isolation.js";
 import { gatewayWorkerDirectory } from "./gateway-name-files.js";
 // Setup agent (design setup-test-health 3.1-3.2 and 12, task SH7): the worker's half of the setup run that RUNS things. This module is the part that can be built and tested without the model session:
 // the sandbox the commands run in and the rules around it, the shell the agent gets, the check that tracked files were left alone, and the reading of the final answer. The session itself is created
@@ -187,10 +188,17 @@ export function assertSetupSandboxExecArgs(args: readonly string[]): void {
  * The Docker seam of a setup sandbox for the workspace `rootPath`. `run` must pass `assertSetupSandboxRunArgs`; `exec` (and the file tools' byte-exact exec) must pass `assertSetupSandboxExecArgs`.
  * Everything else (inspect, network, rm, ps) passes. Wraps the real Docker, or a fake in a test.
  */
-export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined; gateway?: { network: string; dns: string } | undefined; gatewayResolverDirectory?: string | undefined }): DockerCli {
+export function guardedSetupDocker(docker: DockerCli = createDockerCli(), options: { rootPath: string; network?: { name: string; ip: string; helperIp: string } | undefined; sharedNetwork?: string | undefined; gateway?: { network: string; dns: string } | undefined; gatewayResolverDirectory?: string | undefined; isolationImage?: string | undefined }): DockerCli {
   return {
     async run(args: readonly string[], runOptions?: CollectedProcessOptions): Promise<CollectedProcess> {
-      if (args[0] === "run") assertSetupSandboxRunArgs(args, options);
+      if (args[0] === "run") {
+        let isolationHelper = false;
+        if (options.gateway !== undefined && options.isolationImage !== undefined && /^[1-9][0-9]{0,9}$/u.test(args.at(-1) ?? "")) {
+          const expected = sandboxPortIsolationArgs(options.isolationImage, args.at(-1)!);
+          isolationHelper = args.length === expected.length && args.every((arg, index) => arg === expected[index]);
+        }
+        if (!isolationHelper) assertSetupSandboxRunArgs(args, options);
+      }
       if (args[0] === "exec") assertSetupSandboxExecArgs(args);
       return docker.run(args, runOptions);
     },
@@ -209,7 +217,7 @@ export function createSetupSandbox(options: Omit<TaskSandboxOptions, "docker"> &
   if (options.network !== undefined && (options.dns?.length !== 1 || helperIp === undefined)) throw agentXError("CONFIG_INVALID", "a setup sandbox on a run network has exactly its helper as resolver");
   const environment = options.environment ?? process.env;
   const gateway = gatewayEgressFor(environment);
-  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! }, sharedNetwork: sandboxNetworkFromEnvironment(environment), ...(gateway === undefined ? {} : { gateway }), gatewayResolverDirectory: options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY }) });
+  return new TaskSandbox({ ...options, docker: guardedSetupDocker(options.docker, { rootPath: options.rootPath, network: options.network === undefined ? undefined : { ...options.network, helperIp: helperIp! }, sharedNetwork: sandboxNetworkFromEnvironment(environment), ...(gateway === undefined ? {} : { gateway }), gatewayResolverDirectory: options.gatewayResolverDirectory ?? GATEWAY_RESOLVER_DIRECTORY, isolationImage: options.image ?? environment["AGENTX_SANDBOX_IMAGE"] }) });
 }
 
 // ---- tracked files are left alone

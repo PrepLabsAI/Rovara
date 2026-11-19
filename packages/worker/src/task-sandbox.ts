@@ -14,6 +14,7 @@ import { containerGone, type QuarantinedSandbox } from "./workspace-quarantine.j
 import { createDockerCli, taskContainerExec, type DockerCli } from "./swebench/containers.js";
 import { createGatewayNameFiles, GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
 export { GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
+import { isolateSandboxPort } from "./sandbox-port-isolation.js";
 import { modelHostAddHostArgs, type ModelHostBlock } from "./model-helper-block.js";
 
 /**
@@ -364,7 +365,25 @@ export class TaskSandbox {
 
   constructor(private readonly options: TaskSandboxOptions) {
     if (options.modelBlock?.role !== undefined && options.modelBlock.role !== "working") throw agentXError("CONFIG_INVALID", "a task sandbox is the working sandbox: it cannot take a model block made for a round's check sandbox");
-    this.docker = options.docker ?? createDockerCli();
+    const docker = options.docker ?? createDockerCli();
+    // Gate EVERY command channel, including file-tool execBytes and service-wrapped exec.
+    // A reattachment changes the host ifindex, so never cache the port or the verdict.
+    const gate = async () => {
+      if (gatewayEgressFor(options.environment ?? process.env) === undefined) return;
+      try {
+        const image = options.image ?? (options.environment ?? process.env)[TASK_SANDBOX_IMAGE_ENVIRONMENT];
+        if (!image) throw new Error("no trusted sandbox image");
+        await isolateSandboxPort(docker, this.name, image);
+      } catch {
+        await this.remove();
+        throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not set and verify sandbox bridge port isolation, so it did not run the task's commands");
+      }
+    };
+    this.isolatePort = gate;
+    this.docker = {
+      run: async (args, runOptions) => { if (args[0] === "exec") await gate(); return docker.run(args, runOptions); },
+      ...(docker.execBytes === undefined ? {} : { execBytes: async (args, execOptions) => { await gate(); return docker.execBytes!(args, execOptions); } }),
+    };
     this.name = `agentx-task-${options.taskId.replace(/[^a-zA-Z0-9_.-]/gu, "-")}-${randomUUID().slice(0, 8)}`;
     const exec = taskContainerExec(this.docker, this.name);
     this.exec = async (command, execOptions) => {
@@ -375,6 +394,7 @@ export class TaskSandbox {
   }
 
   private readonly rawExec: ContainerExec;
+  private readonly isolatePort: () => Promise<void>;
 
   /** Test services: from now on every command gets the run's variables, and `dispose()` tears the run down first. Call once, after `start()`. */
   attachServices(services: SandboxServices): void {
@@ -530,6 +550,7 @@ export class TaskSandbox {
         throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not start the task sandbox: it could not join the model helper's network");
       }
     }
+    await this.isolatePort();
     await this.prepareUserBase(root);
     // A write the file tools' helper was killed in leaves a `.agentx-file-ops-*` file; an earlier task's must not reach this one's snapshots.
     await fileOpsExec(this.fileOpsTarget(), { root, op: "sweep", path: root }).catch(() => undefined);

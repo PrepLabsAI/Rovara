@@ -16,7 +16,7 @@ const WORKER_IMAGE = `111122223333.dkr.ecr.us-west-2.amazonaws.com/agentx-stagin
 
 interface Host { proxyReply: string | null; dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
 interface Options {
-  failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
+  failIsolationSet?: boolean; failIsolationVerify?: boolean; failIpv6?: boolean; failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean; innerIccOn?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
   otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; noAgentxDir?: boolean; installFailsForAgentx?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
@@ -55,7 +55,17 @@ function host(options: Options = {}): Host {
   *) exit 1 ;;
 esac`;
   fake("iptables", table(h.rules, options.failRuleInsert === true));
-  fake("ip6tables", table(h.rules6, false));
+  fake("ip6tables", table(h.rules6, options.failIpv6 === true));
+  for (const [name, index] of [["vethgw", "101"], ["vethpeer", "102"]]) {
+    mkdirSync(join(h.dir, "sys", "rvs0", "brif", name!), { recursive: true });
+    mkdirSync(join(h.dir, "sys", name!, "brport"), { recursive: true });
+    writeFileSync(join(h.dir, "sys", name!, "ifindex"), index!);
+    writeFileSync(join(h.dir, "sys", name!, "brport", "isolated"), "0");
+  }
+  fake("bridge", `[[ "$*" == "link set dev "* ]] || exit 1
+    ${options.failIsolationSet === true ? "exit 1" : ":"}
+    ${options.failIsolationVerify === true ? "exit 0" : `[[ "$6" == on ]] && value=1 || value=0; printf '%s' "$value" >"${join(h.dir, "sys")}/$4/brport/isolated"`}`);
+  // Docker 25 uses map[string]string for NetworkResource.Options: absent index renders empty (CLI v25.0.5 inspector / Moby api/types/types.go), not <no value>.
   fake("timeout", 'while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"');
   fake("install", options.installFailsForAgentx === true ? 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 && "$last" == */agentx ]] && exit 1; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0' : 'dir=0; for last; do [[ "$last" == -d ]] && dir=1; done; [[ "$dir" == 1 ]] && mkdir -p "$last"; exit 0');
   // A restart of Docker on the new file (the one with the gateway as name server) fails; on the old file it works.
@@ -68,7 +78,7 @@ case "$1" in
       inspect) f="$S/nets/\${@: -1}"; [[ -e "$f" ]] && cat "$f" || exit 1 ;;
       rm) [[ "$3" == agentx-task && -e "$S/held" ]] && exit 1; rm -f "$S/nets/$3" ;;
       create)
-        shift 2; internal=false; inhibit=""; icc="<no value>"; bridge=""; subnet=""
+        shift 2; internal=false; inhibit=""; icc=""; bridge=""; subnet=""
         while (($#)); do case "$1" in --internal) internal=true ;; --subnet) subnet=$2; shift ;; -o) case "$2" in com.docker.network.bridge.inhibit_ipv4=*) inhibit=\${2#*=} ;; com.docker.network.bridge.enable_icc=*) icc=\${2#*=} ;; com.docker.network.bridge.name=*) bridge=\${2#*=} ;; esac; shift ;; esac; name=$1; shift; done
         ${options.failInnerCreate === true ? '[[ "$name" == rovara-snet ]] && exit 1' : ":"}
         ${options.failOuterCreate === true ? '[[ "$name" == rovara-xnet ]] && exit 1' : ":"}
@@ -80,7 +90,9 @@ case "$1" in
   rm) rm -f "$S/gw" "$S/gw.nets" "$S/gw.running" ;;
   create) ${options.failCreate === true ? "exit 1" : `for ((i=1;i<=$#;i++)); do [[ "\${!i}" == --network ]] && { j=$((i+1)); echo "\${!j}" >"$S/gw.nets"; }; done; : >"$S/gw"`} ;;
   start) ${options.failStart === true ? "exit 1" : `: >"$S/gw.running"`} ;;
-  inspect) [[ -e "$S/gw.running" ]] || { printf 'false|'; exit 0; }
+  exec) printf '101' ;;
+  inspect) [[ "$*" == *MacAddress* ]] && { printf '02:42:ac:1c:fa:02'; exit 0; }
+           [[ -e "$S/gw.running" ]] || { printf 'false|'; exit 0; }
            ${options.ghostNetworks === true ? "printf 'true|rovara-xnet '" : `printf 'true|'; sort "$S/gw.nets" | tr '\\n' ' '`} ;;
   run)
     case " $* " in
@@ -99,6 +111,7 @@ esac`);
 /** The stage's text with the root-owned paths moved into the fake host. */
 function stageFor(h: Host): string {
   return stage
+    .split("/sys/class/net").join(join(h.dir, "sys"))
     .split("/usr/local/libexec/rovara-sandbox-egress-restore").join(h.restore)
     .split("/etc/agentx").join(join(h.dir, "agentx"))
     .split("/usr/local/libexec/rovara-container-firewall").join(h.firewall)
@@ -193,7 +206,7 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     for (const rule of opened) for (const range of ["10.0.0.0/8", "169.254.0.0/16"]) expect(index(rule)).toBeLessThan(index(`DOCKER-USER -i rvx+ -d ${range} -j DROP`));
     expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("RETURN"))).toHaveLength(0);
     expect(installed.filter((rule) => rule.includes("rvs+") && rule.endsWith("ACCEPT"))).toHaveLength(5);
-    expect(readFileSync(h.rules6, "utf8").split("\n")).toEqual(expect.arrayContaining(["INPUT -i rvs+ -j DROP", "INPUT -i rvx+ -j DROP"]));
+    expect(readFileSync(h.rules6, "utf8").split("\n")).toEqual(expect.arrayContaining(["INPUT -i rvs+ -j DROP", "FORWARD -i rvs+ -j DROP", "INPUT -i rvx+ -j DROP"]));
     // The metadata block (wall_off_containers') is untouched and still on top for every container.
     expect(installed).toContain("DOCKER-USER -d 169.254.169.254/32 -j DROP");
   });
@@ -470,6 +483,36 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(unit).toContain("Requires=docker.service");
     expect(unit).toContain("After=docker.service rovara-container-firewall.service");
     expect(readFileSync(join(h.units, "agentx-worker.service.d", "30-sandbox-egress.conf"), "utf8")).toBe("[Unit]\nRequires=rovara-sandbox-egress.service\nAfter=rovara-sandbox-egress.service\n");
+  });
+
+  it.each([{ failIsolationSet: true }, { failIsolationVerify: true }, { failIpv6: true }])("fails boot before worker settings on an unverified boundary: %j", (options) => {
+    const h = host(options);
+    const ran = runStage(h);
+    expect(ran.status, ran.stderr).not.toBe(0);
+    expect(envLines(h)).toEqual(NO_SANDBOX_ENV);
+  });
+
+  it("restore re-isolates existing ports, keeps the gateway non-isolated, and refuses failed verification", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    const peer = join(h.dir, "sys", "vethpeer", "brport", "isolated");
+    const gateway = join(h.dir, "sys", "vethgw", "brport", "isolated");
+    const env = { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}` };
+    writeFileSync(peer, "0"); writeFileSync(gateway, "1");
+    expect(spawnSync("bash", [h.restore], { env }).status).toBe(0);
+    expect(readFileSync(peer, "utf8")).toBe("1");
+    expect(readFileSync(gateway, "utf8")).toBe("0");
+    writeFileSync(peer, "0");
+    writeFileSync(join(h.dir, "bin", "bridge"), "#!/bin/bash\nexit 0\n");
+    expect(spawnSync("bash", [h.restore], { env }).status).not.toBe(0);
+  });
+
+  it("refuses restore when the existing sandbox network has ICC enabled", () => {
+    const h = host();
+    expect(runStage(h).status).toBe(0);
+    writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|true|172.28.250.0/24 ");
+    const ran = spawnSync("bash", [h.restore], { encoding: "utf8", env: { PATH: `${join(h.dir, "bin")}:${process.env.PATH ?? ""}` } });
+    expect(ran.status, ran.stderr).not.toBe(0);
   });
 
   it("the restore script puts the walls back after a reboot or a Docker restart, starts the gateway if it is down, and FAILS (so the worker does not start) when it cannot", () => {

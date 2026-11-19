@@ -238,6 +238,10 @@ function runArgsRefusal(args: readonly string[], context: DevcontainerPolicyCont
         if (equals === -1 || arg.slice(equals + 1) !== "false") return "--privileged";
       } else if (ALWAYS_REFUSED.has(name)) {
         return name;
+      } else if (name === "--sysctl") {
+        // No repository net.* sysctl is explicitly allowed. Docker accepts slash separators too.
+        const key = value().split("=", 1)[0]!.trim().replaceAll("/", ".");
+        if (key === "net" || key.startsWith("net.")) return "--sysctl (repository network sysctls are refused)";
       } else if (name === "--cap-add") {
         if (!ALLOWED_CAPABILITY.test(value())) return "--cap-add";
       } else if (context.walledNetwork !== undefined && (name === "--network" || name === "--net")) {

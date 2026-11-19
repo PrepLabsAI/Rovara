@@ -10,14 +10,15 @@ import type * as CollectedProcessModule from "../../packages/worker/src/collecte
 const captured = vi.hoisted(() => ({ calls: [] as string[][], environments: [] as Array<NodeJS.ProcessEnv | undefined> }));
 vi.mock("../../packages/worker/src/collected-process.js", async (importOriginal) => {
   const original = await importOriginal<typeof CollectedProcessModule>();
-  return { ...original, runCollected: async (_executable: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => { captured.calls.push([...args]); captured.environments.push(options?.env); return { exitCode: 0, stdout: "", stderr: "" }; } };
+  return { ...original, runCollected: async (_executable: string, args: readonly string[], options?: { env?: NodeJS.ProcessEnv }) => { captured.calls.push([...args]); captured.environments.push(options?.env); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
 });
 
 const { TASK_SANDBOX_NETWORK, TaskSandbox, daemonProxyFromEnvironment, gatewayEgressFor, gatewayEgressFromEnvironment, sandboxDnsFromEnvironment } = await import("../../packages/worker/src/task-sandbox.js");
 const { setupSharedNetwork } = await import("../../packages/worker/src/setup-agent-invocation.js");
 const { DEVCONTAINER_GATEWAY_DOCKER, createDevcontainerCli, ensureGatewayNetwork } = await import("../../packages/worker/src/devcontainer.js");
 const { evalInstallArgProblems, evalInstallRunArgs } = await import("../../packages/worker/src/verification/eval-bridged-exec.js");
-const { createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
+const { sandboxPortIsolationArgs } = await import("../../packages/worker/src/sandbox-port-isolation.js");
+const { guardedSetupDocker, createSetupSandbox } = await import("../../packages/worker/src/setup-agent.js");
 
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
@@ -58,7 +59,7 @@ describe("the task sandbox on a gateway-mode worker", () => {
     const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-resolver-")));
     cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
-    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
     const sandbox = new TaskSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment, gatewayResolverDirectory: resolverRoot, ...extra });
     try {
       await sandbox.start();
@@ -80,6 +81,64 @@ describe("the task sandbox on a gateway-mode worker", () => {
     const resolverPath = /^type=bind,src=([^,]+),dst=\/etc\/resolv\.conf,readonly$/u.exec(resolverMount!)![1]!;
     expect(await readFile(resolverPath, "utf8")).toBe("nameserver 172.28.250.2\noptions ndots:0 timeout:3 attempts:1\n");
     expect(run).not.toContain(TASK_SANDBOX_NETWORK);
+  });
+
+  it.each([false, true])("gates ordinary/setup commands before exec and refuses a failed gate (setup=%s)", async (setup) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "icc-order-")));
+    const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "icc-names-")));
+    cleanup.push(root, resolverRoot);
+    let isolated = false;
+    let failGate = false;
+    let port = "101";
+    const repositoryExecs: string[] = [];
+    const seenPorts: string[] = [];
+    let byteExecs = 0;
+    const docker = { execBytes: async () => { byteExecs += 1; return { exitCode: 0, stdout: Buffer.from('{}'), stderr: "" }; }, run: async (args: readonly string[]) => {
+      if (args[0] === "inspect") return { exitCode: 0, stdout: "02:42:ac:1c:fa:03", stderr: "" };
+      if (args[0] === "exec" && args.some(a => a.includes("iflink"))) return { exitCode: 0, stdout: port, stderr: "" };
+      if (args[0] === "run" && args.includes("NET_ADMIN")) {
+        seenPorts.push(args.at(-1)!);
+        isolated = !failGate;
+        return { exitCode: failGate ? 1 : 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "exec" && args.includes("repository-command")) {
+        if (!isolated) throw new Error("repository executed before isolation");
+        repositoryExecs.push(port);
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    } };
+    const options = { rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV, gatewayResolverDirectory: resolverRoot };
+    const sandbox = setup ? createSetupSandbox(options) : new TaskSandbox(options);
+    await sandbox.exec(["repository-command"], {});
+    expect(repositoryExecs).toEqual(["101"]);
+    expect(seenPorts).toContain("101");
+    // Docker reattached the endpoint: the next exec must gate its NEW port.
+    isolated = false; port = "202";
+    await sandbox.exec(["repository-command"], {});
+    expect(repositoryExecs).toEqual(["101", "202"]);
+    expect(seenPorts).toContain("202");
+    isolated = false; failGate = true;
+    await expect(sandbox.exec(["repository-command"], {})).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(repositoryExecs).toEqual(["101", "202"]);
+    const before = byteExecs;
+    const target = sandbox.fileOpsTarget();
+    expect(target).toBeDefined();
+    await expect(target!.docker.execBytes!(["exec", sandbox.name, "node"], { maxStdoutBytes: 1 })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(byteExecs).toBe(before);
+  });
+
+  it("the setup seam permits only the exact worker-owned isolation helper", async () => {
+    let launches = 0;
+    const docker = guardedSetupDocker({ run: async () => { launches += 1; return { exitCode: 0, stdout: "", stderr: "" }; } },
+      { rootPath: "/mnt/workspace", gateway: { network: "rovara-snet", dns: "172.28.250.2" }, isolationImage: IMAGE });
+    const args = sandboxPortIsolationArgs(IMAGE, "101");
+    await docker.run(args);
+    expect(launches).toBe(1);
+    for (const bad of [args.map(a => a === IMAGE ? "repository-image" : a), args.map(a => a === "NET_ADMIN" ? "SYS_ADMIN" : a),
+      [...args.slice(0, 1), "--volume", "/:/host", ...args.slice(1)], args.map(a => a.includes("se_port_isolation") ? "arbitrary code" : a)]) {
+      await expect(docker.run(bad)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    }
+    expect(launches).toBe(1);
   });
 
   it("removes the run-owned resolver after the sandbox is removed", async () => {
@@ -151,7 +210,7 @@ describe("the task sandbox on a gateway-mode worker", () => {
     const resolverRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-gateway-setup-resolver-")));
     cleanup.push(root, resolverRoot);
     const calls: string[][] = [];
-    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: "", stderr: "" }; } };
+    const docker = { run: async (args: readonly string[]) => { calls.push([...args]); return { exitCode: 0, stdout: args[0] === "inspect" ? "02:42:ac:1c:fa:03" : args[0] === "exec" && args.includes("-e") && args.some(a => a.includes("iflink")) ? "101" : "", stderr: "" }; } };
     await createSetupSandbox({ rootPath: root, taskId: TASK, docker, image: IMAGE, environment: GATEWAY_ENV, gatewayResolverDirectory: resolverRoot }).start();
     const run = calls.find((call) => call[0] === "run")!;
     expect(flag(run, "--network")).toEqual(["rovara-snet"]);
