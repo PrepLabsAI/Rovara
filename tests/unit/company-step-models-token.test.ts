@@ -25,7 +25,7 @@ const installRoute = { route: async () => ({ alias: INSTALL, api: "anthropic-mes
 
 /** One company's world. `shared`: the other company's store and the gateway reader, as in production (one table, keys prefixed by the company; one reader for every company). */
 async function world(companyId?: OrgId, shared?: { backend: HarnessOptions["backend"]; reader: FakeOfferedModels }) {
-  const h = createHarness({ ...(companyId === undefined ? {} : { companyId }), ...(shared === undefined ? {} : { backend: shared.backend }) });
+  const h = createHarness({ ...(companyId === undefined ? {} : { companyId }), ...(shared?.backend === undefined ? {} : { backend: shared.backend }) });
   await h.registerProject();
   const reader = shared?.reader ?? createFakeOfferedModels();
   const company = h.deps.companyId;
