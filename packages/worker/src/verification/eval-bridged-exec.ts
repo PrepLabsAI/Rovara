@@ -371,6 +371,9 @@ const configProblem = (config: FreshEvalSandboxConfig): boolean => {
   } catch { return true; }
 };
 
+/** The by-name block of a fresh eval round whose model helper is at `helperIp` (a model row, as every paid round has). Exported so the allow-list tests build the same block the round does without importing the guarded block module themselves. */
+export const freshEvalModelBlock = (helperIp: string): ModelHostBlock => planModelHostBlock({ hasModelRow: true, helperIp });
+
 /** The input of one run, checked at runtime (the types are not a check). */
 function runProblem(input: FreshEvalSandboxRun): boolean {
   try {
