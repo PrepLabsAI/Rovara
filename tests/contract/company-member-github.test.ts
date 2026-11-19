@@ -11,7 +11,6 @@ import { MEMBER_NOT_FOUND, NOT_FOUND, OWNER_ONLY } from "../../packages/broker/s
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { companyOperator } from "../../packages/broker/src/developer/company-operator.js";
 import { companyIssuerKey } from "../../packages/broker/src/developer/company-issuer.js";
-import { MEMBER_STEP_UP } from "../../packages/broker/src/developer/company-member-contract.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = Date.parse("2026-11-17T12:00:00.000Z");
@@ -30,7 +29,7 @@ function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean
   const db = new FakeDynamoDb({ seed: 11 });
   // Cloud's web app: a full-access, install-level sign-in client (as company-member-routes.test.ts).
   const claims: Record<string, unknown> = { azp: "web-app", env: "test", sub: ADMIN, sid: SESSIONS[ADMIN], amr };
-  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
+  db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://cloud.example.com/callback"], loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   const join = (id: string, companyId: string, role: "owner" | "admin" | "member") => {
     db.set({ ...membershipKey(id), entityType: "COMPANY_MEMBERSHIP", personId: id, companyId, role, joinedAt: TIME });
     db.set({ pk: `ORG#${companyId}#MEMBERS`, sk: `MEMBER#${id}`, entityType: "COMPANY_MEMBER_VIEW", personId: id, companyId, role, joinedAt: TIME });
@@ -60,48 +59,52 @@ function world(amr: "github" | "slack" = "github", options: { githubOn?: boolean
     },
   };
   const jwt = () => { const part = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url"); return `Bearer ${part({ alg: "none" })}.${part(claims)}.sig`; };
+  // DEC 254zzz84 (5): a removal names its request (a fresh id per call, the same sequence in every world) and the role the remover saw.
+  let removals = 0;
   const call = async (method: string, path: string, body?: unknown) => {
-    const request = { method, path, headers: { authorization: jwt() }, requestId: "r", ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
+    const target = /\/members\/([a-f0-9]{64})\/removal$/u.exec(path)?.[1];
+    const sent = method === "POST" && target !== undefined && body !== null && typeof body === "object" && Object.keys(body).length === 0
+      ? { requestId: `00000000-0000-4000-8000-${String(++removals).padStart(12, "0")}`, expectedRole: role(target) ?? "member" } : body;
+    const request = { method, path, headers: { authorization: jwt() }, requestId: "r", ...(sent === undefined ? {} : { body: JSON.stringify(sent) }) };
     try { return { status: 200, body: await routeDeveloperRequest(deps, request, new URL(path, "https://broker.example.test")) as Record<string, unknown> }; } catch (error) {
       if (!(error instanceof AgentXError)) throw error;
       return { status: error.statusCode, body: { error: { code: error.code, message: error.message.slice(error.code.length + 2) } } as Record<string, unknown> };
     }
   };
   const as = (id: string) => { claims.sub = id; claims.sid = SESSIONS[id]; };
-  const stepUp = () => { claims.step_up_at = Math.floor((NOW - 30_000) / 1000); claims.step_up_amr = "passkey"; };
   const role = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { role?: string } | undefined)?.role;
   const revoked = (id: string) => (db.get(membershipKey(id).pk, "COMPANY") as { revokedAt?: string } | undefined)?.revokedAt !== undefined;
-  return { db, claims, deps, jwt, call, as, stepUp, forwarded, role, revoked, session: (id: string) => `SESSION#${SESSIONS[id]}` };
+  return { db, claims, deps, jwt, call, as, forwarded, role, revoked, session: (id: string) => `SESSION#${SESSIONS[id]}` };
 }
 const refusal = (status: number, code: string, message: string) => ({ status, body: { error: { code, message } } });
 
 describe("GitHub-signed-in company admins (DEC 254n)", () => {
   it.each([["owner", OWNER], ["admin", ADMIN]] as const)("a GitHub %s lists, previews, sets a member's role and removes a member of their own company", async (_role, id) => {
-    const h = world(); h.as(id); h.stepUp();
+    const h = world(); h.as(id);
     const list = await h.call("GET", MEMBERS);
     expect(list.status).toBe(200);
     expect((list.body["members"] as Array<{ personId: string }>).map((row) => row.personId).sort()).toEqual([OWNER, ADMIN, MEMBER, TARGET].sort());
     expect((await h.call("GET", member(TARGET, "removal-preview"))).status).toBe(200);
     expect(await h.call("PUT", member(TARGET, "role"), { role: "member" })).toEqual({ status: 200, body: { ok: true } });
-    expect(await h.call("POST", member(TARGET, "removal"), {})).toEqual({ status: 200, body: { ok: true } });
+    expect(await h.call("POST", member(TARGET, "removal"), {})).toMatchObject({ status: 200, body: { state: "DONE", successorId: id } });
     expect(h.revoked(TARGET)).toBe(true);
     // The identity side heard the caller's live company and the caller as the actor, nothing the request named.
     expect(h.forwarded).toEqual([
       { kind: "company-member-list", companyId: A },
       { kind: "company-member-role-set", companyId: A, personId: TARGET, role: "member", createdBy: id },
-      { kind: "company-member-revoke", companyId: A, personId: TARGET, createdBy: id },
+      { kind: "company-member-revoke", companyId: A, personId: TARGET, expectedRole: "member", successorId: id, createdBy: id },
     ]);
   });
 
-  it("only a GitHub owner touches an owner: a GitHub admin is refused before the store, an owner reaches the store's own step-up rule", async () => {
-    const h = world(); h.as(ADMIN); h.stepUp();
+  it("only a GitHub owner touches an owner: a GitHub admin is refused before the store, an owner promotes with no step-up (DEC 254zzz73)", async () => {
+    const h = world(); h.as(ADMIN);
     expect(await h.call("PUT", member(TARGET, "role"), { role: "owner" })).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
     expect(await h.call("POST", member(OWNER, "removal"), {})).toEqual(refusal(403, "FORBIDDEN", OWNER_ONLY));
     expect(h.forwarded).toEqual([]);
     h.as(OWNER);
-    expect(await h.call("PUT", member(TARGET, "role"), { role: "owner" })).toEqual(refusal(403, "REAUTH_REQUIRED", MEMBER_STEP_UP));
+    expect(await h.call("PUT", member(TARGET, "role"), { role: "owner" })).toEqual({ status: 200, body: { ok: true } });
     expect(h.forwarded).toEqual([{ kind: "company-member-role-set", companyId: A, personId: TARGET, role: "owner", createdBy: OWNER }]);
-    expect(h.role(TARGET)).toBe("member"); expect(h.revoked(OWNER)).toBe(false);
+    expect(h.role(TARGET)).toBe("owner"); expect(h.revoked(OWNER)).toBe(false);
   });
 
   it.each([OWNER, ADMIN, MEMBER, OTHER])("a GitHub caller gets exactly what a Slack caller of the same role gets, action by action (%s)", async (id) => {
@@ -111,7 +114,7 @@ describe("GitHub-signed-in company admins (DEC 254n)", () => {
       ["POST", member(OTHER_TARGET, "removal"), {}], ["POST", member(TARGET, "removal"), {}], ["POST", member(TARGET, "removal"), {}],
     ] as const;
     const run = async (amr: "github" | "slack") => {
-      const h = world(amr); h.as(id); h.stepUp();
+      const h = world(amr); h.as(id);
       const answers = [];
       for (const entry of script) { const [method, path, body] = entry as readonly [string, string, unknown?]; answers.push(await h.call(method, path, body)); }
       return { answers, forwarded: h.forwarded, state: [OWNER, ADMIN, MEMBER, TARGET, OTHER, OTHER_TARGET].map((p) => [h.role(p), h.revoked(p)]) };
@@ -122,7 +125,7 @@ describe("GitHub-signed-in company admins (DEC 254n)", () => {
   });
 
   it("a GitHub plain member gets not found on every member route and nothing is forwarded", async () => {
-    const h = world(); h.as(MEMBER); h.stepUp();
+    const h = world(); h.as(MEMBER);
     for (const [method, path, body] of [["GET", MEMBERS], ["GET", member(TARGET, "removal-preview")], ["PUT", member(TARGET, "role"), { role: "admin" }], ["POST", member(TARGET, "removal"), {}]] as const) {
       expect(await h.call(method, path, body)).toEqual(refusal(404, "NOT_FOUND", NOT_FOUND));
     }
@@ -130,7 +133,7 @@ describe("GitHub-signed-in company admins (DEC 254n)", () => {
   });
 
   it("a GitHub owner of another company cannot see or touch this company's people, and A's owner cannot touch B's", async () => {
-    const h = world(); h.as(OTHER); h.stepUp();
+    const h = world(); h.as(OTHER);
     const list = await h.call("GET", MEMBERS);
     expect((list.body["members"] as Array<{ personId: string }>).map((row) => row.personId).sort()).toEqual([OTHER, OTHER_TARGET].sort());
     for (const [method, path, body] of [["GET", member(TARGET, "removal-preview")], ["PUT", member(TARGET, "role"), { role: "admin" }], ["POST", member(TARGET, "removal"), {}]] as const) {
@@ -149,7 +152,7 @@ describe("GitHub sessions not bound to the company reach no member route (review
     ["bound to another company", (h: ReturnType<typeof world>) => { h.db.set({ ...(h.db.get(h.session(OWNER), "META") as Record<string, unknown>), companyId: B }); }],
     ["a company with its own issuer", (h: ReturnType<typeof world>) => { h.db.set({ ...companyIssuerKey(A), entityType: "COMPANY_SIGNIN_ISSUER", enabled: true }); }],
   ] as const)("%s: refused, nothing forwarded, nobody changed", async (_name, damage) => {
-    const h = world(); h.as(OWNER); h.stepUp(); damage(h);
+    const h = world(); h.as(OWNER); damage(h);
     for (const [method, path, body] of [["GET", MEMBERS], ["PUT", member(TARGET, "role"), { role: "member" }], ["POST", member(TARGET, "removal"), {}]] as const) {
       expect((await h.call(method, path, body)).status).toBe(401);
     }
@@ -157,16 +160,9 @@ describe("GitHub sessions not bound to the company reach no member route (review
   });
 
   it("GitHub sign-in switched off: refused", async () => {
-    const h = world("github", { githubOn: false }); h.as(OWNER); h.stepUp();
+    const h = world("github", { githubOn: false }); h.as(OWNER);
     expect((await h.call("GET", MEMBERS)).status).toBe(401);
     expect(h.forwarded).toEqual([]);
-  });
-
-  it("a GitHub round trip is no step-up: removal and role change need Code's own factor", async () => {
-    const h = world(); h.as(OWNER); h.stepUp(); h.claims.step_up_amr = "github";
-    expect(await h.call("POST", member(TARGET, "removal"), {})).toEqual(refusal(403, "REAUTH_REQUIRED", "this removal needs a fresh sign-in check; sign in again and retry"));
-    expect((await h.call("PUT", member(TARGET, "role"), { role: "member" })).status).toBe(403);
-    expect(h.forwarded).toEqual([]); expect(h.revoked(TARGET)).toBe(false);
   });
 });
 

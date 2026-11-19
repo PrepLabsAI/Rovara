@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { createSocket } from "node:dgram";
 import { describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
-import { SANDBOX_REGISTRY_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
+import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
 import { EC2_USER_DATA_MAX_BYTES, ec2WorkerBootScript, ec2WorkerUserData, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
 
 const stage = readFileSync(new URL("../../packages/worker/ec2/sandbox-egress.sh", import.meta.url), "utf8");
@@ -17,7 +17,7 @@ const WORKER_IMAGE = `111122223333.dkr.ecr.us-west-2.amazonaws.com/agentx-stagin
 
 interface Host { proxyReply: string | null; dir: string; daemon: string; firewall: string; envFile: string; calls: string; rules: string; rules6: string; units: string; restore: string; resolv: string; state: string; failure: string }
 interface Options {
-  failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean;
+  failRuleInsert?: boolean; noMetadataBlock?: boolean; failInnerCreate?: boolean; failOuterCreate?: boolean; emptyProgram?: boolean; fewNames?: boolean; badName?: boolean; fewS3?: boolean; badS3?: boolean;
   failCreate?: boolean; failConnect?: boolean; failStart?: boolean; ghostNetworks?: boolean; failProbe?: boolean; innerNotInternal?: boolean; innerExistsRight?: boolean;
   // L4-NETG2: the Docker daemon's name server, the container firewall script, and the old agentx-task bridge.
   otherDaemonDns?: boolean; failDockerRestart?: boolean; failFirewall?: boolean; dockerNotReady?: boolean; staleTaskNetwork?: boolean; taskNetworkHeld?: boolean; loopbackResolver?: boolean; dnsAlreadySet?: boolean; emptyDaemonJson?: boolean; notJsonDaemon?: boolean; noResolvers?: boolean; proxyDead?: boolean; proxyOpen?: boolean; noRegion?: boolean;
@@ -44,6 +44,7 @@ function host(options: Options = {}): Host {
   if (options.staleTaskNetwork === true) writeFileSync(join(h.state, "nets", "agentx-task"), TASK_NETWORK_ID);
   if (options.taskNetworkHeld === true) writeFileSync(join(h.state, "held"), "");
   writeFileSync(join(dir, "program"), options.emptyProgram === true ? "" : EGRESS_GATEWAY_SOURCE);
+  writeFileSync(join(dir, "s3names"), (options.fewS3 === true ? SANDBOX_S3_DENY.slice(0, 2) : options.badS3 === true ? [...SANDBOX_S3_DENY, "bad name"] : SANDBOX_S3_DENY).join("\n"));
   writeFileSync(join(dir, "names"), `${(options.fewNames === true ? SANDBOX_REGISTRY_DENY.slice(0, 3) : options.badName === true ? [...SANDBOX_REGISTRY_DENY, "bad name"] : SANDBOX_REGISTRY_DENY).join("\n")}`);
   if (options.innerExistsRight === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|true|true|rvs0|false|172.28.250.0/24 ");
   if (options.innerNotInternal === true) writeFileSync(join(h.state, "nets", "rovara-snet"), "bridge|false||rvs0|false|172.28.250.0/24 ");
@@ -83,7 +84,7 @@ case "$1" in
            ${options.ghostNetworks === true ? "printf 'true|rovara-xnet '" : `printf 'true|'; sort "$S/gw.nets" | tr '\\n' ' '`} ;;
   run)
     case " $* " in
-      *" --input-type=module "*) case "$*" in *EGRESS_GATEWAY_SOURCE*) cat "${join(dir, "program")}" ;; *) cat "${join(dir, "names")}" ;; esac ;;
+      *" --input-type=module "*) case "$*" in *EGRESS_GATEWAY_SOURCE*) cat "${join(dir, "program")}" ;; *SANDBOX_S3_DENY*) cat "${join(dir, "s3names")}" ;; *) cat "${join(dir, "names")}" ;; esac ;;
       *" --network rovara-snet "*) ${options.failProbe === true ? "exit 1" : "exit 0"} ;;
       *) exit 1 ;;
     esac ;;
@@ -100,6 +101,7 @@ function stageFor(h: Host): string {
     .split("/usr/local/libexec/rovara-container-firewall").join(h.firewall)
     .split("/etc/docker/daemon.json").join(h.daemon)
     .split("/etc/systemd/system").join(h.units)
+    .split("/var/lib/rovara-egress").join(join(h.dir, "egress-allow"))
     .split("/etc/resolv.conf").join(h.resolv)
     .split("/run/systemd/resolve/resolv.conf").join(`${h.resolv}.none`);
 }
@@ -140,12 +142,12 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     expect(outerCreate).not.toContain("--internal");
     // The gateway: created on the OUTER network at a fixed address, joined to the inner one at a fixed address, then started; nothing but its two networks.
     const create = log.find((line) => line.startsWith("docker create"))!;
-    expect(create).toContain("--name rovara-egw --label rovara.sandbox-egress=gateway --restart unless-stopped --network rovara-xnet --ip 172.28.251.2 --dns 10.42.0.2 --dns 169.254.169.253 --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --read-only");
+    expect(create).toContain(`--name rovara-egw --label rovara.sandbox-egress=gateway --restart unless-stopped --network rovara-xnet --ip 172.28.251.2 --dns 10.42.0.2 --dns 169.254.169.253 --user 1000:1000 --volume ${join(h.dir, "egress-allow")}:${join(h.dir, "egress-allow")}:ro --cap-drop ALL --security-opt no-new-privileges --read-only`);
     expect(create).toContain("--sysctl net.ipv4.ip_forward=0");
     expect(create).toContain("--pids-limit 512 --memory 512m");
     expect(create).not.toMatch(/--network host|--privileged|--cap-add|docker\.sock|--publish|-p /u);
-    const config = JSON.parse(/ROVARA_GW_CONFIG=(\{.*?\}\}) --entrypoint/u.exec(create)![1]!) as { mode: string; sandboxDenied: string[]; proxy: Record<string, unknown>; nets: Record<string, string> };
-    expect(config).toEqual({ mode: "host", sandboxDenied: [...SANDBOX_REGISTRY_DENY], proxy: { port: 3128, peer: "172.28.251.1/32" }, nets: { sandbox: "172.28.250.0/24", external: "172.28.251.0/24" } });
+    const config = JSON.parse(/ROVARA_GW_CONFIG=(\{.*?\}\}) --entrypoint/u.exec(create)![1]!) as { mode: string; sandboxDenied: string[]; nets: Record<string, string> };
+    expect(config).toEqual({ mode: "host", sandboxDenied: [...SANDBOX_REGISTRY_DENY], sandboxDeniedS3: [...SANDBOX_S3_DENY], projectAllowFile: join(h.dir, "egress-allow", "project-allow.json"), proxy: { port: 3128, peer: "172.28.251.1/32" }, nets: { sandbox: "172.28.250.0/24", external: "172.28.251.0/24" } });
     expect(create).toContain(`--entrypoint /usr/local/bin/node ${WORKER_IMAGE} -e "use strict";`);
     const connect = log.indexOf("docker network connect --ip 172.28.250.2 rovara-snet rovara-egw");
     expect(connect).toBeGreaterThan(log.findIndex((line) => line.startsWith("docker create")));
@@ -158,6 +160,9 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     for (const line of log.filter((entry) => entry.startsWith("docker run") && entry.includes("--input-type=module"))) expect(line).toContain(`--rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --workdir /opt/agentx --entrypoint node ${WORKER_IMAGE} --input-type=module -e`);
     // The worker's environment: exactly the three lines, and only after the checks passed.
     expect(envLines(h)).toEqual([...NO_SANDBOX_ENV, "AGENTX_SANDBOX_EGRESS=gateway", "AGENTX_SANDBOX_NETWORK=rovara-snet", "AGENTX_SANDBOX_DNS=172.28.250.2", "AGENTX_DAEMON_PROXY=http://172.28.251.2:3128"]);
+    // The project's S3 lift: a folder only the worker's user owns, mounted read-only into the gateway and nowhere else.
+    expect(create).toContain(`--volume ${join(h.dir, "egress-allow")}:${join(h.dir, "egress-allow")}:ro`);
+    expect(log.some((line) => line.startsWith("install -d -o 1000 -g 1000 -m 0700") && line.endsWith("egress-allow"))).toBe(true);
   });
 
   it("installs the walls: nothing leaves the sandbox bridge, the host is unreachable from both bridges, the gateway's way out loses the private ranges but keeps the host's resolvers' port 53", () => {
@@ -190,6 +195,8 @@ describe("the sandbox-egress stage on a worker (gateway mode)", () => {
     ["the worker image gives no gateway program", { emptyProgram: true }, "could not start the sandbox egress gateway"],
     ["the worker image gives a deny list that is too short to be the list", { fewNames: true }, "could not start the sandbox egress gateway"],
     ["the worker image gives a deny name that is not a plain name", { badName: true }, "could not start the sandbox egress gateway"],
+    ["the worker image gives an S3 deny list that is too short to be the list", { fewS3: true }, "could not start the sandbox egress gateway"],
+    ["the worker image gives an S3 deny name that is not a plain name", { badS3: true }, "could not start the sandbox egress gateway"],
     ["the gateway cannot be created", { failCreate: true }, "could not start the sandbox egress gateway"],
     ["the gateway cannot join the sandbox network", { failConnect: true }, "could not start the sandbox egress gateway"],
     ["the gateway cannot be started", { failStart: true }, "could not start the sandbox egress gateway"],
@@ -486,6 +493,9 @@ describe("the snippets the stage runs", () => {
     const names = node(snippet("se_denied_names"));
     expect(names.status, names.stderr).toBe(0);
     expect(names.stdout).toBe(SANDBOX_REGISTRY_DENY.join("\n"));
+    const s3 = node(snippet("se_denied_s3_names"));
+    expect(s3.status, s3.stderr).toBe(0);
+    expect(s3.stdout).toBe(SANDBOX_S3_DENY.join("\n"));
     expect(program.stdout.length).toBeGreaterThan(20_000);
   });
 

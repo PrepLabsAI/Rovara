@@ -88,6 +88,8 @@ export const WORKER_IMPLEMENTED_FEATURES = [
   "task.testEnvCoveragePath.v1",
   // N9 (INTG2): the prepare invocation's `registries` (a project's private package registries for the setup and readiness commands; registry-config.ts).
   "prepare.registries.v1",
+  // L4-NETG follow-up: the prepare invocation's `egressS3Allow` (the project's exact S3 hosts, published for the host's egress gateway; sandbox-egress-allow.ts).
+  "prepare.egressS3.v1",
   // Saved environments (SH25): the prepare invocation's `savedEnv` (a project's saved image to start from; saved-env/use.ts). Any problem with the image sets up fresh.
   "prepare.savedEnv.v1",
   // Saved project images: the prepare invocation's `savedEnvBuild` (a rebuild of the project's image after a read-only pinned preparation; saved-env/rebuild.ts).

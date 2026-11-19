@@ -1,13 +1,12 @@
-// Lane W (contract v0 tasks.merge): pressing Merge goes through the merge core only. The route refuses earlier (company, owner, step-up, body), never later, and adds no rule of its own.
+// Lane W (contract v0 tasks.merge): pressing Merge goes through the merge core only. The route refuses earlier (company, owner, body; DEC 254zzz73: no step-up), never later, and adds no rule of its own.
 import { describe, expect, it, vi } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, type ApprovalProof } from "../../packages/contracts/src/index.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
-import { MERGE_BODY, MERGE_NOT_SET_UP, MERGE_ON_A_PAGE, pressTaskMerge, routeTaskMerge, type TaskMergeWiring } from "../../packages/broker/src/aws/task-merge.js";
+import { MERGE_BODY, MERGE_NOT_SET_UP, pressTaskMerge, routeTaskMerge, type TaskMergeWiring } from "../../packages/broker/src/aws/task-merge.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const NOW = Date.parse("2026-11-09T10:00:00.000Z");
-const fresh = { at: new Date(NOW - 30_000).toISOString(), method: "email_code" as const };
 const REQUEST = "0b9f1c3e-7a51-4c1e-9d55-0f3a4b6c7d8e";
 
 function wiring(world: MergeWorld, proof?: (prepared: Parameters<TaskMergeWiring["proofOf"]>[0]) => ApprovalProof) {
@@ -15,7 +14,7 @@ function wiring(world: MergeWorld, proof?: (prepared: Parameters<TaskMergeWiring
   const view = vi.fn(async (_company: string, taskId: string) => ({ taskId, stage: "MERGED" }));
   return { merge, view, proofOf: (prepared: Parameters<TaskMergeWiring["proofOf"]>[0]) => (proof ?? ((p) => world.proofFor(p)))(prepared) } satisfies TaskMergeWiring;
 }
-const press = (overrides: Partial<Parameters<typeof pressTaskMerge>[1]> = {}) => ({ companyId: ORG, taskId: TASK_ID, requestId: REQUEST, presserPersonId: "owner-1", stepUp: fresh, ...overrides });
+const press = (overrides: Partial<Parameters<typeof pressTaskMerge>[1]> = {}) => ({ companyId: ORG, taskId: TASK_ID, requestId: REQUEST, presserPersonId: "owner-1", ...overrides });
 const rejects = async (run: () => Promise<unknown>) => {
   try { await run(); } catch (error) { return { code: (error as { code?: string }).code, message: (error as Error).message.replace(/^[A-Z_]+: /, "") }; }
   throw new Error("expected a refusal");
@@ -75,18 +74,16 @@ describe("a merge press through the merge core", () => {
 
 describe("the merge route", () => {
   const route = (w: TaskMergeWiring | undefined, overrides: Partial<Parameters<typeof routeTaskMerge>[0]> = {}) =>
-    routeTaskMerge({ wiring: w, companyId: ORG, taskId: TASK_ID, personId: "owner-1", stepUp: fresh, body: { requestId: REQUEST }, now: NOW, ...overrides });
+    routeTaskMerge({ wiring: w, companyId: ORG, taskId: TASK_ID, personId: "owner-1", body: { requestId: REQUEST }, now: NOW, ...overrides });
 
   it("is a fixed 'not set up' where the deployment has not wired the merge core", async () => {
     expect(await rejects(() => route(undefined))).toEqual({ code: "NOT_FOUND", message: MERGE_NOT_SET_UP });
   });
 
-  it("needs a fresh step-up with Code's own factor; refused presses never reach the core", async () => {
+  it("DEC 254zzz73: merges with no step-up for the task's owner; another person and another company still get 'task not found' and nothing merges", async () => {
     const world = await mergeWorld(); await world.seedTracking();
-    for (const stepUp of [undefined, { at: new Date(NOW - 11 * 60_000).toISOString(), method: "email_code" as const }, { at: fresh.at, method: "slack" as never }]) {
-      const w = wiring(world);
-      expect(await rejects(() => route(w, { stepUp }))).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
-      expect(w.merge).not.toHaveBeenCalled();
+    for (const overrides of [{ personId: "someone-else" }, { companyId: COMPANY_B.orgId }]) {
+      expect(await rejects(() => route(wiring(world), overrides))).toEqual({ code: "TASK_NOT_FOUND", message: "task not found" });
     }
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     expect(await route(wiring(world))).toMatchObject({ merged: true });
@@ -123,15 +120,7 @@ describe("the merge route on the developer API", () => {
     expect(errorOf((await h.read(MERGE_PATH, { method: "POST", body: JSON.stringify({ requestId: REQUEST }) })).body)).toEqual({ code: "NOT_FOUND", message: MERGE_NOT_SET_UP });
   });
 
-  it("never takes a step-up from the CLI's token: a tool holding it cannot merge", async () => {
-    const h = companyRouteHarness();
-    const { loadTask } = wired(h);
-    h.claims.step_up_at = Math.floor(Date.parse(TIME) / 1000) - 30; h.claims.step_up_amr = "email_code";
-    expect(errorOf((await h.read(MERGE_PATH, { method: "POST", body: JSON.stringify({ requestId: REQUEST }) })).body)).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
-    expect(loadTask).not.toHaveBeenCalled();
-  });
-
-  it("takes the step-up only from a full-access web client's verified token and the company only from membership", async () => {
+  it("takes the company only from membership (DEC 254zzz73: no step-up)", async () => {
     const h = companyRouteHarness();
     const { loadTask } = wired(h);
     // A full-access sign-in client and its session (spec 066), so the person's token goes through the client path.
@@ -143,9 +132,6 @@ describe("the merge route on the developer API", () => {
       method: "POST", headers: { authorization: `Bearer ${part({ alg: "none" })}.${part(h.claims)}.sig`, "x-company": COMPANY_B.orgId }, body: JSON.stringify({ requestId: REQUEST, companyId: COMPANY_B.orgId }),
     });
     const pressPlain = () => h.read(MERGE_PATH, { method: "POST", headers: { authorization: `Bearer ${part({ alg: "none" })}.${part(h.claims)}.sig`, "x-company": COMPANY_B.orgId }, body: JSON.stringify({ requestId: REQUEST }) });
-    expect(errorOf((await pressPlain()).body)).toEqual({ code: "REAUTH_REQUIRED", message: MERGE_ON_A_PAGE });
-    expect(loadTask).not.toHaveBeenCalled();
-    h.claims.step_up_at = Math.floor(Date.parse(TIME) / 1000) - 30; h.claims.step_up_amr = "email_code";
     // A company named in the body is never read: the strict body refuses it.
     expect(errorOf((await press()).body)).toEqual({ code: "CONFIG_INVALID", message: MERGE_BODY });
     const companies: string[] = [];

@@ -248,6 +248,15 @@ describe("install steps", () => {
     expect(w.daemon.working.paused).toBe(false);
   });
 
+  it("L4-TH1: a sealed eval that tried to reach a database and an outside host is named; a model host the sandbox pinned to the helper is not", async () => {
+    const log = ["Error: getaddrinfo ENOTFOUND api.openai.com", "Error: connect ECONNREFUSED 172.30.1.7:5432", "Error: getaddrinfo ENOTFOUND api.stripe.com"].join("\n");
+    const w = await world(fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 0 } : { code: 1, log }) }));
+    const diagnostic = runFailureOf(await w.sandbox.run(w.input({ side: "old" })).catch((e: unknown) => e))!;
+    expect(diagnostic).toMatchObject({ code: "blocked_connection", phase: "run", exitCode: 1, blocked: { items: [{ kind: "database", port: 5432 }, { kind: "service", host: "api.stripe.com" }] } });
+    const only = await world(fakeDaemon({ play: async (kind) => (kind === "install" ? { code: 0 } : { code: 1, log: "Error: getaddrinfo ENOTFOUND api.openai.com" }) }));
+    expect(runFailureOf(await only.sandbox.run(only.input({ side: "old" })).catch((e: unknown) => e))).toMatchObject({ code: "exited" });
+  });
+
   it("an install that ran out of time, or a box that did not start, is its own named failure", async () => {
     const timedOut = fakeDaemon({ play: async (kind) => (kind === "install" ? { code: "timeout" } : { code: 0 }) });
     const a = await world(timedOut, { evalEnvironment: PIP });

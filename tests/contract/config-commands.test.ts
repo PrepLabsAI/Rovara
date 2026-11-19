@@ -47,8 +47,14 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "coreEngine.agentModel")).toMatchObject({ value: "", where: "stack parameter CoreAgentModel on agentx-staging-control-plane" });
     // Batch 13 (#906, DEC 254zm): the hosted test service images setting, none until the starter copies are checked.
     expect(rows.find((row) => row.key === "testServices.images")).toMatchObject({ where: "stack parameter TestServiceImages on agentx-staging-control-plane" });
+    // DEC 254zzz58: the hosted lessons learning model, empty (claude-haiku-5-5, unless a company chooses its own) until set.
+    expect(rows.find((row) => row.key === "coreEngine.learningModel")).toMatchObject({ value: "", where: "stack parameter CoreLearningModel on agentx-staging-control-plane" });
+    // L4-SE (#1081, DEC 254zzz56): the saved-environment switch, off until set.
+    expect(rows.find((row) => row.key === "savedEnvironments.switch")).toMatchObject({ where: "stack parameter SavedEnvironments on agentx-staging-control-plane" });
+    // Live switches check 2026-11-18: the per-company model choice, off until set.
+    expect(rows.find((row) => row.key === "coreEngine.agentModelChoice")).toMatchObject({ value: "off", where: "stack parameter CoreAgentModelChoice on agentx-staging-control-plane" });
     // L4-NETG (DEC 254zzz77): workerSandboxEgress.
-    expect(rows).toHaveLength(27);
+    expect(rows).toHaveLength(30);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {

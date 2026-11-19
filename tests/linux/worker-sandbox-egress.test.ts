@@ -255,7 +255,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const wrapper = join(dir, "devcontainer-docker-build.sh");
     await writeFile(wrapper, (await readFile(wrapperPath, "utf8")).split("/usr/local/bin/docker").join(real));
     await chmod(wrapper, 0o755);
-    const env = { ...process.env, AGENTX_SANDBOX_NETWORK: NETWORK, AGENTX_SANDBOX_DNS: GATEWAY_IP, DOCKER_BUILDKIT: "0", ...environment };
+    const env = { ...process.env, AGENTX_SANDBOX_NETWORK: NETWORK, AGENTX_SANDBOX_DNS: GATEWAY_IP, DOCKER_BUILDKIT: "1", ...environment };
+    // (DOCKER_BUILDKIT=1 on purpose: the runner has the buildx plugin, like the worker image, and the wrapper itself must keep the build on the classic builder.)
     return run(wrapper, args, { env, maxBuffer: 10_000_000 }).then((done) => ({ code: 0, stdout: done.stdout, stderr: done.stderr }), (error: { code?: number; stdout?: string; stderr?: string }) => ({ code: error.code ?? 1, stdout: error.stdout ?? "", stderr: error.stderr ?? "" }));
   }
   /** A build context holding one Dockerfile whose RUN lines are `steps`. */

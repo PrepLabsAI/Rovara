@@ -10,7 +10,6 @@ const projectPath = "/v1/dev/client/projects/shared-project";
 const taskPaths = ["messages", "comments", "diff?repository=api&number=1"].map((part) => `/v1/dev/tasks/${TASK}/${part}`);
 function harness(companyId?: string) {
   const h = companyRouteHarness();
-  h.deps.developer.clientRoutes = true;
   h.claims.azp = "web-app";
   h.claims.amr = "oidc";
   h.claims.scope = "projects:create projects:members";
@@ -173,10 +172,13 @@ describe("named T-lane known gaps (not isolation claims)", () => {
     expect((await h.call("/v1/dev/client/projects", "POST", { repository: "example/api" })).statusCode).toBe(404);
     expect(h.deps.createClientProject).toHaveBeenCalledExactlyOnceWith(PERSON, { repository: "example/api" });
   });
-  it.each(["GET", "PUT", "DELETE"])("T2/T3 client member %s still operates across company boundaries", async (method) => {
+  // DEC 254zzz81 (the client routes are always on): this pinned gap is CLOSED. A company-B caller reaches company A's project members no more; it reads as missing.
+  it.each(["GET", "PUT", "DELETE"])("T2/T3 client member %s no longer operates across company boundaries (404)", async (method) => {
     const h = harness(COMPANY_B.orgId); h.project(COMPANY_A.orgId);
     h.db.set({ ...h.db.get(`DEVELOPER#${PERSON}`, "META")!, developerId: PERSON, displayName: "Test Person", revoked: false });
-    expect((await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method)).statusCode).toBe(200);
+    const answer = await h.call(`${projectPath}/members${method === "GET" ? "" : `/${PERSON}`}`, method);
+    expect(answer.statusCode).toBe(404);
+    expect(answer.body).toContain("project not found");
   });
   it.each(["messages", "comments"])("T2 task POST %s does not resolve supplied membership", async (kind) => {
     const h = harness(); h.task();

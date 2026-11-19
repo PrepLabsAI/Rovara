@@ -8,7 +8,8 @@
     "./dns-helper": "./dist/dns-helper.js",
     "./egress-gateway-source": "./dist/egress-gateway-source.js",
     "./model-helper": "./dist/model-helper-entry.js",
-    "./general-fakes-helper": "./dist/general-fakes-helper-entry.js"
+    "./general-fakes-helper": "./dist/general-fakes-helper-entry.js",
+    "./eval-standin-helper": "./dist/eval-standin-helper-entry.js"
   },
   "types": "./dist/index.d.ts",
   "sideEffects": false,

@@ -474,3 +474,47 @@ describe("the old entry points run on it", () => {
     expect(old).not.toMatch(/createServer\(/u);
   });
 });
+
+describe("generate mode (L4-E56, eval rounds: never stop)", () => {
+  const get = (fake: RunningFakeServer, path: string, init: RequestInit = {}) => fetch(`${fake.url}${path}`, init);
+  it("answers EVERY request with no recording (a different path, method or body that fails the request schema too), labelled, counted as synthesized, and never 500", async () => {
+    const fake = await replay(makeSet(), { unmatched: "generate" });
+    const known = await post(fake, 5);
+    expect(known.status).toBe(200);
+    for (const answer of [await post(fake, 99), await post(fake, 1, {}, "customer=c1", { amount: "x" }), await get(fake, "/v1/other?x=1"), await get(fake, "/v1/charges?customer=c1", { method: "PUT" })]) {
+      expect(answer.status).toBeLessThan(500);
+      expect(answer.headers.get("x-rovara-mock")).toBe("generated");
+      expect(answer.headers.get("x-rovara-label")).toBe("madeByRovara");
+    }
+    expect(fake.usage()).toMatchObject({ matched: 1, synthesized: 4, unmatchedFailed: 0 });
+  });
+  it("shapes the answer from the set's response schema (every origin-form request is addressed to the set), and builds a minimal one from the request when the set has no schema", async () => {
+    const fake = await replay(makeSet(), { unmatched: "generate" });
+    const shaped = await post(fake, 99);
+    expect(typeof ((await shaped.json()) as { ok: unknown }).ok).toBe("boolean");
+    expect(typeof ((await (await get(fake, "/v1/other")).json()) as { ok: unknown }).ok).toBe("boolean");
+    const bare = await replay(makeSet({ responseSchema: undefined }), { unmatched: "generate" });
+    const minimal = (await (await get(bare, "/v1/other")).json()) as { ok: boolean; id: string; request: { method: string; path: string } };
+    expect(minimal).toMatchObject({ ok: true, request: { method: "GET", path: "/v1/other" } });
+    expect(minimal.id).toMatch(/^id-[0-9a-f]{8}$/u);
+  });
+  it("gives the same bytes for the same request from two servers sharing one answer book, and the first answer stays", async () => {
+    const { EvalAnswerBook } = await import("@agentx/contracts");
+    const book = new EvalAnswerBook();
+    const one = await replay(makeSet(), { unmatched: "generate", answerBook: book });
+    const two = await replay(makeSet(), { unmatched: "generate", answerBook: book });
+    const first = await (await get(one, "/v1/other?x=1")).text();
+    expect(await (await get(two, "/v1/other?x=1")).text()).toBe(first);
+    expect(book.counts()).toMatchObject({ generated: 1, gapCalls: 2 });
+    // Another book (another round, another company) shares nothing: a fresh book makes the same pure answer, but it is its own entry.
+    const other = new EvalAnswerBook();
+    const three = await replay(makeSet(), { unmatched: "generate", answerBook: other });
+    expect(await (await get(three, "/v1/other?x=1")).text()).toBe(first);
+    expect(other.snapshot()).toHaveLength(1);
+    expect(other).not.toBe(book);
+  });
+  it("still fails by default and in schema_synth mode for a request it cannot place (the new mode is opt-in)", async () => {
+    expect((await get(await replay(), "/v1/other?x=1")).status).toBe(500);
+    expect((await get(await replay(makeSet(), { unmatched: "schema_synth" }), "/v1/other?x=1")).status).toBe(500);
+  });
+});

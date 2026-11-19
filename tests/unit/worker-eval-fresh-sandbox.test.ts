@@ -455,3 +455,82 @@ describe("the vertex row (L4-EVV)", () => {
     expect(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q"], helperIp: "172.30.7.9" })).toBe(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q"] }));
   });
 });
+
+
+describe("stand-in project commands on the round network", () => {
+  it("runs each side's migrations in its own checkout with service variables, walls and cleanup before the eval", async () => {
+    const daemon = fakeDaemon(); const events: string[] = [];
+    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+      async start(net, signal, commands) {
+        const started = { hosts: [{ alias: "postgres", address: net.checkSandboxIp.replace(/\.4$/u, ".16") }], env: [["DATABASE_URL", "postgres://app:run-only@postgres/app"]] as Array<[string, string]>, secrets: ["run-only"], started: [], targets: [], unsupported: [] };
+        expect(commands).toBeTypeOf("function");
+        const result = await commands!(started)({ cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal);
+        expect(result).toEqual({ exitCode: 0, timedOut: false }); events.push("migrated");
+        return { ...started, observe: async ids => { events.push(`observed ${ids.join(",")}`); }, stop: async () => { events.push("stopped"); } };
+      },
+    } });
+    for (const side of ["old", "new"] as const) await w.sandbox.run(w.input({ side }));
+    const seeds = daemon.calls.filter(args => args[0] === "run" && args.includes("alembic"));
+    expect(seeds).toHaveLength(2);
+    for (const args of seeds) {
+      expect(args.slice(-4)).toEqual(["--", "alembic", "upgrade", "head"]);
+      expect(args).toContain("--read-only"); expect(args).toContain("no-new-privileges");
+      const name = args[args.indexOf("--name") + 1]!;
+      expect(args[args.indexOf("--network") + 1]).toBe(name.replace(/-eval$/u, ""));
+      expect(daemon.calls).toContainEqual(["rm", "--force", name]);
+    }
+    expect(daemon.envSeen.filter(text => text.includes("DATABASE_URL=") && !text.includes(TOKEN))).toHaveLength(2);
+    for (const text of daemon.envSeen.filter(text => text.includes("DATABASE_URL=") && !text.includes(TOKEN))) {
+      expect(text).toContain("DATABASE_URL=postgres://app:run-only@postgres/app"); expect(text).not.toContain(TOKEN);
+    }
+    expect(w.materialized.map(m => m.commit)).toEqual([BASE, CANDIDATE]);
+    expect(events).toEqual(["migrated", "observed q1,q2", "stopped", "migrated", "observed q1,q2", "stopped"]);
+    expect(daemon.containers).toHaveLength(0); expect(daemon.networks).toHaveLength(0);
+  });
+});
+
+
+it("never starts a preparation command whose checkout no longer satisfies its seed lock", async () => {
+  const daemon = fakeDaemon();
+  const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+    async start(_net, signal, commands) {
+      const started = { hosts: [], env: [], secrets: [], started: [], targets: [], unsupported: [] };
+      await expect(commands!(started)({ cwd: ".", executable: "node", args: ["seed.js"], timeoutSeconds: 2 }, signal, { version: 1, hash: "0".repeat(64), from: ["seed.js"] })).rejects.toThrow("the eval seed lock differs");
+      return { ...started, stop: async () => undefined };
+    },
+  } });
+  await w.sandbox.run(w.input());
+  expect(daemon.calls.some(args => args[0] === "run" && args.includes("alembic"))).toBe(false);
+  expect(daemon.containers).toHaveLength(0);
+});
+
+describe("stand-in project commands: folder and isolation (L4-EINT2 review)", () => {
+  it("runs a command in its folder inside the side's checkout and refuses a folder that climbs out", async () => {
+    const daemon = fakeDaemon();
+    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+      async start(_net, signal, commands) {
+        const started = { hosts: [], env: [], secrets: [], started: [], targets: [], unsupported: [] };
+        expect(await commands!(started)({ cwd: "repo/db", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).toEqual({ exitCode: 0, timedOut: false });
+        await expect(commands!(started)({ cwd: "../elsewhere", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).rejects.toThrow("the eval seed folder is unavailable");
+        return { ...started, stop: async () => undefined };
+      },
+    } });
+    await w.sandbox.run(w.input());
+    const seeds = daemon.calls.filter(args => args[0] === "run" && args.includes("alembic"));
+    expect(seeds).toHaveLength(1);
+    expect(seeds[0]![seeds[0]!.indexOf("--workdir") + 1]).toBe(`${FRESH_EVAL_WORKSPACE}/db`);
+  });
+  it("stops a preparation box that can see the model bridge folder, and removes it", async () => {
+    const daemon = fakeDaemon({ extraSandboxMount: (bridgeDir) => ({ Source: bridgeDir, Destination: "/x", RW: false, Type: "bind" }) });
+    const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {
+      async start(_net, signal, commands) {
+        const started = { hosts: [], env: [], secrets: [], started: [], targets: [], unsupported: [] };
+        await expect(commands!(started)({ cwd: ".", executable: "alembic", args: ["upgrade", "head"], timeoutSeconds: 2 }, signal)).rejects.toThrow("the eval seed is not isolated");
+        throw new Error("services failed");
+      },
+    } });
+    await w.sandbox.run(w.input()).catch(() => undefined);
+    expect(daemon.calls.some(args => args[0] === "wait")).toBe(false);
+    expect(daemon.containers).toHaveLength(0);
+  });
+});

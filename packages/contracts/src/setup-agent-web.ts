@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { SESSION_ID_PATTERN } from "./browser-ids.js";
 import { SETUP_VERIFICATION_STATES, SetupProposalSchema } from "./setup-proposal.js";
+import { StandInWriterCardSchema } from "./standin-writer.js";
 import { SetupAgentLimitsSchema, SetupHostSchema, SetupJournalEntrySchema, SetupRunEndWordSchema, SetupRunSummarySchema } from "./setup-run.js";
 
 export const SETUP_AGENT_VIEW_STATUSES = ["none", "running", "ready", "failed"] as const;
@@ -27,6 +28,8 @@ export const SetupAgentViewSchema = z.object({
   companyLocksUnreadable: z.literal(true).optional(),
   /** A run a person stopped: who (a name, one plain line) and when. Its proposal, if it has one, is what the run had so far: unproven and never applied. */
   stoppedBy: z.object({ name: z.string().min(1).max(100), at: z.string().datetime() }).strict().optional(),
+  /** L4-E7: what the run's sample-data writer does and costs, before the run (inside the run's own limit); or that an AI must be connected first. */
+  standInWriter: StandInWriterCardSchema.optional(),
 }).passthrough();
 export type SetupAgentView = z.infer<typeof SetupAgentViewSchema>;
 

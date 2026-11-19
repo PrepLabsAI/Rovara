@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { BUDGET_EXHAUSTED_FAILURE_MESSAGE, taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
+import { budgetExhaustedWords, taskGraphDigest, type TaskGraphV1 } from "@agentx/contracts";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { PART_SCOPE_SENTENCE, SERIAL_SCOPE_SENTENCE } from "../../packages/worker/src/compaction.js";
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
@@ -221,7 +221,7 @@ describe("a v2 task's parts, run by the worker", () => {
         return undefined;
       },
     });
-    expect(outcome.error?.message).toBe(BUDGET_EXHAUSTED_FAILURE_MESSAGE);
+    expect(outcome.error?.message).toBe(budgetExhaustedWords("task"));
     const progress = progressOf(outcome.events);
     expect(progress.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId)).toEqual([B]);
     expect(progress.some((entry) => entry.itemId === C)).toBe(false);

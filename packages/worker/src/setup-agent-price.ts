@@ -19,3 +19,6 @@ export function setupModelPrice(model: { provider: string; modelId: string }): M
 
 /** The tokens one more turn may add on top of the last turn's input and output: a command's output and the model's next words, in a bound (4 KiB of text is about 1,024 tokens). */
 export const SETUP_NEXT_TURN_MARGIN_TOKENS = 1_024;
+
+/** A cache write costs 1.25 times the input price: the extra quarter, on top of the input price already counted for it. */
+export const SETUP_CACHE_WRITE_EXTRA = 0.25;

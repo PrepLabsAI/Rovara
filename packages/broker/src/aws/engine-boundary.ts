@@ -16,7 +16,7 @@ import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointe
 // good and is kept (bounded) per state table client. A verdict about an id with no task behind it is never kept, except `core` (a stamp, once there, stays).
 import { randomUUID } from "node:crypto";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef } from "@agentx/contracts";
+import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef, type DeveloperSignInMethod } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
@@ -202,14 +202,14 @@ export async function stopCoreTaskAs(entry: CoreTaskEntry | undefined, caller: C
 }
 
 /**
- * The broker's signed-in caller as the core entry takes it. `stepUp` is the step-up the VERIFIED access token states (`stepUpOf`), set only by the broker's token sign-in; `clientId` is the
+ * The broker's signed-in caller as the core entry takes it. `amr` is how the person signed in, as the VERIFIED access token states it, set only by the broker's token sign-in; `clientId` is the
  * registered sign-in client whose token made the call (absent for the Rovara CLI).
  */
 export interface CoreEntryCaller {
   developerId: string;
   sessionId: string;
   name: string;
-  stepUp?: { at: string; method: string } | undefined;
+  amr?: DeveloperSignInMethod | undefined;
   clientId?: string | undefined;
   /** DEC 236h: set by the broker's sign-in only for the Rovara web app's own sign-in client (`DeveloperCaller.webApp`), never from a request. Everything else that reads the wiki is a tool outside Rovara (L4-WKS). */
   webApp?: true | undefined;

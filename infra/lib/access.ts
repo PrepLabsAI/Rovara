@@ -1,9 +1,10 @@
-import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, Validations, type StackProps } from "aws-cdk-lib";
+import { Aws, CfnCondition, CfnOutput, CfnParameter, CfnRule, Duration, Fn, RemovalPolicy, Stack, Validations, type StackProps } from "aws-cdk-lib";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import type { Construct } from "constructs";
 import { defaultBoundaryName, defaultBoundaryStatements, environmentRolePath, operatorRoleStatements, serviceRoleStatements } from "./access-policies.js";
+import { OPERATOR_EXTERNAL_ID_PATTERN_SOURCE, OPERATOR_PRINCIPAL_PATTERN_SOURCE } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 
@@ -49,14 +50,37 @@ export class AccessStack extends Stack {
         return policy.ref;
       },
     });
+    // Who may assume the operator role (L4-HARD, owner 2026-11-18). Empty (the documented default): any principal of THIS account that its own IAM allows to call
+    // sts:AssumeRole on the role (the customer's own platform team). A named principal is ONE role or user: never a whole account (`...:root`), whichever account.
+    // A principal of ANOTHER account can assume the role only with the external id below (the trust policy has no other statement for it), so a guessed or pasted
+    // ARN alone opens nothing; `agentx init` and upgrade refuse a cross-account principal without an id up front (packages/contracts access-policies.ts operatorTrustProblem).
     const operatorPrincipalArn = new CfnParameter(this, "OperatorPrincipalArn", {
       type: "String",
       default: "",
-      allowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$",
-      description: "Optional operator-role principal; empty trusts account root",
+      allowedPattern: OPERATOR_PRINCIPAL_PATTERN_SOURCE,
+      constraintDescription: "must be empty (this account's own principals) or the ARN of ONE IAM role or user, arn:aws:iam::<12-digit account>:role/<name> or :user/<name>; a whole account (:root) is refused",
+      description: "Optional operator-role principal: one IAM role or user ARN. Empty trusts this account's own principals. A principal of another account also needs OperatorExternalId",
+    });
+    const operatorExternalId = new CfnParameter(this, "OperatorExternalId", {
+      type: "String",
+      default: "",
+      allowedPattern: OPERATOR_EXTERNAL_ID_PATTERN_SOURCE,
+      constraintDescription: "must be empty or 2 to 1224 characters of letters, digits and + = , . @ : / _ -",
+      description: "The sts:ExternalId a principal of ANOTHER account must present to assume the operator role (required for one; unused for a principal of this account). Not a secret: it guards against a confused deputy",
     });
     const hasOperatorPrincipal = new CfnCondition(this, "HasOperatorPrincipal", {
       expression: Fn.conditionNot(Fn.conditionEquals(operatorPrincipalArn.valueAsString, "")),
+    });
+    const hasOperatorExternalId = new CfnCondition(this, "HasOperatorExternalId", {
+      expression: Fn.conditionAnd(hasOperatorPrincipal, Fn.conditionNot(Fn.conditionEquals(operatorExternalId.valueAsString, ""))),
+    });
+    // An id with no principal to present it is a mistake, not a setting: refused with these words at create or change-set time.
+    new CfnRule(this, "OperatorExternalIdNeedsPrincipal", {
+      ruleCondition: Fn.conditionNot(Fn.conditionEquals(operatorExternalId.valueAsString, "")),
+      assertions: [{
+        assert: Fn.conditionNot(Fn.conditionEquals(operatorPrincipalArn.valueAsString, "")),
+        assertDescription: "OperatorExternalId is only used with OperatorPrincipalArn: name the role or user that will present it, or clear OperatorExternalId",
+      }],
     });
 
     const bucket = new s3.Bucket(this, "ArtifactBucket", {
@@ -113,6 +137,9 @@ export class AccessStack extends Stack {
         Version: "2012-10-17",
         Statement: [
           {
+            // The default (this account's root, which still needs an allow on the caller's side) or ONE named role or user. Either way only a caller OF THIS ACCOUNT
+            // gets in through this statement: a principal of another account has no way in here.
+            Sid: "OperatorOfThisAccount",
             Effect: "Allow",
             Principal: {
               AWS: Fn.conditionIf(
@@ -122,7 +149,16 @@ export class AccessStack extends Stack {
               ),
             },
             Action: "sts:AssumeRole",
+            Condition: { StringEquals: { "aws:PrincipalAccount": Aws.ACCOUNT_ID } },
           },
+          // Only when an external id is set: the named principal, of any account, with that id. This is the only way a principal of another account can assume the role.
+          Fn.conditionIf(hasOperatorExternalId.logicalId, {
+            Sid: "NamedOperatorWithExternalId",
+            Effect: "Allow",
+            Principal: { AWS: operatorPrincipalArn.valueAsString },
+            Action: "sts:AssumeRole",
+            Condition: { StringEquals: { "sts:ExternalId": operatorExternalId.valueAsString } },
+          }, Aws.NO_VALUE),
         ],
       },
       maxSessionDuration: 3600,

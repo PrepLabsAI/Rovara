@@ -12,7 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { EGRESS_GATEWAY_SOURCE } from "../../packages/contracts/src/egress-gateway-source.js";
-import { SANDBOX_REGISTRY_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
+import { SANDBOX_REGISTRY_DENY, SANDBOX_S3_DENY } from "../../packages/contracts/src/sandbox-deny-domains.js";
+import { writeFileSync, symlinkSync } from "node:fs";
 
 const scratch: string[] = [];
 const cleanup: Array<() => Promise<void> | void> = [];
@@ -279,5 +280,79 @@ describe("host mode: the networks it needs", () => {
       expect(() => gateway.main()).toThrow("exit");
     }
     expect(exits).toEqual([2, 2, 2]);
+  });
+});
+
+// ---- L4-NETG follow-up (DEC 254zzz90): S3 is denied to the sandbox side, and a project can lift ONE exact host at a time through a file only the worker writes.
+describe("host mode: S3 denied to sandboxes, lifted host by host", () => {
+  const S3_NAMES = [
+    "s3.amazonaws.com", "s3.us-west-2.amazonaws.com", "s3.dualstack.us-west-2.amazonaws.com", "s3-fips.us-east-1.amazonaws.com", "s3-fips.dualstack.us-east-1.amazonaws.com", "s3-us-west-2.amazonaws.com", "s3-external-1.amazonaws.com",
+    "s3-accelerate.amazonaws.com", "s3-accelerate.dualstack.amazonaws.com", "mybucket.s3.amazonaws.com", "mybucket.s3.us-west-2.amazonaws.com", "my.dotted.bucket.s3.us-west-2.amazonaws.com", "mybucket.s3.dualstack.eu-west-1.amazonaws.com",
+    "mybucket.s3-us-west-2.amazonaws.com", "mybucket.s3-accelerate.amazonaws.com", "mybucket.s3-accelerate.dualstack.amazonaws.com", "s3-website-us-east-1.amazonaws.com", "s3-website.eu-west-2.amazonaws.com", "mybucket.s3-website-us-east-1.amazonaws.com",
+    "mybucket.s3-website.eu-west-2.amazonaws.com", "ap1.s3-accesspoint.us-east-1.amazonaws.com", "ap1.s3-accesspoint.dualstack.us-east-1.amazonaws.com", "ap1.s3-accesspoint-fips.dualstack.us-east-1.amazonaws.com", "s3-accesspoint.us-east-1.amazonaws.com",
+    "123456789012.s3-control.us-west-2.amazonaws.com", "123456789012.s3-control.dualstack.us-west-2.amazonaws.com", "123456789012.s3-control-fips.dualstack.us-west-2.amazonaws.com", "s3-control.us-west-2.amazonaws.com",
+    "mybucket--usw2-az1--x-s3.s3express-usw2-az1.us-west-2.amazonaws.com", "s3express-control.us-west-2.amazonaws.com", "s3tables.us-west-2.amazonaws.com", "s3.dualstack.us-west-2.api.aws", "mybucket.s3.dualstack.us-west-2.api.aws", "s3vectors.us-west-2.api.aws",
+  ];
+  const NOT_S3 = ["dynamodb.us-west-2.amazonaws.com", "sts.us-west-2.amazonaws.com", "bedrock-runtime.us-east-1.amazonaws.com", "sqs.us-west-2.amazonaws.com", "registry.npmjs.org", "github.com", "mys3.example.com", "s3.example.com", "amazonaws.com", "s3x.amazonaws.com", "files.pythonhosted.org", "ecs.us-west-2.amazonaws.com"];
+  const config = (file?: string) => ({ ...HOST_CONFIG, sandboxDeniedS3: SANDBOX_S3_DENY, ...(file === undefined ? {} : { projectAllowFile: file }) });
+  const folder = async () => { const d = await mkdtemp(join(tmpdir(), "gw-allow-")); scratch.push(d); return d; };
+
+  it("denies every S3 name form to a sandbox, keeps non-S3 AWS names, and never denies the worker role (the host)", async () => {
+    const gateway = await load(config());
+    for (const name of S3_NAMES) expect(gateway.hostAllowed(name, "sandbox"), name).toBe(false);
+    for (const name of NOT_S3) expect(gateway.hostAllowed(name, "sandbox"), name).toBe(true);
+    expect(gateway.hostAllowed("s3.us-west-2.amazonaws.com", "worker")).toBe(true);
+  });
+
+  it("without the S3 list in the configuration S3 is not denied here (the registries stay), so the boot's list is what decides", async () => {
+    const gateway = await load(HOST_CONFIG);
+    expect(gateway.hostAllowed("s3.us-west-2.amazonaws.com", "sandbox")).toBe(true);
+    expect(gateway.hostAllowed("ghcr.io", "sandbox")).toBe(false);
+  });
+
+  it("lifts exactly the hosts in the project file: a lifted host passes, its neighbours and every other S3 name stay denied, a registry is never lifted", async () => {
+    const dir = await folder();
+    const file = join(dir, "project-allow.json");
+    writeFileSync(file, JSON.stringify({ hosts: ["mybucket.s3.us-west-2.amazonaws.com", "ghcr.io", "registry-1.docker.io", "*.s3.us-west-2.amazonaws.com", "UPPER.s3.us-west-2.amazonaws.com", "1.2.3.4", "s3.us-west-2.amazonaws.com"] }));
+    const gateway = await load(config(file));
+    expect(gateway.hostAllowed("mybucket.s3.us-west-2.amazonaws.com", "sandbox")).toBe(true);
+    expect(gateway.hostAllowed("s3.us-west-2.amazonaws.com", "sandbox")).toBe(true);
+    for (const name of ["other.s3.us-west-2.amazonaws.com", "mybucket.s3.us-east-1.amazonaws.com", "x.mybucket.s3.us-west-2.amazonaws.com", "s3.dualstack.us-west-2.amazonaws.com", "upper.s3.us-west-2.amazonaws.com"]) expect(gateway.hostAllowed(name, "sandbox"), name).toBe(false);
+    // The registries are never liftable, whatever the file says.
+    expect(gateway.hostAllowed("ghcr.io", "sandbox")).toBe(false);
+    expect(gateway.hostAllowed("registry-1.docker.io", "sandbox")).toBe(false);
+  });
+
+  it("any problem with the file leaves S3 denied: missing, not JSON, wrong shape, too large, a link, a directory", async () => {
+    const dir = await folder();
+    const attempts: Array<[string, (file: string) => void]> = [
+      ["missing", () => undefined],
+      ["not json", (file) => writeFileSync(file, "{nope")],
+      ["wrong shape", (file) => writeFileSync(file, JSON.stringify({ hosts: "mybucket.s3.us-west-2.amazonaws.com" }))],
+      ["too large", (file) => writeFileSync(file, JSON.stringify({ hosts: ["mybucket.s3.us-west-2.amazonaws.com"], pad: "x".repeat(20000) }))],
+      ["a link", (file) => { writeFileSync(`${file}.real`, JSON.stringify({ hosts: ["mybucket.s3.us-west-2.amazonaws.com"] })); symlinkSync(`${file}.real`, file); }],
+    ];
+    let n = 0;
+    for (const [label, make] of attempts) {
+      const file = join(dir, `case${String((n += 1))}.json`);
+      make(file);
+      const gateway = await load(config(file));
+      expect(gateway.hostAllowed("mybucket.s3.us-west-2.amazonaws.com", "sandbox"), label).toBe(false);
+    }
+    const asDirectory = await load(config(dir));
+    expect(asDirectory.hostAllowed("mybucket.s3.us-west-2.amazonaws.com", "sandbox")).toBe(false);
+  });
+
+  it("a host removed from the file is denied again once the gateway rereads it (at most a second later), and the name server follows", async () => {
+    const dir = await folder();
+    const file = join(dir, "project-allow.json");
+    writeFileSync(file, JSON.stringify({ hosts: ["mybucket.s3.us-west-2.amazonaws.com"] }));
+    hostResolver({ "mybucket.s3.us-west-2.amazonaws.com": ["52.92.0.1"] });
+    const { udp } = await startHost(config(file));
+    expect(rcode((await ask(udp, query("mybucket.s3.us-west-2.amazonaws.com")))!)).toBe(0);
+    expect(rcode((await ask(udp, query("other.s3.us-west-2.amazonaws.com")))!)).toBe(3);
+    writeFileSync(file, JSON.stringify({ hosts: [] }));
+    await settle(1200);
+    expect(rcode((await ask(udp, query("mybucket.s3.us-west-2.amazonaws.com")))!)).toBe(3);
   });
 });

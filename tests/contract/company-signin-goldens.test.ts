@@ -193,7 +193,7 @@ export function normalizeGolden(value: unknown): unknown {
   const references = new Map<string, number>();
   const jwts: Array<{ token: string; header: string; payload: string }> = [];
   const jwtReferences = new Map<string, string>();
-  // firstSignInMark (#668, ID-STEPUP-FOLLOWUPS (a)): a random per-sign-in UUID, masked like sid and jti so both company modes compare to one golden.
+  // firstSignInMark: masked like sid and jti (a legacy random UUID; no sign-in writes it since DEC 254zzz73 removed the factor email).
   const secretField = /^(?:access[_-]?token|refresh[_-]?token|session[_-]?(?:token|id)|id[_-]?token|token|nonce|sid|jti|secret(?:Hash)?|client[_-]?secret|tokenHash|api[_-]?key|private[_-]?key|key|accessKeyId|secretAccessKey|password|firstSignInMark)$/i;
   const keyShape = new RegExp(`\\b(?:${["sk", "proj"].join("-")}-|${["gh", "p"].join("")}_|${["xox", "b"].join("")}-)[A-Za-z0-9_-]+`, "g");
   const token = (raw: string, kind = "token"): string => {

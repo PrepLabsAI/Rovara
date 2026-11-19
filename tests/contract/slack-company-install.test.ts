@@ -2,10 +2,11 @@
 // real reader (slack-workspace-tokens.ts), with a fake slack.com behind the fetch seam. Two companies throughout.
 import { createHash, createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { ON_THE_WEBSITE_MESSAGE } from "@agentx/contracts";
 import { companyRouteHarness, PERSON, TIME } from "../support/company-route-harness.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import {
-  companyInstallKey, handleSlackWorkspaceRemoved, SLACK_ADMIN_ONLY, SLACK_COMPANY_HAS_WORKSPACE, SLACK_DISCONNECT_STEP_UP, SLACK_ENTERPRISE_REFUSED, SLACK_INSTALL_BOT_SCOPES,
+  companyInstallKey, handleSlackWorkspaceRemoved, SLACK_ADMIN_ONLY, SLACK_COMPANY_HAS_WORKSPACE, SLACK_ENTERPRISE_REFUSED, SLACK_INSTALL_BOT_SCOPES,
   SLACK_NOT_CONNECTED, SLACK_NOT_SET_UP, SLACK_OWNER_ONLY, SLACK_WORKSPACE_TAKEN, START_AGAIN, type SlackInstallWiring,
 } from "../../packages/broker/src/aws/slack-company-install.js";
 import { handleSlackInstallRequest, slackInstallSecretsFromSecretsManager, slackInstallThroughLambda, type SlackInstallIdentityDependencies } from "../../packages/broker/src/aws/slack-install-identity.js";
@@ -103,16 +104,15 @@ function world(grants: Record<string, Grant> = {
   const wiring: SlackInstallWiring = { slack: slackInstallThroughLambda(invoke), log: (entry) => logs.push(entry), random: () => Buffer.alloc(32, ++seed) };
   h.deps.companies = companyMembershipFromDynamo(h.db, "SignIn");
   h.deps.developer.slackInstall = wiring;
-  // The Rovara web app's registered full-access client: only its tokens carry a step-up (developer-routes.ts authenticateCallerWithStepUp).
+  // The Rovara web app's registered full-access client, as Cloud's calls use it.
   h.db.set({ pk: "SIGNIN_CLIENTS", sk: "CLIENT#web-app", entityType: "SIGN_IN_CLIENT", clientId: "web-app", name: "Web App", audience: "web-app", redirectUris: ["https://app.rovara.test/callback"],
     loopback: false, installLevel: true, secretHash: "f".repeat(64), fullAccess: true, webApp: true, createdAt: TIME, updatedAt: TIME, updatedBy: "admin" });
   const sessions = new Map<string, Record<string, unknown>>();
-  const as = (personId: string, companyId: string, role: "owner" | "admin" | "member" = "admin", sid = personId === PERSON ? "session" : "session-b", stepUpAt?: number) => {
+  const as = (personId: string, companyId: string, role: "owner" | "admin" | "member" = "admin", sid = personId === PERSON ? "session" : "session-b") => {
     h.db.set({ ...membershipKey(personId), entityType: "COMPANY_MEMBERSHIP", personId, companyId, role, joinedAt: TIME });
     h.db.set({ pk: `SESSION#${sid}`, sk: "META", sessionId: sid, developerId: personId, amr: "slack", clientId: "web-app", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 86_400 });
     h.db.set({ pk: `DEVELOPER#${personId}`, sk: "META", developerId: personId, provider: "slack", displayName: personId === PERSON ? "Ada Admin" : "Bea Admin", revoked: false });
-    const claims: Record<string, unknown> = { ...h.claims, azp: "web-app", sub: personId, sid, ...(stepUpAt === undefined ? {} : { step_up_at: stepUpAt, step_up_amr: "passkey" }) };
-    if (stepUpAt === undefined) { delete claims.step_up_at; delete claims.step_up_amr; }
+    const claims: Record<string, unknown> = { ...h.claims, azp: "web-app", sub: personId, sid };
     sessions.set(personId + sid, claims);
     for (const key of Object.keys(h.claims)) delete h.claims[key];
     Object.assign(h.claims, claims);
@@ -465,17 +465,26 @@ describe("Slack's removal events", () => {
 });
 
 describe("disconnect", () => {
-  const fresh = () => Math.floor(Date.parse(TIME) / 1000);
-  it("needs an owner with a fresh step-up", async () => {
+  it("needs a live owner of the company on the Rovara website (no step-up, DEC 254zzz73; website only, DEC 254zzz99): an admin, a member and another company's owner change nothing", async () => {
     const w = world();
     await w.connect("acme-code");
     expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: SLACK_OWNER_ONLY });
-    w.as(PERSON, A, "owner");
-    expect((await w.disconnect()).body.error).toEqual({ code: "REAUTH_REQUIRED", message: SLACK_DISCONNECT_STEP_UP });
-    w.as(PERSON, A, "owner", "session", fresh() - 3600);
-    expect((await w.disconnect()).body.error.code).toBe("REAUTH_REQUIRED");
+    w.as(PERSON, A, "member");
+    expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: SLACK_OWNER_ONLY });
+    w.as(PERSON_B, B, "owner");
+    expect((await w.disconnect()).status).not.toBe(200);
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
     expect(w.slack.revoked).toEqual([]);
+    // Owner DEC 254zzz99: the owner's CLI (or AI-tool) token, with no web-app client, is refused with the website words and nothing changes.
+    w.as(PERSON, A, "owner", "cli"); delete w.claims.azp;
+    w.db.set({ pk: "SESSION#cli", sk: "META", sessionId: "cli", developerId: PERSON, amr: "slack", startedAt: TIME, endsAt: Date.parse(TIME) / 1000 + 86_400 });
+    expect((await w.disconnect()).body.error).toEqual({ code: "FORBIDDEN", message: ON_THE_WEBSITE_MESSAGE });
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
+    expect(w.slack.revoked).toEqual([]);
+    w.as(PERSON, A, "owner");
+    expect(w.claims).not.toHaveProperty("step_up_at");
+    expect((await w.disconnect()).status).toBe(200);
+    expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeUndefined();
   });
   it("revokes A's token, drops it, unbinds, removes A's channel links and names their projects; B is untouched", async () => {
     const w = world();
@@ -483,7 +492,7 @@ describe("disconnect", () => {
     for (const [team, channel, project] of [["T0ACME", "C1", "web"], ["T0ACME", "C2", "api"], ["T0ACME", "C3", "web"], ["T0BETA", "C9", "beta-app"]] as const) {
       w.db.set({ pk: `SLACK_BINDING#${team}`, sk: `CHANNEL#${channel}`, teamId: team, channelId: channel, projectName: project, updatedAt: TIME });
     }
-    w.as(PERSON, A, "owner", "session", fresh());
+    w.as(PERSON, A, "owner", "session");
     const answer = await w.disconnect();
     expect(answer.status).toBe(200);
     expect(answer.body).toMatchObject({ status: "disconnected", workspace: { teamId: "T0ACME", teamName: "Acme" }, projectsLosingChannel: ["api", "web"] });
@@ -505,7 +514,7 @@ describe("disconnect", () => {
   it("leaves everything bound when the revoke fails, so pressing again finishes", async () => {
     const w = world();
     await w.connect("acme-code");
-    w.as(PERSON, A, "owner", "session", fresh());
+    w.as(PERSON, A, "owner", "session");
     const real = w.identity.fetch;
     w.identity.fetch = async () => { throw new Error("offline"); };
     expect((await w.disconnect()).status).toBe(503);
@@ -537,7 +546,7 @@ describe("leaks", () => {
     const state = started.body.state as string;
     raws.push((await w.complete({ state, code: "acme-code" })).raw);
     raws.push((await w.connect("acme-b", w.b)).raw, (await w.connect("beta-a")).raw, (await w.connect("grid-code")).raw, (await w.connect("unknown-code")).raw);
-    w.as(PERSON, A, "owner", "session", Math.floor(Date.parse(TIME) / 1000));
+    w.as(PERSON, A, "owner", "session");
     raws.push((await w.disconnect()).raw);
     const answersAfterStart = raws.slice(1).join("\n");
     for (const secret of [tokenOf("acme-code"), tokenOf("acme-b"), tokenOf("beta-a"), tokenOf("grid-code"), "acme-code", "acme-b", "unknown-code", CLIENT_SECRET, "xoxb"]) {
@@ -573,7 +582,6 @@ describe("the sign-in Lambda's slack-install invoke", () => {
 });
 
 describe("review round 1", () => {
-  const fresh = () => Math.floor(Date.parse(TIME) / 1000);
   it("an admin re-adding a second workspace the company already holds (operator-bound) never revokes that workspace's bot", async () => {
     const w = world();
     const operator = createSlackWorkspaceBindings({ client: w.db, tableName: "State" });
@@ -588,7 +596,7 @@ describe("review round 1", () => {
     w.db.set({ pk: "SLACK_TEAM#T0ACME", sk: "BINDING", entityType: "SLACK_WORKSPACE_BINDING", teamId: "T0ACME", companyId: B, boundAt: TIME, boundBy: "operator" });
     w.db.set({ pk: "SLACK_BINDING#T0ACME", sk: "CHANNEL#C7", teamId: "T0ACME", channelId: "C7", projectName: "b-app", updatedAt: TIME });
     expect((await w.read()).body.workspace).toBeNull();
-    w.as(PERSON, A, "owner", "session", fresh());
+    w.as(PERSON, A, "owner", "session");
     const answer = await w.disconnect();
     expect(answer.body).toMatchObject({ status: "disconnected", projectsLosingChannel: [] });
     expect(w.slack.revoked).toEqual([]);
@@ -599,7 +607,7 @@ describe("review round 1", () => {
   it("a reconnect landing during a disconnect makes the disconnect fail closed; pressing again finishes", async () => {
     const w = world();
     await w.connect("acme-code");
-    w.as(PERSON, A, "owner", "session", fresh());
+    w.as(PERSON, A, "owner", "session");
     const secrets = w.identity.secrets;
     const real = (company: string, team: string) => secrets.readToken(company, team);
     w.identity.secrets = { ...secrets, readToken: async (company, team) => {
@@ -614,7 +622,7 @@ describe("review round 1", () => {
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeUndefined();
   });
   it("disconnect takes no body", async () => {
-    const w = world(); await w.connect("acme-code"); w.as(PERSON, A, "owner", "session", fresh());
+    const w = world(); await w.connect("acme-code"); w.as(PERSON, A, "owner", "session");
     expect((await w.call("POST", "/v1/dev/company/slack/disconnect", { companyId: B })).status).toBe(400);
     expect(w.db.get("SLACK_TEAM#T0ACME", "BINDING")).toBeDefined();
   });
@@ -679,7 +687,7 @@ describe("review round 2 (removal races)", () => {
   it("disconnecting an operator-bound workspace fails closed if a person's connect record lands meanwhile", async () => {
     const w = world();
     await createSlackWorkspaceBindings({ client: w.db, tableName: "State" }).bind(A, "T0ACME", "operator");
-    w.as(PERSON, A, "owner", "session", Math.floor(Date.parse(TIME) / 1000));
+    w.as(PERSON, A, "owner", "session");
     const secrets = w.identity.secrets;
     w.identity.secrets = { ...secrets, readToken: async (company, team) => {
       w.db.set({ ...companyInstallKey(A), entityType: "SLACK_COMPANY_WORKSPACE", companyId: A, teamId: "T0ACME", status: "connected", connectedAt: TIME, connectedBy: PERSON });

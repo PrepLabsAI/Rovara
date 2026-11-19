@@ -4,6 +4,7 @@ import { inertEvidenceText } from "./evidence-inert.js";
 import { EvalRunDiagnosticSchema } from "./eval-run-diagnostic.js";
 import { EVAL_NOT_RUN_REASONS, EVAL_QUESTION_LIMIT, evalCheckResult, evalNotRunResult, type EvalCheckInput, type EvalCheckResult, type EvalQuestionComparison } from "./eval-check.js";
 import { EVAL_ROUND_KINDS } from "./eval-hidden-set.js";
+import { EvalStandInResultSchema, evalStandInHasWords, evalStandInLine, type EvalStandInResult } from "./eval-standin-set.js";
 
 export const EVAL_ROUND_ARTIFACT = "eval-round.json";
 export const EVAL_ROUND_ARTIFACT_MAX_BYTES = 1_048_576;
@@ -32,9 +33,11 @@ const questionSchema = z.object(questionShape).strict();
 export type EvalEvidenceQuestion = z.infer<typeof questionSchema>;
 const evidenceShape = {
   context: contextSchema.optional(), questions: z.array(questionSchema).max(EVAL_QUESTION_LIMIT).optional(), options: optionsSchema.optional(),
-  excluded: z.array(z.object({ id, reason: z.enum(["edited", "suspect_limit"]) }).strict()).max(2 * EVAL_QUESTION_LIMIT).optional(),
+  excluded: z.array(z.object({ id, reason: z.enum(["edited", "suspect_limit", "stand_in_gap"]) }).strict()).max(2 * EVAL_QUESTION_LIMIT).optional(),
   notices: z.array(noticeSchema).max(4).optional(), privatePass: z.boolean().optional(), privateSet: z.literal(true).optional(),
   basis: basisSchema.optional(),
+  /** L4-E56: what the outside-HTTP stand-in did (counts only). */
+  standIns: EvalStandInResultSchema.optional(),
 };
 export type EvalRoundEvidence = z.infer<z.ZodObject<typeof evidenceShape>>;
 export interface EvalEvidenceCaptureInput {
@@ -42,6 +45,7 @@ export interface EvalEvidenceCaptureInput {
   readonly comparison?: Omit<EvalCheckInput, "roundKind">;
   readonly excluded?: EvalCheckResult["excluded"];
   readonly notices?: readonly EvalEvidenceNotice[];
+  readonly standIns?: EvalStandInResult;
   readonly privatePass?: boolean;
   readonly privateSet?: boolean;
 }
@@ -56,9 +60,10 @@ export function captureEvalRoundEvidence(input: EvalEvidenceCaptureInput): EvalR
   if (input.privatePass !== undefined && typeof input.privatePass !== "boolean") return {};
   if (input.privatePass !== undefined) return { privatePass: input.privatePass };
   if (input.privateSet === true) return { privateSet: true };
-  if (!contextSchema.safeParse(input.context).success || (input.excluded !== undefined && (!array(input.excluded) || input.excluded.length > 2 * EVAL_QUESTION_LIMIT || input.excluded.some(q => q === null || typeof q !== "object" || typeof q.id !== "string" || q.id.length > 320 || !["edited", "suspect_limit"].includes(q.reason))))) return {};
+  if (!contextSchema.safeParse(input.context).success || (input.excluded !== undefined && (!array(input.excluded) || input.excluded.length > 2 * EVAL_QUESTION_LIMIT || input.excluded.some(q => q === null || typeof q !== "object" || typeof q.id !== "string" || q.id.length > 320 || !["edited", "suspect_limit", "stand_in_gap"].includes(q.reason))))) return {};
+  if (input.standIns !== undefined && !EvalStandInResultSchema.safeParse(input.standIns).success) return {};
   if (input.notices !== undefined && (!array(input.notices) || input.notices.length > 4 || !input.notices.every(n => noticeSchema.safeParse(n).success))) return {};
-  const base: EvalRoundEvidence = { context: input.context, excluded: (input.excluded ?? []).map(q => ({ id: inertEvidenceText(q.id, 160), reason: q.reason })), notices: [...(input.notices ?? [])] };
+  const base: EvalRoundEvidence = { context: input.context, excluded: (input.excluded ?? []).map(q => ({ id: inertEvidenceText(q.id, 160), reason: q.reason })), notices: [...(input.notices ?? [])], ...(input.standIns === undefined ? {} : { standIns: { ...input.standIns } }) };
   const comparison = input.comparison;
   if (comparison === undefined) return base;
   if (comparison === null || comparison.questions === undefined || !array(comparison.questions) || comparison.questions.length > EVAL_QUESTION_LIMIT) return {};
@@ -108,7 +113,7 @@ const consistent = (a: ArtifactFields): boolean => {
   if (a.runFailure !== undefined && (a.outcome !== "not_run" || a.notRunReason !== "eval_run_failed")) return false;
   if (a.outcome === "done" && (a.roundKind === "working" || a.evalConfigured === false || a.context?.discovery === "not_configured")) return false;
   const hidden = a.privatePass !== undefined || a.privateSet === true;
-  if (hidden) return a.runFailure === undefined && a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.basis === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
+  if (hidden) return a.runFailure === undefined && a.context === undefined && a.questions === undefined && a.options === undefined && a.excluded === undefined && a.notices === undefined && a.basis === undefined && a.standIns === undefined && a.usage === undefined && a.cache === undefined && a.evalConfigured === undefined && a.label === undefined && a.summary === undefined && a.feedback === undefined && a.fixRequested === undefined && (a.outcome === "done" ? a.privatePass !== undefined && a.roundKind === "check_sealed" : a.privatePass === undefined);
   if (a.context === undefined || a.context.previousPasses !== a.evalPass - 1 || a.usage === undefined || a.cache === undefined || a.excluded === undefined || a.notices === undefined) return false;
   if (a.evalConfigured !== undefined && a.context.discovery !== (a.evalConfigured ? "configured" : "not_configured")) return false;
   if ((a.questions !== undefined) !== (a.options !== undefined) || (a.outcome === "done" && (a.questions?.length ?? 0) === 0)) return false;
@@ -164,6 +169,9 @@ export function evalResultFromArtifact(input: unknown): EvalCheckResult {
 }
 function addContext(result: EvalCheckResult, a: EvalRoundArtifact): EvalCheckResult {
   const excluded = a.excluded ?? []; const count = excluded.length;
+  const gaps = excluded.filter(q => q.reason === "stand_in_gap").length; const others = count - gaps;
   const notices = (a.notices ?? []).map(n => n.code === "stage_estimate" ? `Eval ${n.stage} estimate: ${n.calls} calls, ${n.costMicros} microdollars.` : n.code === "baseline_measuring" ? "baseline still being measured" : noEvalNotice);
-  return { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...notices], summary: result.summary + (count === 0 ? "" : ` ${count} question${count === 1 ? "" : "s"} added, removed or edited: not compared.`) };
+  return { ...result, excluded: [...excluded, ...result.excluded], casesTotal: result.casesTotal + count, notices: [...result.notices, ...notices, ...(a.standIns === undefined || !evalStandInHasWords(a.standIns) ? [] : [evalStandInLine(a.standIns)])],
+    ...(a.standIns === undefined ? {} : { standIns: a.standIns }),
+    summary: result.summary + (others === 0 ? "" : ` ${others} question${others === 1 ? "" : "s"} added, removed or edited: not compared.`) + (gaps === 0 ? "" : ` ${gaps} question${gaps === 1 ? "" : "s"} not compared: an outside service's answer was made up by Rovara.`) };
 }

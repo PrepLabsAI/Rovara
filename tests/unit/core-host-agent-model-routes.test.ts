@@ -1,14 +1,14 @@
-// DEC 243c / DEC 236j: the company's agent model choice on the deployed API. Anyone of the company reads it; changing it is the web page's act only (a fresh step-up the route checks itself, never an API or
-// script token), by an owner or an administrator, from the gateway's list; the company is the caller's membership, so one company's choice never reaches another's.
+// DEC 243c / DEC 236j: the company's agent model choice on the deployed API. Anyone of the company reads it; changing it is an owner's or an administrator's act (never a script token; DEC 254zzz73: no step-up),
+// by an owner or an administrator, from the gateway's list; the company is the caller's membership, so one company's choice never reaches another's.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { AgentModelPageSchema, FRESH_SIGN_IN_SECONDS, agentModelIdentity, type OrgRole } from "@agentx/contracts";
+import { AgentModelPageSchema, agentModelIdentity, type OrgRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { AGENT_MODELS_PATH, AGENT_MODEL_CHANGE_NOT_ALLOWED, AGENT_MODEL_CHANGE_ON_A_PAGE } from "../../packages/broker/src/core-host/agent-model-routes.js";
+import { AGENT_MODELS_PATH, AGENT_MODEL_CHANGE_NOT_ALLOWED } from "../../packages/broker/src/core-host/agent-model-routes.js";
 import { HOSTED_MODEL_WORDS, OFFERED_MODELS_UNAVAILABLE, createAgentModelChoice, type AgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { GATEWAY_OFFERED_MODELS, createFakeOfferedModels } from "../support/offered-models-fake.js";
@@ -47,8 +47,7 @@ function setup() {
     members.set(personId + companyId, { companyId, role });
     return caller;
   };
-  const fresh = (): DeployedCaller["stepUp"] => ({ at: new Date(world.clock.now - 60_000).toISOString(), method: "email_code" });
-  return { world, app, reader, routes, person, fresh, choices };
+  return { world, app, reader, routes, person, choices };
 }
 const SET_BUILD = (name: string, expectedRevision = 0) => ({ action: "set", stage: "build", choice: { model: agentModelIdentity(name) }, expectedRevision });
 
@@ -87,7 +86,7 @@ describe("reading the company's agent model choice", () => {
   });
   it("a script token reads nothing and changes nothing here", async () => {
     const t = setup();
-    const caller = { ...t.person(FAKE_COMPANY, "owner"), scriptToken: { tokenId: randomUUID() }, stepUp: t.fresh() };
+    const caller = { ...t.person(FAKE_COMPANY, "owner"), scriptToken: { tokenId: randomUUID() } };
     for (const request of [get(), post(SET_BUILD("claude-opus-5-5"))]) {
       const answer = await t.routes.route(request, caller);
       expect(answer?.statusCode).toBe(403);
@@ -96,10 +95,10 @@ describe("reading the company's agent model choice", () => {
   });
 });
 
-describe("changing the company's agent model choice (the web page only)", () => {
-  it("is made by an administrator right after a fresh step-up, from the gateway's list, and is the next step's model", async () => {
+describe("changing the company's agent model choice (an owner or administrator; no step-up)", () => {
+  it("is made by a signed-in administrator with no step-up, from the gateway's list, and is the next step's model", async () => {
     const t = setup();
-    const admin = t.person(FAKE_COMPANY, "admin", { stepUp: t.fresh() });
+    const admin = t.person(FAKE_COMPANY, "admin");
     const answer = await t.routes.route(post(SET_BUILD("qwen.qwen3-coder-480b-a35b-v1:0")), admin);
     expect(answer?.statusCode).toBe(200);
     expect(bodyOf(answer)).toMatchObject({ ok: true, revision: 1 });
@@ -114,30 +113,12 @@ describe("changing the company's agent model choice (the web page only)", () => 
 
   it("an owner may too", async () => {
     const t = setup();
-    expect((await t.routes.route(post(SET_BUILD("claude-opus-5-5")), t.person(FAKE_COMPANY, "owner", { stepUp: t.fresh() })))?.statusCode).toBe(200);
+    expect((await t.routes.route(post(SET_BUILD("claude-opus-5-5")), t.person(FAKE_COMPANY, "owner")))?.statusCode).toBe(200);
   });
 
-  it("is refused without a step-up (an API token), with a stale one, with a future one, and with a factor Code does not own; nothing changes", async () => {
+  it("is refused for a member (the live role from membership), with no step-up asked", async () => {
     const t = setup();
-    const cases: Array<DeployedCaller["stepUp"] | "none"> = [
-      "none",
-      { at: new Date(t.world.clock.now - (FRESH_SIGN_IN_SECONDS + 120) * 1000).toISOString(), method: "email_code" },
-      { at: new Date(t.world.clock.now + 3_600_000).toISOString(), method: "email_code" },
-      { at: new Date(t.world.clock.now - 60_000).toISOString(), method: "slack" },
-      { at: "yesterday", method: "email_code" },
-    ];
-    for (const stepUp of cases) {
-      const caller = t.person(FAKE_COMPANY, "owner", stepUp === "none" ? {} : { stepUp });
-      const answer = await t.routes.route(post(SET_BUILD("claude-opus-5-5")), caller);
-      expect(answer?.statusCode, JSON.stringify(stepUp)).toBeGreaterThanOrEqual(400);
-      expect(bodyOf(answer).error).toEqual({ code: "REAUTH_REQUIRED", message: AGENT_MODEL_CHANGE_ON_A_PAGE });
-    }
-    expect(bodyOf(await t.routes.route(get(), t.person(FAKE_COMPANY, "owner"))).state!.revision).toBe(0);
-  });
-
-  it("is refused for a member (the live role from membership), even with a fresh step-up", async () => {
-    const t = setup();
-    const answer = await t.routes.route(post(SET_BUILD("claude-opus-5-5")), t.person(FAKE_COMPANY, "member", { stepUp: t.fresh() }));
+    const answer = await t.routes.route(post(SET_BUILD("claude-opus-5-5")), t.person(FAKE_COMPANY, "member"));
     expect(answer?.statusCode).toBe(403);
     expect(bodyOf(answer).error).toEqual({ code: "FORBIDDEN", message: AGENT_MODEL_CHANGE_NOT_ALLOWED });
     expect(bodyOf(await t.routes.route(get(), t.person(FAKE_COMPANY, "owner"))).state!.revision).toBe(0);
@@ -145,7 +126,7 @@ describe("changing the company's agent model choice (the web page only)", () => 
 
   it("refuses a model the gateway does not offer, a body that is not a change, and a stale revision, each in fixed words that echo nothing", async () => {
     const t = setup();
-    const owner = t.person(FAKE_COMPANY, "owner", { stepUp: t.fresh() });
+    const owner = t.person(FAKE_COMPANY, "owner");
     const offered = await t.routes.route(post({ action: "set", stage: "build", choice: { model: { provider: "amazon-bedrock", modelId: "meta.llama3-1-405b-instruct-v1:0" } }, expectedRevision: 0 }), owner);
     expect(offered?.statusCode).toBe(400);
     expect(bodyOf(offered).error?.message).toBe(HOSTED_MODEL_WORDS.unavailable("amazon-bedrock/meta.llama3-1-405b-instruct-v1:0"));
@@ -161,7 +142,7 @@ describe("changing the company's agent model choice (the web page only)", () => 
 
   it("refuses when the gateway's list cannot be read, and changes nothing", async () => {
     const t = setup();
-    const owner = t.person(FAKE_COMPANY, "owner", { stepUp: t.fresh() });
+    const owner = t.person(FAKE_COMPANY, "owner");
     t.reader.fail();
     const answer = await t.routes.route(post(SET_BUILD("claude-opus-5-5")), owner);
     expect(answer?.statusCode).toBe(400);
@@ -176,8 +157,8 @@ describe("two companies", () => {
     const t = setup();
     t.reader.set(FAKE_COMPANY, GATEWAY_OFFERED_MODELS);
     t.reader.set(OTHER, ["claude-sonnet-5-5", "claude-haiku-5-5"]);
-    const adminA = t.person(FAKE_COMPANY, "admin", { stepUp: t.fresh() });
-    const adminB = t.person(OTHER, "admin", { stepUp: t.fresh() });
+    const adminA = t.person(FAKE_COMPANY, "admin");
+    const adminB = t.person(OTHER, "admin");
     expect((await t.routes.route(post(SET_BUILD("deepseek.v3-v1:0")), adminA))?.statusCode).toBe(200);
     // B's list does not have it: refused, and B's setting is untouched.
     expect((await t.routes.route(post({ ...SET_BUILD("deepseek.v3-v1:0"), companyId: FAKE_COMPANY }), adminB))?.statusCode).toBe(400);

@@ -1012,7 +1012,8 @@
                 "checks_failed",
                 "stopped",
                 "questions_changed",
-                "eval_run_failed"
+                "eval_run_failed",
+                "outside_calls_made_up"
               ]
             },
             "runFailure": {
@@ -1027,6 +1028,7 @@
                     "install_failed",
                     "install_timed_out",
                     "run_timed_out",
+                    "blocked_connection",
                     "exited"
                   ]
                 },
@@ -1045,6 +1047,62 @@
                   "type": "integer",
                   "minimum": -1,
                   "maximum": 255
+                },
+                "blocked": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "minItems": 1,
+                      "maxItems": 3,
+                      "type": "array",
+                      "items": {
+                        "oneOf": [
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "const": "database"
+                              },
+                              "port": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 65535
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "additionalProperties": false
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "const": "service"
+                              },
+                              "host": {
+                                "type": "string",
+                                "pattern": "^(?!\\d+(?:\\.\\d+)*$)(?=.{1,45}$)[a-z0-9](?:[a-z0-9-]{0,43}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,43}[a-z0-9])?)*$"
+                              }
+                            },
+                            "required": [
+                              "kind"
+                            ],
+                            "additionalProperties": false
+                          }
+                        ]
+                      }
+                    },
+                    "more": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ],
+                  "additionalProperties": false
                 },
                 "tail": {
                   "type": "string",

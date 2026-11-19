@@ -25,7 +25,8 @@ const refused = (reason: EvalHealthRefusal, message: string): EvalHealthResult =
 
 /** Derive the same identity for cache reads, in-flight refreshes and measured writes. */
 export function evalHealthKey(input: Pick<EvalHealthInput, "key" | "settings">): EvalBaseCacheKeyParts {
-  return { ...input.key, settingsFingerprint: evalSettingsFingerprint(input.settings, input.key.judgePin ?? "") };
+  // L4-E34 (E4): a stand-in eval's identity also binds the stand-in set's version (absent: exactly the approved fingerprint).
+  return { ...input.key, settingsFingerprint: evalSettingsFingerprint(input.settings, input.key.judgePin ?? "", input.key.standInSetVersion) };
 }
 
 /** Trusted adapters only. The repository can supply results, never selection, approval or payer. */
@@ -46,7 +47,7 @@ export async function runEvalHealth(input: EvalHealthInput): Promise<EvalHealthR
     const grant = await input.approval.read();
     // L4-T3: an approval that stands for this very eval but whose AI provider is not connected reads as that (the person's next step is to connect it), never as "not approved".
     const standing = grant !== undefined && ["owner", "maintainer", "admin"].includes(grant.role) && grant.company === input.key.company && grant.project === input.key.project && grant.selection === input.selection
-      && grant.inputsDigest === evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: key.settingsFingerprint })
+      && grant.inputsDigest === evalSpendInputsDigest({ evalSetHash: key.evalSetHash, judgePin: input.key.judgePin, modelVersion: key.modelVersion, model: key.model, catalogRowId: key.catalogRowId, commandFingerprint: key.commandFingerprint, settingsFingerprint: evalSettingsFingerprint(input.settings, input.key.judgePin) })
       && grant.provider === "customer";
     if (grant === undefined || !standing) return refused("not_confirmed", "an owner, maintainer or admin must confirm the connected customer's call estimate");
     if (grant.connected !== true) return refused("provider_not_connected", "the AI your evals call is not connected for this project");

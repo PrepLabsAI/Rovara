@@ -22,3 +22,9 @@ export const WORKER_SANDBOX_EGRESS_BOOT_VARIABLE = "AGENTX_SANDBOX_EGRESS";
 export function workerSandboxEgressGateway(env: Record<string, string | undefined>): boolean {
   return env[WORKER_SANDBOX_EGRESS_SETTING_VARIABLE] === "gateway";
 }
+
+/**
+ * The prepare invocation's `egressS3Allow` (L4-NETG follow-up, DEC 254zzz90): the exact S3 host names among the project's allowed websites, which the worker publishes for the host's egress gateway so those hosts (and only those) are lifted from the
+ * sandbox S3 deny. Sent only to a worker that lists this feature, and only when the list is not empty; a prepare without the field clears whatever an earlier one published.
+ */
+export const PREPARE_EGRESS_S3_FEATURE = "prepare.egressS3.v1" as const;

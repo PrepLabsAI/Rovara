@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, modelFailureCodeOf, noChangeFindingsFrom, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
+import { AgentXError, PREPARE_SAVED_ENV_BUILD_FEATURE, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, modelFailureCodeOf, noChangeFindingsFrom, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
+import { pinnedSavedEnvBuilder } from "./saved-env/builder.js";
 import { WORKER_IMPLEMENTED_FEATURES } from "./implemented-features.js";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
@@ -104,6 +105,7 @@ export function advertisedInvocationFeatures(state: WorkerServerState): { featur
   try { withheld = state.executor.withheldInvocationFeatures?.() ?? {}; } catch {
     withheld = Object.fromEntries((state.executor.withholdableInvocationFeatures ?? []).map((feature) => [feature, { status: "unavailable", reason: "availability-check-failed" }]));
   }
+  if (!pinnedSavedEnvBuilder(process.env["AGENTX_SAVED_ENV_BUILDER_IMAGE"])) withheld = { ...withheld, [PREPARE_SAVED_ENV_BUILD_FEATURE]: { status: "unavailable", reason: "builder_not_configured" } };
   return { features: state.invocationFeatures.filter((feature) => !Object.hasOwn(withheld, feature)), withheld };
 }
 

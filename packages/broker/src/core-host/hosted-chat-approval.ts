@@ -22,7 +22,7 @@ import { CHAT_METHOD_PREFIX } from "../ports/policy-defaults.js";
 export interface HostedChatApproval {
   /** The chat's name (`slack`); its method is `chat-<channel>`. */
   channel: string;
-  /** The install's approval proof key (`stepUpApprovalKeyOf`): a press's token is a MAC under it. */
+  /** The install's approval proof key (`approvalProofKeyOf`): a press's token is a MAC under it. */
   key: Buffer;
   /** Which company a workspace of the chat belongs to (undefined, or a failure: nobody's). */
   companyOf: ChannelCompanyOf;

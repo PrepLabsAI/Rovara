@@ -1,5 +1,5 @@
 // Node detector: package.json scripts (test, lint, typecheck, build), the package manager's install command, and lockfiles.
-import { awsClientCandidate, callArguments, candidate, hardcodedEndpoint, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
+import { awsClientCandidate, callArguments, candidate, gcpClientFamily, hardcodedEndpoint, isOwnedElsewhere, mergeCandidates, normalizeAwsService, scanDrivers, type DriverRule } from "./dependency-candidates.js";
 import type { ProjectCommand } from "@agentx/contracts";
 import { readsDatabaseSetting } from "./env-config.js";
 import { type DependencyCandidate, type Detection, type Detector, type DetectorContext, type Located, findLine } from "./types.js";
@@ -119,6 +119,11 @@ const NODE_PACKAGES: Readonly<Record<string, string>> = {
   "@elastic/elasticsearch": "elasticsearch", "@opensearch-project/opensearch": "opensearch",
   memcached: "memcached", memjs: "memcached", nodemailer: "smtp",
 };
+/** `@google-cloud/<name>`: a Google Cloud client library of the GCP pack (`@google-cloud/pubsub`, `@google-cloud/storage`, ...), or undefined. */
+const nodeGoogleFamily = (name: string): string | undefined => {
+  const short = /^@google-cloud\/([a-z0-9-]+)$/u.exec(name)?.[1];
+  return short === undefined ? undefined : gcpClientFamily(short);
+};
 const AWS_SDK_V3 = /^@aws-sdk\/(?:client|lib|util)-([a-z0-9-]+)$/u;
 const AWS_SDK_EXTRA: Readonly<Record<string, string>> = { "@aws-sdk/lib-storage": "s3", "@aws-sdk/s3-request-presigner": "s3", "@aws-sdk/s3-presigned-post": "s3" };
 
@@ -142,7 +147,7 @@ export async function nodeManifestCandidates(repo: DetectorContext["repo"]): Pro
       const table = (parsed as Record<string, unknown> | null)?.[key];
       if (table === null || typeof table !== "object" || Array.isArray(table)) continue;
       for (const name of Object.keys(table).slice(0, 500)) {
-        const family = Object.hasOwn(NODE_PACKAGES, name) ? NODE_PACKAGES[name] : undefined;
+        const family = Object.hasOwn(NODE_PACKAGES, name) ? NODE_PACKAGES[name] : nodeGoogleFamily(name);
         const service = awsPackageService(name);
         const resolved = family ?? (service === undefined ? undefined : `aws:${service}`);
         if (resolved !== undefined) found.push(candidate(resolved, "mentioned", { path, line: findLine(text, new RegExp(`"${name.replace(/[.*+?^${}()|[\]\\/]/gu, "\\$&")}"\\s{0,40}:`, "u")) ?? 1 }, { seenBy: ["driver"] }));
@@ -164,6 +169,14 @@ export const NODE_DRIVERS: readonly DriverRule[] = [
   { family: "elasticsearch", uses: NODE_IMPORT("@elastic/elasticsearch"), call: /\bnew\s{1,40}Client\s{0,120}\(/u },
   { family: "opensearch", uses: NODE_IMPORT("@opensearch-project/opensearch"), call: /\bnew\s{1,40}Client\s{0,120}\(/u },
   { family: "memcached", uses: NODE_IMPORT("memcached|memjs"), call: /\bnew\s{1,40}Memcached\s{0,120}\(|\bMemcached\.create\s{0,120}\(|\bClient\.create\s{0,120}\(/u },
+  // The GCP pack (L4-E8): each client class, built with a string `apiEndpoint` / `servicePath`, is flagged as a hard-coded endpoint.
+  { family: "pubsub", uses: NODE_IMPORT("@google-cloud/pubsub"), call: /\bnew\s{1,40}PubSub\s{0,120}\(/u },
+  { family: "firestore", uses: NODE_IMPORT("@google-cloud/firestore"), call: /\bnew\s{1,40}Firestore\s{0,120}\(/u },
+  { family: "datastore", uses: NODE_IMPORT("@google-cloud/datastore"), call: /\bnew\s{1,40}Datastore\s{0,120}\(/u },
+  { family: "bigtable", uses: NODE_IMPORT("@google-cloud/bigtable"), call: /\bnew\s{1,40}Bigtable\s{0,120}\(/u },
+  { family: "spanner", uses: NODE_IMPORT("@google-cloud/spanner"), call: /\bnew\s{1,40}Spanner\s{0,120}\(/u },
+  { family: "gcs", uses: NODE_IMPORT("@google-cloud/storage"), call: /\bnew\s{1,40}Storage\s{0,120}\(/u },
+  { family: "bigquery", uses: NODE_IMPORT("@google-cloud/bigquery"), call: /\bnew\s{1,40}BigQuery\s{0,120}\(/u },
 ];
 
 /** AWS SDK clients (v3 imports, v2 `new AWS.S3(...)`) and drivers a JavaScript or TypeScript file uses (test services D5). An `endpoint` written as a string is flagged. */

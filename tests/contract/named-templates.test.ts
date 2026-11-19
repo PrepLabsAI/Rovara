@@ -4,6 +4,9 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
 import { removePackedPieces, unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutSavedEnvAccess, withoutSavedEnvImages } from "../support/saved-env-images-template.js";
+import { withoutSavedEnvSwitch } from "../support/saved-env-switch-template.js";
+import { withoutChatGptKeyDeny } from "../support/chatgpt-key-deny-template.js";
 import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutNatEgressAddresses, withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
@@ -249,9 +252,9 @@ describe("named environment templates", () => {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
-        : stack.stackName === "agentx-staging-access" ? withoutDnsFirewallAccess(template)
+        : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
-        : stack.stackName === "agentx-staging-control-plane" ? withoutWorkerSandboxEgress(withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutBrokerSlackPoster(template, "staging"))))), "staging")))
+        : stack.stackName === "agentx-staging-control-plane" ? withoutWorkerSandboxEgress(withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutChatGptKeyDeny(withoutBrokerSlackPoster(withoutSavedEnvSwitch(withoutSavedEnvImages(template, "staging")), "staging")))))), "staging")))
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;
       expect(stack.stackName === "agentx-staging-control-plane" ? withoutCoreEngine(withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(parity))))) : parity).toMatchSnapshot();
     }, 120_000);

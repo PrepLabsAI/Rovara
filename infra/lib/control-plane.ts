@@ -38,6 +38,7 @@ import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
 import { CoreEngine, TEST_SERVICES_PARAMETER, TEST_SERVICE_IMAGES_PARAMETER } from "./core-engine.js";
 import { CompanySecrets } from "./company-secrets.js";
+import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { TaskPersonProof } from "./task-person-proof.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerNamesParameterArn } from "./broker-names.js";
@@ -1069,6 +1070,18 @@ export class ControlPlaneStack extends Stack {
           principals: [new iam.ArnPrincipal(broker.role!.roleArn)],
           actions: ["kms:Encrypt", "kms:Decrypt"], resources: ["*"],
         }));
+        // L4-HARD (owner 2026-11-18): the Deny the other keys have. The default key policy lets the account's root delegate to IAM, so without this any account admin with
+        // kms:Decrypt in their own IAM policy could open developers' ChatGPT tokens. Now only the broker uses the key (like the invoke signing key and the sign-in token keys).
+        // The broker's sealer and the Linear token wrapper always pass an encryption context; requiring one in the policy is deferred (it would change the headroom pins' evaluator
+        // contexts). Named environments only, like the Allow above.
+        chatGptConnectionKey.addToResourcePolicy(new iam.PolicyStatement({
+          sid: "UseOnlyAsBroker",
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*"],
+          resources: ["*"],
+          conditions: { ArnNotEquals: { "aws:PrincipalArn": broker.role!.roleArn } },
+        }));
       } else chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
       addBrokerName(broker, naming, "chatGptConnectionKey", chatGptConnectionKey.keyId, chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
@@ -1082,6 +1095,10 @@ export class ControlPlaneStack extends Stack {
         const companySecretsRole = new CompanySecrets(this, "CompanySecrets", { env: naming.env, brokerRole: broker.role! }).role;
         addBrokerName(broker, naming, "companySecretsRole", companySecretsRole.roleName, companySecretsRole.roleArn);
       }
+      // L4-SE6 (owner-approved 2026-11-18): the saved environment images' registry side: ONE repository creation template for `rovara-env/<env>` and the three roles (push, pull, manage) that trust only
+      // the broker. Named environments only (the legacy template is unchanged). It publishes the output contract (briefs/lead4/L4-SE-OUTPUT-CONTRACT.md) and gives the broker the three role ARNs and the prefix; the broker gets no new policy statement
+      // (the trust names its role and the boundary allows the AssumeRole). Nothing assumes a role until the broker's switch is on.
+      if (naming.env !== undefined) new SavedEnvImages(this, "SavedEnvImages", { env: naming.env, brokerRole: broker.role! }).expose(this, broker);
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");

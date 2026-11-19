@@ -129,7 +129,7 @@ describe("a company's choice", () => {
     }
     // A fallback model is held to the same list.
     expect(await choice.service().apply(owner(ORG_A), { action: "set", stage: "build", choice: { model: agentModelIdentity("claude-opus-5-5"), fallbackModel: { provider: "amazon-bedrock", modelId: "meta.llama3-1-405b-instruct-v1:0" } }, expectedRevision: 0 }, { fresh: true })).toMatchObject({ ok: false, code: "model_unavailable" });
-    expect(await choice.service().apply(owner(ORG_A), { action: "set", stage: "build", choice: { model: agentModelIdentity("claude-opus-5-5") }, expectedRevision: 0 }, { fresh: false })).toMatchObject({ ok: false, code: "reauth_required", words: HOSTED_MODEL_WORDS.reauth });
+    expect(await choice.service().apply(owner(ORG_A), { action: "set", stage: "build", choice: { model: agentModelIdentity("claude-opus-5-5") }, expectedRevision: 0 }, { fresh: false })).toMatchObject({ ok: false, code: "reauth_required" });
     expect(await revisionOf(choice)).toBe(0);
     expect(w.events).toEqual([]);
     expect(await stepOf(choice)).toMatchObject({ ok: true, step: { model: { modelId: DEFAULT } } });

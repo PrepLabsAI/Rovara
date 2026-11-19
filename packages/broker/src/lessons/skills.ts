@@ -124,6 +124,41 @@ export function renderSkill(form: SkillForm): string {
   ].join("\n");
 }
 
+/**
+ * The form a skill's text was made from, read back so a person can edit it (L4-JA). Returned ONLY when making the text again from what was read gives the very same text: a text this reader does not fully understand
+ * gives no form (never a guess), and the person then writes the new version from nothing.
+ */
+export function skillFormOf(content: string, name: string): Omit<SkillForm, "name"> | undefined {
+  const blocks = content.replace(/\n+$/u, "").split("\n\n");
+  const head = blocks[0]?.split("\n");
+  if (head === undefined || head.length !== 4 || head[0] !== "---" || head[1] !== `name: ${name}` || !(head[2] ?? "").startsWith("description: ") || head[3] !== "---") return undefined;
+  const description = head[2]!.slice("description: ".length);
+  let when: string | undefined;
+  let steps: string[] | undefined;
+  let doneWhen: string | undefined;
+  let why: string | undefined;
+  for (const block of blocks.slice(1)) {
+    const lines = block.split("\n");
+    const title = lines[0];
+    const rest = lines.slice(1);
+    if (title === "## When to use" && when === undefined && rest.length === 1) when = rest[0]!;
+    else if (title === "## Done when" && doneWhen === undefined && rest.length === 1) doneWhen = rest[0]!;
+    else if (title === "## Why this order" && why === undefined && rest.length === 1) why = rest[0]!;
+    else if (title === "## Steps" && steps === undefined && rest.length >= 1) {
+      const found: string[] = [];
+      for (const [index, one] of rest.entries()) {
+        const prefix = `${String(index + 1)}. `;
+        if (!one.startsWith(prefix)) return undefined;
+        found.push(one.slice(prefix.length));
+      }
+      steps = found;
+    } else return undefined;
+  }
+  if (when === undefined || steps === undefined) return undefined;
+  const form = { description, when, steps, ...(doneWhen === undefined ? {} : { doneWhen }), ...(why === undefined ? {} : { why }) };
+  return renderSkill({ name, ...form }) === content ? form : undefined;
+}
+
 /** The slug a lesson's title makes (lowercase letters, digits and single hyphens, at most 48 characters), or "skill" when nothing is left. */
 export function slugOf(title: string): string {
   const slug = cleanLessonText(title, 200).toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 48).replace(/-+$/u, "");
@@ -199,11 +234,14 @@ export async function skillOffers(deps: Pick<SkillDeps, "documents" | "lessons" 
 // ---- who may act
 
 type Fail<C extends string> = { ok: false; code: C };
-const eligible = async (deps: SkillDeps, key: ScopeKey, person: string): Promise<boolean | undefined> => {
+const eligible = async (deps: Pick<SkillDeps, "directory">, key: ScopeKey, person: string): Promise<boolean | undefined> => {
   const group = await deps.directory.eligibility(key.workspaceId, key.project, { approverId: person }).catch(() => undefined);
   if (group === undefined || !group.complete) return undefined;
   return idIn(group.eligibleIds, person);
 };
+
+/** Whether the person may decide skills here and now (the same directory answer every skill write asks); an answer that cannot be had reads as no (L4-JA: the screen shows the buttons only to people who may use them). */
+export const mayDecideSkills = async (deps: Pick<SkillDeps, "directory">, key: ScopeKey, person: string): Promise<boolean> => (await eligible(deps, key, person)) === true;
 
 export type DraftResult =
   | { ok: true; name: string; version: 1; note?: typeof ROVARA_SKILL_LONG_NOTE }
@@ -403,6 +441,10 @@ export async function retireSkill(deps: SkillDeps, key: ScopeKey, input: { name:
 // ---- reading
 
 export interface SkillSummary { name: string; description: string; currentVersion: number; activeVersion?: number; approvals: number; approvers: string[]; retired: boolean; bytes: number; note?: typeof ROVARA_SKILL_LONG_NOTE }
+const summaryOf = (head: SkillHead, version: SkillVersion): SkillSummary => ({
+  name: head.name, description: version.description, currentVersion: head.currentVersion, ...(head.activeVersion === undefined ? {} : { activeVersion: head.activeVersion }), approvals: version.approvals.length,
+  approvers: version.approvals.map((entry) => entry.by), retired: head.retired, bytes: version.bytes, ...(version.bytes > ROVARA_SKILL_LONG_NOTE_BYTES ? { note: ROVARA_SKILL_LONG_NOTE } : {}),
+});
 /** The project's skills for a person who decides: the newest version of each, how many have approved it and who (ids), and the long-skill note. Never another project's or company's. */
 export async function listSkills(deps: Pick<SkillDeps, "documents">, key: ScopeKey): Promise<SkillSummary[]> {
   const rows = await queryAll(deps.documents, { pk: companyScoped(key.workspaceId, `SKILL#${key.project}`), sk: { op: "beginsWith", prefix: "head#" } });
@@ -412,9 +454,24 @@ export async function listSkills(deps: Pick<SkillDeps, "documents">, key: ScopeK
     if (head === undefined) continue;
     const version = versionOf(await deps.documents.get(versionKey(key.workspaceId, key.project, head.name, head.currentVersion)));
     if (version === undefined) continue;
-    out.push({ name: head.name, description: version.description, currentVersion: head.currentVersion, ...(head.activeVersion === undefined ? {} : { activeVersion: head.activeVersion }), approvals: version.approvals.length, approvers: version.approvals.map((entry) => entry.by), retired: head.retired, bytes: version.bytes, ...(version.bytes > ROVARA_SKILL_LONG_NOTE_BYTES ? { note: ROVARA_SKILL_LONG_NOTE } : {}) });
+    out.push(summaryOf(head, version));
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export interface SkillDetail extends SkillSummary { content: string; form?: Omit<SkillForm, "name"> }
+/**
+ * One skill with the text of its newest version (the text a person approves) and, when it can be read back exactly, the form it was made from (L4-JA, so the screen can show what is approved and start an edit from it).
+ * Undefined when the skill is not there. This project's partition only; another project's or company's skill is never found.
+ */
+export async function readSkill(deps: Pick<SkillDeps, "documents">, key: ScopeKey, name: string): Promise<SkillDetail | undefined> {
+  if (!ROVARA_SKILL_NAME.test(name)) return undefined;
+  const head = headOf(await deps.documents.get(headKey(key.workspaceId, key.project, name)));
+  if (head === undefined) return undefined;
+  const version = versionOf(await deps.documents.get(versionKey(key.workspaceId, key.project, head.name, head.currentVersion)));
+  if (version === undefined) return undefined;
+  const form = skillFormOf(version.content, head.name);
+  return { ...summaryOf(head, version), content: version.content, ...(form === undefined ? {} : { form }) };
 }
 
 export interface LiveSkills { skills: RovaraSkillFile[]; /** Skills that were live but could not be sent (unreadable, or a text that does not match its digest, or past the step's limits): they are named by count only. */ left: number }

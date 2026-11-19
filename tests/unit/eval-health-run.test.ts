@@ -3,13 +3,17 @@
 // Every guard has a named mutant in briefs/lead4/L4-EVH-MUTANTS-20261118.md, each broken by hand and seen to fail one of these tests.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, createDocumentBaseScoreCache, evalHealthNotRunWords, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalReservationAdapter, type Principal } from "@agentx/contracts";
+import { EVAL_HEALTH_MAX_AGE_MS, EVAL_HEALTH_RUN_MAX_MS, EvalHealthResultBodySchema, EvalBaseRecordSchema, evalBaseCacheKey, standInSettingsFingerprint, createDocumentBaseScoreCache, evalHealthNotRunWords, type EvalBaseCacheKeyParts, type EvalBaseRecord, type EvalReservationAdapter, type Principal } from "@agentx/contracts";
 import { deliverEvalHealthPlan, recordEvalHealthResult, startEvalHealthRun, type EvalHealthRunDeps } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { evalHealthKeyOf } from "../../packages/broker/src/core/setup-agent/eval-health-run.js";
 import { evalHealthRequestKey, readEvalHealthRow, readEvalHealthView, requestEvalHealthCheck } from "../../packages/broker/src/core/setup-agent/eval-health-request.js";
 import { readEvalCard } from "../../packages/broker/src/core/setup-agent/eval-card.js";
 import { createEvalPlanSources } from "../../packages/broker/src/core/setup-agent/eval-plan-source.js";
 import { A, B, CAP, NOW, ROLES, filesOf, company, person, project, reportOf, type Role } from "../support/eval-card-world.js";
+
+import { handleEvalPlanDelivery } from "../../packages/broker/src/core/proof/eval-plan-delivery.js";
+import { evalSourcesFromDelivery } from "../../packages/worker/src/verification/eval-plan-delivery.js";
+import { evalHealthKey } from "../../packages/worker/src/verification/eval-health.js";
 
 const HEAD = "a".repeat(40);
 type Audit = Parameters<EvalHealthRunDeps["audit"]>[0];
@@ -54,6 +58,120 @@ async function started(w: World) {
   return { requestId: r!.requestId, claimId: outcome.claimId };
 }
 const partsOf = async (w: World) => (await w.row())!.claim!.parts as unknown as EvalBaseCacheKeyParts;
+const versioned = (parts: EvalBaseCacheKeyParts, v: string): EvalBaseCacheKeyParts => ({ ...parts, standInSetVersion: v, settingsFingerprint: standInSettingsFingerprint(parts.settingsFingerprint, v) });
+/** A store whose named methods are replaced and the rest delegate to the real (class) store, so its private state still works. */
+function withStore<S extends object>(real: S, over: Partial<Record<keyof S, unknown>>): S {
+  return new Proxy(real, { get: (target, prop) => {
+    if (Object.prototype.hasOwnProperty.call(over, prop)) return (over as Record<PropertyKey, unknown>)[prop];
+    const value: unknown = Reflect.get(target, prop);
+    return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+  } });
+}
+
+describe("the health baseline binds the stand-in version to its claim", () => {
+  const version = "c".repeat(64);
+  it("hits the stand-in task's versioned key and releases only the original unversioned lock", async () => {
+    const w = await world(); const lease = await started(w); const plain = await partsOf(w);
+    const delivered = (await deliverEvalHealthPlan(w.deps(), project, lease))!;
+    const plan = delivered.plan as { settings: Parameters<typeof evalHealthKey>[0]["settings"] };
+    const taskParts = evalHealthKey({ key: { ...plain, standInSetVersion: version }, settings: plan.settings });
+    expect(evalBaseCacheKey(taskParts)).not.toBe(evalBaseCacheKey(plain));
+    expect(await w.cache().readMeasurement!(plain)).toBe("measuring");
+    expect(await recordEvalHealthResult(w.deps(), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "finished" });
+    expect(await w.cache().read(taskParts)).toEqual({ ...record(), standInSetVersion: version });
+    expect(await w.cache().read(plain)).toBeUndefined();
+    expect(await w.cache().readMeasurement!(plain)).toBe("idle");
+    const row = (await w.row())!;
+    expect(row.claim).toMatchObject({ standInSetVersion: version, parts: plain });
+    expect(evalHealthKeyOf(row)).toBe(evalBaseCacheKey(taskParts));
+    const sources = createEvalPlanSources({ store: w.w.store, companyId: A, registry: w.registry, members: w.w.members, standIns: async () => undefined });
+    const operation = { kind: "task", workflowMode: "CHECKS", status: "RUNNING", companyId: A, dispatch: { payload: {
+      evalRequest: { aiChange: true, reason: "eval_hint", evalPass: 1, callsAlreadyUsed: 0, costAlreadyUsedMicros: 0 }, workflowBase: [{ repositoryId: "web", baseCommitSha: HEAD }],
+    } } };
+    const answer = await handleEvalPlanDelivery({ sources, companyId: A, projectOf: async () => project }, operation);
+    const taskSources = evalSourcesFromDelivery(answer)!;
+    expect(await taskSources.cache.read(taskParts)).toEqual({ ...record(), standInSetVersion: version });
+    expect(await taskSources.cache.read({ ...taskParts, standInSetVersion: "d".repeat(64) })).toBeUndefined();
+    const scope = { companyId: A, project };
+    const changed = await sources.read(scope, { bases: [{ repositoryId: "web", baseCommitSha: "b".repeat(40) }] });
+    expect(changed).not.toHaveProperty("baselineStandInSetVersion");
+    const off = createEvalPlanSources({ store: w.w.store, companyId: A, registry: w.registry, members: w.w.members });
+    expect(await off.read(scope, { bases: [{ repositoryId: "web", baseCommitSha: HEAD }] })).not.toHaveProperty("baselineStandInSetVersion");
+
+
+  });
+  it("keeps an old worker's record and key byte-identical", async () => {
+    const w = await world(); const lease = await started(w); const parts = await partsOf(w);
+    const key = evalHealthKeyOf((await w.row())!);
+    expect(await recordEvalHealthResult(w.deps(), project, body(lease.requestId, lease.claimId, { status: "measured", record: record() }))).toEqual({ outcome: "finished" });
+    expect(evalHealthKeyOf((await w.row())!)).toBe(key);
+    expect(JSON.stringify(await w.cache().read(parts))).toBe(JSON.stringify(EvalBaseRecordSchema.parse(record())));
+    expect((await w.row())!.claim).not.toHaveProperty("standInSetVersion");
+  });
+  it.each(["", "a".repeat(63), "a".repeat(65), "A".repeat(64), "g".repeat(64)])("refuses bad hex %j at the contract and broker", async bad => {
+    const w = await world(); const lease = await started(w);
+    const raw = body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: bad });
+    expect(EvalHealthResultBodySchema.safeParse(raw).success).toBe(false);
+    expect(await recordEvalHealthResult(w.deps(), project, raw)).toEqual({ outcome: "refused" });
+    expect((await w.row())!.claim).not.toHaveProperty("standInSetVersion");
+    expect(await w.cache().read(await partsOf(w))).toBeUndefined();
+  });
+  it("refuses a version for another claim, project or company", async () => {
+    const w = await world(); const lease = await started(w); const before = await w.row();
+    const result = { status: "measured", record: record(), standInSetVersion: version };
+    for (const [deps, target, claimId] of [[w.deps(), project, randomUUID()], [w.deps(), "other", lease.claimId], [w.deps({ companyId: B }), project, lease.claimId]] as const) {
+      expect(await recordEvalHealthResult(deps, target, body(lease.requestId, claimId, result))).toEqual({ outcome: "refused" });
+    }
+    expect(await w.row()).toEqual(before);
+  });
+  it("keeps a bound version on a retry and refuses changing or omitting it", async () => {
+    const w = await world(); const lease = await started(w);
+    const key = evalHealthRequestKey(A, project); const raw = (await w.w.store.get(key))!;
+    await w.w.store.put({ item: { ...raw, claim: { ...(raw["claim"] as Record<string, never>), standInSetVersion: version } } });
+    for (const reported of [undefined, "d".repeat(64)]) {
+      expect(await recordEvalHealthResult(w.deps(), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), ...(reported === undefined ? {} : { standInSetVersion: reported }) }))).toEqual({ outcome: "refused" });
+    }
+    expect(await recordEvalHealthResult(w.deps(), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "finished" });
+  });
+  it("delivers the stand-in descriptor only through the live claim's plan", async () => {
+    const w = await world(); const lease = await started(w); const seen: unknown[] = [];
+    const descriptor = { version: 1, hosts: [{ name: "api.example.test" }] };
+    const deps = w.deps({ standIns: async scope => { seen.push(scope); return descriptor; } });
+    expect((await deliverEvalHealthPlan(deps, project, lease))?.standIns).toEqual(descriptor);
+    expect(seen).toEqual([{ companyId: A, project }]);
+    expect(await deliverEvalHealthPlan(deps, project, { ...lease, claimId: randomUUID() })).toBeUndefined();
+    expect(seen).toHaveLength(1);
+  });
+  it("refuses a version that cannot be bound to the live claim", async () => {
+    const w = await world(); const lease = await started(w); const parts = await partsOf(w);
+    const store = withStore(w.w.store, { update: async () => ({ applied: false as const, reason: "condition_failed" as const }) });
+    expect(await recordEvalHealthResult(w.deps({ store }), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "refused" });
+    expect(await w.cache().read(parts)).toBeUndefined();
+    expect(await w.cache().read(versioned(parts, version))).toBeUndefined();
+    expect((await w.row())!.state).toBe("running");
+  });
+  it("refuses a competing version bound by a concurrent post after this post read the claim", async () => {
+    const w = await world(); const lease = await started(w); const parts = await partsOf(w);
+    const key = evalHealthRequestKey(A, project); const stale = (await w.w.store.get(key))!;
+    // Another post binds "d..." first; this post read the claim before that bind (a stale, unbound claim).
+    await w.w.store.put({ item: { ...stale, claim: { ...(stale["claim"] as Record<string, never>), standInSetVersion: "d".repeat(64) } } });
+    let first = true;
+    const real = w.w.store;
+    const store = withStore(real, { get: async (k: Parameters<typeof real.get>[0]) => { if (first) { first = false; return structuredClone(stale); } return await real.get(k); } });
+    expect(await recordEvalHealthResult(w.deps({ store }), project, body(lease.requestId, lease.claimId, { status: "measured", record: record(), standInSetVersion: version }))).toEqual({ outcome: "refused" });
+    expect(first).toBe(false);
+    expect((await w.row())!.claim).toMatchObject({ standInSetVersion: "d".repeat(64) });
+    expect(await w.cache().read(versioned(parts, version))).toBeUndefined();
+  });
+  it("refuses a record carrying an unbound or different version", async () => {
+    const w = await world(); const lease = await started(w);
+    for (const reported of [undefined, "d".repeat(64)]) {
+      const result = { status: "measured", record: { ...record(), standInSetVersion: version }, ...(reported === undefined ? {} : { standInSetVersion: reported }) };
+      expect(await recordEvalHealthResult(w.deps(), project, body(lease.requestId, lease.claimId, result))).toEqual({ outcome: "refused" });
+    }
+    expect((await w.row())!.claim).not.toHaveProperty("standInSetVersion");
+  });
+});
 
 describe("a health run starts only from a yes, once", () => {
   it("nothing happens without a yes: no request, an approval alone, a call again and again", async () => {

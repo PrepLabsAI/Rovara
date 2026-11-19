@@ -5,9 +5,9 @@
 //
 // Rules (core/system-runs/consent-control.ts holds them; this file only reads who is asking and writes the audit record):
 //   - The company and the live role are the caller's MEMBERSHIP (the dev routes' `companyOf`), never a header, query, body or token claim. A script token never reaches this route (the dev routes refuse it first).
-//   - ALLOWING needs a fresh step-up (checked before the body is acted on); WITHDRAWING needs only the live role and works while the operator's ceiling is off. Withdrawing leaves every project's own switch as it is.
+//   - ALLOWING needs the live role and the operator ceiling (DEC 254zzz73: no step-up); WITHDRAWING needs only the live role and works while the operator's ceiling is off. Withdrawing leaves every project's own switch as it is.
 //   - The audit record (`system_runs.consent_set`: the person, the role, the choice, and for an allow the factor) is written BEFORE the row. Refusals are fixed words; nothing a caller sent is echoed.
-import { AgentXError, SYSTEM_RUNS_CONSENT_AUDIT, SYSTEM_RUNS_CONSENT_WORDS, agentXError, type AuditEvent, type AuditSink, type OrgId, type OrgRole } from "@agentx/contracts";
+import { AgentXError, SYSTEM_RUNS_CONSENT_AUDIT, agentXError, type AuditEvent, type AuditSink, type OrgId, type OrgRole } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { TaskFlowDeps, TaskStartCaller } from "../core/task-flow/deps.js";
 import { SYSTEM_RUNS_WORDS, setSystemRunsConsent, systemRunsView, type SystemRunsControlDeps } from "../core/system-runs/consent-control.js";
@@ -22,10 +22,10 @@ export interface HostedSystemRunsInput {
   role: OrgRole;
   /** Whether the operator's ceiling covers this company (the upkeep wiring's `available`). Absent: not available. */
   available?: ((companyId: OrgId) => boolean) | undefined;
-  /** The caller's fresh step-up check (dev-routes' `freshStepUp`, against the company's window). Absent: nobody can ALLOW through this input. */
-  freshStepUp?: ((refusal: string) => Promise<{ at: string; method: string }>) | undefined;
   audit: AuditSink;
   now: () => number;
+  /** Owner DEC 254zzz91: the caller is the Rovara website's own client (set by the broker's sign-in, never from a request). */
+  webApp?: boolean | undefined;
 }
 
 const SYSTEM_RUNS_PATH = "/v1/app/company/system-runs";
@@ -50,18 +50,14 @@ export async function routeHostedSystemRuns(input: HostedSystemRunsInput): Promi
     const personId = principal.personId;
     const role = input.role;
     const admin = role === "owner" || role === "admin";
-    // The factor the caller proved it was them with, when ALLOWING was asked (kept on the audit record).
-    let stepUpMethod: string | undefined;
-    const freshStepUp = input.freshStepUp;
     const deps: SystemRunsControlDeps = {
-      store: input.flow.store, companyId, now: input.now, isCompanyAdmin: async () => admin,
+      store: input.flow.store, companyId, now: input.now, isCompanyAdmin: async () => admin, webApp: input.webApp === true,
       available: input.available === undefined ? undefined : () => input.available!(companyId),
-      requireStepUp: freshStepUp === undefined ? undefined : async () => { stepUpMethod = (await freshStepUp(SYSTEM_RUNS_CONSENT_WORDS.needsSignIn)).method; },
       record: async (details) => {
         const event: AuditEvent = {
           eventId: `${SYSTEM_RUNS_CONSENT_AUDIT}:${companyId}:${personId}:${details.requestId}:${details.on ? "on" : "off"}:${details.previous}`, companyId, at: new Date(input.now()).toISOString(),
           actor: { type: "person", id: personId }, action: SYSTEM_RUNS_CONSENT_AUDIT, subject: { type: "company", id: companyId },
-          details: { basis: role === "owner" ? "company-owner" : "company-admin", requestId: details.requestId, on: details.on, previous: details.previous, ...(details.on && stepUpMethod !== undefined ? { stepUp: stepUpMethod } : {}) },
+          details: { basis: role === "owner" ? "company-owner" : "company-admin", requestId: details.requestId, on: details.on, previous: details.previous },
         };
         await input.audit.record(event);
       },

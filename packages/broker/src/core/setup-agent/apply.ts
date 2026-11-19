@@ -44,10 +44,18 @@ export const SETUP_CONFIRM_WORDS = {
   notChecked: "Rovara could not finish checking where each suggestion came from. Try again in a minute.",
   nothing: "None of the suggestions can be used: each one failed its check, or is a command Rovara does not carry into a project's setup.",
   unknownItem: "That suggestion is not part of this setup.",
-  noTest: "The setup has no test command to prove, so there is nothing to use yet.",
+  noTest: "The setup has no test command to prove, so there is nothing to use yet. Add a test command to the project's setup, or run the setup again.",
   invalid: "The commands could not be made into the project's setup.",
-  waiting: "Another setup is waiting for your approval. Decide it, or discard it, first.",
+  /** L4-T5: the sentence when the check cannot be read (the neutral one); `waitingSetupWords` picks the exact one. */
+  waiting: "Another setup is waiting. If its check passed, approve or reject it; otherwise discard it. Then use this one.",
   tooLong: "A command in this setup is too long to show whole, so it cannot be approved.",
+} as const;
+
+/** L4-T5: what a waiting setup (a candidate with no decision) lets a person do, by where its check on a fresh machine stands. Only a check that PASSED can be approved or rejected; any other waiting setup can only be discarded. */
+export const SETUP_WAITING_WORDS = {
+  ready: "Another setup is waiting for your approval. Approve or reject it, or discard it, first.",
+  checking: "Another setup is still being checked on a fresh machine. Wait for the check to finish, or discard it, first.",
+  failed: "Another setup can't be approved: its check on a fresh machine did not pass. Discard it, then use this one.",
 } as const;
 
 export type SetupConfirmLeftOut = "unverified" | "refused_command" | "not_a_command_item" | "too_many" | "invalid_command";
@@ -66,12 +74,37 @@ export interface SetupApplyRow {
   createdAt: string; decidedAt?: string; decidedBy?: string;
   /** L4-DR: the commit of each repository when the candidate's check was started (the code the check prepares), so the snapshot saved at approval is of THAT code and not of whatever landed meanwhile. Absent: no snapshot is saved. */
   baseCommits?: Record<string, string>;
+  /**
+   * L4-T2b: the last setup a person APPROVED for this project, kept when a newer candidate replaces this row (the one row per project is overwritten by every new candidate). `revision` is the revision the approval made the
+   * project's latest; `at` is when. Tasks keep using that revision after a later candidate is rejected or discarded (its candidate revision is deleted, and the catalog still names this one), so the checklist reads the approval from here.
+   */
+  earlierApproval?: { revision: number; at: string };
+}
+
+/** The approval a replaced row leaves behind: its own when it was approved, else the one it was itself carrying. Pure; a malformed value is no approval. */
+export function earlierApprovalOf(previous: Record<string, unknown> | undefined): SetupApplyRow["earlierApproval"] {
+  if (previous === undefined || previous["entityType"] !== "SETUP_APPLY") return undefined;
+  const own = previous["state"] === "approved" ? { revision: previous["candidateRevision"], at: previous["decidedAt"] } : previous["earlierApproval"];
+  const found = own as { revision?: unknown; at?: unknown } | null | undefined;
+  return typeof found?.revision === "number" && Number.isInteger(found.revision) && found.revision >= 0 && typeof found.at === "string" && found.at.length > 0 ? { revision: found.revision, at: found.at } : undefined;
 }
 
 /** Whether the project has a proposal waiting (its candidate revision exists and no decision was made). Another new revision is refused meanwhile. */
 export async function waitingSetupApply(store: Pick<DocumentStore, "get">, orgId: OrgId, project: string): Promise<SetupApplyRow | undefined> {
   const row = await store.get(setupApplyKey(orgId, project));
   return row !== undefined && row["entityType"] === "SETUP_APPLY" && row["state"] === "checking" ? (row as unknown as SetupApplyRow) : undefined;
+}
+
+/** L4-T5: the sentence for "another setup is waiting", by what that setup's check says now. Never throws: a check that cannot be read gets the neutral sentence. */
+export async function waitingSetupWords(deps: Pick<SetupApplyDeps, "flow" | "store" | "companyId" | "now">, project: string): Promise<string> {
+  try {
+    const row = await readSetupApply(deps, project);
+    // Only a setup that is waiting (no decision yet) has anything to say; any other row is the neutral sentence.
+    const status = row?.state === "checking" ? row.checkState.status : undefined;
+    return status === "ready" ? SETUP_WAITING_WORDS.ready : status === "checking" ? SETUP_WAITING_WORDS.checking : status === "failed" ? SETUP_WAITING_WORDS.failed : SETUP_CONFIRM_WORDS.waiting;
+  } catch {
+    return SETUP_CONFIRM_WORDS.waiting;
+  }
 }
 
 const pathOf = (definition: { repositories: ReadonlyArray<{ name: string; path: string }> }, repo: string): string | undefined => definition.repositories.find((repository) => repository.name === repo)?.path;
@@ -193,7 +226,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   const latest = await deps.latest(project);
   if (latest === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
   if (body.expectedRevision !== latest.revision) throw agentXError("PROJECT_REVISION_MISMATCH", SETUP_CONFIRM_WORDS.old);
-  if ((await waitingSetupApply(deps.store, orgId, project)) !== undefined) throw agentXError("WORKSPACE_BUSY", SETUP_CONFIRM_WORDS.waiting);
+  if ((await waitingSetupApply(deps.store, orgId, project)) !== undefined) throw agentXError("WORKSPACE_BUSY", await waitingSetupWords(deps, project));
   const state = await readState(deps, project, latest.revision);
   if (state.view.status !== "ready" || state.view.proposal === undefined) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.notReady);
   if (state.view.proposal.basedOnRevision !== latest.revision) throw agentXError("PROJECT_REVISION_MISMATCH", SETUP_CONFIRM_WORDS.old);
@@ -249,7 +282,9 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
   const now = new Date(deps.now()).toISOString();
   // L4-DR: the code the candidate's check is about to prepare, read just before it starts (best effort: none read, none saved at approval). The candidate keeps the base's repositories.
   const baseCommits = await readBaseCommits(deps.flow, candidate);
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }) };
+  // L4-T2b: the row about to be replaced may hold the project's approved setup; keep that fact on the new row (a row still waiting is refused below by the put's own condition, and an approval that lands first moves the catalog, which fails the check).
+  const earlierApproval = earlierApprovalOf(await deps.store.get(setupApplyKey(orgId, project)));
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never }, condition: when.absent() },
@@ -259,7 +294,7 @@ export async function storeSetupCandidate(deps: SetupApplyDeps, input: StoreCand
     ...started.items,
     ...input.alsoTransact,
   ] satisfies TransactItem[]);
-  if (!result.applied) throw agentXError("WORKSPACE_BUSY", SETUP_CONFIRM_WORDS.waiting);
+  if (!result.applied) throw agentXError("WORKSPACE_BUSY", await waitingSetupWords(deps, project));
   await relayCheck(deps.flow, started);
   return reply;
 }

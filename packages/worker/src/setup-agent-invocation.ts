@@ -1,6 +1,6 @@
 // The setup run as the worker receives it (sh-setup-wire, SH14): builds the real ports of `runSetupAgent` from the task invocation's dependencies and returns the task's result. `run-task.ts` calls it from one
 // early hunk; everything about the run itself is in `setup-agent-run.ts`.
-import { agentXError } from "@agentx/contracts";
+import { SETUP_RUN_REFUSED_MESSAGES, agentXError } from "@agentx/contracts";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { EventBatcher, type EventBatchSink } from "./events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type WorkspaceModelConfiguration } from "./pi-session.js";
@@ -15,6 +15,11 @@ import type { RunNetwork } from "./setup-network.js";
 import { setupModelPrice } from "./setup-agent-price.js";
 import { createDockerCli, type DockerCli } from "./swebench/containers.js";
 import { EVAL_WORKER_IMAGE_VARIABLE } from "./verification/eval-wiring.js";
+import { runSetupEvalDryRun } from "./verification/eval-dry-run.js";
+import { testServicesConfigFromEnvironment } from "./test-services-run.js";
+import { join } from "node:path";
+import { standInRequestOf } from "./standin-shapes.js";
+import { standInSessionInputOf } from "./standin-writer.js";
 
 export interface SetupInvocationDependencies {
   rootPath: string;
@@ -69,10 +74,10 @@ export async function runSetupAgentInvocation(
   // A worker whose launcher had to withdraw the setup run's firewall rules refuses here, before any network, helper or sandbox exists.
   assertSetupIsolation(environment);
   const image = environment[TASK_SANDBOX_IMAGE_ENVIRONMENT];
-  if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", `AgentX has no task sandbox image (${TASK_SANDBOX_IMAGE_ENVIRONMENT}), so it did not run the setup`);
+  if (image === undefined || image === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noSandboxImage);
   // Money: a setup run is metered by the model proxy (the broker's spend ledger) and priced from the catalog; without either it does not start.
   const proxy = environment["AGENTX_MODEL_PROXY_URL"];
-  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", "this install has no model proxy, so AgentX did not run the setup (its spending could not be counted)");
+  if (proxy === undefined || proxy === "") throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_REFUSED_MESSAGES.noModelProxy);
   const price = setupModelPrice(dependencies.model);
   const docker = dependencies.docker ?? createDockerCli();
   const callback = dependencies.setupAgent;
@@ -86,6 +91,11 @@ export async function runSetupAgentInvocation(
   const result = await runSetupAgent({
     rootPath: canonicalRoot, operationId: invocation.operationId, basedOnRevision: invocation.projectRevision, limits: setup.limits, price,
     repositories: manifest.repositories, commits: setup.commits, evalImage: environment[EVAL_WORKER_IMAGE_VARIABLE],
+    // L4-E12 (E2): the free dry run of the drafted eval, started without asking, never spending (scripted model replies, no bridge). It needs the worker's own pinned image and the fresh eval sandbox's walls; otherwise it gives nothing.
+    evalDryRun: (report, signal) => runSetupEvalDryRun({
+      docker, environment, taskId: invocation.operationId, workspaceKey: () => setupWorkspaceKey(canonicalRoot), commits: setup.commits, servicesOff: testServicesConfigFromEnvironment(environment, docker) === undefined,
+      repositories: manifest.repositories.map((repository) => ({ name: repository.name, directory: join(canonicalRoot, repository.path) })), signal,
+    }, report),
     ...(manifest.meta === undefined ? {} : { metaRepo: manifest.meta.name }),
     ports: {
       startNetwork: async () => (sharedNetwork !== undefined ? sharedRunNetwork(sharedNetwork) : startRunNetwork(docker, { taskId: invocation.operationId, image, workspace: await setupWorkspaceKey(canonicalRoot) })),
@@ -99,6 +109,11 @@ export async function runSetupAgentInvocation(
         rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic: () => undefined, extensionFactories: [], ...parts,
       }, dependencies.piAdapter),
       callback,
+      // L4-E7: the stand-in writer's own session: its own system prompt, no repository context, and NO tool at all (`agentTools: []`; the file-tool guard is satisfied only because none is active). The company's model, the setup run's cap.
+      standIn: {
+        input: (repositories, tracked) => standInRequestOf(repositories, tracked),
+        openSession: () => createWorkspacePiSession(standInSessionInputOf({ rootPath: dependencies.rootPath, model: dependencies.model }), dependencies.piAdapter),
+      },
       progress: async (message) => { await events.append("progress", { message }); },
       register: (control) => {
         const unregister = dependencies.cancellationController?.register(invocation.operationId, {

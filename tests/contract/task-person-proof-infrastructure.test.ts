@@ -1,6 +1,9 @@
 import { App, Stack } from "aws-cdk-lib";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
+import { withoutSavedEnvSwitch } from "../support/saved-env-switch-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
+import { withoutChatGptKeyDeny } from "../support/chatgpt-key-deny-template.js";
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutDispatcherHookSigner } from "../support/dispatcher-hook-signer-template.js";
 import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-template.js";
@@ -117,6 +120,42 @@ function parentRemainderDigest(template: TemplateJson): string {
   }
   const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
   return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
+}
+
+/**
+ * Owner DEC 254zzz73 (rule D, a removal): the step-up's removal took exactly these out of a named or foreign control plane: the StepUpEmailSender parameter (after
+ * McpConfirmElicitation), the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables (after POLICY_HOOK_KEY_ARN), and its ses:SendEmail and PASSKEYS# Query/DeleteItem
+ * statements (the 7th and 8th of its default policy). Putting exactly those back, where they stood, must give the pre-removal pins: the proof that nothing else moved.
+ */
+function withStepUpRestored(template: TemplateJson): TemplateJson {
+  const restored = structuredClone(template);
+  const insertAfter = <T>(record: Record<string, T>, after: string, entries: Array<[string, T]>): Record<string, T> => {
+    const list = Object.entries(record);
+    const at = list.findIndex(([key]) => key === after);
+    expect(at, `${after} is where the removed entries stood`).toBeGreaterThanOrEqual(0);
+    list.splice(at + 1, 0, ...entries);
+    return Object.fromEntries(list);
+  };
+  restored.Parameters = insertAfter(restored.Parameters ?? {}, "McpConfirmElicitation", [["StepUpEmailSender", {
+    Type: "String", Default: "", AllowedPattern: "^$|^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,252}\\.[A-Za-z]{2,63}$",
+    Description: "The verified Amazon SES email identity (one address) that sends step-up codes; empty: no emailed codes (passkeys only)", MaxLength: 254,
+  }]]);
+  const resources = restored.Resources ?? {};
+  const fn = Object.entries(resources).filter(([id, resource]) => id.startsWith("DeveloperSignInFunction") && resource.Type === "AWS::Lambda::Function");
+  expect(fn).toHaveLength(1);
+  const environment = fn[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  environment.Variables = insertAfter(environment.Variables, "POLICY_HOOK_KEY_ARN", [["STEP_UP_EMAIL_FROM", { Ref: "StepUpEmailSender" }], ["DEVELOPER_PASSKEYS", "enabled"]]);
+  const policies = Object.entries(resources).filter(([id]) => id.startsWith("DeveloperSignInFunctionServiceRoleDefaultPolicy"));
+  expect(policies).toHaveLength(1);
+  const statements = (policies[0]![1].Properties!.PolicyDocument as { Statement: unknown[] }).Statement;
+  const table = Object.keys(resources).find((id) => id.startsWith("DeveloperSignInTable") && resources[id]!.Type === "AWS::DynamoDB::Table")!;
+  statements.splice(6, 0,
+    { Action: "ses:SendEmail", Condition: { StringEquals: { "ses:FromAddress": { Ref: "StepUpEmailSender" } } }, Effect: "Allow",
+      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":ses:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":identity/", { Ref: "StepUpEmailSender" }]] } },
+    { Action: ["dynamodb:Query", "dynamodb:DeleteItem"], Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PASSKEYS#*"] }, Null: { "dynamodb:LeadingKeys": "false" } }, Effect: "Allow",
+      Resource: { "Fn::GetAtt": [table, "Arn"] } },
+  );
+  return restored;
 }
 
 function realAppControlPlane(env?: string): TemplateJson {
@@ -249,30 +288,34 @@ describe("the named TEST proof-only installation gate", () => {
     // Batch 14 combined (DEC 254zzl-amend3, DEC 254zzn(2)): named and foreign re-pinned again; legacy unchanged. Against the first batch-14 synth the templates differ ONLY in the
     // CoreSystemRuns parameter (default off) and its condition, the hourly upkeep-night schedule (existing invoke role, DISABLED unless that condition holds), the CoreAnswersModel
     // parameter (default empty), `aa`/`sy` in the broker's and `sy` in the dispatcher's AGENTX_SETTINGS, and the proof function's CurrentVersion id (its code changed).
+    // Owner DEC 254zzz73 (rule D, a removal): named and foreign re-pinned for the step-up's removal ONLY. A dump of the hashed remainder before and after differs in exactly the
+    // StepUpEmailSender parameter, the sign-in function's STEP_UP_EMAIL_FROM and DEVELOPER_PASSKEYS variables and its two statements; `beforeStepUpRemoval` proves it (withStepUpRestored
+    // puts exactly those back and gives the old pins). Legacy unchanged.
     const digestCases = [
       {
         label: "named",
         template: named,
-        withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce",
-        withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990",
+        withRoute: "68b6f3773112b50de33dd51f904eb8d88b11e1ce399796da8d24f2c618331152", withoutRoute: "4c7bfd1c54470b7d7a29b6ca16ddfda40613cb3a4034e2714993d148c7d42c44",
+        beforeStepUpRemoval: { withRoute: "28ac511b3de836798c7019b85d17a9b78f1ab41f6612bbca09bc2b88078871ce", withoutRoute: "8ff25bf806a8428450ecb20234834bcb937208beefa487af7a257dbfcb9bc990" },
       },
       {
         label: "foreign",
         template: foreign,
-        withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc",
-        withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7",
+        withRoute: "d337df4794e8c7fdf5e3d745b72cf4360b7e6ac8dd5d8b9aee9694c79e418db3", withoutRoute: "80d4a4a9c340ca4ed612dac08e5fd6a562456aa4122cd6d7e7bca8dbee3677c9",
+        beforeStepUpRemoval: { withRoute: "14f9db9630796cb0d931e94aae7a84ab6c3e7823a9dd1721d570f75261ae88cc", withoutRoute: "3c8f70cf97644e22fbddcb27ee00b41c5eeb06628287ae6d22926b07323ea7a7" },
       },
       {
         label: "legacy",
         template: legacy,
         withRoute: "fc5271f6edfbbe24ca24965cd06a17c952eb90f9892499f23982352967d79523",
         withoutRoute: "0757ab45466760b0c22c9e43c1d0e114168e9aba7e290c50d579875e2e840da5",
+        beforeStepUpRemoval: undefined,
       },
     ] as const;
     expect(named.Parameters?.CoreEngine, "named has the core engine switch").toBeDefined();
     expect(foreign.Parameters?.CoreEngine, "foreign has the core engine switch").toBeDefined();
     expect(legacy.Parameters?.CoreEngine, "legacy has no core engine switch").toBeUndefined();
-    for (const { label, template, withRoute, withoutRoute } of digestCases) {
+    for (const { label, template, withRoute, withoutRoute, beforeStepUpRemoval } of digestCases) {
       const creatorChecks = developerSignInConditionCheckEntries(template);
       {
         expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
@@ -298,11 +341,19 @@ describe("the named TEST proof-only installation gate", () => {
       // L4-HW8b: the broker's Slack poster variables and the Slack adapter secret's policy (tests/support/broker-slack-poster-template.ts) are asserted and taken out too; the legacy template has none.
       // CORE-DISPATCH-HOOK-SIGNER-20261117: the dispatcher's question signer is asserted and taken out (tests/support/dispatcher-hook-signer-template.ts); legacy has none.
       const environment = label === "named" ? "agentxlivetest123" : "staging";
-      const pinned = label === "legacy" ? template : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutBrokerSlackPoster(structuredClone(template), environment))), environment)));
+      const pinned = label === "legacy" ? template : withoutWorkerSandboxEgress(withoutDispatcherHookSigner(withoutGithubSignIn(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutChatGptKeyDeny(withoutSavedEnvSwitch(withoutSavedEnvImages(withoutBrokerSlackPoster(structuredClone(template), environment), environment))))), environment)));
+      // L4-HARD (c): the ChatGPT key's Deny is asserted and taken out too (tests/support/chatgpt-key-deny-template.ts); legacy has none.
       expect(parentRemainderDigest(pinned), `${label} parent remainder with the route`).toBe(withRoute);
       const priorRemainder = structuredClone(pinned);
       delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
       expect(parentRemainderDigest(priorRemainder), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
+      if (beforeStepUpRemoval !== undefined) {
+        // Rule D proof (owner DEC 254zzz73): with exactly the step-up's removed parameter, variables and statements put back, the pre-removal pins hold.
+        const restored = withStepUpRestored(pinned);
+        expect(parentRemainderDigest(restored), `${label} with the step-up's removed parts put back`).toBe(beforeStepUpRemoval.withRoute);
+        delete restored.Resources?.ProjectSetupExecutionReadRoute;
+        expect(parentRemainderDigest(restored), `${label} with the step-up's parts put back and the route removed`).toBe(beforeStepUpRemoval.withoutRoute);
+      } else expect(JSON.stringify(pinned), "legacy never had the step-up's parts").not.toContain("StepUpEmailSender");
     }
   });
 
