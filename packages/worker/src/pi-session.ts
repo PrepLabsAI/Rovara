@@ -626,9 +626,24 @@ async function createDefaultSession(
       const model = live.session?.model ?? sessionModel;
       // Pi's current session stream owns credential resolution. Pre-reading auth here bypasses runtime-managed credentials and can write to Pi's host auth store.
       const streamFunction = live.session?.agent.streamFunction;
+      // Each completed model call can incur spend even when Pi later rejects its response, retries it, or fails the turn-prefix summary.
+      // Persist at the stream boundary using Pi's existing usage entry, before compact() can throw or cancellation can discard its result.
+      const trackedStream: NonNullable<Parameters<typeof compact>[7]> = async (...args) => {
+        const stream = await (streamFunction === undefined ? modelRuntime.streamSimple(...args) : streamFunction(...args));
+        const recorded = stream.result().then((message) => {
+          manager.appendUsage("compaction", message.provider, message.responseModel ?? message.model, message.usage);
+          return message;
+        });
+        // Memoize the recorded result: a consumer reading it again must not record the call twice.
+        stream.result = () => recorded;
+        return stream;
+      };
       // A retry of the summary is reported as a fixed sentence (the provider's own words are not).
       const retries = { onRetryScheduled: (attempt: number, maxAttempts: number) => { try { input.onDiagnostic?.(`conversation compaction: the summary will be tried again (${String(attempt)} of ${String(maxAttempts)})`); } catch { /* reporting must not break a turn */ } } };
-      return compact(preparation, model, undefined, undefined, instructions, signal, live.session?.thinkingLevel, streamFunction, undefined, settingsManager.getRetrySettings(), retries);
+      const result = await compact(preparation, model, undefined, undefined, instructions, signal, live.session?.thinkingLevel, trackedStream, undefined, settingsManager.getRetrySettings(), retries);
+      // Every attempt is already persisted, including attempts omitted from Pi's success-only aggregate.
+      delete result.usage;
+      return result;
     };
     const compaction = compactionExtension(input.compaction ?? {}, summarise, input.onDiagnostic === undefined ? undefined : (message) => { try { input.onDiagnostic?.(redactText(message)); } catch { /* reporting must not break a turn */ } });
     const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), ...exposure.extensions, compaction], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : input.workflowMode === "WIKI" ? { systemPrompt: WIKI_SYSTEM_PROMPT } : {}) });

@@ -221,10 +221,10 @@ describe("the hook", () => {
     expect(result?.compaction?.summary.length).toBeLessThanOrEqual(16_384);
   });
 
-  it("lets an abort through", async () => {
+  it("returns explicit cancellation on abort so Pi cannot swallow a throw and run its default", async () => {
     const controller = new AbortController();
     controller.abort();
-    await expect(run({}, async () => { throw new Error("aborted"); }, preparation([toolResult(FRAMED)]), { signal: controller.signal })).rejects.toThrow("aborted");
+    expect((await run({}, async () => { throw new Error("aborted"); }, preparation([toolResult(FRAMED)]), { signal: controller.signal })).result).toEqual({ cancel: true });
   });
 
   it("uses a fallback, and leaves the preparation as it was, when cleaning fails part way", async () => {

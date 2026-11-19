@@ -4,14 +4,15 @@
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type TranscriptContext } from "@earendil-works/pi-ai";
-import { ModelRuntime, type CompactionResult, type InlineExtension, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type AssistantMessage, type TranscriptContext } from "@earendil-works/pi-ai";
+import { AgentSession, ModelRuntime, type CompactionResult, type InlineExtension, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ContextToolCatalog } from "../../packages/contracts/src/index.js";
 import { PLAN_FACTS_HEADING, approvedPlanFacts, type ConversationCompacted } from "../../packages/worker/src/compaction.js";
 import { createContextTools } from "../../packages/worker/src/context-sources/bridge.js";
 import { createSourceTextGuard } from "../../packages/worker/src/context-sources/text-guard.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { createTaskUsageTelemetry, statsSince } from "../../packages/worker/src/usage.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import type { fauxModelRuntime } from "../support/faux-model.js";
 
@@ -45,6 +46,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -63,7 +65,7 @@ async function world(script: Script, mode: "PLAN" | "UNDERSTAND" | "REVIEW" | "I
   // Pi's own way for an extension to compact: its context's `compact`, taken once a turn has ended.
   const probe: InlineExtension = { name: "compaction-probe", factory: (pi) => { pi.on("agent_end", (_event, ctx) => { trigger.current = (options) => { ctx.compact(options); }; }); } };
   const compactNow = (): Promise<CompactionResult> => new Promise((resolve, reject) => { trigger.current!({ onComplete: resolve, onError: reject }); });
-  return { rootPath, adapter, probe, compactNow, mode };
+  return { rootPath, adapter, probe, compactNow, mode, modelRuntime };
 }
 
 /** A scripted summary call: it records what the summariser was shown. A conversation of two turns is summarised in two calls (the earlier turns, then the start of the last turn). */
@@ -254,7 +256,81 @@ describe("the event", () => {
   });
 });
 
+describe("summary-call usage", () => {
+  // Hand-set provider usage at the model boundary, after the two ordinary turns. Pi's real compact(), retries,
+  // extension runner, persistence and task-telemetry conversion all run unchanged.
+  const response = (text: string, stopReason: AssistantMessage["stopReason"], input: number, output: number, cost: number, errorMessage?: string): AssistantMessage => ({
+    ...fauxAssistantMessage(text, { stopReason, ...(errorMessage === undefined ? {} : { errorMessage }) }),
+    provider: FAUX_MODEL.provider, model: FAUX_MODEL.modelId,
+    usage: { input, output, cacheRead: 3, cacheWrite: 2, totalTokens: input + output + 5, cost: { input: cost, output: 0, cacheRead: 0, cacheWrite: 0, total: cost, totalFromProvider: true } },
+  });
+
+  it.each([
+    { name: "history succeeds then the prefix fails", responses: [response("History.", "stop", 10, 5, 0.1), response("", "error", 20, 4, 0.2, "400 invalid request")], tokens: { input: 30, output: 9, cacheRead: 6, cacheWrite: 4, total: 49 }, cost: 0.3, fallback: true },
+    { name: "a length-limited history response fails", responses: [response("Partial.", "length", 10, 5, 0.1)], tokens: { input: 10, output: 5, cacheRead: 3, cacheWrite: 2, total: 20 }, cost: 0.1, fallback: true },
+    { name: "a transient error retries before successful history and prefix", responses: [response("", "error", 10, 5, 0.1, "503 service unavailable"), response("History.", "stop", 20, 4, 0.2), response("Prefix.", "stop", 30, 6, 0.3)], tokens: { input: 60, output: 15, cacheRead: 9, cacheWrite: 6, total: 90 }, cost: 0.6, fallback: false },
+  ])("counts every completed call once when $name", async ({ responses, tokens, cost, fallback }) => {
+    const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again.")], "PLAN");
+    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
+    try {
+      await handle.prompt("hi");
+      await handle.prompt("hi again");
+      const baseline = handle.getSessionStats();
+      let calls = 0;
+      vi.spyOn(w.modelRuntime, "streamSimple").mockImplementation(() => {
+        // A completed history/retry must already be in the totals before the next call starts.
+        if (calls === 1) expect(statsSince(handle.getSessionStats(), baseline).tokens.total).toBe(20);
+        const next = responses[calls++];
+        if (next === undefined) throw new Error("Unexpected summary call");
+        const stream = createAssistantMessageEventStream();
+        stream.end(next);
+        return stream;
+      });
+      await w.compactNow();
+      const spent = statsSince(handle.getSessionStats(), baseline);
+      expect(spent.tokens).toEqual(tokens);
+      expect(spent.cost).toBeCloseTo(cost);
+      expect(spent.costFromProvider).toBe(true);
+      expect(createTaskUsageTelemetry(spent, FAUX_MODEL, "SUCCEEDED")).toMatchObject({ tokens, costUsd: cost });
+      const entries = (await readFile(handle.sessionFile, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type: string; summary?: string; fromHook?: boolean; usage?: unknown });
+      expect(entries.filter((entry) => entry.type === "usage").map((entry) => entry.usage)).toEqual(responses.map((entry) => entry.usage));
+      const saved = entries.find((entry) => entry.type === "compaction")!;
+      expect(saved.fromHook).toBe(true);
+      expect(saved.usage).toBeUndefined();
+      expect(saved.summary!.includes("main summary failed")).toBe(fallback);
+      expect(calls).toBe(responses.length);
+    } finally { handle.dispose(); }
+  });
+});
+
 describe("the worker compaction guard", () => {
+  it.each(["manual", "overflow"] as const)("never enters Pi default when a %s compaction is aborted", async (reason) => {
+    const defaults = vi.spyOn(AgentSession.prototype as unknown as { _runDefaultCompaction: () => Promise<CompactionResult> }, "_runDefaultCompaction");
+    let aborted = false;
+    const w = await world(reason === "manual"
+      ? [fauxAssistantMessage("Hello."), fauxAssistantMessage("Again.")]
+      : [fauxAssistantMessage("Hello."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" })], "PLAN");
+    const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: "PLAN", localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
+    const streamSimple = w.modelRuntime.streamSimple.bind(w.modelRuntime);
+    vi.spyOn(w.modelRuntime, "streamSimple").mockImplementation((model, context, options) => {
+      if (options?.cacheRetention === "none") {
+        aborted = true;
+        void handle.abort();
+        throw new Error("aborted during summary");
+      }
+      return streamSimple(model, context, options);
+    });
+    try {
+      await handle.prompt("hi");
+      await handle.prompt("hi again");
+      const cancellation: unknown = reason === "manual" ? await w.compactNow().catch((error: unknown) => error) : undefined;
+      expect(aborted).toBe(true);
+      expect(defaults).not.toHaveBeenCalled();
+      if (reason === "manual") expect(cancellation).toMatchObject({ message: "Compaction cancelled" });
+      expect(await summaries(handle)).toHaveLength(0);
+    } finally { handle.dispose(); }
+  });
+
   it.each(["PLAN", "IMPLEMENT", "REVIEW", "UNDERSTAND", "SETUP", "WIKI"] as const)("supplies its own summary for every %s session", async (mode) => {
     const asked: string[] = [];
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Worker summary."), summaryCall(asked, "Worker prefix.")], mode);
@@ -265,7 +341,8 @@ describe("the worker compaction guard", () => {
     expect(entries[0]!.summary).toContain("Worker summary.");
     expect(entries[0]!.summary).not.toContain(PLAN_FACTS_HEADING);
     expect(entries[0]!.fromHook).toBe(true);
-    expect(entries[0]!.usage).toBeDefined();
+    expect(entries[0]!.usage).toBeUndefined(); // Per-call usage entries own the spend, once.
+    expect((await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"usage"'))).toHaveLength(2);
     expect(asked.join("")).not.toContain("connected sources");
     expect(asked.join("")).not.toContain("approved plan");
   });
@@ -279,7 +356,8 @@ describe("the worker compaction guard", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!.summary).toContain("Agent summary.");
     expect(entries[0]!.fromHook).toBe(true);
-    expect(entries[0]!.usage).toBeDefined();
+    expect(entries[0]!.usage).toBeUndefined(); // Per-call usage entries own the spend, once.
+    expect((await readFile(handle.sessionFile, "utf8")).split("\n").filter((line) => line.includes('"type":"usage"'))).toHaveLength(2);
   });
 
   it("leaves nothing behind but the session file", async () => {

@@ -9,11 +9,11 @@
 //   (a) replaces every context-source result in what the summary is built from with its stub, redacts what the source-text guard remembers from the messages and from the
 //       summary itself, and takes any source frame out of the summary;
 //   (b) adds the approved plan's key facts to the end of the summary word for word (and asks the summariser to leave them out of its own text);
-//   (c) preserves Pi's summary usage in the compaction entry so session/task totals include it; and
+//   (c) keeps session/task usage complete (the worker's summariser records each model call before returning); and
 //   (d) reports "the conversation was compacted" once the entry is saved (`onCompacted`, which the worker turns into a task event).
 //
 // The messages are cleaned into new values and assigned together before summarisation. Pi's runner catches a handler's throw and then runs its own summary on whatever the
-// preparation holds. Failures therefore return our deterministic fallback, never a cancellation that leaves a full context or an unguarded default summary.
+// preparation holds. Failures therefore return our deterministic fallback; an actual abort returns explicit cancellation so Pi cannot fall through to its default.
 import type { WorkflowApprovedPlan } from "@agentx/contracts";
 import type { CompactionResult, InlineExtension, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { stubContextEvent } from "./context-sources/events.js";
@@ -141,7 +141,7 @@ function fallbackSummary(preparation: Preparation, factsBlock: string): string {
 
 /**
  * The compaction extension. Installed in every worker session; Pi's default summary is never used.
- * Pi catches a handler's throw and then runs its default summary. Every non-abort error instead returns a bounded, no-model fallback; if even that fails, use only the plan facts.
+ * Pi catches a handler's throw and then runs its default summary. Aborts return explicit cancellation. Every other error returns a bounded, no-model fallback; if even that fails, use only the plan facts.
  */
 export function compactionExtension(options: SessionCompactionOptions, summarise: CompactionSummariser, onDiagnostic?: (message: string) => void): InlineExtension {
   return {
@@ -175,8 +175,8 @@ export function compactionExtension(options: SessionCompactionOptions, summarise
           if (guard?.active() === true) summary = guard.redact(summary);
           if (facts !== undefined) { summary = `${summary}\n\n${PLAN_FACTS_HEADING}\n${facts}`; keptFacts = true; }
           return { compaction: { ...result, summary } };
-        } catch (error) {
-          if (event.signal.aborted) throw error;
+        } catch {
+          if (event.signal.aborted) return { cancel: true };
           // Do not echo the failed model/guard's text. Reporting itself must not let Pi run its default.
           try { onDiagnostic?.("conversation compaction: the worker's summary failed; using a deterministic fallback"); } catch { /* reporting must not break compaction */ }
           const factsBlock = facts === undefined ? "" : `\n\n${PLAN_FACTS_HEADING}\n${facts}`;
