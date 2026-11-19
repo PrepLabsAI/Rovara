@@ -312,7 +312,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }
   /** A build context holding one Dockerfile whose RUN lines are `steps`. */
   async function context(name: string, steps: string[]): Promise<string> {
-    const folder = join(dir, name);
+    // Under a folder of their own: the stage's stubs keep files in `dir` named `names`, `s3names` and `program`, and a build context called `names` collided with one (EEXIST).
+    const folder = join(dir, "contexts", name);
     await mkdir(folder, { recursive: true });
     await writeFile(join(folder, "Dockerfile"), `FROM ${APP_NODE_IMAGE}\n${steps.join("\n")}\n`);
     return folder;
