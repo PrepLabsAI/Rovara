@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
@@ -8,7 +9,7 @@ import { currentWorkflowPublicationAuthorityForTask } from "../../packages/broke
 import { getItem } from "../../packages/broker/src/aws/cancellation.js";
 import { taskKey, type DeveloperTaskRecord, developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { finishPlanningWithMarkdown } from "../support/plan-documents.js";
-import { createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
+import { MAYA, createSingleAnswerPlanBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, finishOperation, loadSlackBroker } from "../support/slack-broker.js";
 
 const A = "org_demoaaaaaaaaaaaaaaaa";
@@ -83,6 +84,92 @@ async function startedTask() {
   await finishOperation(w.handler, w.db, workspaceId, String(plan.id), "FAILED");
   return { w, taskId, workspaceId };
 }
+
+describe("persisted legacy task compatibility matrix", () => {
+  it.each([
+    { name: "hosted built-in: legacy-team share", hosted: true, share: "legacy", allowed: true },
+    { name: "hosted built-in: no share", hosted: true, share: "none", allowed: true },
+    { name: "hosted built-in: another-team share", hosted: true, share: "other", allowed: true },
+    { name: "hosted built-in: web-created", hosted: true, share: "web", allowed: true },
+    { name: "hosted named: stamped task over built-in row", hosted: true, share: "legacy", taskCompany: A, allowed: false },
+    { name: "hosted named: unstamped task over named project row", hosted: true, share: "legacy", projectCompany: A, allowed: false },
+    { name: "self-hosted: no company layer", hosted: false, share: "none", allowed: true },
+  ])("$name", async ({ hosted, share, taskCompany, projectCompany, allowed }) => {
+    // Create an old task with the real legacy writer, then read it on a hosted install.
+    // The web row comes from the developer API, rather than an invented Slack share.
+    const h = await createSingleAnswerPlanBroker({ channelMembers: async r => ({ ok: true, memberOf: r.channelIds }) });
+    let taskId: string;
+    if (share === "web") {
+      const started = await h.client("web", MAYA, "POST", "/v1/dev/tasks", {
+        requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
+      });
+      expect(started.status, JSON.stringify(started.body)).toBe(200);
+      taskId = String((started.body.task as { taskId: string }).taskId);
+    } else {
+      const started = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow",
+        thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
+        userId: MAYA.slackUserId, instructions: "Fix the retry bug", workflowPath: "QUICK", requestId: randomUUID() });
+      expect(started.statusCode, started.body).toBe(200);
+      taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    }
+    const task = { ...h.db.get(`DEVTASK#${taskId}`, "META")! };
+    expect(task.companyId).toBeUndefined();
+    if (taskCompany !== undefined) task.companyId = taskCompany;
+    if (share === "none") delete task.share;
+    if (share === "other") task.share = { ...(task.share as Record<string, unknown>), teamId: "T0OTHER00" };
+    if (share === "web") expect(task.share).toBeUndefined();
+    h.db.set(task);
+    const project = h.db.get(`PROJECT#${String(task.project)}`, "REV#000000000001")!;
+    if (projectCompany !== undefined) h.db.set({ ...project, companyId: projectCompany });
+    const companyOfTeam = vi.fn(async () => IMPLICIT_COMPANY_ID);
+    const handler = hosted ? (await loadSlackBroker()).createAwsBrokerHandler({ ...h.brokerInput,
+      companies: { companyOf: async () => IMPLICIT_COMPANY_ID },
+      workspaces: { requireCompany: companyOfTeam }, slackWorkspaceLegacyTeamId: SLACK_TEAM,
+    } as never) : h.handler;
+    const workspaceId = String(task.workspaceId);
+    const prepare = h.db.find(row => row.workspaceId === workspaceId && row.kind === "prepare")[0]!;
+    const before = structuredClone(h.db.find(row => row.kind === "task" || row.entityType === "OUTBOX"));
+    await finishOperation(handler, h.db, workspaceId, String(prepare.id), "SUCCEEDED",
+      { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
+    if (allowed) {
+      expect(h.db.find(row => row.workspaceId === workspaceId && row.workflowMode === "PLAN")).toHaveLength(1);
+      expect(h.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "BUSY" });
+    } else {
+      expect(h.db.find(row => row.workspaceId === workspaceId && row.kind === "task")).toEqual([]);
+      expect(h.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+      expect(h.db.find(row => row.kind === "task" || row.entityType === "OUTBOX")).toEqual(before);
+    }
+    expect(h.db.get(`DEVTASK#${taskId}`, "META")!.companyId).toBe(taskCompany);
+  });
+});
+
+describe("built-in install Slack workflow", () => {
+  it("plans and approves an unstamped legacy task with no company layer", async () => {
+    const h = await createSingleAnswerPlanBroker({ channelMembers: async r => ({ ok: true, memberOf: r.channelIds }) });
+    const started = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow",
+      thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
+      userId: MAYA.slackUserId, instructions: "Fix the retry bug", workflowPath: "QUICK", requestId: randomUUID() });
+    expect(started.statusCode, started.body).toBe(200);
+    const taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    const task = h.db.get(`DEVTASK#${taskId}`, "META")!;
+    expect(task.companyId).toBeUndefined();
+    const workspaceId = String(task.workspaceId);
+    const prepare = h.db.find(row => row.workspaceId === workspaceId && row.kind === "prepare")[0]!;
+    await finishOperation(h.handler, h.db, workspaceId, String(prepare.id), "SUCCEEDED",
+      { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] });
+    const plan = h.db.find(row => row.workspaceId === workspaceId && row.workflowMode === "PLAN")[0]!;
+    expect(plan).toBeDefined();
+    const artifactDigest = await finishPlanningWithMarkdown(h, workspaceId, String(plan.id), "# Plan\n\n1. Fix the retry bug.\n");
+    const workflow = h.db.get(`DEVTASK#${taskId}`, "META")!.workflow as { revision: number };
+    const approved = await h.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId, userId: MAYA.slackUserId,
+      thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" }, requestId: randomUUID(),
+      expectedRevision: workflow.revision, artifactDigest, decision: "APPROVE", reason: "Approved", selectedOptionalCheckIds: [] });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(JSON.parse(approved.body), approved.body).not.toHaveProperty("refused");
+    expect(h.db.find(row => row.workspaceId === workspaceId && row.workflowMode === "IMPLEMENT")).toHaveLength(1);
+    expect(h.db.get(`DEVTASK#${taskId}`, "META")!.companyId).toBeUndefined();
+  });
+});
 
 describe("Slack workflow retry project rows are checked against the task company", () => {
   it("the shared helper accepts only a valid task company and its own legacy row", () => {

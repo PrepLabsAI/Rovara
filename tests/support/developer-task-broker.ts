@@ -73,7 +73,7 @@ async function bearer(who: Developer): Promise<string> {
 export const bearerFor = bearer;
 
 /** A sign-in client's access token for `who` (its own session, `sid`), with the step-up the sign-in would have put in it: `ageSeconds` old, made with `method`. */
-async function clientBearer(who: Developer, client: { clientId: string; audience: string; scope?: string }, sessionId: string, stepUp?: { ageSeconds: number; method?: string }): Promise<string> {
+export async function clientBearer(who: Developer, client: { clientId: string; audience: string; scope?: string }, sessionId: string, stepUp?: { ageSeconds: number; method?: string }): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const claims = {
     iss: DEV_ISSUER, aud: client.audience, azp: client.clientId, sub: who.developerId, amr: who.provider, env: "staging", sid: sessionId, iat: now, nbf: now, exp: now + 3600,

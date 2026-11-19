@@ -440,7 +440,8 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     expect(w.db.get(`WORKSPACE#${id}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
     expect(w.db.find((item) => item.entityType === "OUTBOX" && item.operationId !== prepare.id && (item.invocation as { workspaceId?: string })?.workspaceId === id)).toEqual([]);
     expect(w.db.find((item) => item.taskId === taskId && item.pendingPrompt !== undefined)).toEqual([]);
-    expect(reads).toEqual([]);
+    // An unstamped task needs the persisted project row to distinguish built-in from named ownership.
+    expect(reads).toEqual(kind === "missing-company" ? ["project"] : []);
   });
 
   it.each(["builtin", "other-company", "foreign-pinned", "own-company"])("workflow retry retains its task company against the %s revision", async (kind) => {

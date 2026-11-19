@@ -3436,17 +3436,9 @@ async function workspaceTaskScope(dependencies: AwsBrokerDependencies, task: Dev
   return taskLegacyScope(dependencies, task);
 }
 
-/** Recover an old task only from the operator-bound built-in install; missing named scope stays missing for the helper to refuse. */
-async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId?: string } }>(dependencies: AwsBrokerDependencies, task: T): Promise<T> {
-  if (task.companyId !== undefined) return task;
-  const refuse = () => agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  const companyOfTeam = dependencies.workspaces?.requireCompany.bind(dependencies.workspaces) ?? dependencies.installTeamCompany;
-  if (companyOfTeam === undefined) return { ...task, companyId: IMPLICIT_COMPANY_ID };
-  const team = task.share?.teamId;
-  if (team === undefined || team !== (dependencies.slackWorkspaceLegacyTeamId ?? dependencies.slackInstallTeamOnly ?? dependencies.developer?.slackTeamId)) return task;
-  let company: unknown;
-  try { company = await companyOfTeam(team); } catch { throw refuse(); }
-  return company === IMPLICIT_COMPANY_ID ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
+/** Unstamped persisted tasks belong to the built-in company, including on hosted installs. The project read still refuses named-company rows. */
+async function taskLegacyScope<T extends { companyId?: unknown; share?: { teamId?: string } }>(_dependencies: AwsBrokerDependencies, task: T): Promise<T> {
+  return task.companyId === undefined ? { ...task, companyId: IMPLICIT_COMPANY_ID } : task;
 }
 
 async function getLegacySlackBinding(
@@ -15359,7 +15351,7 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   return adminShareMode(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: tasks, now: Date.now },
     { issuer: identity.issuer, subject: identity.subject, ...(claimed === undefined ? {} : { displayName: claimed.trim() }) },
-    task,
+    await taskLegacyScope(dependencies, task),
     value,
   );
 }
@@ -15630,7 +15622,7 @@ async function assertCurrentWorkflowPublication(dependencies: AwsBrokerDependenc
     tableName: dependencies.tableName,
     workflowE2EPresentation: (input) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: (input) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
-  }, task);
+  }, await taskLegacyScope(dependencies, task));
   if (currentAuthority === undefined || currentAuthority.mode !== publication.publicationMode
     || currentAuthority.pinnedRevision !== publication.admittedPinnedRevision
     || currentAuthority.latestRevision !== publication.admittedLatestRevision

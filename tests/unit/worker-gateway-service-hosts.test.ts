@@ -13,6 +13,15 @@ it("publishes the started services' local aliases to the mounted hosts inode bef
   forgetWorkerStartSweeps();
   const root = await realpath(await mkdtemp(join(tmpdir(), "gateway-service-hosts-")));
   const fake = fakeServicesDocker();
+  const runDocker = fake.docker.run.bind(fake.docker);
+  // ICC gate: expose the sandbox's endpoint and host-side port. The fake's
+  // run --rm host helper succeeds, representing isolation being set and verified.
+  fake.docker.run = async (args, options) => {
+    const result = await runDocker(args, options);
+    if (args[0] === "inspect" && args.includes('{{(index .NetworkSettings.Networks "rovara-snet").MacAddress}}')) return { ...result, exitCode: 0, stdout: "02:42:ac:1c:fa:03" };
+    if (args[0] === "exec" && args.includes("-e") && args.some(arg => arg.includes("iflink"))) return { ...result, stdout: "101" };
+    return result;
+  };
   const image = `registry.example.test/agentx/worker@sha256:${"b".repeat(64)}`;
   const sandbox = new TaskSandbox({ rootPath: root, taskId: "gateway-services", docker: fake.docker, image, gatewayResolverDirectory: join(root, "name-files"),
     environment: { AGENTX_RUNTIME: "ec2", AGENTX_SANDBOX_EGRESS: "gateway", AGENTX_SANDBOX_NETWORK: "rovara-snet", AGENTX_SANDBOX_DNS: "172.28.250.2" } });
